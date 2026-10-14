@@ -10,17 +10,19 @@ impl EventLoop {
         if CompactionCoordinator::manual_compaction_wait_timeout(self) == Some(Duration::ZERO) {
             return true;
         }
-        if self.pending_msg.is_some() {
+        if self.routing.pending_msg.is_some() {
             return true;
         }
 
-        if self.verification_barrier.token.is_some() {
+        if self.publication.verification_barrier.token.is_some() {
             // Verification freezes layout maintenance, but group-commit fsync
             // does not change the layout being verified.
-            let due_sync = self.wal_actor.should_sync_batch()
-                && (self.wal_actor.has_pending_data() || self.durability.has_pending_waiters());
+            let due_sync = self.actors.wal_actor.should_sync_batch()
+                && (self.actors.wal_actor.has_pending_data()
+                    || self.pipeline.durability.has_pending_waiters());
             return due_sync
                 || self
+                    .actors
                     .cloud_coordinator
                     .hybrid_storage_events
                     .as_ref()
@@ -28,6 +30,7 @@ impl EventLoop {
         }
 
         if self
+            .actors
             .cloud_coordinator
             .cloud_wal_prune_worker
             .as_ref()
@@ -36,23 +39,23 @@ impl EventLoop {
             return true;
         }
 
-        if !self.flush_worker_result_rx.is_empty() {
+        if !self.pipeline.flush_worker_result_rx.is_empty() {
             return true;
         }
 
-        if !self.compaction_publish_result_rx.is_empty() {
+        if !self.publication.compaction_publish_result_rx.is_empty() {
             return true;
         }
 
-        if self.wal_actor.should_sync_batch() {
+        if self.actors.wal_actor.should_sync_batch() {
             return true;
         }
 
-        if self.durability.cloud_seal_retry_due() && self.state.wal.pending_writes > 0 {
+        if self.pipeline.durability.cloud_seal_retry_due() && self.state.wal.pending_writes > 0 {
             return true;
         }
 
-        if self.cloud_coordinator.cloud_wal.backlog().ready() {
+        if self.actors.cloud_coordinator.cloud_wal.backlog().ready() {
             return true;
         }
 
@@ -64,7 +67,7 @@ impl EventLoop {
             return true;
         }
 
-        if let Some(rx) = &self.cloud_coordinator.hybrid_storage_events {
+        if let Some(rx) = &self.actors.cloud_coordinator.hybrid_storage_events {
             if !rx.is_empty() {
                 return true;
             }
@@ -77,16 +80,16 @@ impl EventLoop {
         // Lease loss can occur without a storage completion or pressure
         // change. Keep pending admission and flush barrier waiters observing
         // terminal authority even when no worker completion can arrive.
-        let authority_poll = (!self.write_stall_waiters.is_empty()
-            || !self.flush_barrier_waiters.is_empty())
+        let authority_poll = (!self.pipeline.write_stall_waiters.is_empty()
+            || !self.publication.flush_barrier_waiters.is_empty())
         .then_some(Duration::from_millis(100));
-        if self.verification_barrier.is_active() {
+        if self.publication.verification_barrier.is_active() {
             // Verification deliberately freezes maintenance. Ignoring due
             // retry deadlines here makes the run loop block for the release
             // message instead of repeatedly timing out at zero duration. The
             // batched WAL sync deadline still applies.
             return [
-                self.wal_actor.sync_deadline_timeout(),
+                self.actors.wal_actor.sync_deadline_timeout(),
                 authority_poll,
                 CompactionCoordinator::manual_compaction_wait_timeout(self),
             ]
@@ -96,23 +99,27 @@ impl EventLoop {
         }
 
         [
-            self.wal_actor.sync_deadline_timeout(),
+            self.actors.wal_actor.sync_deadline_timeout(),
             self.retry_deadlines().min(),
-            self.cloud_coordinator
+            self.actors
+                .cloud_coordinator
                 .hybrid_storage
                 .as_ref()
                 .and_then(|storage| storage.next_upload_turn(HYBRID_STORAGE_POLL_INTERVAL)),
             // Terminal storage events can arrive before the prune thread
             // exits. Keep observing the handle after its last event so the
             // publication gate and queued manual requests cannot lose a wake.
-            self.cloud_coordinator
+            self.actors
+                .cloud_coordinator
                 .cloud_wal_prune_worker
                 .as_ref()
                 .map(|_| HYBRID_STORAGE_POLL_INTERVAL),
-            self.flush_actor
+            self.actors
+                .flush_actor
                 .is_inflight()
                 .then_some(Duration::from_millis(1)),
-            self.compaction_publish_actor
+            self.actors
+                .compaction_publish_actor
                 .is_inflight()
                 .then_some(Duration::from_millis(1)),
             authority_poll,
@@ -126,10 +133,15 @@ impl EventLoop {
     /// All runtime-owned retry schedules observed by the idle run loop.
     fn retry_deadlines(&self) -> impl Iterator<Item = Duration> + '_ {
         [
-            self.durability
+            self.pipeline
+                .durability
                 .cloud_seal_deadline_timeout(self.state.wal.pending_writes),
-            self.gc_actor.retry_deadline_timeout(),
-            self.cloud_coordinator.cloud_wal.backlog().retry_timeout(),
+            self.actors.gc_actor.retry_deadline_timeout(),
+            self.actors
+                .cloud_coordinator
+                .cloud_wal
+                .backlog()
+                .retry_timeout(),
             self.state.flush_retry_deadline_timeout(),
             Some(self.background_maintenance_timeout()),
         ]
@@ -139,7 +151,7 @@ impl EventLoop {
 
     pub(super) fn progress_pass(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
         CompactionCoordinator::expire_manual_compaction_waiters(self);
-        if self.verification_barrier.token.is_some() {
+        if self.publication.verification_barrier.token.is_some() {
             self.wake_write_stall_waiters();
             self.wake_flush_waiters_for_terminal_fencing();
             // Mutations stay deferred behind the barrier, so sync only what
@@ -172,8 +184,9 @@ impl EventLoop {
         self.tick_hybrid_storage();
         self.drain_hybrid_storage_events();
         self.drain_cloud_wal_upload_backlog();
-        let hybrid_storage = self.cloud_coordinator.hybrid_storage.clone();
-        self.gc_actor
+        let hybrid_storage = self.actors.cloud_coordinator.hybrid_storage.clone();
+        self.actors
+            .gc_actor
             .retry_failed_cloud_deletes_if_due(&mut self.state, hybrid_storage);
         self.retry_manifest_reclamation_if_due();
         self.drain_auto_flush_memtables();
@@ -181,19 +194,20 @@ impl EventLoop {
     }
 
     pub(super) fn retry_manifest_reclamation_if_due(&mut self) {
-        if !self.gc_actor.manifest_reclamation_retry_due() {
+        if !self.actors.gc_actor.manifest_reclamation_retry_due() {
             return;
         }
 
         // Do not interleave with a flush/prune publication snapshot. Deferring
         // re-arms the idle wakeup instead of turning a busy publication gate
         // into a spin loop.
-        if self.publication_gate.is_active() {
-            self.gc_actor.defer_manifest_reclamation_retry();
+        if self.publication.publication_gate.is_active() {
+            self.actors.gc_actor.defer_manifest_reclamation_retry();
             return;
         }
 
-        let deadline = crate::common::OperationDeadline::from_budget(self.runtime_response_timeout);
+        let deadline =
+            crate::common::OperationDeadline::from_budget(self.authority.runtime_response_timeout);
         let _ = self.retry_gc_within(&deadline);
     }
 
@@ -203,25 +217,31 @@ impl EventLoop {
             m.record_event_loop_batch(batch as u64);
         });
 
-        if self.loop_debug {
+        if self.shutdown.loop_debug {
             const LOOP_DEBUG_EVERY: u64 = 256;
-            self.loop_debug_wakes += 1;
-            self.loop_debug_batch_total += batch as u64;
+            self.shutdown.loop_debug_wakes += 1;
+            self.shutdown.loop_debug_batch_total += batch as u64;
 
-            if self.loop_debug_wakes.is_multiple_of(LOOP_DEBUG_EVERY) {
+            if self
+                .shutdown
+                .loop_debug_wakes
+                .is_multiple_of(LOOP_DEBUG_EVERY)
+            {
                 let avg_batch = self
+                    .shutdown
                     .loop_debug_batch_total
                     .to_string()
                     .parse::<f64>()
                     .unwrap_or(0.0)
                     / self
+                        .shutdown
                         .loop_debug_wakes
                         .to_string()
                         .parse::<f64>()
                         .unwrap_or(1.0);
                 eprintln!(
                     "[midge] loop_stats wakes={} avg_batch={:.2}",
-                    self.loop_debug_wakes, avg_batch
+                    self.shutdown.loop_debug_wakes, avg_batch
                 );
             }
         }
@@ -232,7 +252,7 @@ impl EventLoop {
         msg: RuntimeMsg,
         msg_rx: &Receiver<RuntimeMsg>,
     ) -> HandleOutcome {
-        if self.verification_barrier.token.is_none() && msg.is_mutation() {
+        if self.publication.verification_barrier.token.is_none() && msg.is_mutation() {
             CompactionCoordinator::drain_publish_results(self);
             self.drain_flush_worker_results();
             self.maybe_flush_cloud_async_wal();
@@ -264,7 +284,7 @@ impl EventLoop {
 
     pub(super) fn run_request_fairness_slot(&mut self) {
         CompactionCoordinator::expire_manual_compaction_waiters(self);
-        if self.verification_barrier.token.is_some() {
+        if self.publication.verification_barrier.token.is_some() {
             // Allowed control traffic can keep the idle timer from firing.
             // Admission waiters still observe fencing while layout is frozen.
             self.wake_write_stall_waiters();
@@ -300,7 +320,9 @@ impl EventLoop {
             return outcome;
         }
 
-        let drained = if self.verification_barrier.token.is_some() || self.pending_msg.is_some() {
+        let drained = if self.publication.verification_barrier.token.is_some()
+            || self.routing.pending_msg.is_some()
+        {
             0
         } else {
             self.drain_pending_writes(msg_rx, max_drain)
@@ -311,15 +333,19 @@ impl EventLoop {
     }
 
     pub(super) fn restore_publication_deferred_message(&mut self) {
-        if !self.shutting_down
-            && !self.publication_gate.is_active()
-            && self.verification_barrier.token.is_none()
-            && self.pending_msg.is_none()
+        if !self.shutdown.shutting_down
+            && !self.publication.publication_gate.is_active()
+            && self.publication.verification_barrier.token.is_none()
+            && self.routing.pending_msg.is_none()
         {
-            if let Some(index) = self.publication_gate.next_restorable_index(|cf_id| {
-                self.column_family_publication_pipeline_active(cf_id)
-            }) {
-                self.pending_msg = self.publication_gate.finish_at(index);
+            if let Some(index) = self
+                .publication
+                .publication_gate
+                .next_restorable_index(|cf_id| {
+                    self.column_family_publication_pipeline_active(cf_id)
+                })
+            {
+                self.routing.pending_msg = self.publication.publication_gate.finish_at(index);
             }
         }
     }
@@ -337,7 +363,7 @@ impl EventLoop {
             Err(TryRecvError::Disconnected) => return Some(HandleOutcome::Break),
             Err(TryRecvError::Empty) => {}
         }
-        if let Some(storage_rx) = &self.cloud_coordinator.hybrid_storage_events {
+        if let Some(storage_rx) = &self.actors.cloud_coordinator.hybrid_storage_events {
             if let Ok(event) = storage_rx.try_recv() {
                 self.handle_storage_event(event);
                 return Some(HandleOutcome::Continue);
@@ -364,7 +390,7 @@ impl EventLoop {
             }
             self.restore_verification_deferred_message();
             self.restore_publication_deferred_message();
-            if let Some(pending) = self.pending_msg.take() {
+            if let Some(pending) = self.routing.pending_msg.take() {
                 let outcome = self.process_restored_one(pending, msg_rx);
                 if outcome == HandleOutcome::Break {
                     break;
@@ -383,7 +409,7 @@ impl EventLoop {
             // Storage events are selected under the barrier too: the handler
             // takes only the ones that cannot change the verified layout and
             // defers the rest.
-            let selectable_storage_rx = self.cloud_coordinator.hybrid_storage_events.clone();
+            let selectable_storage_rx = self.actors.cloud_coordinator.hybrid_storage_events.clone();
             let msg = if let Some(storage_rx) = selectable_storage_rx {
                 if let Some(timeout) = idle_timeout {
                     crossbeam::channel::select! {
@@ -395,7 +421,7 @@ impl EventLoop {
                                     self.handle_storage_event(ev);
                                 }
                                 Err(_) => {
-                                    self.cloud_coordinator.disconnect_storage_events();
+                                    self.actors.cloud_coordinator.disconnect_storage_events();
                                 }
                             }
                             continue;
@@ -415,7 +441,7 @@ impl EventLoop {
                                     self.handle_storage_event(ev);
                                 }
                                 Err(_) => {
-                                    self.cloud_coordinator.disconnect_storage_events();
+                                    self.actors.cloud_coordinator.disconnect_storage_events();
                                 }
                             }
                             continue;

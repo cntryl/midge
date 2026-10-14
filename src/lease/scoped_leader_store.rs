@@ -1,6 +1,8 @@
 //! Startup authority checks share one scope; fencing cleanup keeps the original store.
 
-use super::traits::{scope_lease_error, LeaderRecord};
+use super::traits::{
+    acquire_leadership_with_minimum_epoch_within, scope_lease_error, LeaderRecord,
+};
 use super::{CloudMetadataGeneration, CloudMetadataHead, LeaderStore, LeaseError};
 use crate::common::DeadlineScope;
 use std::sync::Arc;
@@ -74,7 +76,8 @@ impl LeaderStore for StartupLeaderStore {
         minimum_epoch: u64,
     ) -> Result<LeaderRecord, LeaseError> {
         self.within(self.per_io_timeout, "leader acquisition", |_| {
-            let result = self.inner.acquire_leadership_with_minimum_epoch_within(
+            let result = acquire_leadership_with_minimum_epoch_within(
+                self.inner.as_ref(),
                 holder_id,
                 minimum_epoch,
                 &self.scope,
@@ -87,20 +90,21 @@ impl LeaderStore for StartupLeaderStore {
         })
     }
 
-    fn acquire_leadership_with_minimum_epoch_within(
+    fn acquire_leadership_with_minimum_epoch_with_timeout(
         &self,
         holder_id: &str,
         minimum_epoch: u64,
-        scope: &DeadlineScope,
+        timeout: Duration,
         on_cleanup_epoch: &mut dyn FnMut(u64),
     ) -> Result<LeaderRecord, LeaseError> {
-        self.within(self.per_io_timeout, "scoped leader acquisition", |_| {
-            self.inner.acquire_leadership_with_minimum_epoch_within(
-                holder_id,
-                minimum_epoch,
-                scope,
-                on_cleanup_epoch,
-            )
+        self.within(timeout, "scoped leader acquisition", |timeout| {
+            self.inner
+                .acquire_leadership_with_minimum_epoch_with_timeout(
+                    holder_id,
+                    minimum_epoch,
+                    timeout,
+                    on_cleanup_epoch,
+                )
         })
     }
 

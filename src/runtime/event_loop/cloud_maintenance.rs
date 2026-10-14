@@ -46,17 +46,26 @@ impl CloudCoordinator {
 
 impl EventLoop {
     pub(super) fn cloud_maintenance_enabled(&self) -> bool {
-        self.cloud_coordinator
-            .maintenance_enabled(self.wal_actor.is_cloud_async(), self.state.is_memory_mode())
+        self.actors.cloud_coordinator.maintenance_enabled(
+            self.actors.wal_actor.is_cloud_async(),
+            self.state.is_memory_mode(),
+        )
     }
 
     pub(super) fn cloud_maintenance_control_blocked(&self) -> bool {
-        self.pending_msg.is_some()
-            || !self.publication_gate.deferred_messages_is_empty()
-            || self.publication_gate.is_active()
-            || self.verification_barrier.is_active()
-            || self.flush_actor.is_inflight()
-            || self.cloud_coordinator.cloud_wal_prune_worker.is_some()
+        self.routing.pending_msg.is_some()
+            || !self
+                .publication
+                .publication_gate
+                .deferred_messages_is_empty()
+            || self.publication.publication_gate.is_active()
+            || self.publication.verification_barrier.is_active()
+            || self.actors.flush_actor.is_inflight()
+            || self
+                .actors
+                .cloud_coordinator
+                .cloud_wal_prune_worker
+                .is_some()
     }
 
     pub(super) fn compaction_compute_owned(&self) -> bool {
@@ -68,7 +77,8 @@ impl EventLoop {
     }
 
     pub(super) fn has_manual_flush_obligation(&self) -> bool {
-        self.flush_barrier_waiters
+        self.publication
+            .flush_barrier_waiters
             .values()
             .any(|waiters| !waiters.is_empty())
     }
@@ -81,17 +91,23 @@ impl EventLoop {
         let blocked = self.cloud_maintenance_control_blocked()
             || (compute_owned
                 && (!self.has_manual_flush_obligation() || !self.state.has_due_immutable_flush()));
-        let mut task = self.cloud_coordinator.begin_maintenance_turn(blocked)?;
+        let mut task = self
+            .actors
+            .cloud_coordinator
+            .begin_maintenance_turn(blocked)?;
         if compute_owned {
             // A manual durability barrier may drain older immutable work while
             // compute retains its inputs and reservations. Only Flush can use
             // this turn; compaction and retirement still wait for that owner.
             self.schedule_next_flush_worker();
             let started = self
+                .actors
                 .flush_actor
                 .is_inflight()
                 .then_some(MaintenanceTask::Flush);
-            self.cloud_coordinator.complete_maintenance_turn(started);
+            self.actors
+                .cloud_coordinator
+                .complete_maintenance_turn(started);
             return started;
         }
         let mut started = None;
@@ -99,10 +115,10 @@ impl EventLoop {
             let launched = match task {
                 MaintenanceTask::Flush => {
                     self.schedule_next_flush_worker();
-                    self.flush_actor.is_inflight()
+                    self.actors.flush_actor.is_inflight()
                 }
                 MaintenanceTask::Compaction => {
-                    if self.shutting_down {
+                    if self.shutdown.shutting_down {
                         false
                     } else {
                         match self
@@ -118,7 +134,10 @@ impl EventLoop {
                 }
                 MaintenanceTask::WalRetirement => {
                     self.prune_cloud_wal_segments_covered_by_manifest();
-                    self.cloud_coordinator.cloud_wal_prune_worker.is_some()
+                    self.actors
+                        .cloud_coordinator
+                        .cloud_wal_prune_worker
+                        .is_some()
                 }
             };
             if launched {
@@ -127,7 +146,9 @@ impl EventLoop {
             }
             task = task.following();
         }
-        self.cloud_coordinator.complete_maintenance_turn(started);
+        self.actors
+            .cloud_coordinator
+            .complete_maintenance_turn(started);
         started
     }
 }

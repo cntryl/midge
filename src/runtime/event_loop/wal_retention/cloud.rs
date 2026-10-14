@@ -57,7 +57,7 @@ impl EventLoop {
             .load(std::sync::atomic::Ordering::Acquire)
             > 0
             || !self.state.compaction.compacting_ssts.is_empty()
-            || self.flush_actor.is_inflight()
+            || self.actors.flush_actor.is_inflight()
     }
 
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
@@ -66,11 +66,12 @@ impl EventLoop {
         // Shutdown must settle admitted durability work without admitting a
         // fresh optional retirement from flush/upload completion or maintenance.
         // Retain recovery authority for a later engine lifetime instead.
-        if self.shutting_down {
+        if self.shutdown.shutting_down {
             return;
         }
         self.reap_cloud_wal_prune_worker();
-        if self.cloud_maintenance_enabled() && !self.cloud_coordinator.cloud_maintenance.dispatching
+        if self.cloud_maintenance_enabled()
+            && !self.actors.cloud_coordinator.cloud_maintenance.dispatching
         {
             self.schedule_cloud_maintenance();
             return;
@@ -79,27 +80,37 @@ impl EventLoop {
         // publication gate. Give the run loop a chance to dispatch it before
         // another maintenance prune reacquires the gate; otherwise a steady
         // stream of eligible WAL segments can defer the same request forever.
-        if self.pending_msg.is_some() || !self.publication_gate.deferred_messages_is_empty() {
+        if self.routing.pending_msg.is_some()
+            || !self
+                .publication
+                .publication_gate
+                .deferred_messages_is_empty()
+        {
             return;
         }
-        if !self.wal_actor.is_cloud_async() || self.state.is_memory_mode() {
+        if !self.actors.wal_actor.is_cloud_async() || self.state.is_memory_mode() {
             return;
         }
 
         // A flush publication mutates the local control files on its worker.
         // Start only between publication phases, then own the gate until the
         // worker has verified metadata and retired catalog authority.
-        if self.cloud_coordinator.cloud_wal_prune_worker.is_some()
-            || self.publication_gate.is_active()
+        if self
+            .actors
+            .cloud_coordinator
+            .cloud_wal_prune_worker
+            .is_some()
+            || self.publication.publication_gate.is_active()
             || self.cloud_wal_prune_layout_publication_active()
         {
             return;
         }
 
-        let Some(storage) = self.cloud_coordinator.hybrid_storage.clone() else {
+        let Some(storage) = self.actors.cloud_coordinator.hybrid_storage.clone() else {
             return;
         };
-        storage.configure_maintenance_memory(self.compaction_actor.compaction_memory_limit());
+        storage
+            .configure_maintenance_memory(self.actors.compaction_actor.compaction_memory_limit());
         let candidates = self.next_cloud_wal_prune_candidates();
         if candidates.is_empty() {
             return;
@@ -117,18 +128,43 @@ impl EventLoop {
         // here also bounds the whole retirement sequence rather than granting
         // each provider callback a fresh timeout.
         let attempt_budget = self
+            .authority
             .runtime_response_timeout
-            .min(self.shutdown_cloud_drain_timeout);
+            .min(self.shutdown.shutdown_cloud_drain_timeout);
         let publication_owner =
             crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
-        if !self.publication_gate.try_acquire(publication_owner.clone()) {
+        if !self
+            .publication
+            .publication_gate
+            .try_acquire(publication_owner.clone())
+        {
             return;
         }
+        self.start_cloud_wal_retirement_worker(
+            storage,
+            candidates,
+            metadata_snapshot,
+            writer_epoch,
+            attempt_budget,
+            &publication_owner,
+        );
+    }
+
+    fn start_cloud_wal_retirement_worker(
+        &mut self,
+        storage: std::sync::Arc<crate::storage::HybridStorage>,
+        candidates: Vec<(u64, u64)>,
+        metadata_snapshot: SharedMetadataSnapshot,
+        writer_epoch: u64,
+        attempt_budget: std::time::Duration,
+        publication_owner: &crate::runtime::event_loop::coordination::ManifestPublicationOwner,
+    ) {
         let candidate_ids = candidates
             .iter()
             .map(|(segment_id, _)| *segment_id)
             .collect::<Vec<_>>();
-        self.cloud_coordinator
+        self.actors
+            .cloud_coordinator
             .cloud_wal
             .admit_prunes(candidate_ids.iter().copied());
         let worker_name = format!(
@@ -155,12 +191,15 @@ impl EventLoop {
             });
 
         match worker {
-            Ok(worker) => self.cloud_coordinator.set_prune_worker(worker),
+            Ok(worker) => self.actors.cloud_coordinator.set_prune_worker(worker),
             Err(error) => {
                 for segment_id in candidate_ids {
-                    self.cloud_coordinator.cloud_wal.release_prune(segment_id);
+                    self.actors
+                        .cloud_coordinator
+                        .cloud_wal
+                        .release_prune(segment_id);
                 }
-                self.publication_gate.release(&publication_owner);
+                self.publication.publication_gate.release(publication_owner);
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(
                     %error,
@@ -171,7 +210,7 @@ impl EventLoop {
     }
 
     fn next_cloud_wal_prune_candidates(&self) -> Vec<(u64, u64)> {
-        let tracker = &self.cloud_coordinator.cloud_wal;
+        let tracker = &self.actors.cloud_coordinator.cloud_wal;
         // Retirement is a prefix the committed shared generation covers. That
         // generation mirrors an earlier local manifest, and family frontiers
         // only advance, so a segment the local frontiers leave unflushed is
@@ -200,6 +239,7 @@ impl EventLoop {
 
     pub(in crate::runtime::event_loop) fn reap_cloud_wal_prune_worker(&mut self) {
         if self
+            .actors
             .cloud_coordinator
             .cloud_wal_prune_worker
             .as_ref()
@@ -214,7 +254,7 @@ impl EventLoop {
     }
 
     pub(in crate::runtime::event_loop) fn join_cloud_wal_prune_worker(&mut self) {
-        if let Some(worker) = self.cloud_coordinator.take_prune_worker() {
+        if let Some(worker) = self.actors.cloud_coordinator.take_prune_worker() {
             #[cfg(test)]
             PRUNE_JOIN_HOOK.with(|hook| {
                 let hook = hook.borrow_mut().take();
@@ -226,7 +266,7 @@ impl EventLoop {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!("cloud WAL retirement worker panicked during join");
             }
-            self.publication_gate.release(
+            self.publication.publication_gate.release(
                 &crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune,
             );
         }
@@ -262,11 +302,16 @@ impl EventLoop {
         segment_id: u64,
         release: crate::runtime::event_loop::coordination::LocalRetirement,
     ) -> crate::common::MidgeResult<()> {
-        self.cloud_coordinator
+        self.actors
+            .cloud_coordinator
             .cloud_wal
             .queue_local_retirement(segment_id, release);
         let ledger = self.state.wal.history.ledger();
-        let to = self.cloud_coordinator.cloud_wal.local_retire_point(ledger);
+        let to = self
+            .actors
+            .cloud_coordinator
+            .cloud_wal
+            .local_retire_point(ledger);
         if to > ledger.log_start() {
             self.retire_wal_below_or_retain(to);
         }
@@ -277,12 +322,15 @@ impl EventLoop {
             u64::MAX
         };
         let released = self
+            .actors
             .cloud_coordinator
             .cloud_wal
             .drain_local_retirements_below(log_start);
         for (segment_id, release) in released {
             if release.cloud_durable {
-                self.wal_transition.retire_cloud_durable(segment_id)?;
+                self.pipeline
+                    .wal_transition
+                    .retire_cloud_durable(segment_id)?;
             }
         }
         Ok(())

@@ -1005,15 +1005,6 @@ impl WalActor {
     }
 }
 
-impl Default for WalActor {
-    fn default() -> Self {
-        // INTENTIONAL: Cannot create with default since we need a WAL ledger.
-        // WalActor must be created via WalActor::open(state) to ensure proper initialization.
-        // This prevents misuse while maintaining the Default trait for generic contexts.
-        panic!("WalActor::default() is not supported. Use WalActor::open(state) instead.")
-    }
-}
-
 #[cfg(test)]
 mod tests;
 

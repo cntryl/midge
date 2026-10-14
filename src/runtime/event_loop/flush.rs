@@ -15,7 +15,7 @@ impl FlushCoordinator {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
     ) -> HandleOutcome {
-        if event_loop.fencing.ddl_authority_ambiguous {
+        if event_loop.authority.fencing.ddl_authority_ambiguous {
             event_loop.respond(
                 request_id,
                 RuntimeResponse::Error {
@@ -59,6 +59,7 @@ impl FlushCoordinator {
         }
 
         event_loop
+            .publication
             .flush_barrier_waiters
             .entry(cf_id)
             .or_default()
@@ -86,7 +87,7 @@ impl FlushCoordinator {
 
 impl EventLoop {
     pub(super) fn wake_flush_waiters_for_terminal_fencing(&mut self) {
-        if self.flush_barrier_waiters.is_empty() {
+        if self.publication.flush_barrier_waiters.is_empty() {
             return;
         }
         let Err(error) = self.check_lease_health() else {
@@ -94,7 +95,7 @@ impl EventLoop {
         };
         // Only answer callers. Accepted immutable data, worker reservations
         // and the publication owner stay retained until their normal outcome.
-        for waiters in std::mem::take(&mut self.flush_barrier_waiters).into_values() {
+        for waiters in std::mem::take(&mut self.publication.flush_barrier_waiters).into_values() {
             for waiter in waiters {
                 self.respond(
                     waiter.request_id,

@@ -41,6 +41,7 @@ fn should_reject_stale_repair_publication_state() -> MidgeResult<()> {
         .add_file(file("neighbor.sst", b"z", b"zz"));
     let selected = vec!["left.sst".to_string(), "right.sst".to_string()];
     event_loop
+        .actors
         .compaction_actor
         .prepare_repair_for_completion_test(&mut event_loop.state, &selected, 1)?;
 
@@ -80,6 +81,7 @@ fn should_reject_stale_repair_publication_state() -> MidgeResult<()> {
         CompactionCoordinator::validate_captured_target_span(&event_loop, &selected, 0, 1).is_err()
     );
     event_loop
+        .actors
         .compaction_actor
         .finish_publication(&mut event_loop.state, &selected, &[]);
     Ok(())
@@ -137,17 +139,22 @@ fn should_retain_failed_compaction_admission_when_anonymous_scratch_cleanup_is_u
         let (mut event_loop, hybrid) = event_loop_with_storage(&directory, true)?;
         let compaction_storage: Arc<dyn crate::runtime::actors::compaction::CompactionStorage> =
             hybrid.clone();
-        event_loop.compaction_actor = crate::runtime::actors::compaction::CompactionActor::new(
-            Arc::new(UnknownScratchFactory),
-        );
+        event_loop.actors.compaction_actor =
+            crate::runtime::actors::compaction::CompactionActor::new(Arc::new(
+                UnknownScratchFactory,
+            ));
         event_loop
+            .actors
             .compaction_actor
             .prepare_for_completion_with_storage_test(
                 &mut event_loop.state,
                 &[],
                 Some(&compaction_storage),
             )?;
-        event_loop.compaction_actor.set_worker_error_for_test(error);
+        event_loop
+            .actors
+            .compaction_actor
+            .set_worker_error_for_test(error);
         // Act
         CompactionCoordinator::complete(
             &mut event_loop,
@@ -282,6 +289,7 @@ fn should_settle_async_compaction_failure_according_to_owned_scratch() -> MidgeR
                 });
             hybrid.reconcile_local_disk_usage(100, 0);
             event_loop
+                .actors
                 .compaction_actor
                 .prepare_for_completion_with_storage_test(
                     &mut event_loop.state,
@@ -293,7 +301,10 @@ fn should_settle_async_compaction_failure_according_to_owned_scratch() -> MidgeR
             } else {
                 MidgeError::Aborted("compaction canceled".into())
             };
-            event_loop.compaction_actor.set_worker_error_for_test(error);
+            event_loop
+                .actors
+                .compaction_actor
+                .set_worker_error_for_test(error);
 
             // Act
             CompactionCoordinator::complete(
@@ -355,15 +366,23 @@ fn should_defer_failed_repair_until_the_next_maintenance_backoff() -> MidgeResul
             });
     }
     event_loop
+        .actors
         .compaction_actor
         .prepare_repair_for_completion_test(&mut event_loop.state, &inputs, 1)?;
     event_loop
+        .actors
         .compaction_actor
         .set_worker_error_for_test(MidgeError::Io(std::io::Error::other(
             "scratch write failed",
         )));
-    assert!(event_loop.compaction_actor.active_same_level_repair());
-    event_loop.background_compaction_schedule.mark_due();
+    assert!(event_loop
+        .actors
+        .compaction_actor
+        .active_same_level_repair());
+    event_loop
+        .pipeline
+        .background_compaction_schedule
+        .mark_due();
 
     // Act
     CompactionCoordinator::complete(
@@ -395,8 +414,11 @@ fn should_defer_failed_repair_until_the_next_maintenance_backoff() -> MidgeResul
 fn should_not_retry_repair_while_compaction_publication_is_degraded() -> MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
-    event_loop.background_compaction_schedule.mark_due();
-    event_loop.compaction_fence.degrade();
+    event_loop
+        .pipeline
+        .background_compaction_schedule
+        .mark_due();
+    event_loop.authority.compaction_fence.degrade();
 
     // Act
     CompactionCoordinator::defer_failed_repair_retry(&mut event_loop, true, "publication");
@@ -573,6 +595,7 @@ fn should_reject_compaction_publication_when_writer_lease_moved_to_newer_holder(
             ..Default::default()
         });
     event_loop
+        .actors
         .compaction_actor
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input))?;
 
@@ -589,7 +612,7 @@ fn should_reject_compaction_publication_when_writer_lease_moved_to_newer_holder(
 
     // Assert
     assert!(
-        event_loop.compaction_fence.is_degraded(),
+        event_loop.authority.compaction_fence.is_degraded(),
         "a stale writer must retain the durable publication obligation"
     );
     assert_eq!(
@@ -658,7 +681,7 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
         )?;
         let intent_path = directory.path().join(crate::metadata::files::INTENT_LOG);
         let before = std::fs::read(&intent_path)?;
-        let epoch = event_loop.fencing.writer_epoch;
+        let epoch = event_loop.authority.fencing.writer_epoch;
         let validity = Arc::new(crate::lease::LeaseValidity::new());
         validity
             .activate(
@@ -666,7 +689,7 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
                 std::time::Instant::now() + std::time::Duration::from_mins(1),
             )
             .unwrap();
-        event_loop.fencing.lease_validity = Some(Arc::clone(&validity));
+        event_loop.authority.fencing.lease_validity = Some(Arc::clone(&validity));
         let pending = PendingCompactionPublication {
             manual_deadline: None,
             token: CompactionPublicationToken {
@@ -683,49 +706,101 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
             superseded_outputs: Vec::new(),
             expected_phase: CompactionPublishPhase::ManifestPublished,
         };
-        let boundary = if before_gc {
-            "slice6::after_manifest_persist_before_sst_gc"
-        } else {
-            "midge::compaction::after_input_sst_gc"
-        };
-        fail::cfg_callback(boundary, move || validity.expire_for_test()).unwrap();
+        expire_validity_at_publication_boundary(before_gc, validity);
         let owner = CompactionCoordinator::publication_owner(&pending.token);
-        assert!(event_loop.publication_gate.try_acquire(owner.clone()));
+        assert!(event_loop
+            .publication
+            .publication_gate
+            .try_acquire(owner.clone()));
         let completion = CompactionPublishCompletion {
             token: pending.token.clone(),
             phase: CompactionPublishPhase::ManifestPublished,
             result: Ok(()),
         };
-        event_loop
-            .compaction_publication
-            .install(&event_loop.publication_gate, owner, pending)?;
+        event_loop.publication.compaction_publication.install(
+            &event_loop.publication.publication_gate,
+            owner,
+            pending,
+        )?;
         let waiter_request_id = 2;
-        let response = event_loop.router.register(waiter_request_id, "CompactAll");
+        let response = event_loop
+            .routing
+            .router
+            .register(waiter_request_id, "CompactAll");
         event_loop.state.pending_compaction_waits.insert(
             waiter_request_id,
             event_loop
+                .routing
                 .router
-                .request_deadline(waiter_request_id, event_loop.runtime_response_timeout)
+                .request_deadline(
+                    waiter_request_id,
+                    event_loop.authority.runtime_response_timeout,
+                )
                 .expect("manual caller's original deadline"),
         );
-        assert!(event_loop.router.registered_at(1).is_none());
+        assert!(event_loop.routing.router.registered_at(1).is_none());
         // Act
-        CompactionCoordinator::handle_publication_completion(&mut event_loop, completion);
-        let result = response
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
+        assert_rejected_fenced_publication(
+            &mut event_loop,
+            completion,
+            &response,
+            &FencedPublicationExpectation {
+                waiter_request_id,
+                intent: (&intent_path, &before),
+                input: (&input_path, before_gc),
+            },
+        )?;
         // Assert
-        assert_eq!(result.request_id(), waiter_request_id);
-        assert_fenced_publication_response(&result, before_gc);
-        assert!(response.try_recv().is_err());
-        assert!(event_loop.state.pending_compaction_waits.is_empty());
-        assert_eq!(event_loop.router.late_responses_total(), 0);
-        assert_eq!(std::fs::read(&intent_path)?, before);
-        assert_eq!(input_path.exists(), before_gc);
-        if before_gc {
-            assert_eq!(std::fs::read(&input_path)?, b"retained predecessor input");
-        }
         drop(scenario);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn expire_validity_at_publication_boundary(
+    before_gc: bool,
+    validity: Arc<crate::lease::LeaseValidity>,
+) {
+    let boundary = if before_gc {
+        "slice6::after_manifest_persist_before_sst_gc"
+    } else {
+        "midge::compaction::after_input_sst_gc"
+    };
+    fail::cfg_callback(boundary, move || validity.expire_for_test()).unwrap();
+}
+
+#[cfg(feature = "failpoints")]
+struct FencedPublicationExpectation<'a> {
+    waiter_request_id: u64,
+    intent: (&'a std::path::Path, &'a [u8]),
+    input: (&'a std::path::Path, bool),
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_rejected_fenced_publication(
+    event_loop: &mut EventLoop,
+    completion: CompactionPublishCompletion,
+    response: &crossbeam::channel::Receiver<RuntimeResponse>,
+    expectation: &FencedPublicationExpectation<'_>,
+) -> MidgeResult<()> {
+    // Act
+    CompactionCoordinator::handle_publication_completion(event_loop, completion);
+    let result = response
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    // Assert
+    assert_eq!(result.request_id(), expectation.waiter_request_id);
+    assert_fenced_publication_response(&result, expectation.input.1);
+    assert!(response.try_recv().is_err());
+    assert!(event_loop.state.pending_compaction_waits.is_empty());
+    assert_eq!(event_loop.routing.router.late_responses_total(), 0);
+    assert_eq!(std::fs::read(expectation.intent.0)?, expectation.intent.1);
+    assert_eq!(expectation.input.0.exists(), expectation.input.1);
+    if expectation.input.1 {
+        assert_eq!(
+            std::fs::read(expectation.input.0)?,
+            b"retained predecessor input"
+        );
     }
     Ok(())
 }
@@ -769,7 +844,7 @@ fn should_preserve_snapshot_horizon_when_retained_wal_no_longer_pins_tombstone_g
     let first = el.prepare_compaction_plan_for_launch(plan.clone())?;
     el.state.unregister_snapshot(1);
     el.state.register_snapshot(2, 30, Vec::new());
-    el.wal_transition.register_recovered(81, 5, true);
+    el.pipeline.wal_transition.register_recovered(81, 5, true);
     let retained_wal = el.prepare_compaction_plan_for_launch(plan.clone())?;
     el.state.unregister_snapshot(2);
     let unpinned = el.prepare_compaction_plan_for_launch(plan)?;

@@ -6,7 +6,7 @@ mod cloud;
 
 impl EventLoop {
     pub(super) fn prune_local_wal_segments_covered_by_manifest(&mut self) {
-        if self.state.is_memory_mode() || self.wal_actor.is_cloud_async() {
+        if self.state.is_memory_mode() || self.actors.wal_actor.is_cloud_async() {
             return;
         }
         if let Err(error) = self.validate_runtime_lease_for_wal_prune() {
@@ -52,13 +52,13 @@ impl EventLoop {
         to: u64,
     ) -> Option<crate::runtime::wal_history::RetiredWal> {
         crate::failpoints::fail_point!("midge::cloud::before_local_wal_retirement");
-        match self.wal_actor.retire_wal_below(&mut self.state, to) {
+        match self.actors.wal_actor.retire_wal_below(&mut self.state, to) {
             Ok(retired) => {
                 crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
-                self.gc_actor.enqueue_retired_wal(&retired);
-                self.gc_actor.retry_retired_wal(
+                self.actors.gc_actor.enqueue_retired_wal(&retired);
+                self.actors.gc_actor.retry_retired_wal(
                     &mut self.state,
-                    self.cloud_coordinator.hybrid_storage.as_deref(),
+                    self.actors.cloud_coordinator.hybrid_storage.as_deref(),
                 );
                 tracing::debug!(?retired, "retired WAL segments");
                 Some(retired)
@@ -83,7 +83,7 @@ impl EventLoop {
     /// appends run on this thread, so none is in flight here. Returns false
     /// when pruning must stop.
     pub(super) fn seal_active_wal_for_prune(&mut self) -> bool {
-        if self.wal_actor.open_tail().record_count == 0 {
+        if self.actors.wal_actor.open_tail().record_count == 0 {
             return true;
         }
         if let Err(error) = self.sync_local_wal_before_prune_rotation() {
@@ -101,11 +101,15 @@ impl EventLoop {
 
     pub(super) fn validate_runtime_lease_for_wal_prune(&self) -> crate::common::MidgeResult<()> {
         self.check_lease_health()?;
-        if let Some(store) = &self.fencing.leader_store {
+        if let Some(store) = &self.authority.fencing.leader_store {
             store
                 .validate_epoch(
-                    self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
-                    self.fencing.writer_epoch,
+                    self.authority
+                        .fencing
+                        .leader_holder_id
+                        .as_deref()
+                        .unwrap_or_default(),
+                    self.authority.fencing.writer_epoch,
                 )
                 .map_err(|error| error.into_validation_error("local WAL prune"))?;
         }

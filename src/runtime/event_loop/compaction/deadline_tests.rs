@@ -10,11 +10,13 @@ fn should_refuse_manual_compaction_when_route_budget_expired_in_queue() -> Midge
     crate::failpoints::with_read_gate(|| {
         // Arrange: the registered caller spent its allowance before dispatch.
         let mut event_loop = create_test_local_event_loop()?;
-        event_loop.runtime_response_timeout = Duration::from_secs(1);
+        event_loop.authority.runtime_response_timeout = Duration::from_secs(1);
         let started = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
-        let response = event_loop
-            .router
-            .register_at_for_test(91_711, "CompactAll", started);
+        let response =
+            event_loop
+                .routing
+                .router
+                .register_at_for_test(91_711, "CompactAll", started);
 
         // Act
         CompactionCoordinator::compact_all(&mut event_loop, 91_711);
@@ -51,14 +53,15 @@ fn should_expire_manual_waiter_when_maintenance_remains_blocked() -> MidgeResult
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
         event_loop
+            .actors
             .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .unwrap()
             .enable_ephemeral_sst_cache(64 * 1024 * 1024);
         assert!(event_loop.cloud_maintenance_enabled());
-        event_loop.runtime_response_timeout = Duration::from_secs(1);
-        let response = event_loop.router.register_at_for_test(
+        event_loop.authority.runtime_response_timeout = Duration::from_secs(1);
+        let response = event_loop.routing.router.register_at_for_test(
             91_712,
             "CompactAll",
             Instant::now().checked_sub(Duration::from_secs(2)).unwrap(),
@@ -66,18 +69,22 @@ fn should_expire_manual_waiter_when_maintenance_remains_blocked() -> MidgeResult
         event_loop.state.pending_compaction_waits.insert(
             91_712,
             event_loop
+                .routing
                 .router
-                .request_deadline(91_712, event_loop.runtime_response_timeout)
+                .request_deadline(91_712, event_loop.authority.runtime_response_timeout)
                 .unwrap(),
         );
         let owner = crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
-        assert!(event_loop.publication_gate.try_acquire(owner.clone()));
+        assert!(event_loop
+            .publication
+            .publication_gate
+            .try_acquire(owner.clone()));
 
         // Act: a fair progress pass must observe caller expiry even behind the gate.
         event_loop.run_request_fairness_slot();
         let outcome = response.try_recv();
-        let gate_retained = event_loop.publication_gate.is_active();
-        event_loop.publication_gate.release(&owner);
+        let gate_retained = event_loop.publication.publication_gate.is_active();
+        event_loop.publication.publication_gate.release(&owner);
         event_loop.join_cloud_wal_prune_worker();
 
         // Assert
@@ -108,20 +115,26 @@ fn should_wake_idle_runtime_when_blocked_manual_waiter_budget_expires() -> Midge
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
         event_loop
+            .actors
             .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .unwrap()
             .enable_ephemeral_sst_cache(64 * 1024 * 1024);
         let owner = crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
-        assert!(event_loop.publication_gate.try_acquire(owner.clone()));
+        assert!(event_loop
+            .publication
+            .publication_gate
+            .try_acquire(owner.clone()));
         let started = Instant::now();
         let budget = Duration::from_secs(2);
         let deadline = OperationDeadline::from_start(started, budget);
-        let response =
-            event_loop
-                .router
-                .register_with_deadline(91_713, "CompactAll", started, deadline);
+        let response = event_loop.routing.router.register_with_deadline(
+            91_713,
+            "CompactAll",
+            started,
+            deadline,
+        );
         event_loop
             .state
             .pending_compaction_waits
@@ -139,8 +152,8 @@ fn should_wake_idle_runtime_when_blocked_manual_waiter_budget_expires() -> Midge
         let elapsed = started.elapsed();
         drop(requests);
         let mut event_loop = runtime.join().expect("join idle event loop");
-        let gate_retained = event_loop.publication_gate.is_active();
-        event_loop.publication_gate.release(&owner);
+        let gate_retained = event_loop.publication.publication_gate.is_active();
+        event_loop.publication.publication_gate.release(&owner);
         event_loop.join_cloud_wal_prune_worker();
 
         // Assert

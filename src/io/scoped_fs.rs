@@ -93,6 +93,10 @@ impl<F: ReadFs + ?Sized> ReadFs for ScopedFs<F> {
 }
 
 impl Fs for ScopedFs<dyn Fs> {
+    fn persistent_handle_capability(&self) -> Option<&dyn super::traits::PersistentHandleFs> {
+        Some(self)
+    }
+
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
         self.inner
             .local_output_view()
@@ -136,20 +140,6 @@ impl Fs for ScopedFs<dyn Fs> {
         }))
     }
 
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        options: OpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        let inner = checked(&self.scope, "filesystem persistent open", || {
-            self.inner.open_persistent_handle(path, options)
-        })?;
-        Ok(Box::new(ScopedFile {
-            inner,
-            scope: self.scope.clone(),
-        }))
-    }
-
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         checked(&self.scope, "filesystem removal", || {
             self.inner.remove_file(path)
@@ -178,6 +168,18 @@ impl Fs for ScopedFs<dyn Fs> {
         checked(&self.scope, "filesystem rename", || {
             self.inner.rename_atomic(from, to)
         })
+    }
+}
+
+impl super::traits::PersistentHandleFs for ScopedFs<dyn Fs> {
+    fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
+        let inner = checked(&self.scope, "filesystem persistent open", || {
+            self.inner.open_persistent_handle(path, options)
+        })?;
+        Ok(Box::new(ScopedFile {
+            inner,
+            scope: self.scope.clone(),
+        }))
     }
 }
 

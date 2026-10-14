@@ -90,7 +90,13 @@ pub(crate) fn set_request_timeout_header(
     headers.retain(|(name, _)| !name.eq_ignore_ascii_case(REQUEST_TIMEOUT_HEADER));
     headers.push((
         REQUEST_TIMEOUT_HEADER.into(),
-        timeout.as_millis().max(1).to_string(),
+        timeout
+            .as_millis()
+            .saturating_add(u128::from(
+                !timeout.subsec_nanos().is_multiple_of(1_000_000),
+            ))
+            .max(1)
+            .to_string(),
     ));
 }
 
@@ -150,7 +156,10 @@ pub(crate) use event::object_match_precondition_headers;
 pub use event::{CloudCallback, CloudEvent, ObjectMetadata};
 
 mod backend;
-pub use backend::CloudBackend;
+pub use backend::{
+    CloudBackend, CloudDeleteCapability, CloudHeadCapability, CloudListCapability,
+    CloudReadCapability, CloudReadOptions, CloudRequestOptions, CloudWriteCapability,
+};
 
 #[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
 mod mock;

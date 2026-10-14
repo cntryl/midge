@@ -169,6 +169,10 @@ impl ReadFs for MockFs {
 }
 
 impl Fs for MockFs {
+    fn persistent_handle_capability(&self) -> Option<&dyn super::traits::PersistentHandleFs> {
+        Some(self)
+    }
+
     fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn super::traits::FsLock>> {
         let lock = Arc::clone(
             self.exclusive_locks
@@ -202,34 +206,6 @@ impl Fs for MockFs {
         Ok(Box::new(MockFile {
             path: path.0.clone(),
             fs: self,
-        }))
-    }
-
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        let mut files = self.files.lock();
-
-        if opts.create_new && files.contains_key(&path.0) {
-            return Err(FsError::AlreadyExists(path.0.clone()));
-        }
-        if !opts.create && !opts.create_new && !files.contains_key(&path.0) {
-            return Err(FsError::NotFound(path.0.clone()));
-        }
-
-        let file_data = files
-            .entry(path.0.clone())
-            .or_insert_with(|| MockFileData { data: Vec::new() });
-
-        if opts.truncate {
-            file_data.data.clear();
-        }
-        let readonly_snapshot =
-            (opts.mode == super::traits::OpenMode::ReadOnly).then(|| file_data.data.clone());
-        drop(files);
-
-        Ok(Box::new(MockPersistentFile {
-            path: path.0.clone(),
-            files: Arc::clone(&self.files),
-            readonly_snapshot,
         }))
     }
 
@@ -291,6 +267,36 @@ impl Fs for MockFs {
         } else {
             Err(FsError::NotFound(from.0.clone()))
         }
+    }
+}
+
+impl super::traits::PersistentHandleFs for MockFs {
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        let mut files = self.files.lock();
+
+        if opts.create_new && files.contains_key(&path.0) {
+            return Err(FsError::AlreadyExists(path.0.clone()));
+        }
+        if !opts.create && !opts.create_new && !files.contains_key(&path.0) {
+            return Err(FsError::NotFound(path.0.clone()));
+        }
+
+        let file_data = files
+            .entry(path.0.clone())
+            .or_insert_with(|| MockFileData { data: Vec::new() });
+
+        if opts.truncate {
+            file_data.data.clear();
+        }
+        let readonly_snapshot =
+            (opts.mode == super::traits::OpenMode::ReadOnly).then(|| file_data.data.clone());
+        drop(files);
+
+        Ok(Box::new(MockPersistentFile {
+            path: path.0.clone(),
+            files: Arc::clone(&self.files),
+            readonly_snapshot,
+        }))
     }
 }
 

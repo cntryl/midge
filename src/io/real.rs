@@ -276,6 +276,10 @@ impl ReadFs for RealFs {
 }
 
 impl Fs for RealFs {
+    fn persistent_handle_capability(&self) -> Option<&dyn super::PersistentHandleFs> {
+        Some(self)
+    }
+
     fn host_addressing(&self) -> Option<HostAddressing<'_>> {
         Some(HostAddressing {
             root: &self.base_path,
@@ -326,12 +330,6 @@ impl Fs for RealFs {
 
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
         // Delegate to shared implementation that returns a 'static file handle.
-        self.open_inner(path, opts)
-    }
-
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        // For real FS, a file handle is independently owned and therefore 'static.
-        // Delegate to the shared implementation which returns a `'static` handle.
         self.open_inner(path, opts)
     }
 
@@ -457,6 +455,12 @@ impl Fs for RealFs {
             fs::rename(&from_full, &to_full)
                 .map_err(|error| rename_err(&from_full, &to_full, &error))
         }
+    }
+}
+
+impl super::PersistentHandleFs for RealFs {
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        self.open_inner(path, opts)
     }
 }
 

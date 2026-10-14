@@ -30,7 +30,7 @@ impl EventLoop {
             sst_path_prefix,
             self.state.is_memory_mode(),
             self.state.observed_time_millis(),
-            self.read_resources.clone(),
+            self.authority.read_resources.clone(),
         );
         Some(snapshot)
     }
@@ -71,7 +71,8 @@ impl EventLoop {
             let value = self.handle_read(cf_id, &key, sequence);
             self.respond(request_id, RuntimeResponse::ReadValue { request_id, value });
         } else {
-            self.durability
+            self.pipeline
+                .durability
                 .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::Read {
                     request_id,
                     cf_id,
@@ -108,7 +109,8 @@ impl EventLoop {
                 },
             );
         } else {
-            self.durability
+            self.pipeline
+                .durability
                 .queue_waiter(DurabilityWaiter::Test(TestDurabilityWaiter::RangeScan {
                     request_id,
                     cf_id,
@@ -299,7 +301,7 @@ mod tests {
                 largest_seq: Some(10),
                 ..Default::default()
             });
-        el.compaction_actor =
+        el.actors.compaction_actor =
             crate::runtime::actors::CompactionActor::new(std::sync::Arc::new(TestFactory));
         Ok((tmp, el, sst_path))
     }
@@ -359,7 +361,7 @@ mod tests {
     fn should_range_scan_include_keys_from_ssts() -> crate::common::MidgeResult<()> {
         // Arrange
         let (_tmp, el, sst_path) = create_event_loop_with_test_sst()?;
-        let reader = el.compaction_actor.open_sst_reader(&sst_path)?;
+        let reader = el.actors.compaction_actor.open_sst_reader(&sst_path)?;
         let sst_pairs = reader.scan_range_state(Some(b"a"), Some(b"b"))?;
         // Act
         // Assert

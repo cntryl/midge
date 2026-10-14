@@ -7,6 +7,101 @@
 use super::{CloudCallback, CloudError, CloudEvent};
 use crate::storage::StorageObjectMetadata;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Shared request controls passed to a cloud operation.
+///
+/// The deadline is absolute so time spent waiting in the runtime queue and
+/// earlier calls in the same request remain charged to the same budget.
+#[derive(Clone, Default)]
+pub struct CloudRequestOptions {
+    deadline: Option<crate::common::OperationDeadline>,
+    headers: Vec<(String, String)>,
+    reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+}
+
+impl CloudRequestOptions {
+    #[must_use]
+    pub fn with_deadline(mut self, deadline: crate::common::OperationDeadline) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    #[must_use]
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    #[must_use]
+    pub fn with_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.headers.extend(headers);
+        self
+    }
+
+    #[must_use]
+    pub fn with_reservation(
+        mut self,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+    ) -> Self {
+        self.reservation = reservation;
+        self
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        self.deadline.map(|deadline| deadline.remaining())
+    }
+
+    fn headers_with_deadline(&self) -> Vec<(String, String)> {
+        let mut headers = self.headers.clone();
+        if let Some(deadline) = self
+            .deadline
+            .filter(crate::common::OperationDeadline::is_bounded)
+        {
+            super::set_request_timeout_header(&mut headers, deadline.remaining());
+        }
+        headers
+    }
+}
+
+/// Read-specific controls, including an immutable identity and an optional
+/// exact byte range.
+#[derive(Clone, Default)]
+pub struct CloudReadOptions {
+    request: CloudRequestOptions,
+    range: Option<std::ops::Range<u64>>,
+    expected_identity: Option<StorageObjectMetadata>,
+    include_metadata: bool,
+}
+
+impl CloudReadOptions {
+    #[must_use]
+    pub fn with_request_options(mut self, request: CloudRequestOptions) -> Self {
+        self.request = request;
+        self
+    }
+
+    #[must_use]
+    pub fn with_range(
+        mut self,
+        range: std::ops::Range<u64>,
+        expected_identity: StorageObjectMetadata,
+    ) -> Self {
+        self.range = Some(range);
+        self.expected_identity = Some(expected_identity);
+        self
+    }
+
+    #[must_use]
+    pub fn with_metadata(mut self) -> Self {
+        self.include_metadata = true;
+        self
+    }
+}
+
+fn operation_timeout_error(operation: &str) -> CloudError {
+    CloudError::Timeout(format!("{operation} deadline exhausted"))
+}
 
 /// Non-blocking cloud backend interface used by the engine.
 ///
@@ -104,6 +199,169 @@ use std::sync::Arc;
 /// }
 /// ```
 pub trait CloudBackend: Send + Sync + 'static {
+    /// Submit a PUT with typed deadline, conditional headers and payload
+    /// reservation controls.
+    fn submit_put_with_options(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        options: CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        if options.timeout().is_some_and(|timeout| timeout.is_zero()) {
+            let _ = callback.send(CloudEvent::Put {
+                key: key.to_string(),
+                result: Err(operation_timeout_error("PUT")),
+            });
+            return;
+        }
+        let headers = options.headers_with_deadline();
+        self.submit_put_with_reservation(key, data, headers, options.reservation, callback);
+    }
+
+    /// Submit a GET with typed deadline, reservation, identity and range
+    /// controls.
+    fn submit_get_with_options(
+        &self,
+        key: &str,
+        options: CloudReadOptions,
+        callback: CloudCallback,
+    ) {
+        if options
+            .request
+            .timeout()
+            .is_some_and(|timeout| timeout.is_zero())
+        {
+            let event = match (options.range, options.include_metadata) {
+                (Some(range), _) => CloudEvent::GetRange {
+                    key: key.to_string(),
+                    start: range.start,
+                    end: Some(range.end),
+                    result: Err(operation_timeout_error("range GET")),
+                },
+                (None, true) => CloudEvent::GetWithMetadata {
+                    key: key.to_string(),
+                    result: Err(operation_timeout_error("GET")),
+                },
+                (None, false) => CloudEvent::Get {
+                    key: key.to_string(),
+                    result: Err(operation_timeout_error("GET")),
+                },
+            };
+            let _ = callback.send(event);
+            return;
+        }
+        let request_timeout = options.request.timeout();
+        let timeout = options.request.timeout().unwrap_or(Duration::MAX);
+        if let Some(range) = options.range {
+            let Some(expected_identity) = options.expected_identity else {
+                let _ = callback.send(CloudEvent::GetRange {
+                    key: key.to_string(),
+                    start: range.start,
+                    end: Some(range.end),
+                    result: Err(CloudError::Protocol(
+                        "bounded cloud read requires an expected object identity".into(),
+                    )),
+                });
+                return;
+            };
+            self.submit_get_range_with_reservation(
+                key,
+                range,
+                expected_identity,
+                timeout,
+                options.request.reservation,
+                callback,
+            );
+            return;
+        }
+
+        let callback = if let Some(reservation) = options.request.reservation {
+            match crate::storage::retained_callback::retain(callback.clone(), reservation) {
+                Ok(retained) => retained,
+                Err(error) => {
+                    let error =
+                        CloudError::Protocol(format!("retain cloud read completion: {error}"));
+                    let event = if options.include_metadata {
+                        CloudEvent::GetWithMetadata {
+                            key: key.to_string(),
+                            result: Err(error),
+                        }
+                    } else {
+                        CloudEvent::Get {
+                            key: key.to_string(),
+                            result: Err(error),
+                        }
+                    };
+                    let _ = callback.send(event);
+                    return;
+                }
+            }
+        } else {
+            callback
+        };
+
+        match (options.include_metadata, request_timeout) {
+            (true, Some(timeout)) => {
+                self.submit_get_with_metadata_with_timeout(key, timeout, callback);
+            }
+            (true, None) => self.submit_get_with_metadata(key, callback),
+            (false, Some(timeout)) => self.submit_get_with_timeout(key, timeout, callback),
+            (false, None) => self.submit_get(key, callback),
+        }
+    }
+
+    /// Submit a DELETE with typed deadline and conditional headers.
+    fn submit_delete_with_options(
+        &self,
+        key: &str,
+        options: CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        if options.timeout().is_some_and(|timeout| timeout.is_zero()) {
+            let _ = callback.send(CloudEvent::Delete {
+                key: key.to_string(),
+                result: Err(operation_timeout_error("DELETE")),
+            });
+            return;
+        }
+        self.submit_delete(key, options.headers_with_deadline(), callback);
+    }
+
+    /// Submit a LIST with typed deadline controls.
+    fn submit_list_with_options(
+        &self,
+        prefix: &str,
+        options: CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        if options.timeout().is_some_and(|timeout| timeout.is_zero()) {
+            let _ = callback.send(CloudEvent::List {
+                prefix: prefix.to_string(),
+                result: Err(operation_timeout_error("LIST")),
+            });
+            return;
+        }
+        self.submit_list_with_headers(prefix, options.headers_with_deadline(), callback);
+    }
+
+    /// Submit a HEAD with typed deadline controls.
+    fn submit_head_with_options(
+        &self,
+        key: &str,
+        options: CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        if options.timeout().is_some_and(|timeout| timeout.is_zero()) {
+            let _ = callback.send(CloudEvent::Head {
+                key: key.to_string(),
+                result: Err(operation_timeout_error("HEAD")),
+            });
+            return;
+        }
+        self.submit_head_with_headers(key, options.headers_with_deadline(), callback);
+    }
+
     /// Carry admission through a bounded read until the backend finishes.
     /// Implementations whose callback can precede payload release must override
     /// this method and attach the reservation to the underlying operation.
@@ -265,5 +523,72 @@ pub trait CloudBackend: Send + Sync + 'static {
         callback: CloudCallback,
     ) {
         self.submit_list(prefix, callback);
+    }
+}
+
+/// Read-only cloud operations used by layers that do not publish objects.
+pub trait CloudReadCapability: Send + Sync {
+    fn read(&self, key: &str, options: CloudReadOptions, callback: CloudCallback);
+}
+
+impl<T: CloudBackend + ?Sized> CloudReadCapability for T {
+    fn read(&self, key: &str, options: CloudReadOptions, callback: CloudCallback) {
+        self.submit_get_with_options(key, options, callback);
+    }
+}
+
+/// Object creation and replacement operations.
+pub trait CloudWriteCapability: Send + Sync {
+    fn write(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        options: CloudRequestOptions,
+        callback: CloudCallback,
+    );
+}
+
+impl<T: CloudBackend + ?Sized> CloudWriteCapability for T {
+    fn write(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        options: CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        self.submit_put_with_options(key, data, options, callback);
+    }
+}
+
+/// Idempotent object removal operations.
+pub trait CloudDeleteCapability: Send + Sync {
+    fn delete(&self, key: &str, options: CloudRequestOptions, callback: CloudCallback);
+}
+
+impl<T: CloudBackend + ?Sized> CloudDeleteCapability for T {
+    fn delete(&self, key: &str, options: CloudRequestOptions, callback: CloudCallback) {
+        self.submit_delete_with_options(key, options, callback);
+    }
+}
+
+/// Prefix enumeration operations.
+pub trait CloudListCapability: Send + Sync {
+    fn list(&self, prefix: &str, options: CloudRequestOptions, callback: CloudCallback);
+}
+
+impl<T: CloudBackend + ?Sized> CloudListCapability for T {
+    fn list(&self, prefix: &str, options: CloudRequestOptions, callback: CloudCallback) {
+        self.submit_list_with_options(prefix, options, callback);
+    }
+}
+
+/// Object metadata lookup operations.
+pub trait CloudHeadCapability: Send + Sync {
+    fn head(&self, key: &str, options: CloudRequestOptions, callback: CloudCallback);
+}
+
+impl<T: CloudBackend + ?Sized> CloudHeadCapability for T {
+    fn head(&self, key: &str, options: CloudRequestOptions, callback: CloudCallback) {
+        self.submit_head_with_options(key, options, callback);
     }
 }

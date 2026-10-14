@@ -119,8 +119,8 @@ fn metadata_fixture(el: &mut EventLoop) -> MidgeResult<MetadataFixture> {
     let lease = attach_provider_metadata_lease(el, Arc::clone(&cloud), "manual-compaction-order");
     assert_eq!(el.state.writer_epoch, lease.epoch());
     let (publisher_tx, publisher_rx) = crossbeam::channel::unbounded();
-    el.compaction_publish_actor = CompactionPublishActor::new(publisher_tx, false)?;
-    el.compaction_publish_result_rx = publisher_rx;
+    el.actors.compaction_publish_actor = CompactionPublishActor::new(publisher_tx, false)?;
+    el.publication.compaction_publish_result_rx = publisher_rx;
     Ok(MetadataFixture {
         cloud,
         backend,
@@ -232,6 +232,7 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
     let mut metadata = metadata_fixture(&mut el)?;
     let (mut compute_release, finalized) = paused_compactor::install(&mut el);
     let plan = el
+        .actors
         .compaction_actor
         .check_manual_compaction(&el.state)?
         .expect("real cloud plan");
@@ -251,6 +252,7 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
     let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
     let assigned = assigned_name(&el, flush_id);
     let build = el
+        .pipeline
         .flush_worker_result_rx
         .recv_timeout(TEST_WAIT)
         .expect("actual flush Build");
@@ -312,6 +314,7 @@ fn should_defer_compaction_completion_when_manual_flush_publishes_first() -> Mid
     let metadata = metadata_fixture(&mut el)?;
     let (mut compute_release, finalized) = paused_compactor::install(&mut el);
     let plan = el
+        .actors
         .compaction_actor
         .check_manual_compaction(&el.state)?
         .expect("real cloud plan");
@@ -329,17 +332,18 @@ fn should_defer_compaction_completion_when_manual_flush_publishes_first() -> Mid
     let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
     let (name, _) = assigned_name(&el, flush_id).expect("canonical identity before build");
     let build = el
+        .pipeline
         .flush_worker_result_rx
         .recv_timeout(TEST_WAIT)
         .expect("actual Build");
     assert!(matches!(build, FlushWorkerResult::Build(_)));
     el.handle_flush_worker_result(build);
     let flush_owner = ManifestPublicationOwner::Flush { flush_id };
-    let owner_before = el.publication_gate.is_owned_by(&flush_owner);
+    let owner_before = el.publication.publication_gate.is_owned_by(&flush_owner);
     compute_release.release();
     complete_compaction(&mut el, &worker);
-    let completion_deferred = el.publication_gate.deferred_messages_len() == 1;
-    let no_compaction_publication = el.compaction_publication.get().is_none();
+    let completion_deferred = el.publication.publication_gate.deferred_messages_len() == 1;
+    let no_compaction_publication = el.publication.compaction_publication.get().is_none();
     let inputs_retained = inputs
         .iter()
         .all(|input| remote_sst_path_for_test(&el, input).exists());

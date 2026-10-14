@@ -94,6 +94,7 @@ fn should_preserve_full_compaction_allowance_when_retirement_is_idle(
     // Arrange
     let (mut el, _) = local_debt()?;
     let plan = el
+        .actors
         .compaction_actor
         .check_manual_compaction(&el.state)?
         .unwrap();
@@ -104,7 +105,7 @@ fn should_preserve_full_compaction_allowance_when_retirement_is_idle(
     // Assert
     assert_eq!(
         prepared.compaction_memory_limit,
-        el.compaction_actor.compaction_memory_limit()
+        el.actors.compaction_actor.compaction_memory_limit()
     );
     Ok(())
 }
@@ -128,19 +129,20 @@ fn should_retain_cloud_wal_when_shutdown_would_start_fresh_reclamation(
     ));
     hybrid.enable_ephemeral_sst_cache(64 * 1024 * 1024);
     el.set_hybrid_storage(hybrid);
-    el.runtime_response_timeout = Duration::from_secs(3);
-    el.shutdown_cloud_drain_timeout = Duration::from_secs(3);
-    el.compaction_actor
+    el.authority.runtime_response_timeout = Duration::from_secs(3);
+    el.shutdown.shutdown_cloud_drain_timeout = Duration::from_secs(3);
+    el.actors
+        .compaction_actor
         .set_execution_limits(1024 * 1024, 1024 * 1024);
     el.state.set_compaction_enabled(false);
-    el.cloud_coordinator.cloud_maintenance.next =
+    el.actors.cloud_coordinator.cloud_maintenance.next =
         crate::runtime::event_loop::cloud_maintenance::MaintenanceTask::WalRetirement;
     let last = wal_debt_last_sequence(WAL_DEBT_RECORDS);
     assert_eq!(test_flush_frontier(&el.state.manifest, 0), last);
     assert_eq!(el.state.wal.frontiers.cloud_durable(), last);
     assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
-    assert!(!el.flush_actor.is_inflight());
-    assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_none());
+    assert!(!el.actors.flush_actor.is_inflight());
+    assert!(el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none());
     assert!(el
         .state
         .column_families
@@ -153,7 +155,7 @@ fn should_retain_cloud_wal_when_shutdown_would_start_fresh_reclamation(
         .join("cloud_store/wal/publication-catalog.v1.json");
     let catalog_before = std::fs::read(&catalog_path)?;
     let request_id = 91_203;
-    let response = el.router.register(request_id, "Shutdown");
+    let response = el.routing.router.register(request_id, "Shutdown");
 
     // Act
     let outcome = el.handle_shutdown(Some(request_id));
@@ -177,8 +179,8 @@ fn should_retain_cloud_wal_when_shutdown_would_start_fresh_reclamation(
         "unretired WAL recovery authority must survive"
     );
     assert_eq!(std::fs::read(catalog_path)?, catalog_before);
-    assert!(el.cloud_coordinator.cloud_wal.acks().contains(81));
-    assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_none());
+    assert!(el.actors.cloud_coordinator.cloud_wal.acks().contains(81));
+    assert!(el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none());
     Ok(())
 }
 
@@ -188,19 +190,20 @@ fn should_retain_wal_when_shutdown_completion_requests_optional_reclamation(
     // Arrange: flush and upload completions share this reclamation entry
     // point, even before shutdown reaches its final worker join.
     let (mut el, _worker, _) = cloud_debt_with_wal_records(1, WAL_DEBT_RECORDS)?;
-    el.compaction_actor
+    el.actors
+        .compaction_actor
         .set_execution_limits(1024 * 1024, 1024 * 1024);
     el.state.set_compaction_enabled(false);
-    el.cloud_coordinator.cloud_maintenance.next =
+    el.actors.cloud_coordinator.cloud_maintenance.next =
         crate::runtime::event_loop::cloud_maintenance::MaintenanceTask::WalRetirement;
     let wal_path = remote_wal_path_for_test(&el, 81);
     assert!(wal_path.exists());
-    assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_none());
-    el.shutting_down = true;
+    assert!(el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none());
+    el.shutdown.shutting_down = true;
 
     // Act
     el.prune_cloud_wal_segments_covered_by_manifest();
-    let admitted = el.cloud_coordinator.cloud_wal_prune_worker.is_some();
+    let admitted = el.actors.cloud_coordinator.cloud_wal_prune_worker.is_some();
     el.join_cloud_wal_prune_worker();
 
     // Assert
@@ -209,7 +212,7 @@ fn should_retain_wal_when_shutdown_completion_requests_optional_reclamation(
         "a shutdown completion must not admit another optional WAL retirement"
     );
     assert!(wal_path.exists());
-    assert!(el.cloud_coordinator.cloud_wal.acks().contains(81));
+    assert!(el.actors.cloud_coordinator.cloud_wal.acks().contains(81));
     Ok(())
 }
 
@@ -239,19 +242,20 @@ fn should_join_owned_wal_retirement_head_before_acknowledging_shutdown(
     ));
     hybrid.enable_ephemeral_sst_cache(64 * 1024 * 1024);
     el.set_hybrid_storage(hybrid);
-    el.runtime_response_timeout = Duration::from_secs(3);
-    el.shutdown_cloud_drain_timeout = Duration::from_secs(3);
-    el.compaction_actor
+    el.authority.runtime_response_timeout = Duration::from_secs(3);
+    el.shutdown.shutdown_cloud_drain_timeout = Duration::from_secs(3);
+    el.actors
+        .compaction_actor
         .set_execution_limits(1024 * 1024, 1024 * 1024);
     el.state.set_compaction_enabled(false);
     el.prune_cloud_wal_segments_covered_by_manifest();
     started
         .recv_timeout(Duration::from_secs(1))
         .expect("the owned retirement entered its target HEAD");
-    assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_some());
-    assert!(el.publication_gate.is_active());
+    assert!(el.actors.cloud_coordinator.cloud_wal_prune_worker.is_some());
+    assert!(el.publication.publication_gate.is_active());
     let request_id = 91_204;
-    let response = el.router.register(request_id, "Shutdown");
+    let response = el.routing.router.register(request_id, "Shutdown");
     let (shutdown_started, shutdown_entered) = crossbeam::channel::bounded(1);
 
     // Act: the negative receive is bounded coordination with a deliberately
@@ -284,6 +288,6 @@ fn should_join_owned_wal_retirement_head_before_acknowledging_shutdown(
         }) if response_id == request_id
     ));
     assert!(cloud.calls.load(Ordering::Acquire) > 0);
-    assert!(el.cloud_coordinator.cloud_wal_prune_worker.is_none());
+    assert!(el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none());
     Ok(())
 }

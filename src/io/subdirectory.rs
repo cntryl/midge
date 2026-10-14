@@ -86,6 +86,10 @@ impl ReadFs for Subdirectory {
 }
 
 impl Fs for Subdirectory {
+    fn persistent_handle_capability(&self) -> Option<&dyn super::traits::PersistentHandleFs> {
+        Some(self)
+    }
+
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
         self.inner
             .local_output_view()
@@ -122,10 +126,6 @@ impl Fs for Subdirectory {
         self.inner.open(&self.path(path)?, opts)
     }
 
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        self.inner.open_persistent_handle(&self.path(path)?, opts)
-    }
-
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_file(&self.path(path)?)
     }
@@ -144,6 +144,12 @@ impl Fs for Subdirectory {
 
     fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
         self.inner.rename_atomic(&self.path(from)?, &self.path(to)?)
+    }
+}
+
+impl super::traits::PersistentHandleFs for Subdirectory {
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        self.inner.open_persistent_handle(&self.path(path)?, opts)
     }
 }
 

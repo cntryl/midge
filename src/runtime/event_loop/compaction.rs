@@ -32,7 +32,7 @@ impl EventLoop {
         if plan.output_seq == 0 {
             plan.output_seq = self.state.next_compaction_output_generation()?;
         }
-        if self.cloud_coordinator.hybrid_storage.is_some() {
+        if self.actors.cloud_coordinator.hybrid_storage.is_some() {
             // Early remote output staging can leave harmless orphans after a
             // crash. Persist the filename allocation before any such object
             // is uploaded so a cold replacement never reuses its identity.
@@ -61,7 +61,7 @@ impl EventLoop {
         let memory_limit = self.available_compaction_memory()?;
         let mut plan = self.assign_compaction_output_sequence_within(plan, manual_deadline)?;
         plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
-        plan.target_sst_size = self.compaction_actor.target_sst_size();
+        plan.target_sst_size = self.actors.compaction_actor.target_sst_size();
         plan.compaction_memory_limit = memory_limit;
 
         if plan.output_seq == 0 {
@@ -74,14 +74,18 @@ impl EventLoop {
     }
 
     pub(super) fn available_compaction_memory(&self) -> crate::common::MidgeResult<usize> {
-        if self.cloud_coordinator.cloud_wal_prune_worker.is_some()
-            || self.publication_gate.is_active()
+        if self
+            .actors
+            .cloud_coordinator
+            .cloud_wal_prune_worker
+            .is_some()
+            || self.publication.publication_gate.is_active()
         {
             return Err(crate::common::MidgeError::Busy(
                 "compaction memory is owned by an active publication turn".into(),
             ));
         }
-        Ok(self.compaction_actor.compaction_memory_limit())
+        Ok(self.actors.compaction_actor.compaction_memory_limit())
     }
 
     pub(super) fn launch_compaction(
@@ -90,12 +94,12 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         let had_manual_waiters = !self.state.pending_compaction_waits.is_empty();
         CompactionCoordinator::expire_manual_compaction_waiters(self);
-        if self.publication_gate.is_active() {
+        if self.publication.publication_gate.is_active() {
             return Err(crate::common::MidgeError::Busy(
                 "manifest publication is already in progress".to_string(),
             ));
         }
-        self.compaction_fence.admit_compaction()?;
+        self.authority.compaction_fence.admit_compaction()?;
         // Select once, before any preparation or provider work. Later waiters
         // cannot replace the accepted generation's original allowance.
         let manual_deadline = self.state.pending_compaction_waits.values().next().copied();
@@ -110,20 +114,22 @@ impl EventLoop {
         let plan = self.prepare_compaction_plan_for_launch_within(plan, manual_deadline)?;
         CompactionCoordinator::check_manual_deadline(manual_deadline)?;
 
-        let compaction_storage = self
-            .cloud_coordinator
-            .hybrid_storage
-            .as_ref()
-            .map(|storage| {
-                Arc::clone(storage)
-                    as Arc<dyn crate::runtime::actors::compaction::CompactionStorage>
-            });
-        self.compaction_actor
+        let compaction_storage =
+            self.actors
+                .cloud_coordinator
+                .hybrid_storage
+                .as_ref()
+                .map(|storage| {
+                    Arc::clone(storage)
+                        as Arc<dyn crate::runtime::actors::compaction::CompactionStorage>
+                });
+        self.actors
+            .compaction_actor
             .run_compaction(
                 &mut self.state,
                 &plan,
                 compaction_storage.as_ref(),
-                self.worker_msg_tx.clone(),
+                self.pipeline.worker_msg_tx.clone(),
                 manual_deadline,
             )
             .map(|_| ())
@@ -133,7 +139,8 @@ impl EventLoop {
         &mut self,
         operation: &str,
     ) -> crate::common::MidgeResult<bool> {
-        if self.cloud_maintenance_enabled() && !self.cloud_coordinator.cloud_maintenance.dispatching
+        if self.cloud_maintenance_enabled()
+            && !self.actors.cloud_coordinator.cloud_maintenance.dispatching
         {
             return Ok(self.schedule_cloud_maintenance() == Some(MaintenanceTask::Compaction));
         }
@@ -169,7 +176,8 @@ impl EventLoop {
             crate::failpoints::fail_point!("midge::compaction::defer_pressure_recovery", |_| {
                 // Recheck held fixtures promptly when released. This hook and
                 // its scheduling override are absent from ordinary builds.
-                self.background_compaction_schedule
+                self.pipeline
+                    .background_compaction_schedule
                     .defer_for(Duration::from_millis(10));
                 Ok(false)
             });
@@ -177,7 +185,7 @@ impl EventLoop {
         if !background_enabled && !manual && !self.state.has_any_critical_l0_debt() {
             return Ok(false);
         }
-        if self.fencing.ddl_authority_ambiguous {
+        if self.authority.fencing.ddl_authority_ambiguous {
             return Err(crate::common::MidgeError::Fenced(
                 "DDL authority is ambiguous; refusing compaction until reconciliation".into(),
             ));
@@ -192,9 +200,11 @@ impl EventLoop {
         }
 
         let planned = if background_enabled && !manual {
-            self.compaction_actor.check_compaction(&self.state)
+            self.actors.compaction_actor.check_compaction(&self.state)
         } else {
-            self.compaction_actor.check_manual_compaction(&self.state)
+            self.actors
+                .compaction_actor
+                .check_manual_compaction(&self.state)
         };
         let Some(plan) = planned.inspect_err(|_| self.state.mark_persistence_anomaly())? else {
             return Ok(false);
@@ -220,7 +230,8 @@ impl EventLoop {
     }
 
     pub(super) fn background_maintenance_timeout(&self) -> Duration {
-        self.background_compaction_schedule
+        self.pipeline
+            .background_compaction_schedule
             .remaining()
             .unwrap_or(Duration::ZERO)
     }
@@ -230,7 +241,8 @@ impl EventLoop {
             return;
         }
 
-        self.background_compaction_schedule
+        self.pipeline
+            .background_compaction_schedule
             .defer_for(BACKGROUND_COMPACTION_CHECK_INTERVAL);
         match self.schedule_one_background_compaction_if_needed("periodic maintenance") {
             Ok(true) => tracing::debug!("Scheduled background compaction during maintenance"),
@@ -243,7 +255,8 @@ impl EventLoop {
     }
 
     pub(in crate::runtime) fn schedule_background_compaction_on_startup(&mut self) {
-        self.background_compaction_schedule
+        self.pipeline
+            .background_compaction_schedule
             .defer_for(STARTUP_CLOUD_MAINTENANCE_DELAY);
         match self.schedule_one_background_compaction_if_needed("runtime startup") {
             Ok(true) => tracing::debug!("Scheduled compaction during runtime startup"),
@@ -255,7 +268,7 @@ impl EventLoop {
     /// Local copies are disposable only after the remote manifest publication
     /// has completed. Snapshot readers pin remote objects, not these files.
     pub(super) fn evict_published_sst_cache(&self, names: &[String]) {
-        let Some(storage) = &self.cloud_coordinator.hybrid_storage else {
+        let Some(storage) = &self.actors.cloud_coordinator.hybrid_storage else {
             return;
         };
         for name in names {
@@ -367,8 +380,9 @@ impl CompactionCoordinator {
         }
 
         let deadline = event_loop
+            .routing
             .router
-            .request_deadline(request_id, event_loop.runtime_response_timeout)
+            .request_deadline(request_id, event_loop.authority.runtime_response_timeout)
             .unwrap_or_else(|| OperationDeadline::from_budget(Duration::ZERO));
         if let Err(error) = Self::check_manual_deadline(Some(deadline)) {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
@@ -396,6 +410,7 @@ impl CompactionCoordinator {
         let mut scheduled = 0usize;
         loop {
             let plan = match event_loop
+                .actors
                 .compaction_actor
                 .check_manual_compaction(&event_loop.state)
             {
@@ -439,8 +454,8 @@ impl CompactionCoordinator {
     fn validate_manual_compaction_request(
         event_loop: &EventLoop,
     ) -> crate::common::MidgeResult<()> {
-        event_loop.compaction_fence.admit_compaction()?;
-        if event_loop.fencing.ddl_authority_ambiguous {
+        event_loop.authority.compaction_fence.admit_compaction()?;
+        if event_loop.authority.fencing.ddl_authority_ambiguous {
             return Err(crate::common::MidgeError::Fenced(
                 "DDL authority is ambiguous; refusing compaction until reconciliation".into(),
             ));
@@ -460,10 +475,10 @@ impl CompactionCoordinator {
             target_level,
             succeeded,
         } = request;
-        let worker_error = event_loop.compaction_actor.take_worker_error();
+        let worker_error = event_loop.actors.compaction_actor.take_worker_error();
 
         if succeeded {
-            event_loop.compaction_actor.join_completed_worker();
+            event_loop.actors.compaction_actor.join_completed_worker();
             if let Err(error) = Self::start_publication(
                 event_loop,
                 request_id,
@@ -472,7 +487,7 @@ impl CompactionCoordinator {
                 cf_id,
                 target_level,
             ) {
-                if event_loop.compaction_publication.is_active() {
+                if event_loop.publication.compaction_publication.is_active() {
                     Self::finish_failed_publication(event_loop, &error);
                 } else {
                     Self::finish_failed_start(
@@ -488,7 +503,10 @@ impl CompactionCoordinator {
             event_loop.state.diagnostics.record(|m| {
                 m.record_compaction_failure();
             });
-            let repair = event_loop.compaction_actor.active_same_level_repair();
+            let repair = event_loop
+                .actors
+                .compaction_actor
+                .active_same_level_repair();
             let error = worker_error.unwrap_or_else(|| {
                 crate::common::MidgeError::Internal(
                     "compaction worker failed without an error".to_string(),
@@ -508,22 +526,29 @@ impl CompactionCoordinator {
             // never-reused generation and referenced by no manifest or
             // intent. Reclaim them now, or every retry of a deterministically
             // failing plan leaks another set of remote objects.
-            let orphaned = event_loop.compaction_actor.take_prepared_output_names();
+            let orphaned = event_loop
+                .actors
+                .compaction_actor
+                .take_prepared_output_names();
             if !orphaned.is_empty() {
-                let hybrid_storage = event_loop.cloud_coordinator.hybrid_storage.clone();
-                event_loop
-                    .gc_actor
-                    .delete_ssts(&mut event_loop.state, &orphaned, hybrid_storage);
+                let hybrid_storage = event_loop.actors.cloud_coordinator.hybrid_storage.clone();
+                event_loop.actors.gc_actor.delete_ssts(
+                    &mut event_loop.state,
+                    &orphaned,
+                    hybrid_storage,
+                );
             }
-            let reservation = event_loop.compaction_actor.handle_complete(
+            let reservation = event_loop.actors.compaction_actor.handle_complete(
                 &mut event_loop.state,
                 &input_ssts,
                 &output_ssts,
             );
-            if let (Some(hybrid), Some(token)) =
-                (&event_loop.cloud_coordinator.hybrid_storage, reservation)
-            {
+            if let (Some(hybrid), Some(token)) = (
+                &event_loop.actors.cloud_coordinator.hybrid_storage,
+                reservation,
+            ) {
                 event_loop
+                    .actors
                     .compaction_actor
                     .settle_compaction_error_reservation(hybrid.as_ref(), token, Some(&error));
             }
@@ -556,19 +581,18 @@ impl CompactionCoordinator {
         ) {
             Ok(validated) => validated,
             Err(error) => {
-                event_loop.gc_actor.delete_ssts(
+                event_loop.actors.gc_actor.delete_ssts(
                     &mut event_loop.state,
                     output_ssts,
-                    event_loop.cloud_coordinator.hybrid_storage.clone(),
+                    event_loop.actors.cloud_coordinator.hybrid_storage.clone(),
                 );
                 return Err(error);
             }
         };
-        let manual_deadline = event_loop.compaction_actor.manual_deadline_for_generation(
-            cf_id,
-            target_level,
-            output_generation,
-        )?;
+        let manual_deadline = event_loop
+            .actors
+            .compaction_actor
+            .manual_deadline_for_generation(cf_id, target_level, output_generation)?;
         Self::check_manual_deadline(manual_deadline)?;
         let mut canonical_inputs = input_ssts.to_vec();
         let mut canonical_outputs = output_ssts.to_vec();
@@ -576,7 +600,7 @@ impl CompactionCoordinator {
         canonical_outputs.sort_unstable();
         let token = CompactionPublicationToken {
             request_id,
-            writer_epoch: event_loop.fencing.writer_epoch,
+            writer_epoch: event_loop.authority.fencing.writer_epoch,
             cf_id,
             target_level,
             output_generation,
@@ -585,6 +609,7 @@ impl CompactionCoordinator {
         };
         let publication_owner = Self::publication_owner(&token);
         if !event_loop
+            .publication
             .publication_gate
             .try_acquire(publication_owner.clone())
         {
@@ -599,7 +624,10 @@ impl CompactionCoordinator {
         ) {
             Ok(outputs) => outputs,
             Err(error) => {
-                event_loop.publication_gate.release(&publication_owner);
+                event_loop
+                    .publication
+                    .publication_gate
+                    .release(&publication_owner);
                 return Err(error);
             }
         };
@@ -611,12 +639,15 @@ impl CompactionCoordinator {
             superseded_outputs,
             expected_phase: CompactionPublishPhase::OutputDurable,
         };
-        if let Err(error) = event_loop.compaction_publication.install(
-            &event_loop.publication_gate,
+        if let Err(error) = event_loop.publication.compaction_publication.install(
+            &event_loop.publication.publication_gate,
             publication_owner.clone(),
             pending,
         ) {
-            event_loop.publication_gate.release(&publication_owner);
+            event_loop
+                .publication
+                .publication_gate
+                .release(&publication_owner);
             return Err(error);
         }
         Self::submit_publication_phase(event_loop, CompactionPublishPhase::OutputDurable)
@@ -649,13 +680,15 @@ impl CompactionCoordinator {
         }
         let output_generation = Self::validate_output_names(cf_id, target_level, output_ssts)?;
         Self::validate_captured_target_span(event_loop, input_ssts, cf_id, target_level)?;
-        let prepared =
-            event_loop
-                .compaction_actor
-                .prepared_outputs_exact(output_ssts, cf_id, target_level);
+        let prepared = event_loop.actors.compaction_actor.prepared_outputs_exact(
+            output_ssts,
+            cf_id,
+            target_level,
+        );
         #[cfg(test)]
         let prepared: MidgeResult<Vec<PreparedCompactionOutput>> = prepared.or_else(|_| {
             let outputs = event_loop
+                .actors
                 .compaction_actor
                 .prepare_outputs_from_local_files_for_test(
                     output_ssts,
@@ -667,6 +700,7 @@ impl CompactionCoordinator {
             // worker. Give their accepted synthetic owner an explicit identity.
             // Real compute and the deadline regressions never use this fallback.
             event_loop
+                .actors
                 .compaction_actor
                 .prepare_publication_generation_for_test(cf_id, target_level, output_generation)?;
             Ok(outputs)
@@ -674,7 +708,11 @@ impl CompactionCoordinator {
         let outputs = prepared?;
         let added =
             Self::validate_prepared_output_metadata(cf_id, target_level, output_ssts, &outputs)?;
-        if event_loop.compaction_actor.active_same_level_repair() {
+        if event_loop
+            .actors
+            .compaction_actor
+            .active_same_level_repair()
+        {
             Self::validate_repair_replacement_level(
                 event_loop,
                 input_ssts,
@@ -684,6 +722,7 @@ impl CompactionCoordinator {
             )?;
         }
         let accepted_generation = event_loop
+            .actors
             .compaction_actor
             .accepted_output_generation(cf_id, target_level)?;
         if !output_ssts.is_empty() && accepted_generation != output_generation {
@@ -833,7 +872,7 @@ impl CompactionCoordinator {
                 "compaction input authority changed before publication".to_string(),
             ));
         }
-        let captured = event_loop.compaction_actor.captured_input_metadata();
+        let captured = event_loop.actors.compaction_actor.captured_input_metadata();
         if !captured.is_empty() {
             let live: std::collections::HashMap<_, _> = selected_files
                 .iter()
@@ -850,7 +889,11 @@ impl CompactionCoordinator {
                 ));
             }
         }
-        if event_loop.compaction_actor.active_same_level_repair() {
+        if event_loop
+            .actors
+            .compaction_actor
+            .active_same_level_repair()
+        {
             return Self::validate_captured_repair_component(
                 event_loop,
                 &selected,
@@ -944,8 +987,8 @@ impl CompactionCoordinator {
         event_loop: &mut EventLoop,
         completion: CompactionPublishCompletion,
     ) {
-        event_loop.compaction_publish_actor.finish_task();
-        let Some(pending) = event_loop.compaction_publication.get().cloned() else {
+        event_loop.actors.compaction_publish_actor.finish_task();
+        let Some(pending) = event_loop.publication.compaction_publication.get().cloned() else {
             tracing::warn!(?completion.phase, "ignored stale compaction publication completion");
             return;
         };
@@ -962,7 +1005,7 @@ impl CompactionCoordinator {
             Self::finish_failed_publication(event_loop, &error);
             return;
         }
-        if event_loop.fencing.writer_epoch != pending.token.writer_epoch {
+        if event_loop.authority.fencing.writer_epoch != pending.token.writer_epoch {
             Self::finish_failed_publication(
                 event_loop,
                 &crate::common::MidgeError::Fenced(
@@ -1004,10 +1047,10 @@ impl CompactionCoordinator {
             ));
         }
         if !pending.superseded_outputs.is_empty() {
-            event_loop.gc_actor.delete_ssts(
+            event_loop.actors.gc_actor.delete_ssts(
                 &mut event_loop.state,
                 &pending.superseded_outputs,
-                event_loop.cloud_coordinator.hybrid_storage.clone(),
+                event_loop.actors.cloud_coordinator.hybrid_storage.clone(),
             );
         }
         Self::validate_captured_target_span(
@@ -1018,7 +1061,7 @@ impl CompactionCoordinator {
         )?;
         event_loop.check_lease_health()?;
         Self::check_manual_deadline(pending.manual_deadline)?;
-        event_loop.manifest_actor.compaction_complete(
+        event_loop.actors.manifest_actor.compaction_complete(
             &mut event_loop.state,
             &pending.token.input_ssts,
             &pending.added,
@@ -1058,22 +1101,22 @@ impl CompactionCoordinator {
             Self::resident_output_sizes(event_loop.state.fs.as_ref(), &pending.token.output_ssts)?;
         event_loop.check_lease_health()?;
         Self::check_manual_deadline(pending.manual_deadline)?;
-        let reservation = event_loop.compaction_actor.finish_publication(
+        let reservation = event_loop.actors.compaction_actor.finish_publication(
             &mut event_loop.state,
             &pending.token.input_ssts,
             &pending.token.output_ssts,
         );
         // From here the compaction is settled; any later failure only leaves
         // the cleared intent unmirrored.
-        if let Some(active) = event_loop.compaction_publication.get_mut() {
+        if let Some(active) = event_loop.publication.compaction_publication.get_mut() {
             active.expected_phase = CompactionPublishPhase::IntentCleared;
         }
-        let hybrid_storage = event_loop.cloud_coordinator.hybrid_storage.clone();
+        let hybrid_storage = event_loop.actors.cloud_coordinator.hybrid_storage.clone();
         if let (Some(hybrid), Some(token)) = (&hybrid_storage, reservation) {
             hybrid.compaction_completed_with_token(token, &output_sizes);
         }
         event_loop.check_lease_health()?;
-        event_loop.gc_actor.delete_ssts(
+        event_loop.actors.gc_actor.delete_ssts(
             &mut event_loop.state,
             &pending.token.input_ssts,
             hybrid_storage,
@@ -1091,11 +1134,15 @@ impl CompactionCoordinator {
         event_loop: &mut EventLoop,
         phase: CompactionPublishPhase,
     ) -> crate::common::MidgeResult<()> {
-        let pending = event_loop.compaction_publication.get_mut().ok_or_else(|| {
-            crate::common::MidgeError::Internal(
-                "compaction publication state disappeared before worker submission".to_string(),
-            )
-        })?;
+        let pending = event_loop
+            .publication
+            .compaction_publication
+            .get_mut()
+            .ok_or_else(|| {
+                crate::common::MidgeError::Internal(
+                    "compaction publication state disappeared before worker submission".to_string(),
+                )
+            })?;
         Self::check_manual_deadline(pending.manual_deadline)?;
         pending.expected_phase = phase;
         let task = CompactionPublishTask {
@@ -1108,17 +1155,21 @@ impl CompactionCoordinator {
                 Vec::new()
             },
             fs: std::sync::Arc::clone(&event_loop.state.fs),
-            hybrid_storage: event_loop.cloud_coordinator.hybrid_storage.clone(),
-            cloud_metadata_storage: event_loop.cloud_coordinator.cloud_metadata_storage.clone(),
-            metadata_publication_lock: event_loop.metadata_publication_lock.clone(),
-            lease_validity: event_loop.fencing.lease_validity.clone(),
-            lease_healthy: event_loop.fencing.lease_healthy.clone(),
-            leader_store: event_loop.fencing.leader_store.clone(),
-            leader_holder_id: event_loop.fencing.leader_holder_id.clone(),
-            publication_memory_limit: event_loop.compaction_actor.compaction_memory_limit(),
-            runtime_response_timeout: event_loop.runtime_response_timeout,
+            hybrid_storage: event_loop.actors.cloud_coordinator.hybrid_storage.clone(),
+            cloud_metadata_storage: event_loop
+                .actors
+                .cloud_coordinator
+                .cloud_metadata_storage
+                .clone(),
+            metadata_publication_lock: event_loop.actors.metadata_publication_lock.clone(),
+            lease_validity: event_loop.authority.fencing.lease_validity.clone(),
+            lease_healthy: event_loop.authority.fencing.lease_healthy.clone(),
+            leader_store: event_loop.authority.fencing.leader_store.clone(),
+            leader_holder_id: event_loop.authority.fencing.leader_holder_id.clone(),
+            publication_memory_limit: event_loop.actors.compaction_actor.compaction_memory_limit(),
+            runtime_response_timeout: event_loop.authority.runtime_response_timeout,
         };
-        event_loop.compaction_publish_actor.submit(task)
+        event_loop.actors.compaction_publish_actor.submit(task)
     }
 
     fn manifest_authority_switched(
@@ -1140,11 +1191,12 @@ impl CompactionCoordinator {
         output_ssts: &[String],
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) {
-        event_loop.compaction_fence.degrade();
+        event_loop.authority.compaction_fence.degrade();
         event_loop.publish_snapshot();
-        if let (Some(hybrid), Some(token)) =
-            (&event_loop.cloud_coordinator.hybrid_storage, reservation)
-        {
+        if let (Some(hybrid), Some(token)) = (
+            &event_loop.actors.cloud_coordinator.hybrid_storage,
+            reservation,
+        ) {
             match Self::resident_output_sizes(event_loop.state.fs.as_ref(), output_ssts) {
                 Ok(output_sizes) => {
                     hybrid.compaction_inputs_retained_with_token(token, &output_sizes);
@@ -1164,6 +1216,7 @@ impl CompactionCoordinator {
             // submit for local GC even if a later phase/checkpoint write
             // failed. The intent remains for idempotent restart recovery.
             event_loop
+                .actors
                 .gc_actor
                 .delete_ssts(&mut event_loop.state, input_ssts, None);
         } else {
@@ -1218,8 +1271,9 @@ impl CompactionCoordinator {
         event_loop.evict_published_sst_cache(&pending.token.output_ssts);
         event_loop.publish_snapshot();
         event_loop
+            .publication
             .compaction_publication
-            .finish(&mut event_loop.publication_gate);
+            .finish(&mut event_loop.publication.publication_gate);
         Self::complete_pending_waits(event_loop, true, None);
         event_loop.restore_publication_deferred_message();
         event_loop.schedule_next_flush_worker();
@@ -1234,24 +1288,29 @@ impl CompactionCoordinator {
         output_ssts: &[String],
         error: &crate::common::MidgeError,
     ) {
-        let repair = event_loop.compaction_actor.active_same_level_repair();
+        let repair = event_loop
+            .actors
+            .compaction_actor
+            .active_same_level_repair();
         // A failed intent append can still have reached the journal. Keep the
         // outputs and refuse further compaction until restart reconciles them.
         if event_loop
             .state
             .has_compaction_publication_intent(input_ssts, output_ssts)
         {
-            event_loop.compaction_fence.degrade();
+            event_loop.authority.compaction_fence.degrade();
         }
-        let reservation = event_loop.compaction_actor.finish_publication(
+        let reservation = event_loop.actors.compaction_actor.finish_publication(
             &mut event_loop.state,
             input_ssts,
             output_ssts,
         );
-        if let (Some(hybrid), Some(token)) =
-            (&event_loop.cloud_coordinator.hybrid_storage, reservation)
-        {
+        if let (Some(hybrid), Some(token)) = (
+            &event_loop.actors.cloud_coordinator.hybrid_storage,
+            reservation,
+        ) {
             event_loop
+                .actors
                 .compaction_actor
                 .settle_failed_compaction_reservation(hybrid.as_ref(), token);
         }
@@ -1267,8 +1326,9 @@ impl CompactionCoordinator {
         // Settling releases the gate here; nothing below reads it before the
         // deferred messages are restored.
         let Some(pending) = event_loop
+            .publication
             .compaction_publication
-            .finish(&mut event_loop.publication_gate)
+            .finish(&mut event_loop.publication.publication_gate)
         else {
             tracing::warn!(%error, "compaction publication failed without pending state");
             return;
@@ -1277,11 +1337,14 @@ impl CompactionCoordinator {
             Self::finish_failed_intent_clear(event_loop, error);
             return;
         }
-        let repair = event_loop.compaction_actor.active_same_level_repair();
+        let repair = event_loop
+            .actors
+            .compaction_actor
+            .active_same_level_repair();
         let input_ssts = &pending.token.input_ssts;
         let output_ssts = &pending.token.output_ssts;
         let authoritative = Self::manifest_authority_switched(event_loop, input_ssts, output_ssts);
-        let reservation = event_loop.compaction_actor.finish_publication(
+        let reservation = event_loop.actors.compaction_actor.finish_publication(
             &mut event_loop.state,
             input_ssts,
             output_ssts,
@@ -1298,12 +1361,14 @@ impl CompactionCoordinator {
                 .state
                 .has_compaction_publication_intent(input_ssts, output_ssts)
             {
-                event_loop.compaction_fence.degrade();
+                event_loop.authority.compaction_fence.degrade();
             }
-            if let (Some(hybrid), Some(token)) =
-                (&event_loop.cloud_coordinator.hybrid_storage, reservation)
-            {
+            if let (Some(hybrid), Some(token)) = (
+                &event_loop.actors.cloud_coordinator.hybrid_storage,
+                reservation,
+            ) {
                 event_loop
+                    .actors
                     .compaction_actor
                     .settle_failed_compaction_reservation(hybrid.as_ref(), token);
             }
@@ -1319,11 +1384,12 @@ impl CompactionCoordinator {
     }
 
     fn defer_failed_repair_retry(event_loop: &mut EventLoop, repair: bool, phase: &'static str) {
-        if !repair || event_loop.compaction_fence.is_degraded() {
+        if !repair || event_loop.authority.compaction_fence.is_degraded() {
             return;
         }
         let retry_after = BACKGROUND_COMPACTION_CHECK_INTERVAL;
         event_loop
+            .pipeline
             .background_compaction_schedule
             .defer_for(retry_after);
         tracing::info!(
@@ -1342,7 +1408,7 @@ impl CompactionCoordinator {
             ?error,
             "failed to mirror cleared compaction publication intent"
         );
-        event_loop.compaction_fence.degrade();
+        event_loop.authority.compaction_fence.degrade();
         event_loop.publish_snapshot();
         let response_error = if matches!(error, MidgeError::Timeout(_)) {
             error.replay()
@@ -1371,7 +1437,7 @@ impl CompactionCoordinator {
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) -> bool {
         event_loop.publish_snapshot();
-        let hybrid_storage = event_loop.cloud_coordinator.hybrid_storage.clone();
+        let hybrid_storage = event_loop.actors.cloud_coordinator.hybrid_storage.clone();
         if let (Some(hybrid), Some(token)) = (&hybrid_storage, reservation) {
             let output_sizes =
                 match Self::resident_output_sizes(event_loop.state.fs.as_ref(), output_ssts) {
@@ -1383,9 +1449,11 @@ impl CompactionCoordinator {
             hybrid.compaction_completed_with_token(token, &output_sizes);
         }
         if event_loop.check_lease_health().is_ok() {
-            event_loop
-                .gc_actor
-                .delete_ssts(&mut event_loop.state, input_ssts, hybrid_storage);
+            event_loop.actors.gc_actor.delete_ssts(
+                &mut event_loop.state,
+                input_ssts,
+                hybrid_storage,
+            );
         } else {
             event_loop.state.mark_persistence_anomaly();
         }
@@ -1459,10 +1527,14 @@ impl CompactionCoordinator {
         // starve destructive DDL indefinitely.
         if allow_emergent_followup
             && Self::has_manual_compaction_waiters(event_loop)
-            && event_loop.publication_gate.deferred_messages_is_empty()
+            && event_loop
+                .publication
+                .publication_gate
+                .deferred_messages_is_empty()
         {
             loop {
                 let plan = match event_loop
+                    .actors
                     .compaction_actor
                     .check_manual_compaction(&event_loop.state)
                 {
@@ -1526,8 +1598,9 @@ impl CompactionCoordinator {
             .filter_map(|(&id, deadline)| {
                 (deadline.is_expired()
                     || event_loop
+                        .routing
                         .router
-                        .request_deadline(id, event_loop.runtime_response_timeout)
+                        .request_deadline(id, event_loop.authority.runtime_response_timeout)
                         .is_none())
                 .then_some(id)
             })
@@ -1538,11 +1611,12 @@ impl CompactionCoordinator {
                 .pending_compaction_waits
                 .remove(&request_id);
             if event_loop
+                .routing
                 .router
-                .request_deadline(request_id, event_loop.runtime_response_timeout)
+                .request_deadline(request_id, event_loop.authority.runtime_response_timeout)
                 .is_some()
             {
-                event_loop.router.complete(RuntimeResponse::Error {
+                event_loop.routing.router.complete(RuntimeResponse::Error {
                     request_id,
                     error: MidgeError::Timeout(
                         "manual compaction exceeded the caller deadline".into(),
@@ -1569,6 +1643,7 @@ impl CompactionCoordinator {
         for request_id in std::mem::take(&mut event_loop.state.pending_compaction_waits).into_keys()
         {
             event_loop
+                .routing
                 .router
                 .complete(RuntimeResponse::Ok { request_id });
         }
@@ -1580,7 +1655,7 @@ impl CompactionCoordinator {
     ) {
         for request_id in std::mem::take(&mut event_loop.state.pending_compaction_waits).into_keys()
         {
-            event_loop.router.complete(RuntimeResponse::Error {
+            event_loop.routing.router.complete(RuntimeResponse::Error {
                 request_id,
                 error: error.replay(),
             });
@@ -1595,17 +1670,25 @@ impl CompactionCoordinator {
     }
 
     pub(super) fn drain_publish_results(event_loop: &mut EventLoop) {
-        while let Ok(completion) = event_loop.compaction_publish_result_rx.try_recv() {
+        while let Ok(completion) = event_loop
+            .publication
+            .compaction_publish_result_rx
+            .try_recv()
+        {
             Self::handle_publication_completion(event_loop, completion);
         }
     }
 
     fn drain_inline_publish_worker(event_loop: &mut EventLoop) {
-        if !event_loop.compaction_publish_actor.is_inline() {
+        if !event_loop.actors.compaction_publish_actor.is_inline() {
             return;
         }
-        while event_loop.compaction_publish_actor.is_inflight() {
-            let Ok(completion) = event_loop.compaction_publish_result_rx.try_recv() else {
+        while event_loop.actors.compaction_publish_actor.is_inflight() {
+            let Ok(completion) = event_loop
+                .publication
+                .compaction_publish_result_rx
+                .try_recv()
+            else {
                 break;
             };
             Self::handle_publication_completion(event_loop, completion);

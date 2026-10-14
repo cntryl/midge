@@ -1290,6 +1290,10 @@ impl ReadFs for CrashFs {
 }
 
 impl Fs for CrashFs {
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::traits::PersistentHandleFs> {
+        Some(self)
+    }
+
     fn coordination_key(&self) -> u64 {
         Arc::as_ptr(&self.device.state) as usize as u64
     }
@@ -1315,11 +1319,6 @@ impl Fs for CrashFs {
     }
 
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-        self.open_file(path, opts)
-            .map(|file| Box::new(file) as Box<dyn File>)
-    }
-
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
         self.open_file(path, opts)
             .map(|file| Box::new(file) as Box<dyn File>)
     }
@@ -1420,6 +1419,13 @@ impl Fs for CrashFs {
                 }
                 state.rename((from_parent, from_name), (to_parent, to_name), inode)
             })
+    }
+}
+
+impl crate::io::traits::PersistentHandleFs for CrashFs {
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        self.open_file(path, opts)
+            .map(|file| Box::new(file) as Box<dyn File>)
     }
 }
 

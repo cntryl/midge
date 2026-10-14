@@ -1,6 +1,10 @@
 //! Namespace-aware cloud request dispatch.
 
-use super::{set_request_timeout_header, CloudBackend, CloudCallback};
+use super::{
+    set_request_timeout_header, CloudBackend, CloudCallback, CloudDeleteCapability,
+    CloudHeadCapability, CloudListCapability, CloudReadCapability, CloudReadOptions,
+    CloudRequestOptions, CloudWriteCapability,
+};
 use std::sync::Arc;
 
 /// Namespace-aware dispatcher that forwards calls to the active backend.
@@ -137,7 +141,12 @@ impl CloudStorage {
             return;
         }
         let full_key = self.full_path(key);
-        self.backend.submit_put(&full_key, data, headers, callback);
+        let options = headers
+            .into_iter()
+            .fold(CloudRequestOptions::default(), |options, (name, value)| {
+                options.with_header(name, value)
+            });
+        CloudWriteCapability::write(self.backend.as_ref(), &full_key, data, options, callback);
     }
 
     #[cfg(test)]
@@ -162,8 +171,14 @@ impl CloudStorage {
             });
             return;
         }
-        self.backend
-            .submit_get_with_timeout(&self.full_path(key), timeout, callback);
+        let request = CloudRequestOptions::default()
+            .with_deadline(crate::common::OperationDeadline::from_budget(timeout));
+        CloudReadCapability::read(
+            self.backend.as_ref(),
+            &self.full_path(key),
+            CloudReadOptions::default().with_request_options(request),
+            callback,
+        );
     }
 
     pub(crate) fn submit_get_with_metadata_within(
@@ -182,8 +197,16 @@ impl CloudStorage {
             });
             return;
         }
-        self.backend
-            .submit_get_with_metadata_with_timeout(&self.full_path(key), timeout, callback);
+        let request = CloudRequestOptions::default()
+            .with_deadline(crate::common::OperationDeadline::from_budget(timeout));
+        CloudReadCapability::read(
+            self.backend.as_ref(),
+            &self.full_path(key),
+            CloudReadOptions::default()
+                .with_request_options(request)
+                .with_metadata(),
+            callback,
+        );
     }
 
     #[cfg(test)]
@@ -221,7 +244,12 @@ impl CloudStorage {
             return;
         }
         let full_key = self.full_path(key);
-        self.backend.submit_delete(&full_key, headers, callback);
+        CloudDeleteCapability::delete(
+            self.backend.as_ref(),
+            &full_key,
+            CloudRequestOptions::default().with_headers(headers),
+            callback,
+        );
     }
 
     #[cfg(test)]
@@ -245,11 +273,14 @@ impl CloudStorage {
             });
             return;
         }
-        let mut headers = Vec::new();
-        set_request_timeout_header(&mut headers, timeout);
         let full_prefix = self.full_path(prefix);
-        self.backend
-            .submit_list_with_headers(&full_prefix, headers, callback);
+        CloudListCapability::list(
+            self.backend.as_ref(),
+            &full_prefix,
+            CloudRequestOptions::default()
+                .with_deadline(crate::common::OperationDeadline::from_budget(timeout)),
+            callback,
+        );
     }
 
     #[cfg(test)]
@@ -273,10 +304,13 @@ impl CloudStorage {
             });
             return;
         }
-        let mut headers = Vec::new();
-        set_request_timeout_header(&mut headers, timeout);
         let full_key = self.full_path(key);
-        self.backend
-            .submit_head_with_headers(&full_key, headers, callback);
+        CloudHeadCapability::head(
+            self.backend.as_ref(),
+            &full_key,
+            CloudRequestOptions::default()
+                .with_deadline(crate::common::OperationDeadline::from_budget(timeout)),
+            callback,
+        );
     }
 }

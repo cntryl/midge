@@ -27,7 +27,8 @@ impl Drop for ComputeRelease {
 pub(super) fn install(el: &mut EventLoop) -> (ComputeRelease, crossbeam::channel::Receiver<()>) {
     let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&el.state.fs),
-        el.cloud_coordinator
+        el.actors
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .expect("cloud storage")
@@ -42,13 +43,14 @@ pub(super) fn install(el: &mut EventLoop) -> (ComputeRelease, crossbeam::channel
     );
     let (reached, arrived) = crossbeam::channel::bounded(1);
     let (release, resumed) = crossbeam::channel::bounded(1);
-    el.compaction_actor = crate::runtime::actors::CompactionActor::new(Arc::new(PausedFactory {
-        delegate,
-        gate: Arc::new(Mutex::new(Some(FinalizeGate {
-            reached,
-            release: resumed,
-        }))),
-    }));
+    el.actors.compaction_actor =
+        crate::runtime::actors::CompactionActor::new(Arc::new(PausedFactory {
+            delegate,
+            gate: Arc::new(Mutex::new(Some(FinalizeGate {
+                reached,
+                release: resumed,
+            }))),
+        }));
     (ComputeRelease(Some(release)), arrived)
 }
 

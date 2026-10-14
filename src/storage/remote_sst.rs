@@ -314,6 +314,10 @@ impl ReadFs for RemoteSstFs {
 }
 
 impl Fs for RemoteSstFs {
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::traits::PersistentHandleFs> {
+        Some(self)
+    }
+
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
         Some(Arc::clone(&self.local))
     }
@@ -393,15 +397,6 @@ impl Fs for RemoteSstFs {
         }
         Ok(Box::new(self.remote_file(path)?))
     }
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        if self.pinned.is_none() && self.local.exists(path)? {
-            return self.local.open_persistent_handle(path, opts);
-        }
-        if opts.mode != OpenMode::ReadOnly || opts.create || opts.create_new || opts.truncate {
-            return Err(immutable_sst_error());
-        }
-        Ok(Box::new(self.remote_file(path)?))
-    }
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.local.remove_file(path)
     }
@@ -416,6 +411,18 @@ impl Fs for RemoteSstFs {
     }
     fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
         self.local.rename_atomic(from, to)
+    }
+}
+
+impl crate::io::traits::PersistentHandleFs for RemoteSstFs {
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        if self.pinned.is_none() && self.local.exists(path)? {
+            return self.local.open_persistent_handle(path, opts);
+        }
+        if opts.mode != OpenMode::ReadOnly || opts.create || opts.create_new || opts.truncate {
+            return Err(immutable_sst_error());
+        }
+        Ok(Box::new(self.remote_file(path)?))
     }
 }
 
@@ -439,6 +446,10 @@ impl ReadFs for VerifiedLocalSstFs {
 }
 
 impl Fs for VerifiedLocalSstFs {
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::traits::PersistentHandleFs> {
+        Some(self)
+    }
+
     fn coordination_key(&self) -> u64 {
         self.local.coordination_key()
     }
@@ -447,12 +458,6 @@ impl Fs for VerifiedLocalSstFs {
             return Err(immutable_sst_error());
         }
         self.local.open(&self.path, opts)
-    }
-    fn open_persistent_handle(&self, _path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        if opts.mode != OpenMode::ReadOnly || opts.create || opts.create_new || opts.truncate {
-            return Err(immutable_sst_error());
-        }
-        self.local.open_persistent_handle(&self.path, opts)
     }
     fn remove_file(&self, _path: &FsPath) -> FsResult<()> {
         Err(immutable_sst_error())
@@ -468,6 +473,15 @@ impl Fs for VerifiedLocalSstFs {
     }
     fn rename_atomic(&self, _from: &FsPath, _to: &FsPath) -> FsResult<()> {
         Err(immutable_sst_error())
+    }
+}
+
+impl crate::io::traits::PersistentHandleFs for VerifiedLocalSstFs {
+    fn open_persistent(&self, _path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        if opts.mode != OpenMode::ReadOnly || opts.create || opts.create_new || opts.truncate {
+            return Err(immutable_sst_error());
+        }
+        self.local.open_persistent_handle(&self.path, opts)
     }
 }
 

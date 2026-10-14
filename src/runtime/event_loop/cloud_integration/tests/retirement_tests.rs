@@ -17,7 +17,7 @@ fn should_preserve_ack_when_retirement_completion_has_no_matching_admission(
 
     // Assert
     assert_eq!(
-        el.cloud_coordinator.cloud_wal.acks().max_sequence(1),
+        el.actors.cloud_coordinator.cloud_wal.acks().max_sequence(1),
         Some(10)
     );
     Ok(())
@@ -39,7 +39,7 @@ fn should_preserve_wal_when_only_the_local_flush_frontier_advanced(
     drain_prune_completion_for_test(&mut el);
 
     // Assert
-    assert!(el.cloud_coordinator.cloud_wal.acks().contains(1));
+    assert!(el.actors.cloud_coordinator.cloud_wal.acks().contains(1));
     assert!(remote_wal_path_for_test(&el, 1).exists());
     Ok(())
 }
@@ -54,7 +54,7 @@ fn should_preserve_wal_when_catalog_retirement_uses_a_stale_writer_epoch(
     seed_cloud_prune_candidate(&mut el, 1, 10);
     el.state.wal.frontiers.set_cloud_durable_for_test(10);
     add_valid_manifest_sst_for_test(&mut el, "stale-epoch-proof.sst", 10);
-    cloud_persistence(el.cloud_coordinator.hybrid_storage.as_ref().unwrap())
+    cloud_persistence(el.actors.cloud_coordinator.hybrid_storage.as_ref().unwrap())
         .fence_cloud_wal_catalog(el.state.writer_epoch + 1)?;
 
     // Act
@@ -62,7 +62,7 @@ fn should_preserve_wal_when_catalog_retirement_uses_a_stale_writer_epoch(
     drain_prune_completion_for_test(&mut el);
 
     // Assert
-    assert!(el.cloud_coordinator.cloud_wal.acks().contains(1));
+    assert!(el.actors.cloud_coordinator.cloud_wal.acks().contains(1));
     assert!(remote_wal_path_for_test(&el, 1).exists());
     Ok(())
 }
@@ -81,7 +81,7 @@ fn should_keep_retired_wal_out_of_history_when_gc_unlink_fails() -> crate::commo
         .join(crate::wal::segment_file_name(1));
     std::fs::remove_file(&path)?;
     std::fs::create_dir_all(path.join("blocker"))?;
-    el.cloud_coordinator.cloud_wal.admit_prunes([1]);
+    el.actors.cloud_coordinator.cloud_wal.admit_prunes([1]);
 
     // Act
     el.handle_storage_event(crate::storage::StorageEvent::CloudWalPruneComplete {
@@ -96,6 +96,6 @@ fn should_keep_retired_wal_out_of_history_when_gc_unlink_fails() -> crate::commo
         path.exists(),
         "the leftover waits for the next open's sweep"
     );
-    assert!(!el.cloud_coordinator.cloud_wal.acks().contains(1));
+    assert!(!el.actors.cloud_coordinator.cloud_wal.acks().contains(1));
     Ok(())
 }

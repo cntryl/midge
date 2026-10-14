@@ -225,12 +225,12 @@ impl NameFixture {
         let guard = Arc::clone(&lease)
             .try_acquire()
             .map_err(|error| error.into_validation_error("name fixture lease acquisition"))?;
-        el.fencing.writer_epoch = lease.epoch();
-        el.fencing.leader_holder_id = Some(lease.holder_id());
-        el.fencing.leader_store = lease.get_leader_store();
-        el.fencing.lease_validity = Some(lease.lease_validity());
-        el.fencing.lease_healthy = Some(Arc::new(AtomicBool::new(true)));
-        el.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&cloud));
+        el.authority.fencing.writer_epoch = lease.epoch();
+        el.authority.fencing.leader_holder_id = Some(lease.holder_id());
+        el.authority.fencing.leader_store = lease.get_leader_store();
+        el.authority.fencing.lease_validity = Some(lease.lease_validity());
+        el.authority.fencing.lease_healthy = Some(Arc::new(AtomicBool::new(true)));
+        el.actors.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&cloud));
         let fixture = Self {
             el,
             cloud,
@@ -275,6 +275,7 @@ impl NameFixture {
         let bytes = std::fs::read(self.el.state.host_sst_dir().join(&self.sst_name))?;
         let reader = self
             .el
+            .actors
             .compaction_actor
             // The actor factory's Fs is rooted at sst_dir. Reader paths are
             // FsPath addresses; only the writer accepts a host destination.
@@ -287,8 +288,11 @@ impl NameFixture {
             return Ok(());
         }
         self.backend.release.store(true, Ordering::Release);
-        self.el.compaction_publish_actor.shutdown_and_join()?;
-        self.el.gc_actor.shutdown_workers();
+        self.el
+            .actors
+            .compaction_publish_actor
+            .shutdown_and_join()?;
+        self.el.actors.gc_actor.shutdown_workers();
         self.el.join_cloud_wal_prune_worker();
         self.stopped = true;
         self.lease

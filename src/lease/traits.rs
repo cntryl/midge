@@ -761,34 +761,32 @@ pub trait LeaderStore: Send + Sync {
         )))
     }
 
-    /// Acquisition scope with a conditional cleanup candidate observer.
+    /// Acquire leadership under one caller-supplied I/O budget.
     ///
-    /// Native stores report the attempted epoch after mutation admission and
-    /// before submission. This does not confirm acquisition: cleanup must read
-    /// and match the exact holder, owner token and epoch before expiring it.
-    /// Compatibility implementations can report only a confirmed result.
-    fn acquire_leadership_with_minimum_epoch_within(
+    /// Stores that can observe an ambiguous provider mutation report its
+    /// cleanup candidate after admission and before submission. The candidate
+    /// is not proof of acquisition: cleanup must still read and match the exact
+    /// holder, owner token and epoch before expiring it. Compatibility stores
+    /// report only a confirmed result.
+    fn acquire_leadership_with_minimum_epoch_with_timeout(
         &self,
         holder_id: &str,
         minimum_epoch: u64,
-        scope: &crate::common::DeadlineScope,
+        timeout: Duration,
         on_cleanup_epoch: &mut dyn FnMut(u64),
     ) -> Result<LeaderRecord, LeaseError> {
-        scope
-            .begin_ambiguous_mutation("leader-store acquisition")
-            .map_err(scope_lease_error)?;
+        if timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "leader-store acquisition deadline exhausted".to_string(),
+            ));
+        }
         let result = self.acquire_leadership_with_minimum_epoch(holder_id, minimum_epoch);
         match result {
             Ok(record) => {
                 on_cleanup_epoch(record.epoch);
                 Ok(record)
             }
-            Err(error) => {
-                if definite_acquisition_rejection(&error) {
-                    scope.resolve_ambiguous_mutation();
-                }
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -949,6 +947,62 @@ pub trait LeaderStore: Send + Sync {
         self.validate_epoch_with_timeout(expected_holder_id, expected_epoch, timeout)?;
         operation();
         Ok(())
+    }
+}
+
+/// Acquire leadership inside a shared deadline scope and resolve an
+/// ambiguous mutation only when the store proves a definite rejection.
+///
+/// Stores may report a candidate epoch before submission. The candidate is
+/// intentionally left to the caller for exact owner-token verification and
+/// conditional cleanup.
+pub(crate) fn acquire_leadership_with_minimum_epoch_within(
+    store: &dyn LeaderStore,
+    holder_id: &str,
+    minimum_epoch: u64,
+    scope: &crate::common::DeadlineScope,
+    on_cleanup_epoch: &mut dyn FnMut(u64),
+) -> Result<LeaderRecord, LeaseError> {
+    let timeout = scope.deadline().remaining();
+    if timeout.is_zero() {
+        return Err(LeaseError::Timeout(
+            "leader-store acquisition deadline exhausted".to_string(),
+        ));
+    }
+    let mut mutation_admitted = false;
+    let mut admission_error = None;
+    let mut observe_cleanup_epoch = |epoch| {
+        on_cleanup_epoch(epoch);
+        if !mutation_admitted {
+            match scope.begin_ambiguous_mutation("leader-store acquisition") {
+                Ok(()) => mutation_admitted = true,
+                Err(error) => admission_error = Some(scope_lease_error(error)),
+            }
+        }
+    };
+    let result = store.acquire_leadership_with_minimum_epoch_with_timeout(
+        holder_id,
+        minimum_epoch,
+        timeout,
+        &mut observe_cleanup_epoch,
+    );
+    drop(observe_cleanup_epoch);
+    match result {
+        Ok(record) => {
+            if let Some(error) = admission_error {
+                return Err(error);
+            }
+            scope
+                .check("leader-store acquisition completion")
+                .map_err(scope_lease_error)?;
+            Ok(record)
+        }
+        Err(error) => {
+            if mutation_admitted && definite_acquisition_rejection(&error) {
+                scope.resolve_ambiguous_mutation();
+            }
+            Err(error)
+        }
     }
 }
 

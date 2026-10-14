@@ -325,13 +325,21 @@ impl LeaderStore for ProviderLeaderStore {
         self.acquire_with_cloud(holder_id, minimum_epoch, &self.cloud, None, &mut |_| {})
     }
 
-    fn acquire_leadership_with_minimum_epoch_within(
+    fn acquire_leadership_with_minimum_epoch_with_timeout(
         &self,
         holder_id: &str,
         minimum_epoch: u64,
-        scope: &crate::common::DeadlineScope,
+        timeout: Duration,
         on_cleanup_epoch: &mut dyn FnMut(u64),
     ) -> Result<LeaderRecord, LeaseError> {
+        if timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "cloud lease acquisition deadline exhausted".to_string(),
+            ));
+        }
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(timeout),
+        );
         scope
             .check("cloud lease acquisition")
             .map_err(super::traits::scope_lease_error)?;
@@ -340,7 +348,7 @@ impl LeaderStore for ProviderLeaderStore {
             holder_id,
             minimum_epoch,
             &cloud,
-            Some(scope),
+            Some(&scope),
             on_cleanup_epoch,
         )
     }
@@ -977,15 +985,15 @@ impl CloudStorageLease {
             ));
         }
         let record = if let Some(scope) = scope {
-            self.leader_store
-                .acquire_leadership_with_minimum_epoch_within(
-                    &self.holder_id,
-                    minimum_epoch,
-                    scope,
-                    &mut |epoch| {
-                        *pending_release = Some(epoch);
-                    },
-                )?
+            super::traits::acquire_leadership_with_minimum_epoch_within(
+                self.leader_store.as_ref(),
+                &self.holder_id,
+                minimum_epoch,
+                scope,
+                &mut |epoch| {
+                    *pending_release = Some(epoch);
+                },
+            )?
         } else {
             self.leader_store
                 .acquire_leadership_with_minimum_epoch(&self.holder_id, minimum_epoch)?
