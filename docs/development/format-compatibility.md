@@ -125,7 +125,7 @@ errors under the existing decoded-size limit. See the
 - no blanket on-disk compatibility promise
 - any format movement must be called out in the changelog and migration guide
 
-The current cloud WAL layout is publication catalog format version 2 (#844).
+The current cloud WAL layout is publication catalog format version 3 (#819).
 Mere object presence is not authority: recovery reads only entries in the
 validated publication catalog. Midge stores identical primary and
 recovery-mirror copies at `wal/publication-catalog.v1.json` and
@@ -135,21 +135,22 @@ missing or malformed. The pre-v1 segment-only cloud layout is not
 auto-migrated because it cannot prove whether a late stale-writer upload was
 accepted before fencing.
 
-The version 2 JSON document is a chain, like the WAL ledger. It contains
+The version 3 JSON document is a chain, like the WAL ledger. It contains
 `format_version`, the current `fencing_epoch`, an `anchor`, a
-`next_segment_id`, a `seq_floor` and `segments`, oldest first. The anchor is
-the link of the last segment the catalog retired, or the genesis link. Each
-entry records its writer epoch, the link of the segment before it (`prev`),
-its own link (`link`: segment id, last sequence and the digest its footer
-seals), and its object's exact byte length and CRC32C; the epoch-scoped
-object key derives from the id and epoch. The first entry links the anchor
-and each later one links the entry before it. Epochs never fall and none
-passes the fencing epoch. `next_segment_id` passes the head and never falls,
-so retiring entries never loses the chain or hands out a published id again.
-Retirement removes only the oldest entries and moves the anchor; salvage
-removes only a suffix and raises `seq_floor` over what it set aside. A cloud
-object must be the sealed segment its entry names: the same size and CRC32C,
-and a header and footer naming the entry's epoch, `prev` and `link`.
+`next_segment_id`, a `seq_floor`, the `retired_by` shared-generation id, and
+`segments`, oldest first. The anchor is the link of the last segment the
+catalog retired, or the genesis link. Each entry records its writer epoch, the
+link of the segment before it (`prev`), its sealed facts (`link`, record count,
+and canonical per-family maximum sequences), and its object's exact byte
+length and CRC32C; the epoch-scoped object key derives from the id and epoch.
+The first entry links the anchor and each later one links the entry before it.
+Epochs never fall and none passes the fencing epoch. `next_segment_id` passes
+the head and never falls, so retiring entries never loses the chain or hands
+out a published id again. Retirement removes only the oldest entries and moves
+the anchor; salvage removes only a suffix and raises `seq_floor` over what it
+set aside. A cloud object must be the sealed segment its entry names: the same
+size and CRC32C, and a header and footer naming the entry's epoch, `prev` and
+`link`.
 
 A catalog of any other format version fails startup with `CompatibilityError`;
 Midge neither repairs it from the mirror nor converts it, and older binaries

@@ -1,9 +1,13 @@
 # Migration guide
 
-Midge is a 0.x crate. Treat upgrades as application migrations: read
-the release notes, inspect [format compatibility](../development/format-compatibility.md),
-run compatibility and recovery tests, and keep a verified application-level
-backup before changing binaries.
+Midge is a 0.x crate. The `0.4.0` release target writes database FORMAT 8,
+requires SST V4, and uses cloud WAL publication catalog v3. Older database
+formats are rejected without migration. Treat upgrades as application
+migrations: read the release notes, inspect
+[format compatibility](../development/format-compatibility.md), run
+compatibility and recovery tests, and keep a verified application-level
+backup before changing binaries. See [0.3.2 to 0.4.0](#032-to-040) before
+upgrading an existing database.
 
 ## `midge verify --json` schema version 1
 
@@ -133,20 +137,42 @@ Writes made after that copy was taken require separate reconciliation. Returning
 to `0.3.1` also restores its known lease, progress, and cloud read-authority
 defects.
 
-## 0.3.2 to 0.3.3
+## 0.3.2 to 0.4.0
 
-Version `0.3.3` fixes SST reads that could falsely report an existing key as
-absent when the next indexed boundary has many retained versions. The change
-validates trie hints and falls back to a complete sparse-index search. Existing
-SSTs benefit immediately; no rewrite, offline export/import, or API migration
-is required. FORMAT 4, SST V4, CLI JSON schema version 1, cloud control formats,
-and durability contracts remain unchanged.
+Version `0.4.0` fixes false-absence reads at duplicate SST successor
+boundaries. It also introduces breaking database FORMAT 8, cloud WAL catalog
+v3, and cloud lease metadata version 3. FORMAT 8 requires SST V4 and durable
+per-family flush frontiers; current binaries reject database formats 1 through
+7. Cloud catalogs of any version other than 3 are rejected. These formats have
+no in-place upgrade or migration path.
 
-Stop writes, complete shutdown, preserve a verified database or prefix copy,
-and qualify recovery on a separate copy before cutover. Rollback is supported
-with constraints: `0.3.2` accepts the same formats but restores the read defect.
-Prefer `0.3.3` for databases with duplicate SST boundaries. This fix does not
-weaken application concurrency assertions or introduce ownership continuity.
+The public Engine API remains usable, but the public storage integration
+interfaces are source-breaking. Applications implementing custom
+`CloudBackend`, `LeaderStore`, or filesystem capabilities must update their
+implementations. `MidgeError::OutcomeUnknown` is a new public error variant;
+applications with exhaustive error matches must handle it. WAL checkpoint
+metrics now expose per-family flush frontiers instead of the removed manifest
+sequence fields.
+
+Move existing data logically:
+
+1. Stop writers and complete `engine.shutdown(timeout)` with `0.3.2`.
+2. Preserve the complete database directory and relevant cloud prefix as the
+   rollback copy.
+3. With `0.3.2`, export every column family's logical key/value contents
+   through the public API. Preserve application metadata needed to reconstruct
+   TTL expiration; public scans do not expose internal expiration timestamps.
+4. With `0.4.0`, create a new local database or cloud prefix, recreate the
+   column families, and import the exported data. Do not copy old WAL, lease,
+   catalog, or metadata files into the new database or prefix.
+5. Run `midge verify`, then test application reads, writes, and restart
+   recovery on a separate copy. For cloud, complete the required Sqrzl or
+   deployment-specific provider qualification before switching traffic.
+
+Rollback requires restoring the preserved original database and using
+`0.3.2`. Older binaries must not open a FORMAT 8 database or a catalog v3
+prefix. Writes made after the export require separate application-level
+reconciliation.
 
 ## FORMAT 3 and SST V4
 
@@ -189,19 +215,21 @@ which prevents cross-provider credential combinations. `OpenOptions::build`
 performs structural validation only and may therefore reject names or endpoints
 that older releases deferred until startup.
 
-## FORMAT 7 and cloud WAL publication catalog v2
+## FORMAT 8 and cloud WAL publication catalog v3
 
-FORMAT 7 (#844) is a breaking pre-1.0 transition with no in-place upgrade
-and no format migration. Binaries reject FORMAT 1 through 6 with
-`CompatibilityError` and leave the marker untouched. FORMAT 7 metadata keeps
+FORMAT 8 (#819) is a breaking pre-1.0 transition with no in-place upgrade
+and no format migration. Binaries reject FORMAT 1 through 7 with
+`CompatibilityError` and leave the marker untouched. FORMAT 8 metadata keeps
 no compatibility encodings: a manifest journal record without its edit
-envelope is corruption, and manifest key bounds must be hex strings.
+envelope is corruption, manifest key bounds must be hex strings, and
+per-family flush frontiers must be canonical and consistent.
 
-Cloud databases also move to publication catalog format version 2. The
+Cloud databases also move to publication catalog format version 3. The
 catalog keeps its object keys, `wal/publication-catalog.v1.json` and
 `wal/publication-catalog.v1.mirror.json`, but its document is a chain: an
-anchor, entries that each link the one before, the next segment id and a
-sequence floor. Startup rejects a catalog of any other version with
+anchor, entries that each link the one before, the next segment id, a sequence
+floor, sealed-segment record counts and per-family maximum sequences. Startup
+rejects a catalog of any other version with
 `CompatibilityError` and leaves both copies unchanged; it neither converts
 the catalog nor repairs it from the mirror. Do not edit either catalog copy by
 hand.
@@ -221,12 +249,12 @@ Move each database logically:
 
 Rollback is unsupported within the new database or prefix. Roll back by
 restoring traffic to the preserved original with its old binary; older
-binaries must not open a FORMAT 7 database or read a version 2 catalog.
+binaries must not open a FORMAT 8 database or read a version 3 catalog.
 
 ## Cloud WAL publication catalog v1
 
 Cloud WAL publication catalog format v1 was a breaking persisted-layout
-change. Current binaries reject a v1 catalog; see the FORMAT 7 section above.
+change. Current binaries reject a v1 catalog; see the FORMAT 8 section above.
 Sealed objects use
 `wal/epochs/<writer-epoch>/<segment-id>.wal`, and
 `wal/publication-catalog.v1.json` and its identically encoded

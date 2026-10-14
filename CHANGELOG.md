@@ -5,48 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) formatting.
 
-Midge is currently in the 0.3 release line. Compatibility expectations for pre-1.0 releases are defined in [docs/development/stability-policy.md](docs/development/stability-policy.md).
+Midge is currently in the 0.4 release line. Compatibility expectations for pre-1.0 releases are defined in [docs/development/stability-policy.md](docs/development/stability-policy.md).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-14
+
 ### Changed
 
-- **Breaking on-disk format: database FORMAT 7 (#844).** Binaries reject
-  FORMAT 1 through 6 with `CompatibilityError`; there is no migration.
-  Export the logical contents with the old binary and import them into a new
-  database. FORMAT 7 metadata keeps no compatibility encodings: every
-  manifest journal record must carry its edit envelope, and a record without
-  one is corruption; manifest key bounds must be hex strings, and the
-  byte-array form written before FORMAT 4 is rejected. The manifest's
-  `next_wal_seq` and `cloud_checkpoint` fields and the `SetCloudCheckpoint`
-  journal record are gone, and maintenance no longer re-summarizes SSTs
-  whose manifest entry lacks complete key bounds.
-- **Breaking API (#844).** `RuntimeMetricsSnapshot::manifest_next_wal_seq`
-  and `StorageLayoutSnapshot::manifest_next_wal_seq` are removed; the
-  manifest no longer tracks a WAL sequence.
-- **Breaking cloud format: WAL publication catalog v2 (#844).** The catalog
-  keeps its object keys, `wal/publication-catalog.v1.json` and its mirror,
-  but its document is `format_version: 2`: a chain with an anchor, entries
-  that each link the one before, a next segment id that never falls, and a
-  sequence floor. Startup rejects a catalog of any other version with
-  `CompatibilityError`, leaves both copies unchanged and never repairs it
-  from the mirror; there is no migration. Move a cloud database by logical
-  export and import into a new prefix. Metadata bootstrap refuses any
-  catalog that is not pristine, even one whose entries have all retired.
+- **Breaking on-disk format: database FORMAT 8 (#843–#866).** FORMAT 8
+  requires SST V4 and durable per-family flush frontiers. WAL segments are
+  linked and named in `wal/LEDGER`; the ledger records segment facts and
+  durable sequence reservations. Manifest journal records require their edit
+  envelope, key bounds use the canonical hex encoding, and legacy WAL
+  checkpoint fields are removed. Current binaries reject database formats
+  1 through 7 with `CompatibilityError`; there is no in-place upgrade.
+- **Breaking cloud metadata formats (#844, #866).** Cloud WAL publication
+  catalog v3 is a chained history whose sealed-segment summaries include
+  record counts and per-family maximum sequences. Retirement is authorized by
+  a committed shared manifest generation. Cloud lease metadata advances to
+  version 3. These formats have no migration path; move cloud databases by
+  logical export and import into a new prefix.
+- **Breaking Rust integration API (#868).** Public storage integration
+  capabilities changed: custom `CloudBackend`, `LeaderStore`, and filesystem
+  implementations must adopt the focused capability interfaces and scoped
+  acquisition/lock contracts. The public metrics fields used for WAL
+  checkpoints were also replaced by the per-family flush-frontier view (#844,
+  #866), and `MidgeError::OutcomeUnknown` distinguishes commits whose outcome
+  cannot be confirmed (#866).
 - **Breaking backup contents (#844).** A backup captures `wal/LEDGER` and the
   segments the ledger names, read inside the capture barrier, instead of
   everything under `wal/`. Orphaned segment files, `wal/salvaged-*/`
   directories and `.salvage-retained` copies are no longer captured, and a
   ledger that cannot be read fails the backup.
-- **Breaking on-disk format: database FORMAT 6 (#843).** WAL segments are
-  linked: each starts with a header naming its writer epoch, first sequence
-  and the segment before it, and each sealed segment ends with a footer whose
-  digest the next header names. WAL records no longer carry a writer epoch,
-  and transaction frames carry their column family. The WAL ledger records
-  every member's header and footer facts and a durable sequence reservation.
-  Binaries reject FORMAT 1 through 5 with `CompatibilityError`; there is no
-  in-place upgrade. Export the logical contents with the old binary and
-  import them into a new database.
+- **WAL writer fencing (#872).** Related same-epoch append, sync, and ledger
+  effects share counted fencing ownership, reducing repeated lock admission
+  and authority reads while preserving lease-transition exclusion.
+- Empty range deletes are rejected with `InvalidArgument` (#866).
 
 ### Fixed
 
@@ -67,30 +62,25 @@ Midge is currently in the 0.3 release line. Compatibility expectations for pre-1
 - A crash during cloud salvage no longer lets the next open replay cataloged
   segments past the hole: one catalog compare-and-swap sets the suffix aside
   and raises the sequence floor before the WAL ledger changes (#844).
-
-## [0.3.3] - 2026-10-07
-
-### Fixed
-
-- Preserve point and bounded prefix reads when a duplicate SST successor boundary
-  spans many retained versions. Validate trie hints against the complete sparse
-  index and fall back to binary search when a hint cannot bracket the query.
-  This fixes false absence after SST publication, including Stream epoch reads
-  under Fitz Fast Queue pressure.
+- Point and bounded-prefix reads remain correct when duplicate SST successor
+  boundaries span many retained versions; unverified trie hints fall back to
+  the complete sparse-index search (#775).
+- Cancellation remains attached to cloud lease acquisition, filesystem writer
+  locks recover safely after process death, and cloud conditional-read headers
+  are preserved through provider requests (#868).
 
 ### Upgrade and rollback
 
-- FORMAT 4, SST V4, Rust API, CLI JSON schema, and durability contracts are
-  unchanged from `0.3.2`. No export/import or format migration is required.
-- Rollback is supported with constraints: `0.3.2` can read the same format but
-  restores the false-absence defect. Preserve a verified database copy before
-  upgrading and qualify a separate copy before cutover. See the migration guide.
-
-### Known risks
-
-- Midge remains pre-1.0 and single-process. The downstream quarter-core/512MiB
-  pilot qualifies a finite local-disk burst, not maximum capacity or real-cloud
-  behavior. Release qualification must pass before tagging or publication.
+- Upgrading from `0.3.2` to `0.4.0` requires a logical export and import into
+  a new local database or cloud prefix. FORMAT 8 rejects older database
+  formats, and cloud catalog v3 rejects other catalog versions; there is no
+  in-place migration.
+- Preserve the original database directory and cloud prefix for rollback.
+  Rollback requires restoring that copy and running `0.3.2`; older binaries
+  must not open data written by `0.4.0`.
+- Applications implementing custom storage backends must update their
+  implementations for the source-breaking integration interfaces. Applications
+  with exhaustive `MidgeError` matches must handle `OutcomeUnknown`.
 
 ## [0.3.2] - 2026-10-07
 
