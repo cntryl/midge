@@ -10,7 +10,7 @@ fn should_refuse_manual_compaction_when_route_budget_expired_in_queue() -> Midge
     crate::failpoints::with_read_gate(|| {
         // Arrange: the registered caller spent its allowance before dispatch.
         let mut event_loop = create_test_local_event_loop()?;
-        event_loop.authority.runtime_response_timeout = Duration::from_secs(1);
+        event_loop.routing.runtime_response_timeout = Duration::from_secs(1);
         let started = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
         let response =
             event_loop
@@ -60,7 +60,7 @@ fn should_expire_manual_waiter_when_maintenance_remains_blocked() -> MidgeResult
             .unwrap()
             .enable_ephemeral_sst_cache(64 * 1024 * 1024);
         assert!(event_loop.cloud_maintenance_enabled());
-        event_loop.authority.runtime_response_timeout = Duration::from_secs(1);
+        event_loop.routing.runtime_response_timeout = Duration::from_secs(1);
         let response = event_loop.routing.router.register_at_for_test(
             91_712,
             "CompactAll",
@@ -71,7 +71,7 @@ fn should_expire_manual_waiter_when_maintenance_remains_blocked() -> MidgeResult
             event_loop
                 .routing
                 .router
-                .request_deadline(91_712, event_loop.authority.runtime_response_timeout)
+                .request_deadline(91_712, event_loop.routing.runtime_response_timeout)
                 .unwrap(),
         );
         let owner = crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;

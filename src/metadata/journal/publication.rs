@@ -1,3 +1,9 @@
+use super::{
+    encode_journal_record, millis_since_epoch, FsError, FsyncMarker, JournalEditEnvelope,
+    ManifestEdit, MidgeResult, BATCH_RECORD_TYPE, FSYNC_MARKER_TYPE, JOURNAL_FILE,
+    JOURNAL_REPAIR_TEMP_FILE,
+};
+
 /// Append an edit to the manifest journal using a provided Fs (preferred).
 /// Returns the journal edit id assigned to the record.
 #[cfg(test)]
@@ -135,7 +141,7 @@ fn append_record_and_marker_with_fs(
     Ok((write_ns, fsync_ns))
 }
 
-fn repair_partial_journal_tail(
+pub(super) fn repair_partial_journal_tail(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     last_valid_offset: u64,
 ) -> MidgeResult<()> {
@@ -259,3 +265,5 @@ pub fn append_edit_batch(db_path: &Path, batch: &[ManifestEdit]) -> MidgeResult<
         })?);
     append_edit_batch_with_fs(&fs, batch)
 }
+#[cfg(test)]
+use super::{next_edit_id_with_fs, with_manifest_writer_lock, Path};

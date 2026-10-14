@@ -686,24 +686,35 @@ mod tests {
         }
     }
 
-    impl Fs for SyncCountingFs {
-        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-            self.inner.open(path, options)
-        }
-
-        fn open_persistent_handle(
-            &self,
-            path: &FsPath,
-            options: OpenOptions,
-        ) -> FsResult<Box<dyn File>> {
+    impl crate::io::PersistentHandleFs for SyncCountingFs {
+        fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
             if let Some(gate) = &self.open_gate {
                 gate.0.send(()).unwrap();
                 gate.1.lock().unwrap().recv().unwrap();
             }
             Ok(Box::new(SyncCountingFile {
-                inner: self.inner.open_persistent_handle(path, options)?,
+                inner: crate::io::open_persistent_handle(&self.inner, path, options)?,
                 durable_sync_count: Arc::clone(&self.durable_sync_count),
             }))
+        }
+    }
+
+    impl Fs for SyncCountingFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
+        fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+            self.inner
+                .persistent_handle_capability()
+                .map(|_| self as &dyn crate::io::PersistentHandleFs)
+        }
+
+        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, options)
         }
 
         fn remove_file(&self, path: &FsPath) -> FsResult<()> {
@@ -796,18 +807,10 @@ mod tests {
         }
     }
 
-    impl Fs for GatedNoSpaceFs {
-        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-            self.inner.open(path, options)
-        }
-
-        fn open_persistent_handle(
-            &self,
-            path: &FsPath,
-            options: OpenOptions,
-        ) -> FsResult<Box<dyn File>> {
+    impl crate::io::PersistentHandleFs for GatedNoSpaceFs {
+        fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
             Ok(Box::new(GatedNoSpaceFile {
-                inner: self.inner.open_persistent_handle(path, options)?,
+                inner: crate::io::open_persistent_handle(&self.inner, path, options)?,
                 entered: self
                     .entered
                     .lock()
@@ -815,6 +818,25 @@ mod tests {
                     .clone(),
                 release: Arc::clone(&self.release),
             }))
+        }
+    }
+
+    impl Fs for GatedNoSpaceFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
+        fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+            self.inner
+                .persistent_handle_capability()
+                .map(|_| self as &dyn crate::io::PersistentHandleFs)
+        }
+
+        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, options)
         }
 
         fn remove_file(&self, path: &FsPath) -> FsResult<()> {

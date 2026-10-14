@@ -720,10 +720,110 @@ pub fn parse_leader_record(content: &str) -> Option<LeaderRecord> {
     Some(record)
 }
 
+/// Admission and cleanup ownership for one leader acquisition.
+///
+/// Implementations must call [`Self::begin_mutation`] immediately before a
+/// potentially committed acquisition and retain the exact candidate epoch
+/// when it is known. The context carries cancellation and the original
+/// absolute deadline together, so a fresh provider budget cannot revive a
+/// cancelled open.
+pub struct LeaderAcquisition<'a> {
+    scope: crate::common::DeadlineScope,
+    on_cleanup_epoch: &'a mut dyn FnMut(u64),
+    mutation_admitted: bool,
+    cleanup_epoch: Option<u64>,
+}
+
+impl<'a> LeaderAcquisition<'a> {
+    pub(crate) fn within(
+        scope: &crate::common::DeadlineScope,
+        on_cleanup_epoch: &'a mut dyn FnMut(u64),
+    ) -> Self {
+        Self {
+            scope: scope.clone(),
+            on_cleanup_epoch,
+            mutation_admitted: false,
+            cleanup_epoch: None,
+        }
+    }
+
+    #[must_use]
+    pub fn remaining(&self) -> Duration {
+        self.scope.deadline().remaining()
+    }
+
+    pub fn check(&self) -> Result<(), LeaseError> {
+        self.scope
+            .check("leader acquisition")
+            .map_err(scope_lease_error)?;
+        Ok(())
+    }
+
+    pub fn begin_mutation(&mut self, cleanup_epoch: Option<u64>) -> Result<(), LeaseError> {
+        self.check()?;
+        self.scope
+            .begin_ambiguous_mutation("leader acquisition mutation")
+            .map_err(scope_lease_error)?;
+        self.mutation_admitted = true;
+        if let Some(epoch) = cleanup_epoch {
+            self.track_owner(epoch);
+        }
+        Ok(())
+    }
+
+    /// Record a confirmed owner even when cancellation won before completion.
+    pub fn track_owner(&mut self, epoch: u64) {
+        if self.cleanup_epoch != Some(epoch) {
+            self.cleanup_epoch = Some(epoch);
+            (self.on_cleanup_epoch)(epoch);
+        }
+    }
+
+    pub(crate) fn scope(&self) -> &crate::common::DeadlineScope {
+        &self.scope
+    }
+
+    pub(crate) fn restrict_timeout(&mut self, timeout: Duration) {
+        self.scope = self
+            .scope
+            .with_deadline(crate::common::OperationDeadline::from_budget(timeout));
+    }
+
+    pub(crate) fn finish(
+        &mut self,
+        result: Result<LeaderRecord, LeaseError>,
+    ) -> Result<LeaderRecord, LeaseError> {
+        match result {
+            Ok(record) => {
+                self.track_owner(record.epoch);
+                self.check().map_err(|error| {
+                    LeaseError::Indeterminate(format!(
+                        "leader acquisition committed but ownership acceptance failed: {error}"
+                    ))
+                })?;
+                Ok(record)
+            }
+            Err(error) => {
+                if self.mutation_admitted {
+                    if definite_acquisition_rejection(&error) {
+                        self.scope.resolve_ambiguous_mutation();
+                    } else {
+                        return Err(LeaseError::Indeterminate(format!(
+                            "leader acquisition mutation is unresolved: {error}"
+                        )));
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
 /// Abstraction over the persistent leader record storage.
 ///
-/// Implementations use CAS semantics (atomic-rename for filesystems,
-/// conditional PUT for object stores) — never file locks.
+/// Implementations publish records with provider CAS or atomic filesystem
+/// replacement. Filesystem stores serialize replacement with the
+/// crash-releasing locks shared by writer effects.
 pub trait LeaderStore: Send + Sync {
     /// Atomically acquire leadership by incrementing the epoch via CAS.
     ///
@@ -761,29 +861,26 @@ pub trait LeaderStore: Send + Sync {
         )))
     }
 
-    /// Acquire leadership under one caller-supplied I/O budget.
+    /// Acquire leadership under the caller's cancellation and I/O budget.
     ///
     /// Stores that can observe an ambiguous provider mutation report its
     /// cleanup candidate after admission and before submission. The candidate
     /// is not proof of acquisition: cleanup must still read and match the exact
     /// holder, owner token and epoch before expiring it. Compatibility stores
     /// report only a confirmed result.
-    fn acquire_leadership_with_minimum_epoch_with_timeout(
+    fn acquire_leadership_with_context(
         &self,
         holder_id: &str,
         minimum_epoch: u64,
-        timeout: Duration,
-        on_cleanup_epoch: &mut dyn FnMut(u64),
+        acquisition: &mut LeaderAcquisition<'_>,
     ) -> Result<LeaderRecord, LeaseError> {
-        if timeout.is_zero() {
-            return Err(LeaseError::Timeout(
-                "leader-store acquisition deadline exhausted".to_string(),
-            ));
-        }
+        // An opaque compatibility operation may mutate before returning any
+        // epoch. Mark that uncertainty before invoking it, not at completion.
+        acquisition.begin_mutation(None)?;
         let result = self.acquire_leadership_with_minimum_epoch(holder_id, minimum_epoch);
         match result {
             Ok(record) => {
-                on_cleanup_epoch(record.epoch);
+                acquisition.track_owner(record.epoch);
                 Ok(record)
             }
             Err(error) => Err(error),
@@ -963,48 +1060,15 @@ pub(crate) fn acquire_leadership_with_minimum_epoch_within(
     scope: &crate::common::DeadlineScope,
     on_cleanup_epoch: &mut dyn FnMut(u64),
 ) -> Result<LeaderRecord, LeaseError> {
-    let timeout = scope.deadline().remaining();
-    if timeout.is_zero() {
-        return Err(LeaseError::Timeout(
-            "leader-store acquisition deadline exhausted".to_string(),
-        ));
-    }
-    let mut mutation_admitted = false;
-    let mut admission_error = None;
-    let mut observe_cleanup_epoch = |epoch| {
-        on_cleanup_epoch(epoch);
-        if !mutation_admitted {
-            match scope.begin_ambiguous_mutation("leader-store acquisition") {
-                Ok(()) => mutation_admitted = true,
-                Err(error) => admission_error = Some(scope_lease_error(error)),
-            }
-        }
-    };
-    let result = store.acquire_leadership_with_minimum_epoch_with_timeout(
-        holder_id,
-        minimum_epoch,
-        timeout,
-        &mut observe_cleanup_epoch,
-    );
-    drop(observe_cleanup_epoch);
-    match result {
-        Ok(record) => {
-            if let Some(error) = admission_error {
-                return Err(error);
-            }
-            scope
-                .check("leader-store acquisition completion")
-                .map_err(scope_lease_error)?;
-            Ok(record)
-        }
-        Err(error) => {
-            if mutation_admitted && definite_acquisition_rejection(&error) {
-                scope.resolve_ambiguous_mutation();
-            }
-            Err(error)
-        }
-    }
+    let mut acquisition = LeaderAcquisition::within(scope, on_cleanup_epoch);
+    acquisition.check()?;
+    let result = store.acquire_leadership_with_context(holder_id, minimum_epoch, &mut acquisition);
+    acquisition.finish(result)
 }
+
+#[cfg(test)]
+#[path = "acquisition_tests.rs"]
+mod acquisition_tests;
 
 #[cfg(test)]
 mod checksum_tests {

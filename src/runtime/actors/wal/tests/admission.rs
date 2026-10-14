@@ -135,19 +135,31 @@ impl ReadFs for PartialAppendFs {
     }
 }
 
-impl Fs for PartialAppendFs {
-    fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
-        self.inner.open(path, opts)
-    }
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        opts: FsOpenOptions,
-    ) -> FsResult<Box<dyn File>> {
+impl crate::io::PersistentHandleFs for PartialAppendFs {
+    fn open_persistent(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File>> {
         Ok(Box::new(PartialAppendFile {
-            inner: self.inner.open_persistent_handle(path, opts)?,
+            inner: crate::io::open_persistent_handle(&self.inner, path, opts)?,
             fail_next: Arc::clone(&self.fail_next),
         }))
+    }
+}
+
+impl Fs for PartialAppendFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
+    fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
+        self.inner.open(path, opts)
     }
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_file(path)

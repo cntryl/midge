@@ -734,7 +734,7 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
                 .router
                 .request_deadline(
                     waiter_request_id,
-                    event_loop.authority.runtime_response_timeout,
+                    event_loop.routing.runtime_response_timeout,
                 )
                 .expect("manual caller's original deadline"),
         );

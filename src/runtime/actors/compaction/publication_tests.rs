@@ -329,25 +329,13 @@ struct PendingUpload {
     pending: parking_lot::Mutex<Option<(Vec<u8>, crate::storage::cloud::CloudCallback)>>,
 }
 
-impl crate::storage::cloud::CloudBackend for PendingUpload {
-    crate::storage::cloud::unsupported_cloud_backend!(submit_get, submit_delete, submit_list);
+impl crate::storage::cloud::CloudReadCapability for PendingUpload {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_get);
 
-    fn submit_put(
-        &self,
-        _key: &str,
-        data: Vec<u8>,
-        _headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        *self.pending.lock() = Some((data, callback));
-    }
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        std::thread::sleep(self.head_delay);
-        self.inner.submit_head(key, callback);
-    }
     fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         self.inner.submit_get_with_metadata(key, callback);
     }
+
     fn submit_get_range(
         &self,
         key: &str,
@@ -358,6 +346,35 @@ impl crate::storage::cloud::CloudBackend for PendingUpload {
         self.inner.submit_get_range(key, start, end, callback);
     }
 }
+
+impl crate::storage::cloud::CloudWriteCapability for PendingUpload {
+    fn submit_put(
+        &self,
+        _key: &str,
+        data: Vec<u8>,
+        _headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        *self.pending.lock() = Some((data, callback));
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for PendingUpload {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for PendingUpload {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for PendingUpload {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        std::thread::sleep(self.head_delay);
+        self.inner.submit_head(key, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for PendingUpload {}
 
 #[test]
 fn should_retain_compaction_upload_charge_after_timeout_until_provider_releases_body(

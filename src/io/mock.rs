@@ -556,7 +556,8 @@ mod tests {
         )?;
         writer.append(Bytes::from_static(b"stable bytes"))?;
         drop(writer);
-        let reader = fs.open_persistent_handle(
+        let reader = crate::io::open_persistent_handle(
+            &fs,
             &path,
             OpenOptions {
                 mode: OpenMode::ReadOnly,
@@ -606,7 +607,8 @@ mod tests {
         // Arrange
         let fs = MockFs::new();
         let path = FsPath::new("grow-persistent.txt");
-        let mut file = fs.open_persistent_handle(
+        let mut file = crate::io::open_persistent_handle(
+            &fs,
             &path,
             OpenOptions {
                 mode: OpenMode::ReadWrite,

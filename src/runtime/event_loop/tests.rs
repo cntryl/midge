@@ -413,8 +413,8 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
         config,
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
-    let publication_lock = event_loop.actors.metadata_publication_lock.clone();
-    event_loop.authority.runtime_response_timeout = std::time::Duration::from_millis(10);
+    let publication_lock = event_loop.publication.metadata_publication_lock.clone();
+    event_loop.routing.runtime_response_timeout = std::time::Duration::from_millis(10);
     let _publication = publication_lock
         .try_lock()
         .expect("hold metadata publication");
@@ -482,7 +482,7 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
         event_loop
             .routing
             .router
-            .request_deadline(8105, event_loop.authority.runtime_response_timeout)
+            .request_deadline(8105, event_loop.routing.runtime_response_timeout)
             .unwrap(),
     );
     event_loop.pipeline.write_stall_waiters.register(8106, 0);
@@ -2046,8 +2046,8 @@ fn should_respect_trace_enabled_flag() {
     .expect("Should create");
 
     // Assert
-    assert!(!event_loop1.actors.trace_enabled);
-    assert!(event_loop2.actors.trace_enabled);
+    assert!(!event_loop1.diagnostics.trace_enabled);
+    assert!(event_loop2.diagnostics.trace_enabled);
 }
 
 // =========== Actor Initialization Tests ===========
@@ -2429,7 +2429,7 @@ fn register_event_loop_compaction_waiter(
     let deadline = event_loop
         .routing
         .router
-        .request_deadline(request_id, event_loop.authority.runtime_response_timeout)
+        .request_deadline(request_id, event_loop.routing.runtime_response_timeout)
         .expect("manual compaction caller deadline");
     event_loop
         .state
@@ -2676,7 +2676,7 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
             .router
             .request_deadline(
                 waiter_request_id,
-                event_loop.authority.runtime_response_timeout,
+                event_loop.routing.runtime_response_timeout,
             )
             .expect("manual compaction caller deadline"),
     );
@@ -2768,7 +2768,7 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
             .router
             .request_deadline(
                 waiter_request_id,
-                event_loop.authority.runtime_response_timeout,
+                event_loop.routing.runtime_response_timeout,
             )
             .expect("manual compaction caller deadline"),
     );
@@ -2931,7 +2931,7 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
             .router
             .request_deadline(
                 compact_all_request_id,
-                event_loop.authority.runtime_response_timeout,
+                event_loop.routing.runtime_response_timeout,
             )
             .unwrap(),
     );

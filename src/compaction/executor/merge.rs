@@ -1,3 +1,13 @@
+use super::{ensure_compaction_not_aborted, CompactionVersion};
+use crate::common::MidgeResult;
+use crate::sst::traits::{RawSstVersionCursor, SstFactory};
+#[cfg(test)]
+use crate::types::KeyState;
+use crate::types::{EntryType, RangeTombstone};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+use std::path::Path;
+
 #[cfg(test)]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SstCompactionInput {
@@ -13,14 +23,14 @@ pub(crate) struct TombstoneGcPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum CompactionEvent {
+pub(super) enum CompactionEvent {
     RangeEnd(RangeTombstone),
     RangeStart(RangeTombstone),
     Version(CompactionVersion),
 }
 
 impl CompactionEvent {
-    fn key(&self) -> &[u8] {
+    pub(super) fn key(&self) -> &[u8] {
         match self {
             Self::RangeEnd(tombstone) => &tombstone.end,
             Self::RangeStart(tombstone) => &tombstone.start,
@@ -43,7 +53,7 @@ impl CompactionEvent {
         }
     }
 
-    fn retained_bytes(&self) -> usize {
+    pub(super) fn retained_bytes(&self) -> usize {
         match self {
             Self::RangeEnd(tombstone) | Self::RangeStart(tombstone) => std::mem::size_of::<Self>()
                 .saturating_add(tombstone.start.capacity())
@@ -55,7 +65,8 @@ impl CompactionEvent {
     }
 }
 
-type CompactionEventCursor<'a> = Box<dyn Iterator<Item = MidgeResult<CompactionEvent>> + 'a>;
+pub(super) type CompactionEventCursor<'a> =
+    Box<dyn Iterator<Item = MidgeResult<CompactionEvent>> + 'a>;
 
 /// One sorted input and its current merge head.
 struct EventMergeInput<'a> {
@@ -133,7 +144,7 @@ impl Ord for VersionHeapItem {
 /// K-way merge over the per-SST version vectors. It emits one input head at a
 /// time, so deduplication and SST writing never need an additional global
 /// version vector or key map.
-struct EventMergeIterator<'a> {
+pub(super) struct EventMergeIterator<'a> {
     inputs: Vec<EventMergeInput<'a>>,
     heap: BinaryHeap<VersionHeapItem>,
     budget: crate::common::resource_budget::ResourceBudget,
@@ -142,7 +153,7 @@ struct EventMergeIterator<'a> {
 }
 
 impl<'a> EventMergeIterator<'a> {
-    fn new(
+    pub(super) fn new(
         mut cursors: Vec<CompactionEventCursor<'a>>,
         budget: crate::common::resource_budget::ResourceBudget,
         abort_check: Option<&'a dyn Fn() -> bool>,
@@ -183,7 +194,7 @@ impl<'a> EventMergeIterator<'a> {
         })
     }
 
-    fn next_event(&mut self) -> MidgeResult<Option<CompactionEvent>> {
+    pub(super) fn next_event(&mut self) -> MidgeResult<Option<CompactionEvent>> {
         let Some(head) = self.heap.pop() else {
             return Ok(None);
         };
@@ -209,7 +220,7 @@ impl<'a> EventMergeIterator<'a> {
         Ok(Some(current.event))
     }
 
-    fn peek_event(&self) -> Option<&CompactionEvent> {
+    pub(super) fn peek_event(&self) -> Option<&CompactionEvent> {
         let head = self.heap.peek()?;
         self.inputs
             .get(head.input_idx)?
@@ -220,7 +231,7 @@ impl<'a> EventMergeIterator<'a> {
 }
 
 #[cfg(test)]
-fn collect_reader_input(
+pub(super) fn collect_reader_input(
     reader: &dyn crate::sst::traits::SstReaderExt,
 ) -> MidgeResult<SstCompactionInput> {
     let versions = reader
@@ -388,8 +399,8 @@ impl Iterator for ChainedSstEventCursor<'_> {
 }
 
 pub(crate) struct CompactionStreamInputs<'a> {
-    cursors: Vec<CompactionEventCursor<'a>>,
-    _cursor_reservation: crate::common::resource_budget::ResourceReservation,
+    pub(super) cursors: Vec<CompactionEventCursor<'a>>,
+    pub(super) _cursor_reservation: crate::common::resource_budget::ResourceReservation,
 }
 
 #[cfg(test)]

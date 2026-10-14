@@ -132,7 +132,8 @@ impl WriterRunner {
 
     fn open_file_handle(&self) -> FsResult<Box<dyn crate::io::File + '_>> {
         // Prefer persistent handle if available
-        match self.config.fs.open_persistent_handle(
+        match crate::io::open_persistent_handle(
+            self.config.fs.as_ref(),
             &self.config.path,
             crate::io::OpenOptions {
                 mode: crate::io::OpenMode::ReadWrite,
@@ -271,9 +272,8 @@ impl WriterRunner {
             })?;
 
         if let Some(file) = file_opt.as_mut() {
-            let mut write_result = None;
-            let mut write = || {
-                write_result = Some(
+            let write_result = self
+                .run_with_write_authority(|| {
                     if crate::failpoints::is_active("midge::wal::partial_write_then_no_space") {
                         let partial_len = (big_bytes.len() / 2).max(1);
                         file.write_at(start_pos, big_bytes.slice(..partial_len))
@@ -284,22 +284,12 @@ impl WriterRunner {
                             })
                     } else {
                         file.write_at(start_pos, big_bytes.clone())
-                    },
-                );
-            };
-            self.run_with_write_authority(&mut write)
+                    }
+                })
                 .map_err(|error| WriteFailure {
-                    error,
-                    unchanged: write_result.is_none(),
+                    error: error.error,
+                    unchanged: !error.started,
                 })?;
-            let Some(write_result) = write_result else {
-                return Err(WriteFailure {
-                    error: crate::common::MidgeError::Internal(
-                        "WAL writer authority completed without running its write".into(),
-                    ),
-                    unchanged: true,
-                });
-            };
             return match write_result {
                 Ok(()) => {
                     // The digest holds every byte written, in order: a
@@ -336,23 +326,12 @@ impl WriterRunner {
         start_pos: u64,
         write_error: &crate::io::FsError,
     ) -> Result<(), WriteFailure> {
-        let mut truncate_result = None;
-        let mut truncate = || {
-            truncate_result = Some(file.truncate(start_pos));
-        };
-        self.run_with_write_authority(&mut truncate)
+        let truncate_result = self
+            .run_with_write_authority(|| file.truncate(start_pos))
             .map_err(|error| WriteFailure {
-                error,
+                error: error.error,
                 unchanged: false,
             })?;
-        let Some(truncate_result) = truncate_result else {
-            return Err(WriteFailure {
-                error: crate::common::MidgeError::Internal(
-                    "WAL writer authority completed without running its truncate".into(),
-                ),
-                unchanged: false,
-            });
-        };
         if let Err(rollback_error) = truncate_result {
             return Err(WriteFailure {
                 error: writer_error(
@@ -363,23 +342,12 @@ impl WriterRunner {
             });
         }
 
-        let mut sync_result = None;
-        let mut sync = || {
-            sync_result = Some(file.sync(Durability::Durable));
-        };
-        self.run_with_write_authority(&mut sync)
+        let sync_result = self
+            .run_with_write_authority(|| file.sync(Durability::Durable))
             .map_err(|error| WriteFailure {
-                error,
+                error: error.error,
                 unchanged: false,
             })?;
-        let Some(sync_result) = sync_result else {
-            return Err(WriteFailure {
-                error: crate::common::MidgeError::Internal(
-                    "WAL writer authority completed without running its rollback sync".into(),
-                ),
-                unchanged: false,
-            });
-        };
         sync_result.map_err(|rollback_error| WriteFailure {
             error: writer_error(
                 format!("wal writer write_at failed (partial WAL rollback to {start_pos} failed: {rollback_error})"),
@@ -389,17 +357,22 @@ impl WriterRunner {
         })
     }
 
-    fn run_with_write_authority(
+    fn run_with_write_authority<T>(
         &self,
-        operation: &mut dyn FnMut(),
-    ) -> crate::common::MidgeResult<()> {
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, crate::wal::writer_effect::WriterEffectError> {
         let authority = self.config.write_authority.read().clone();
-        if let Some(check) = authority {
-            check(operation)
-        } else {
-            operation();
-            Ok(())
-        }
+        crate::wal::writer_effect::with_writer_effect(
+            |run| {
+                if let Some(check) = authority {
+                    check(run)
+                } else {
+                    run();
+                    Ok(())
+                }
+            },
+            operation,
+        )
     }
 
     fn ensure_file_handle<'a>(
@@ -464,27 +437,21 @@ impl WriterRunner {
                 }
             }
         }
-        let mut sync_result = None;
-        let mut sync = || {
+        let sync_result = self.run_with_write_authority(|| {
             if let Some(file) = file_opt.as_mut() {
                 let sync_start = Instant::now();
-                sync_result = Some(
-                    file.sync(Durability::Durable)
-                        .map(|()| sync_start.elapsed()),
-                );
+                file.sync(Durability::Durable)
+                    .map(|()| sync_start.elapsed())
             } else {
-                sync_result = Some(Ok(Duration::ZERO));
+                Ok(Duration::ZERO)
             }
-        };
-        if let Err(error) = self.run_with_write_authority(&mut sync) {
-            self.mark_sync_failure(error);
-            return Err(());
-        }
-        let Some(sync_result) = sync_result else {
-            self.mark_sync_failure(crate::common::MidgeError::Internal(
-                "WAL writer authority completed without running its fsync".into(),
-            ));
-            return Err(());
+        });
+        let sync_result = match sync_result {
+            Ok(result) => result,
+            Err(error) => {
+                self.mark_sync_failure(error.error);
+                return Err(());
+            }
         };
         match sync_result {
             Ok(sync_elapsed) => {

@@ -1,3 +1,11 @@
+#[cfg(test)]
+use super::BTreeMap;
+use super::{
+    Arc, FileMeta, Fs, KeyState, MidgeResult, RangeCandidates, ReadResources, ReadSnapshot,
+    SkipListMemtable, SnapshotScan, SstFileIo, SstReadView, SstStateReader,
+};
+use crate::sst::read_path_metrics::SstReadObserver as _;
+
 impl ReadSnapshot {
     /// Create a read snapshot that opens SST readers directly, bypassing the
     /// runtime reader and block caches. Production reads go through
@@ -94,7 +102,10 @@ impl ReadSnapshot {
         SnapshotScan::new(Arc::clone(self), start, end, reverse, sequence)
     }
 
-    fn sst_reader(&self, file_meta: &FileMeta) -> crate::common::MidgeResult<Arc<SstFileIo>> {
+    pub(super) fn sst_reader(
+        &self,
+        file_meta: &FileMeta,
+    ) -> crate::common::MidgeResult<Arc<SstFileIo>> {
         if let Some(resources) = &self.read_resources {
             return resources.reader_for(file_meta);
         }

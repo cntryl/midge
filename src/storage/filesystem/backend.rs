@@ -1,3 +1,10 @@
+use super::publication::{publish_object_atomically, Publish};
+use super::range::{mutation_lock, range_path_metadata};
+use super::{
+    fs, FileSystem, StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata,
+    StorageOutcome, StoragePrecondition, StorageRequest,
+};
+
 impl StorageBackend for FileSystem {
     fn submit_range_read_request(
         &self,

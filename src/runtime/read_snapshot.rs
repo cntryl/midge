@@ -12,7 +12,6 @@ use crate::runtime::read_resources::ReadResources;
 use crate::runtime::sst_read_view::{LevelRangeCandidates, RangeCandidates, SstReadView};
 use crate::sst::fs::reader_io::SstStateScan;
 use crate::sst::fs::SstFileIo;
-use crate::sst::read_path_metrics::SstReadObserver as _;
 use crate::sst::traits::SstStateReader;
 #[cfg(test)]
 use crate::types::EntryType;
@@ -48,11 +47,11 @@ pub struct ReadSnapshot {
     diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
 }
 
-include!("read_snapshot/scan.rs");
+mod merge;
+mod scan;
+mod snapshot;
 
-include!("read_snapshot/merge.rs");
-
-include!("read_snapshot/snapshot.rs");
+pub(crate) use scan::SnapshotScan;
 
 impl std::fmt::Debug for ReadSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -69,9 +68,3 @@ impl std::fmt::Debug for ReadSnapshot {
             .finish_non_exhaustive()
     }
 }
-
-#[cfg(test)]
-mod l0_scan_tests;
-
-#[cfg(test)]
-include!("read_snapshot/tests.rs");

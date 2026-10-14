@@ -34,6 +34,10 @@ impl ReadFs for ControlledFs {
 }
 
 impl Fs for ControlledFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
     fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
         self.inner.host_addressing()
     }

@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::common::resource_budget::ResourceBudget;
+use crate::storage::cloud::CloudReadCapability;
 use crate::storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
@@ -25,7 +26,7 @@ impl HeldHeadBackend {
     }
 }
 
-impl CloudBackend for HeldHeadBackend {
+impl crate::storage::cloud::CloudReadCapability for HeldHeadBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_get(key, callback);
     }
@@ -50,7 +51,9 @@ impl CloudBackend for HeldHeadBackend {
         self.inner
             .submit_get_range_with_identity(key, start, end, expected, timeout, callback);
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for HeldHeadBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -60,15 +63,21 @@ impl CloudBackend for HeldHeadBackend {
     ) {
         self.inner.submit_put(key, data, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for HeldHeadBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for HeldHeadBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for HeldHeadBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         let hold = {
             let mut hold = self.hold.lock();
@@ -98,6 +107,8 @@ impl CloudBackend for HeldHeadBackend {
         let _ = callback.send(event);
     }
 }
+
+impl CloudBackend for HeldHeadBackend {}
 
 struct PublicationFixture {
     _directory: tempfile::TempDir,

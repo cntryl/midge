@@ -203,7 +203,7 @@ impl EventLoop {
             }
         }
 
-        if drained > 0 && self.actors.trace_enabled {
+        if drained > 0 && self.diagnostics.trace_enabled {
             tracing::trace!(drained, "drained pending writes");
         }
 

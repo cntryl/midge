@@ -129,7 +129,7 @@ fn should_retain_cloud_wal_when_shutdown_would_start_fresh_reclamation(
     ));
     hybrid.enable_ephemeral_sst_cache(64 * 1024 * 1024);
     el.set_hybrid_storage(hybrid);
-    el.authority.runtime_response_timeout = Duration::from_secs(3);
+    el.routing.runtime_response_timeout = Duration::from_secs(3);
     el.shutdown.shutdown_cloud_drain_timeout = Duration::from_secs(3);
     el.actors
         .compaction_actor
@@ -242,7 +242,7 @@ fn should_join_owned_wal_retirement_head_before_acknowledging_shutdown(
     ));
     hybrid.enable_ephemeral_sst_cache(64 * 1024 * 1024);
     el.set_hybrid_storage(hybrid);
-    el.authority.runtime_response_timeout = Duration::from_secs(3);
+    el.routing.runtime_response_timeout = Duration::from_secs(3);
     el.shutdown.shutdown_cloud_drain_timeout = Duration::from_secs(3);
     el.actors
         .compaction_actor

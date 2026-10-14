@@ -94,7 +94,9 @@ impl<F: ReadFs + ?Sized> ReadFs for ScopedFs<F> {
 
 impl Fs for ScopedFs<dyn Fs> {
     fn persistent_handle_capability(&self) -> Option<&dyn super::traits::PersistentHandleFs> {
-        Some(self)
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn super::traits::PersistentHandleFs)
     }
 
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
@@ -174,7 +176,7 @@ impl Fs for ScopedFs<dyn Fs> {
 impl super::traits::PersistentHandleFs for ScopedFs<dyn Fs> {
     fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
         let inner = checked(&self.scope, "filesystem persistent open", || {
-            self.inner.open_persistent_handle(path, options)
+            crate::io::open_persistent_handle(self.inner.as_ref(), path, options)
         })?;
         Ok(Box::new(ScopedFile {
             inner,
@@ -294,9 +296,12 @@ mod tests {
         let inner: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
         let scope = active_scope();
         let view = scope_fs(inner, scope.clone());
-        let mut file = view
-            .open_persistent_handle(&FsPath::new("retained.wal"), read_write())
-            .unwrap();
+        let mut file = crate::io::open_persistent_handle(
+            view.as_ref(),
+            &FsPath::new("retained.wal"),
+            read_write(),
+        )
+        .unwrap();
         file.append(Bytes::from_static(b"acknowledged bytes"))
             .unwrap();
         drop(view);
@@ -381,11 +386,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let inner: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
         let path = FsPath::new("accepted.wal");
-        drop(inner.open_persistent_handle(&path, read_write()).unwrap());
+        drop(crate::io::open_persistent_handle(inner.as_ref(), &path, read_write()).unwrap());
         let deadline = OperationDeadline::from_budget(std::time::Duration::from_secs(5));
         let scope = DeadlineScope::new(deadline);
         let view = scope_fs(inner, scope.clone());
-        let mut file = view.open_persistent_handle(&path, read_write()).unwrap();
+        let mut file =
+            crate::io::open_persistent_handle(view.as_ref(), &path, read_write()).unwrap();
         scope.complete().unwrap();
         drop(view);
 
@@ -440,7 +446,26 @@ mod tests {
         }
     }
 
+    impl crate::io::PersistentHandleFs for CapabilityFs {
+        fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
+            crate::io::open_persistent_handle(self.0.as_ref(), path, options)
+        }
+    }
+
     impl Fs for CapabilityFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.0.try_lock_exclusive(path)
+        }
+
+        fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+            self.0
+                .persistent_handle_capability()
+                .map(|_| self as &dyn crate::io::PersistentHandleFs)
+        }
+
         fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
             Some(Arc::clone(&self.0))
         }
@@ -458,13 +483,6 @@ mod tests {
         }
         fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
             self.0.open(path, options)
-        }
-        fn open_persistent_handle(
-            &self,
-            path: &FsPath,
-            options: OpenOptions,
-        ) -> FsResult<Box<dyn File>> {
-            self.0.open_persistent_handle(path, options)
         }
         fn remove_file(&self, path: &FsPath) -> FsResult<()> {
             self.0.remove_file(path)

@@ -39,7 +39,31 @@ impl ReadFs for RefuseSstReads {
     }
 }
 
+impl crate::io::PersistentHandleFs for RefuseSstReads {
+    fn open_persistent(
+        &self,
+        path: &FsPath,
+        options: OpenOptions,
+    ) -> FsResult<Box<dyn crate::io::File>> {
+        self.check(path)?;
+        crate::io::open_persistent_handle(&self.inner, path, options)
+    }
+}
+
 impl Fs for RefuseSstReads {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn crate::io::File + '_>> {
         self.check(path)?;
         self.inner.open(path, options)
@@ -49,14 +73,6 @@ impl Fs for RefuseSstReads {
     }
     fn coordination_key(&self) -> u64 {
         self.inner.coordination_key()
-    }
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        options: OpenOptions,
-    ) -> FsResult<Box<dyn crate::io::File>> {
-        self.check(path)?;
-        self.inner.open_persistent_handle(path, options)
     }
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_file(path)

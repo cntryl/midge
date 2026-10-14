@@ -382,7 +382,7 @@ impl CompactionCoordinator {
         let deadline = event_loop
             .routing
             .router
-            .request_deadline(request_id, event_loop.authority.runtime_response_timeout)
+            .request_deadline(request_id, event_loop.routing.runtime_response_timeout)
             .unwrap_or_else(|| OperationDeadline::from_budget(Duration::ZERO));
         if let Err(error) = Self::check_manual_deadline(Some(deadline)) {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
@@ -1161,13 +1161,13 @@ impl CompactionCoordinator {
                 .cloud_coordinator
                 .cloud_metadata_storage
                 .clone(),
-            metadata_publication_lock: event_loop.actors.metadata_publication_lock.clone(),
+            metadata_publication_lock: event_loop.publication.metadata_publication_lock.clone(),
             lease_validity: event_loop.authority.fencing.lease_validity.clone(),
             lease_healthy: event_loop.authority.fencing.lease_healthy.clone(),
             leader_store: event_loop.authority.fencing.leader_store.clone(),
             leader_holder_id: event_loop.authority.fencing.leader_holder_id.clone(),
             publication_memory_limit: event_loop.actors.compaction_actor.compaction_memory_limit(),
-            runtime_response_timeout: event_loop.authority.runtime_response_timeout,
+            runtime_response_timeout: event_loop.routing.runtime_response_timeout,
         };
         event_loop.actors.compaction_publish_actor.submit(task)
     }
@@ -1600,7 +1600,7 @@ impl CompactionCoordinator {
                     || event_loop
                         .routing
                         .router
-                        .request_deadline(id, event_loop.authority.runtime_response_timeout)
+                        .request_deadline(id, event_loop.routing.runtime_response_timeout)
                         .is_none())
                 .then_some(id)
             })
@@ -1613,7 +1613,7 @@ impl CompactionCoordinator {
             if event_loop
                 .routing
                 .router
-                .request_deadline(request_id, event_loop.authority.runtime_response_timeout)
+                .request_deadline(request_id, event_loop.routing.runtime_response_timeout)
                 .is_some()
             {
                 event_loop.routing.router.complete(RuntimeResponse::Error {

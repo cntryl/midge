@@ -1,9 +1,9 @@
 //! Filesystem-based leader store using CAS-via-rename.
 //!
-//! Provides distributed-safe leader election for local disk, NFS, SMB, and any
-//! backend that supports atomic rename. Lease records use compare-and-swap via
-//! rename; short-lived advisory locks fence admitted WAL effects and serialize
-//! lease transitions with them.
+//! Provides leader election on writable backends that support atomic rename
+//! and exclusive locks released when the owning process ends. Lease records
+//! use compare-and-swap via rename; locks fence admitted WAL effects and
+//! serialize lease transitions with them.
 //!
 //! ## CAS protocol
 //!
@@ -15,7 +15,8 @@
 //! 6. Re-read `.midge_leader` to confirm our `holder_id` won the race.
 
 use super::traits::{
-    format_leader_record, parse_leader_record, LeaderRecord, LeaderStore, LeaseError,
+    format_leader_record, parse_leader_record, LeaderAcquisition, LeaderRecord, LeaderStore,
+    LeaseError,
 };
 use crate::io::{staging, Durability, Fs, FsError, FsLock, FsPath, OpenMode, OpenOptions};
 use std::sync::Arc;
@@ -26,6 +27,9 @@ const LEADER_RECORD_FILE: &str = ".midge_leader";
 const LEADER_LOCK_FILE: &str = ".midge_leader.lock";
 const WRITER_EFFECT_LOCK_FILE: &str = ".midge_writer_effect.v2.lock";
 const WRITER_EFFECT_FALLBACK_LOCK_FILE: &str = ".midge_writer_effect.v2.fallback.lock";
+/// This permanent marker blocks older create-new fallback clients. It is not
+/// an ownership file and must survive native lock release and process crashes.
+const NATIVE_EFFECT_LOCK_MARKER: &str = "midge writer effects require native exclusive locks v1\n";
 const METADATA_POINTER_FILE: &str = ".midge_shared_metadata";
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -41,14 +45,81 @@ pub(super) const RELEASED_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
 /// Filesystem-based `LeaderStore` using temp-write + fsync + atomic rename.
 pub struct FsLeaderStore {
     fs: Arc<dyn Fs>,
+    /// Exact-owner lock release must still run after a caller cancels its I/O
+    /// view. Scoped copies retain this original cleanup capability.
+    cleanup_fs: Arc<dyn Fs>,
     clock: crate::lease::clock::LeaseClock,
+    storage_io_timeout: Duration,
+    operation_scope: Option<crate::common::DeadlineScope>,
 }
 
 impl FsLeaderStore {
     /// Create a new filesystem leader store backed by the given `Fs`, which
     /// stamps its records from `clock`.
+    #[cfg(test)]
     pub(crate) fn new(fs: Arc<dyn Fs>, clock: crate::lease::clock::LeaseClock) -> Self {
-        Self { fs, clock }
+        Self::with_timeout(fs, clock, crate::config::DEFAULT_STORAGE_IO_TIMEOUT)
+    }
+
+    pub(crate) fn with_timeout(
+        fs: Arc<dyn Fs>,
+        clock: crate::lease::clock::LeaseClock,
+        storage_io_timeout: Duration,
+    ) -> Self {
+        Self {
+            cleanup_fs: Arc::clone(&fs),
+            fs,
+            clock,
+            storage_io_timeout,
+            operation_scope: None,
+        }
+    }
+
+    fn with_scope(&self, scope: &crate::common::DeadlineScope) -> Self {
+        let scope = scope.with_deadline(crate::common::OperationDeadline::from_budget(
+            self.storage_io_timeout,
+        ));
+        Self {
+            fs: crate::io::scope_fs(Arc::clone(&self.fs), scope.clone()),
+            cleanup_fs: Arc::clone(&self.cleanup_fs),
+            clock: self.clock.clone(),
+            storage_io_timeout: self.storage_io_timeout,
+            operation_scope: Some(scope),
+        }
+    }
+
+    fn scoped_for_timeout(&self, timeout: Duration) -> Result<Self, LeaseError> {
+        let timeout = timeout.min(self.storage_io_timeout);
+        if timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "leader-store I/O deadline exhausted".into(),
+            ));
+        }
+        Ok(self.with_scope(&crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(timeout),
+        )))
+    }
+
+    fn transition_deadline(&self) -> crate::common::OperationDeadline {
+        self.operation_scope.as_ref().map_or_else(
+            || crate::common::OperationDeadline::from_budget(self.storage_io_timeout),
+            crate::common::DeadlineScope::deadline,
+        )
+    }
+
+    fn check_operation_scope(&self, operation: &str) -> Result<(), LeaseError> {
+        self.operation_scope.as_ref().map_or(Ok(()), |scope| {
+            scope
+                .check(operation)
+                .map_err(super::traits::scope_lease_error)
+        })
+    }
+
+    fn fs_io_error(operation: &str, error: FsError) -> LeaseError {
+        match error {
+            FsError::Timeout(message) => LeaseError::Timeout(format!("{operation}: {message}")),
+            other => LeaseError::IoError(format!("{operation}: {other}")),
+        }
     }
 
     /// Build the temp file name for CAS.
@@ -66,18 +137,25 @@ impl FsLeaderStore {
     }
 
     fn read_lock_contents(&self, lock_path: &FsPath) -> Result<Option<String>, LeaseError> {
-        match self.fs.exists(lock_path) {
+        Self::read_lock_contents_from(self.fs.as_ref(), lock_path)
+    }
+
+    fn read_lock_contents_from(
+        fs: &dyn Fs,
+        lock_path: &FsPath,
+    ) -> Result<Option<String>, LeaseError> {
+        match fs.exists(lock_path) {
             Ok(false) => return Ok(None),
             Ok(true) => {}
             Err(error) => {
-                return Err(LeaseError::IoError(format!(
-                    "failed to check leader lock presence: {error}"
-                )))
+                return Err(Self::fs_io_error(
+                    "failed to check leader lock presence",
+                    error,
+                ))
             }
         }
 
-        let file = self
-            .fs
+        let file = fs
             .open(
                 lock_path,
                 OpenOptions {
@@ -87,16 +165,16 @@ impl FsLeaderStore {
                     truncate: false,
                 },
             )
-            .map_err(|error| LeaseError::IoError(format!("failed to open leader lock: {error}")))?;
-        let len = file.len().map_err(|error| {
-            LeaseError::IoError(format!("failed to read leader lock length: {error}"))
-        })?;
+            .map_err(|error| Self::fs_io_error("failed to open leader lock", error))?;
+        let len = file
+            .len()
+            .map_err(|error| Self::fs_io_error("failed to read leader lock length", error))?;
         if len == 0 {
             return Ok(Some(String::new()));
         }
         let data = file
             .read_at(0, len)
-            .map_err(|error| LeaseError::IoError(format!("failed to read leader lock: {error}")))?;
+            .map_err(|error| Self::fs_io_error("failed to read leader lock", error))?;
         String::from_utf8(data.to_vec())
             .map(Some)
             .map_err(|error| LeaseError::IoError(format!("leader lock is not UTF-8: {error}")))
@@ -118,18 +196,19 @@ impl FsLeaderStore {
         expected_owner_token: &str,
         durability: Durability,
     ) -> Result<bool, LeaseError> {
-        let Some(content) = self.read_lock_contents(lock_path)? else {
+        let Some(content) = Self::read_lock_contents_from(self.cleanup_fs.as_ref(), lock_path)?
+        else {
             return Ok(false);
         };
         if Self::parse_lock_owner_token(&content) != Some(expected_owner_token) {
             return Ok(false);
         }
 
-        self.fs.remove_file(lock_path).map_err(|error| {
+        self.cleanup_fs.remove_file(lock_path).map_err(|error| {
             LeaseError::IoError(format!("failed to remove lease lock: {error}"))
         })?;
         if durability == Durability::Durable {
-            self.fs
+            self.cleanup_fs
                 .sync_dir(&FsPath::new("."), Durability::Durable)
                 .map_err(|error| {
                     LeaseError::IoError(format!("failed to persist leader lock removal: {error}"))
@@ -145,13 +224,8 @@ impl FsLeaderStore {
     /// Serialize a lease transition with any admitted writer effect. A
     /// transition waits for an in-flight effect to finish rather than
     /// failing release and forcing the next opener to wait for the full TTL.
-    fn acquire_effect_transition_locks(
-        &self,
-        holder_id: &str,
-    ) -> Result<LockGuard<'_>, LeaseError> {
-        let deadline = crate::common::OperationDeadline::from_budget(
-            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
-        );
+    fn acquire_effect_transition_locks(&self) -> Result<LockGuard<'_>, LeaseError> {
+        let deadline = self.transition_deadline();
         let mut contended_path = FsPath::new(WRITER_EFFECT_LOCK_FILE);
         loop {
             if deadline.is_expired() {
@@ -159,7 +233,7 @@ impl FsLeaderStore {
                     "lease transition timed out waiting for writer storage effect lock {contended_path}"
                 )));
             }
-            match self.try_acquire_effect_lock(holder_id, Durability::Durable) {
+            match self.try_acquire_effect_lock() {
                 Ok(lock) => return Ok(lock),
                 Err(LockAttemptError::Contended(path)) => {
                     contended_path = path;
@@ -171,47 +245,97 @@ impl FsLeaderStore {
     }
 
     #[cfg(test)]
-    fn acquire_effect_lock_once(
-        &self,
-        holder_id: &str,
-        fallback_durability: Durability,
-    ) -> Result<LockGuard<'_>, LeaseError> {
-        self.try_acquire_effect_lock(holder_id, fallback_durability)
-            .map_err(|error| match error {
-                LockAttemptError::Contended(path) => LeaseError::AcquisitionFailed(format!(
-                    "another writer storage effect is in progress for holder {holder_id} at {path}"
-                )),
-                LockAttemptError::Failed(error) => error,
-            })
+    fn acquire_effect_lock_once(&self, holder_id: &str) -> Result<LockGuard<'_>, LeaseError> {
+        self.try_acquire_effect_lock().map_err(|error| match error {
+            LockAttemptError::Contended(path) => LeaseError::AcquisitionFailed(format!(
+                "another writer storage effect is in progress for holder {holder_id} at {path}"
+            )),
+            LockAttemptError::Failed(error) => error,
+        })
     }
 
-    fn try_acquire_effect_lock(
-        &self,
-        holder_id: &str,
-        fallback_durability: Durability,
-    ) -> Result<LockGuard<'_>, LockAttemptError> {
+    fn try_acquire_effect_lock(&self) -> Result<LockGuard<'_>, LockAttemptError> {
         let path = FsPath::new(WRITER_EFFECT_LOCK_FILE);
         match self.fs.try_lock_exclusive(&path) {
-            Ok(lock) => Ok(LockGuard::filesystem(lock)),
-            Err(FsError::Unsupported(_)) => self.try_acquire_lock_file(
-                holder_id,
-                FsPath::new(WRITER_EFFECT_FALLBACK_LOCK_FILE),
-                "writer storage effect",
-                fallback_durability,
-            ),
+            Ok(lock) => {
+                let guard = LockGuard::filesystem(lock);
+                self.ensure_native_effect_protocol()
+                    .map_err(LockAttemptError::Failed)?;
+                self.check_operation_scope("writer effect lock admission")
+                    .map_err(LockAttemptError::Failed)?;
+                Ok(guard)
+            }
+            Err(FsError::Unsupported(error)) => Err(LockAttemptError::Failed(
+                LeaseError::IoError(format!(
+                    "writer fencing requires exclusive filesystem locks released on process exit: {error}"
+                )),
+            )),
             Err(FsError::AlreadyExists(_)) => Err(LockAttemptError::Contended(path)),
+            Err(FsError::Timeout(message)) => Err(LockAttemptError::Failed(LeaseError::Timeout(message))),
             Err(error) => Err(LockAttemptError::Failed(LeaseError::IoError(format!(
                 "failed to acquire writer storage effect lock {path}: {error}"
             )))),
         }
     }
 
+    /// Establish one protocol for native and legacy clients. Holding the
+    /// native lock protects initialization and proves no native writer can be
+    /// using a partial marker. Never replace an unknown legacy owner: that
+    /// host may still be performing an admitted write.
+    fn ensure_native_effect_protocol(&self) -> Result<(), LeaseError> {
+        let path = FsPath::new(WRITER_EFFECT_FALLBACK_LOCK_FILE);
+        // Once create-new succeeds, finish this coordination marker even if
+        // the caller cancels. An empty partial marker cannot safely be
+        // distinguished from a legacy peer still initializing its lock.
+        // Subsequent scoped operations still reject the cancelled lease.
+        match self.cleanup_fs.open(
+            &path,
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: true,
+                truncate: false,
+            },
+        ) {
+            Ok(mut file) => {
+                file.write_at(
+                    0,
+                    bytes::Bytes::from_static(NATIVE_EFFECT_LOCK_MARKER.as_bytes()),
+                )
+                .and_then(|()| file.sync(Durability::Durable))
+                .map_err(|error| {
+                    LeaseError::IoError(format!("persist native writer lock protocol: {error}"))
+                })?;
+                self.cleanup_fs
+                    .sync_dir(&FsPath::new("."), Durability::Durable)
+                    .map_err(|error| {
+                        LeaseError::IoError(format!(
+                            "persist native writer lock protocol name: {error}"
+                        ))
+                    })
+            }
+            Err(FsError::AlreadyExists(_)) => {
+                if self.read_lock_contents(&path)?.as_deref() == Some(NATIVE_EFFECT_LOCK_MARKER) {
+                    Ok(())
+                } else {
+                    Err(LeaseError::Indeterminate(format!(
+                        "unresolved legacy writer-effect owner at {path}; stop and fence every writer before operator recovery"
+                    )))
+                }
+            }
+            Err(error) => Err(LeaseError::IoError(format!(
+                "establish native writer lock protocol: {error}"
+            ))),
+        }
+    }
+
     fn acquire_writer_effect_lock_until(
         &self,
-        holder_id: &str,
         timeout: Duration,
     ) -> Result<LockGuard<'_>, LeaseError> {
-        let deadline = crate::common::OperationDeadline::from_budget(timeout);
+        let deadline = self
+            .transition_deadline()
+            .earlier(crate::common::OperationDeadline::from_budget(timeout));
         let mut contended_path = FsPath::new(WRITER_EFFECT_LOCK_FILE);
         loop {
             if deadline.is_expired() {
@@ -219,7 +343,7 @@ impl FsLeaderStore {
                     format!("writer storage effect timed out waiting for same-epoch effect at {contended_path}"),
                 ));
             }
-            match self.try_acquire_effect_lock(holder_id, Durability::Unsafe) {
+            match self.try_acquire_effect_lock() {
                 Ok(lock) => return Ok(lock),
                 Err(LockAttemptError::Contended(path)) => {
                     contended_path = path;
@@ -240,11 +364,16 @@ impl FsLeaderStore {
         purpose: &str,
         durability: Durability,
     ) -> Result<LockGuard<'_>, LockAttemptError> {
+        self.check_operation_scope("lease mutation lock creation")
+            .map_err(LockAttemptError::Failed)?;
         let now = self.clock.now();
         let owner_token = uuid::Uuid::new_v4().to_string();
         let payload = Self::lock_contents(holder_id, &owner_token, &now.to_rfc3339());
 
-        match self.fs.open(
+        // Retain exact ownership even if create-new completes after caller
+        // cancellation. Scoped open could otherwise discard the handle and
+        // strand an empty lock before any guard can release it.
+        match self.cleanup_fs.open(
             &lock_path,
             OpenOptions {
                 mode: OpenMode::ReadWrite,
@@ -259,25 +388,22 @@ impl FsLeaderStore {
                     .and_then(|()| lock_file.sync(durability));
                 drop(lock_file);
                 if let Err(error) = initialized {
-                    if let Err(remove_error) = self.fs.remove_file(&lock_path) {
+                    if let Err(remove_error) = self.cleanup_fs.remove_file(&lock_path) {
                         tracing::warn!(path = %lock_path, %remove_error, "failed to remove partially initialized lease lock");
                     }
                     return Err(LockAttemptError::Failed(LeaseError::IoError(format!(
                         "failed to initialize {purpose} lock {lock_path}: {error}"
                     ))));
                 }
-                Ok(LockGuard::file(
-                    self,
-                    owner_token,
-                    lock_path,
-                    durability,
-                ))
+                let guard = LockGuard::file(self, owner_token, lock_path, durability);
+                self.check_operation_scope("lease mutation lock admission")
+                    .map_err(LockAttemptError::Failed)?;
+                Ok(guard)
             }
             Err(FsError::AlreadyExists(_)) => Err(LockAttemptError::Contended(lock_path)),
-            Err(error) => Err(LockAttemptError::Failed(LeaseError::AcquisitionFailed(
-                format!(
-                    "failed to create {purpose} lock {lock_path}: {error}; automatic stale-lock removal is unsafe because filesystem renames are not cancellable"
-                ),
+            Err(error) => Err(LockAttemptError::Failed(Self::fs_io_error(
+                &format!("failed to create {purpose} lock {lock_path}"),
+                error,
             ))),
         }
     }
@@ -316,10 +442,7 @@ impl LeaderStore for FsLeaderStore {
         let scope = crate::common::DeadlineScope::new(
             crate::common::OperationDeadline::from_budget(timeout),
         );
-        let scoped = Self::new(
-            crate::io::scope_fs(Arc::clone(&self.fs), scope.clone()),
-            self.clock.clone(),
-        );
+        let scoped = self.with_scope(&scope);
         let current = scoped.read_current()?;
         let path = FsPath::new(METADATA_POINTER_FILE);
         let file = match scoped.fs.open(&path, OpenOptions::READ_ONLY) {
@@ -385,8 +508,8 @@ impl LeaderStore for FsLeaderStore {
         let scope = crate::common::DeadlineScope::new(
             crate::common::OperationDeadline::from_budget(timeout),
         );
-        let fs = crate::io::scope_fs(Arc::clone(&self.fs), scope.clone());
-        let scoped = Self::new(Arc::clone(&fs), self.clock.clone());
+        let scoped = self.with_scope(&scope);
+        let fs = Arc::clone(&scoped.fs);
         scoped.with_exclusive_lock(holder_id, || {
             scope
                 .check("shared metadata mutation lock")
@@ -454,6 +577,27 @@ impl LeaderStore for FsLeaderStore {
         )
     }
 
+    fn acquire_leadership_with_context(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+        acquisition: &mut LeaderAcquisition<'_>,
+    ) -> Result<LeaderRecord, LeaseError> {
+        self.acquire_leadership_after_validation_with_context(
+            holder_id,
+            minimum_epoch,
+            acquisition,
+            |_| Ok(()),
+        )
+    }
+
+    fn read_current_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<LeaderRecord>, LeaseError> {
+        self.scoped_for_timeout(timeout)?.read_current()
+    }
+
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
         let path = FsPath::new(LEADER_RECORD_FILE);
 
@@ -463,7 +607,7 @@ impl LeaderStore for FsLeaderStore {
                 if self
                     .fs
                     .exists(&FsPath::new(METADATA_POINTER_FILE))
-                    .map_err(|error| LeaseError::IoError(error.to_string()))?
+                    .map_err(|error| Self::fs_io_error("check shared metadata presence", error))?
                 {
                     return Err(LeaseError::Indeterminate(
                         "shared metadata pointer exists without its fencing record".into(),
@@ -471,7 +615,7 @@ impl LeaderStore for FsLeaderStore {
                 }
                 return Ok(None);
             }
-            Err(e) => return Err(LeaseError::IoError(format!("exists check failed: {e}"))),
+            Err(error) => return Err(Self::fs_io_error("leader record exists check", error)),
         }
 
         let opts = OpenOptions {
@@ -485,16 +629,12 @@ impl LeaderStore for FsLeaderStore {
             Ok(f) => f,
             // The record may have been removed between exists() and open().
             Err(crate::io::FsError::NotFound(_)) => return Ok(None),
-            Err(e) => {
-                return Err(LeaseError::IoError(format!(
-                    "failed to open leader record: {e}"
-                )));
-            }
+            Err(error) => return Err(Self::fs_io_error("failed to open leader record", error)),
         };
 
-        let len = file.len().map_err(|e| {
-            LeaseError::IoError(format!("failed to read leader record length: {e}"))
-        })?;
+        let len = file
+            .len()
+            .map_err(|error| Self::fs_io_error("failed to read leader record length", error))?;
 
         // Only a genuinely absent file (ENOENT, handled above/below) means
         // "no lease ever held" — an *existing* file that is empty,
@@ -511,7 +651,7 @@ impl LeaderStore for FsLeaderStore {
 
         let data = file
             .read_at(0, len)
-            .map_err(|e| LeaseError::IoError(format!("failed to read leader record: {e}")))?;
+            .map_err(|error| Self::fs_io_error("failed to read leader record", error))?;
 
         let content = String::from_utf8(data.to_vec())
             .map_err(|e| LeaseError::Indeterminate(format!("leader record not UTF-8: {e}")))?;
@@ -535,8 +675,9 @@ impl LeaderStore for FsLeaderStore {
                 "writer effect deadline exhausted".into(),
             ));
         }
-        let _effect_lock = self.acquire_writer_effect_lock_until(expected_holder_id, timeout)?;
-        self.validate_epoch(expected_holder_id, expected_epoch)?;
+        let scoped = self.scoped_for_timeout(timeout)?;
+        let _effect_lock = scoped.acquire_writer_effect_lock_until(timeout)?;
+        scoped.validate_epoch(expected_holder_id, expected_epoch)?;
         operation();
         Ok(())
     }
@@ -564,26 +705,14 @@ impl LeaderStore for FsLeaderStore {
         }
     }
 
-    fn validate_write_admission(
+    fn validate_epoch_with_timeout(
         &self,
-        _expected_holder_id: &str,
-        _expected_epoch: u64,
-        _timeout: Duration,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
     ) -> Result<(), LeaseError> {
-        // The filesystem writer's per-effect fence validates and holds the
-        // epoch lock around each actual append and sync. A separate admission
-        // read would duplicate that work without narrowing the effect race.
-        Ok(())
-    }
-
-    fn validate_epoch_before_sync(
-        &self,
-        _expected_holder_id: &str,
-        _expected_epoch: u64,
-        _timeout: Duration,
-    ) -> Result<(), LeaseError> {
-        // `with_writer_epoch` validates under the same lock as physical fsync.
-        Ok(())
+        self.scoped_for_timeout(timeout)?
+            .validate_epoch(expected_holder_id, expected_epoch)
     }
 }
 
@@ -656,6 +785,25 @@ impl Drop for LockGuard<'_> {
 }
 
 impl FsLeaderStore {
+    pub(crate) fn acquire_leadership_after_validation_with_context(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+        acquisition: &mut LeaderAcquisition<'_>,
+        validate_current: impl FnOnce(Option<&LeaderRecord>) -> Result<(), LeaseError>,
+    ) -> Result<LeaderRecord, LeaseError> {
+        acquisition.restrict_timeout(self.storage_io_timeout);
+        acquisition.check()?;
+        let scoped = self.with_scope(acquisition.scope());
+        let _effect_lock = scoped.acquire_effect_transition_locks()?;
+        let _lock = scoped.acquire_lock(holder_id)?;
+        let current = scoped.read_current()?;
+        validate_current(current.as_ref())?;
+        scoped.acquire_inner_with_admission(holder_id, minimum_epoch, |record| {
+            acquisition.begin_mutation(Some(record.epoch))
+        })
+    }
+
     pub(crate) fn acquire_leadership_after_validation<F>(
         &self,
         holder_id: &str,
@@ -687,7 +835,7 @@ impl FsLeaderStore {
         V: FnOnce(Option<&LeaderRecord>) -> Result<(), LeaseError>,
         P: FnOnce(&LeaderRecord) -> Result<(), LeaseError>,
     {
-        let _effect_lock = self.acquire_effect_transition_locks(holder_id)?;
+        let _effect_lock = self.acquire_effect_transition_locks()?;
         let _lock = self.acquire_lock(holder_id)?;
         let current = self.read_current()?;
         validate_current(current.as_ref())?;
@@ -788,7 +936,7 @@ impl FsLeaderStore {
         holder_id: &str,
         expected_epoch: u64,
     ) -> Result<bool, LeaseError> {
-        let _effect_lock = self.acquire_effect_transition_locks(holder_id)?;
+        let _effect_lock = self.acquire_effect_transition_locks()?;
         let lock = self.acquire_lock(holder_id)?;
         let Some(current) = self.read_current()? else {
             return Ok(false);
@@ -824,6 +972,15 @@ impl FsLeaderStore {
         holder_id: &str,
         minimum_epoch: u64,
     ) -> Result<LeaderRecord, LeaseError> {
+        self.acquire_inner_with_admission(holder_id, minimum_epoch, |_| Ok(()))
+    }
+
+    fn acquire_inner_with_admission(
+        &self,
+        holder_id: &str,
+        minimum_epoch: u64,
+        before_commit: impl FnOnce(&LeaderRecord) -> Result<(), LeaseError>,
+    ) -> Result<LeaderRecord, LeaseError> {
         // 1. Read current leader record (epoch 0 if absent)
         let current_epoch = match self.read_current()? {
             Some(rec) => rec.epoch,
@@ -846,6 +1003,7 @@ impl FsLeaderStore {
         let temp = Self::temp_path();
         let target = FsPath::new(LEADER_RECORD_FILE);
 
+        before_commit(&new_record)?;
         staging::stage_bytes(
             &self.fs,
             &temp,
@@ -1222,6 +1380,155 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_stale_epoch_when_validating_write_admission_or_sync() {
+        // Arrange
+        let store = make_store();
+        let old = store.acquire_leadership("old").expect("acquire old lease");
+        store.acquire_leadership("new").expect("acquire new lease");
+
+        // Act
+        let admission = store.validate_write_admission("old", old.epoch, Duration::from_secs(1));
+        let sync = store.validate_epoch_before_sync("old", old.epoch, Duration::from_secs(1));
+
+        // Assert
+        assert!(matches!(admission, Err(LeaseError::RenewalFailed(_))));
+        assert!(matches!(sync, Err(LeaseError::RenewalFailed(_))));
+    }
+
+    #[test]
+    fn should_reject_released_epoch_when_validating_writer() {
+        // Arrange
+        let store = make_store();
+        let released = store.acquire_leadership("writer").expect("acquire lease");
+        store
+            .release_if_owner("writer", released.epoch)
+            .expect("release lease");
+
+        // Act
+        let admission =
+            store.validate_write_admission("writer", released.epoch, Duration::from_secs(1));
+        let sync =
+            store.validate_epoch_before_sync("writer", released.epoch, Duration::from_secs(1));
+
+        // Assert
+        assert!(matches!(admission, Err(LeaseError::RenewalFailed(_))));
+        assert!(matches!(sync, Err(LeaseError::RenewalFailed(_))));
+    }
+
+    #[test]
+    fn should_reject_exhausted_budget_when_validating_writer() {
+        // Arrange
+        let store = make_store();
+        let record = store.acquire_leadership("writer").expect("acquire lease");
+
+        // Act
+        let admission = store.validate_write_admission("writer", record.epoch, Duration::ZERO);
+        let sync = store.validate_epoch_before_sync("writer", record.epoch, Duration::ZERO);
+
+        // Assert
+        assert!(matches!(admission, Err(LeaseError::Timeout(_))));
+        assert!(matches!(sync, Err(LeaseError::Timeout(_))));
+    }
+
+    #[test]
+    fn should_honor_acquisition_deadline_when_writer_effect_is_in_progress() {
+        // Arrange
+        let fs = Arc::new(MockFs::new());
+        let store = FsLeaderStore::new(
+            Arc::clone(&fs) as Arc<dyn Fs>,
+            crate::lease::clock::LeaseClock::default(),
+        );
+        let lock = fs
+            .try_lock_exclusive(&FsPath::new(WRITER_EFFECT_LOCK_FILE))
+            .expect("hold predecessor writer effect");
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            drop(lock);
+        });
+
+        // Act
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(Duration::from_millis(10)),
+        );
+        let result = super::super::traits::acquire_leadership_with_minimum_epoch_within(
+            &store,
+            "successor",
+            0,
+            &scope,
+            &mut |_| {},
+        );
+        release.join().expect("release predecessor effect");
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::Timeout(_))), "{result:?}");
+        assert!(store.read_current().expect("read leader").is_none());
+    }
+
+    #[test]
+    fn should_use_configured_storage_timeout_when_waiting_for_lease_transition() {
+        // Arrange
+        let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+        let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
+            &crate::config::Storage::InMemory,
+            &fs,
+            None,
+            Duration::from_secs(15),
+            Duration::from_millis(10),
+            Duration::from_secs(30),
+            &crate::lease::LeaseClock::default(),
+        )
+        .expect("create lease with configured timeout");
+        let lock = fs
+            .try_lock_exclusive(&FsPath::new(WRITER_EFFECT_LOCK_FILE))
+            .expect("hold predecessor writer effect");
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            drop(lock);
+        });
+
+        // Act
+        let result = created.lease.try_acquire();
+        release.join().expect("release predecessor effect");
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::Timeout(_))));
+        assert!(!fs.exists(&FsPath::new(LEADER_RECORD_FILE)).unwrap());
+    }
+
+    #[test]
+    fn should_release_owned_mutation_lock_when_acquisition_is_cancelled_after_admission() {
+        // Arrange
+        let fs = Arc::new(MockFs::new());
+        let store = FsLeaderStore::new(
+            fs.clone() as Arc<dyn Fs>,
+            crate::lease::LeaseClock::default(),
+        );
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+        );
+
+        // Act: cancellation wins after lease mutation admission but before
+        // the scoped filesystem can submit the write.
+        let result = super::super::traits::acquire_leadership_with_minimum_epoch_within(
+            &store,
+            "cancelled",
+            0,
+            &scope,
+            &mut |_| {
+                scope.cancel();
+            },
+        );
+
+        // Assert
+        assert!(result.is_err(), "{result:?}");
+        assert!(store.read_current().expect("read leader").is_none());
+        assert!(!fs.exists(&FsPath::new(LEADER_LOCK_FILE)).unwrap());
+        store
+            .acquire_leadership("successor")
+            .expect("cleanup permits a later open");
+    }
+
+    #[test]
     fn should_fail_validate_epoch_when_holder_id_mismatches_despite_matching_epoch() {
         // Arrange: a forged/tampered record can carry a matching epoch with
         // a different holder_id — the shared default validate_epoch must
@@ -1564,7 +1871,7 @@ mod tests {
             crate::lease::clock::LeaseClock::default(),
         );
         let lock = interrupted_store
-            .acquire_effect_lock_once("interrupted", Durability::Durable)
+            .acquire_effect_lock_once("interrupted")
             .expect("acquire writer effect lock");
 
         // Act
@@ -1732,6 +2039,7 @@ mod lock_init_failure_tests {
         /// Opening the leader record fails with an I/O error whose path
         /// happens to contain "not found".
         fail_record_open: AtomicBool,
+        cancel_after_create: Option<(&'static str, crate::common::DeadlineScope)>,
     }
 
     impl ReadFs for LockWriteFaultFs {
@@ -1772,6 +2080,13 @@ mod lock_init_failure_tests {
                 ));
             }
             let file = self.inner.open(path, opts)?;
+            if opts.create_new {
+                if let Some((target, scope)) = &self.cancel_after_create {
+                    if path.0 == *target {
+                        scope.cancel();
+                    }
+                }
+            }
             if path.0 == LEADER_LOCK_FILE && self.fail_lock_writes.load(Ordering::SeqCst) {
                 return Ok(Box::new(FailingLockWriteFile { inner: file }));
             }
@@ -1803,6 +2118,7 @@ mod lock_init_failure_tests {
             fail_lock_writes: AtomicBool::new(true),
             unsupported_effect_locks: AtomicBool::new(false),
             fail_record_open: AtomicBool::new(false),
+            cancel_after_create: None,
         });
         let store = FsLeaderStore::new(
             fs.clone() as Arc<dyn Fs>,
@@ -1832,6 +2148,7 @@ mod lock_init_failure_tests {
             fail_lock_writes: AtomicBool::new(false),
             unsupported_effect_locks: AtomicBool::new(false),
             fail_record_open: AtomicBool::new(false),
+            cancel_after_create: None,
         });
         let store = FsLeaderStore::new(
             fs.clone() as Arc<dyn Fs>,
@@ -1848,36 +2165,260 @@ mod lock_init_failure_tests {
     }
 
     #[test]
-    fn should_use_portable_effect_lock_when_filesystem_locks_are_unsupported() {
-        // Arrange: the filesystem cannot provide OS locks, so writer effects
-        // must serialize through the portable create-new lock file.
+    fn should_reject_lease_without_publishing_when_effect_locks_are_unsupported() {
+        // Arrange
         let fs = Arc::new(LockWriteFaultFs {
             inner: MockFs::new(),
             fail_lock_writes: AtomicBool::new(false),
             unsupported_effect_locks: AtomicBool::new(true),
             fail_record_open: AtomicBool::new(false),
+            cancel_after_create: None,
+        });
+        let store = FsLeaderStore::new(
+            fs.clone() as Arc<dyn Fs>,
+            crate::lease::LeaseClock::default(),
+        );
+
+        // Act
+        let result = store.acquire_leadership("writer");
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::IoError(_))), "{result:?}");
+        assert!(store.read_current().expect("read leader").is_none());
+        assert!(!fs
+            .exists(&FsPath::new(WRITER_EFFECT_FALLBACK_LOCK_FILE))
+            .unwrap());
+    }
+
+    #[test]
+    fn should_finish_protocol_initialization_when_open_is_cancelled_after_marker_creation() {
+        // Arrange
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+        );
+        let fs = Arc::new(LockWriteFaultFs {
+            inner: MockFs::new(),
+            fail_lock_writes: AtomicBool::new(false),
+            unsupported_effect_locks: AtomicBool::new(false),
+            fail_record_open: AtomicBool::new(false),
+            cancel_after_create: Some((WRITER_EFFECT_FALLBACK_LOCK_FILE, scope.clone())),
+        });
+        let store = FsLeaderStore::new(
+            fs.clone() as Arc<dyn Fs>,
+            crate::lease::LeaseClock::default(),
+        );
+
+        // Act
+        let cancelled = super::super::traits::acquire_leadership_with_minimum_epoch_within(
+            &store,
+            "cancelled",
+            0,
+            &scope,
+            &mut |_| {},
+        );
+        let successor = store.acquire_leadership("successor");
+
+        // Assert: cancel cannot strand an empty upgrade marker and wedge all
+        // later opens. The cancelled attempt never publishes the lease.
+        assert!(cancelled.is_err(), "{cancelled:?}");
+        assert_eq!(successor.expect("later open recovers").epoch, 1);
+    }
+
+    #[test]
+    fn should_release_owned_lock_when_open_is_cancelled_after_mutation_lock_creation() {
+        // Arrange
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+        );
+        let fs = Arc::new(LockWriteFaultFs {
+            inner: MockFs::new(),
+            fail_lock_writes: AtomicBool::new(false),
+            unsupported_effect_locks: AtomicBool::new(false),
+            fail_record_open: AtomicBool::new(false),
+            cancel_after_create: Some((LEADER_LOCK_FILE, scope.clone())),
+        });
+        let store = FsLeaderStore::new(
+            fs.clone() as Arc<dyn Fs>,
+            crate::lease::LeaseClock::default(),
+        );
+
+        // Act
+        let cancelled = super::super::traits::acquire_leadership_with_minimum_epoch_within(
+            &store,
+            "cancelled",
+            0,
+            &scope,
+            &mut |_| {},
+        );
+        let successor = store.acquire_leadership("successor");
+
+        // Assert
+        assert!(cancelled.is_err(), "{cancelled:?}");
+        assert_eq!(successor.expect("later open recovers").epoch, 1);
+        assert!(!fs.exists(&FsPath::new(LEADER_LOCK_FILE)).unwrap());
+    }
+
+    #[test]
+    fn should_preserve_legacy_fallback_owner_when_native_host_attempts_takeover() {
+        // Arrange: a peer using the old fallback protocol may still be
+        // executing its writer effect, regardless of the timestamp's age.
+        let fs = Arc::new(MockFs::new());
+        let store = FsLeaderStore::new(
+            fs.clone() as Arc<dyn Fs>,
+            crate::lease::LeaseClock::default(),
+        );
+        let legacy_path = FsPath::new(WRITER_EFFECT_FALLBACK_LOCK_FILE);
+        let legacy_payload =
+            FsLeaderStore::lock_contents("old-peer", "old-owner", RELEASED_TIMESTAMP);
+        let mut file = fs
+            .open(
+                &legacy_path,
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .expect("create legacy lock");
+        file.write_at(0, bytes::Bytes::from(legacy_payload.clone()))
+            .expect("write legacy owner");
+        file.sync(Durability::Durable)
+            .expect("persist legacy owner");
+        drop(file);
+
+        // Act
+        let result = store.acquire_leadership("native-peer");
+
+        // Assert
+        assert!(
+            matches!(result, Err(LeaseError::Indeterminate(_))),
+            "{result:?}"
+        );
+        assert!(store.read_current().expect("read leader").is_none());
+        assert_eq!(
+            store.read_lock_contents(&legacy_path).unwrap(),
+            Some(legacy_payload)
+        );
+    }
+
+    #[test]
+    fn should_preserve_unknown_legacy_effect_lock_when_recovering_after_crash() {
+        // Arrange: a durable legacy fallback lock survived its owner's
+        // process. Its age cannot prove that another host stopped writing.
+        let device = crate::simulation::crash_fs::CrashDevice::new();
+        let fs = device.fs();
+        let path = FsPath::new(WRITER_EFFECT_FALLBACK_LOCK_FILE);
+        let mut file = fs
+            .open(
+                &path,
+                OpenOptions {
+                    mode: OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .expect("create legacy effect lock");
+        file.write_at(0, bytes::Bytes::from_static(b"legacy owner"))
+            .expect("write legacy effect lock");
+        file.sync(Durability::Durable).expect("persist legacy lock");
+        fs.sync_dir(&FsPath::new("."), Durability::Durable)
+            .expect("persist legacy lock name");
+        drop(file);
+        device.process_crash();
+        let recovered_fs = Arc::new(device.fs());
+        let store = FsLeaderStore::new(
+            recovered_fs.clone() as Arc<dyn Fs>,
+            crate::lease::LeaseClock::default(),
+        );
+
+        // Act
+        let result = store.acquire_leadership("successor");
+
+        // Assert: incompatible ownership is reported without a 30s retry
+        // loop or deleting a lock that could belong to a live remote peer.
+        assert!(
+            matches!(result, Err(LeaseError::Indeterminate(_))),
+            "{result:?}"
+        );
+        assert!(store.read_current().expect("read leader").is_none());
+        assert!(recovered_fs.exists(&path).expect("legacy owner remains"));
+    }
+
+    #[test]
+    fn should_preserve_native_fencing_protocol_when_crash_releases_effect_lock() {
+        // Arrange
+        let device = crate::simulation::crash_fs::CrashDevice::new();
+        let fs = Arc::new(device.fs());
+        let store = FsLeaderStore::new(
+            fs.clone() as Arc<dyn Fs>,
+            crate::lease::LeaseClock::default(),
+        );
+        let predecessor = store
+            .acquire_leadership("predecessor")
+            .expect("acquire lease");
+        let lock = fs
+            .try_lock_exclusive(&FsPath::new(WRITER_EFFECT_LOCK_FILE))
+            .expect("admit predecessor effect");
+
+        // Act: crashing releases the native lock, while the upgrade barrier
+        // must keep legacy create-new clients from beginning a second protocol.
+        device.process_crash();
+        let recovered_fs = Arc::new(device.fs());
+        let legacy_attempt = recovered_fs.open(
+            &FsPath::new(WRITER_EFFECT_FALLBACK_LOCK_FILE),
+            OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: true,
+                create_new: true,
+                truncate: false,
+            },
+        );
+        let legacy_blocked = matches!(legacy_attempt, Err(FsError::AlreadyExists(_)));
+        drop(legacy_attempt);
+        let successor_store = FsLeaderStore::new(
+            recovered_fs as Arc<dyn Fs>,
+            crate::lease::LeaseClock::default(),
+        );
+        let successor = successor_store.acquire_leadership("successor");
+        drop(lock);
+
+        // Assert
+        assert!(
+            legacy_blocked,
+            "legacy clients must obey the native protocol barrier"
+        );
+        assert!(successor.expect("recover native fence").epoch > predecessor.epoch);
+    }
+
+    #[test]
+    fn should_reject_writer_effect_when_filesystem_lock_support_is_lost() {
+        // Arrange: a valid lease does not authorize an unfenced effect after
+        // the filesystem loses its lock capability.
+        let fs = Arc::new(LockWriteFaultFs {
+            inner: MockFs::new(),
+            fail_lock_writes: AtomicBool::new(false),
+            unsupported_effect_locks: AtomicBool::new(false),
+            fail_record_open: AtomicBool::new(false),
+            cancel_after_create: None,
         });
         let store = FsLeaderStore::new(
             fs.clone() as Arc<dyn Fs>,
             crate::lease::LeaseClock::default(),
         );
         let leader = store.acquire_leadership("writer").expect("acquire lease");
+        fs.unsupported_effect_locks.store(true, Ordering::SeqCst);
         let mut effect_ran = false;
 
         // Act
-        store
-            .with_writer_epoch("writer", leader.epoch, Duration::from_secs(1), &mut || {
+        let result =
+            store.with_writer_epoch("writer", leader.epoch, Duration::from_secs(1), &mut || {
                 effect_ran = true;
-                assert!(fs
-                    .exists(&FsPath::new(WRITER_EFFECT_FALLBACK_LOCK_FILE))
-                    .expect("fallback lock check"));
-            })
-            .expect("portable effect lock should admit a valid lease");
+            });
 
         // Assert
-        assert!(effect_ran);
-        assert!(!fs
-            .exists(&FsPath::new(WRITER_EFFECT_FALLBACK_LOCK_FILE))
-            .expect("fallback lock cleanup check"));
+        assert!(matches!(result, Err(LeaseError::IoError(_))));
+        assert!(!effect_ran);
     }
 }

@@ -1,7 +1,7 @@
 //! Callback-based cloud storage abstractions.
 //!
 //! Aligns with the actor runtime model: synchronous submission + async completion.
-//! - `CloudBackend` defines submit-only methods (PUT/GET/DELETE/LIST/HEAD).
+//! - Operation capabilities define reads, writes, deletes, listings and metadata lookups.
 //! - Backends send results via `CloudCallback` channels (no futures in the engine).
 //! - `CloudStorage` is a namespace-aware dispatcher that shields the rest of the engine.
 //! - `MockCloudBackend` keeps deterministic testing without async runtimes.
@@ -11,7 +11,7 @@
 //! ```text
 //! CloudStorage (namespace-aware dispatcher)
 //!     ↓
-//! CloudBackend trait (interface: submit_put, submit_get, etc.)
+//! Focused cloud operation capabilities (composed by CloudBackend)
 //!     ↓
 //! [Real backends via CloudExecutor]  [MockCloudBackend for testing]
 //! ```

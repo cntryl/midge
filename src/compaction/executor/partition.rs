@@ -1,3 +1,20 @@
+use super::ensure_compaction_not_aborted;
+#[cfg(test)]
+use super::merge::{collect_reader_input, CompactionEventCursor};
+use super::merge::{
+    CompactionEvent, CompactionStreamInputs, EventMergeIterator, TombstoneGcPolicy,
+};
+use super::{tombstone_is_obsolete, CompactionVersion};
+use crate::common::MidgeResult;
+use crate::io::FsError;
+#[cfg(test)]
+use crate::sst::traits::RawSstVersionCursor;
+use crate::sst::traits::SstFactory;
+use crate::types::RangeTombstone;
+#[cfg(test)]
+use crate::types::{EntryType, KeyState};
+use std::path::Path;
+
 struct OutputSetCleanup {
     fs: std::sync::Arc<dyn crate::io::Fs>,
     paths: Vec<std::path::PathBuf>,
@@ -22,7 +39,7 @@ impl OutputSetCleanup {
         finished: Option<(String, std::path::PathBuf)>,
         names: &mut Vec<String>,
         budget: &crate::common::resource_budget::ResourceBudget,
-        sink: Option<&super::CompactionOutputSink<'_>>,
+        sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
     ) -> MidgeResult<()> {
         if let Some((name, path)) = finished {
             // Record cleanup ownership before a fallible sink can publish or
@@ -891,7 +908,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
     budget: &crate::common::resource_budget::ResourceBudget,
     tombstone_gc: TombstoneGcPolicy,
     abort_check: Option<&dyn Fn() -> bool>,
-    output_sink: Option<&super::CompactionOutputSink<'_>>,
+    output_sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
     output_size_limit: Option<usize>,
 ) -> MidgeResult<Vec<String>> {
     ensure_compaction_not_aborted(abort_check)?;
@@ -1041,3 +1058,7 @@ fn normalize_range_tombstones(mut tombstones: Vec<RangeTombstone>) -> Vec<RangeT
     tombstones.dedup();
     tombstones
 }
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;

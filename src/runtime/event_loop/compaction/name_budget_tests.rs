@@ -10,6 +10,7 @@ use crate::lease::{CloudMetadataHead, LeaseGuard, PrimaryLease as _};
 use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use crate::runtime::RuntimeState;
 use crate::sst::SstFactory as _;
+use crate::storage::cloud::CloudReadCapability;
 use crate::storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
@@ -90,7 +91,7 @@ impl DelayedAuthorityBackend {
     }
 }
 
-impl CloudBackend for DelayedAuthorityBackend {
+impl crate::storage::cloud::CloudReadCapability for DelayedAuthorityBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_get(key, callback);
     }
@@ -111,7 +112,9 @@ impl CloudBackend for DelayedAuthorityBackend {
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         self.inner.submit_get_range(key, start, end, callback);
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for DelayedAuthorityBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -135,19 +138,27 @@ impl CloudBackend for DelayedAuthorityBackend {
         });
         let _ = callback.send(event);
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for DelayedAuthorityBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for DelayedAuthorityBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for DelayedAuthorityBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_head(key, callback);
     }
 }
+
+impl CloudBackend for DelayedAuthorityBackend {}
 
 struct NameFixture {
     el: EventLoop,

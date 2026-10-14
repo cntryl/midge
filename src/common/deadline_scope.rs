@@ -19,33 +19,46 @@ struct State {
 
 #[derive(Debug)]
 struct Inner {
-    deadline: OperationDeadline,
     state: Mutex<State>,
 }
 
 /// Private views share this scope without retaining an expired lifetime budget.
 #[derive(Clone, Debug)]
-pub(crate) struct DeadlineScope(Arc<Inner>);
+pub(crate) struct DeadlineScope {
+    inner: Arc<Inner>,
+    deadline: OperationDeadline,
+}
 
 impl DeadlineScope {
     pub(crate) fn new(deadline: OperationDeadline) -> Self {
-        Self(Arc::new(Inner {
+        Self {
             deadline,
-            state: Mutex::new(State {
-                phase: Phase::Active,
-                ambiguous_mutation: false,
+            inner: Arc::new(Inner {
+                state: Mutex::new(State {
+                    phase: Phase::Active,
+                    ambiguous_mutation: false,
+                }),
             }),
-        }))
+        }
+    }
+
+    /// Narrow an operation budget while retaining the same cancellation and
+    /// mutation-admission state as its owner.
+    pub(crate) fn with_deadline(&self, deadline: OperationDeadline) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            deadline: self.deadline.earlier(deadline),
+        }
     }
 
     pub(crate) fn deadline(&self) -> OperationDeadline {
         let state = self
-            .0
+            .inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match state.phase {
-            Phase::Active => self.0.deadline,
+            Phase::Active => self.deadline,
             Phase::Cancelled => OperationDeadline::from_budget(Duration::ZERO),
             Phase::Complete => OperationDeadline::unbounded(),
         }
@@ -66,7 +79,7 @@ impl DeadlineScope {
     /// Cancel and snapshot uncertainty under the same lock as mutation admission.
     pub(crate) fn cancel(&self) -> bool {
         let mut state = self
-            .0
+            .inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -79,14 +92,14 @@ impl DeadlineScope {
     /// Call only from the successful ownership-admission transition.
     pub(crate) fn complete(&self) -> MidgeResult<()> {
         let mut state = self
-            .0
+            .inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match state.phase {
             Phase::Complete => return Ok(()),
             Phase::Cancelled => return Err(Self::timeout("ownership admission")),
-            Phase::Active if self.0.deadline.is_expired() => {
+            Phase::Active if self.deadline.is_expired() => {
                 return Err(Self::timeout("ownership admission"));
             }
             Phase::Active => {}
@@ -103,11 +116,11 @@ impl DeadlineScope {
     /// Bracket a serialized mutation whose unresolved result changes cancellation typing.
     pub(crate) fn begin_ambiguous_mutation(&self, context: &str) -> MidgeResult<()> {
         let mut state = self
-            .0
+            .inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.phase == Phase::Cancelled || self.0.deadline.is_expired() {
+        if state.phase == Phase::Cancelled || self.deadline.is_expired() {
             return Err(Self::timeout(context));
         }
         if state.phase != Phase::Active || state.ambiguous_mutation {
@@ -121,7 +134,7 @@ impl DeadlineScope {
 
     /// Resolve only a definitive rejection or a confirmed, tracked owner.
     pub(crate) fn resolve_ambiguous_mutation(&self) {
-        self.0
+        self.inner
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -141,6 +154,42 @@ mod tests {
 
     fn active_scope() -> DeadlineScope {
         DeadlineScope::new(OperationDeadline::from_budget(Duration::from_secs(5)))
+    }
+
+    #[test]
+    fn should_reject_bounded_view_mutation_when_original_owner_cancels() {
+        // Arrange
+        let scope = active_scope();
+        let operation = scope.with_deadline(OperationDeadline::from_budget(Duration::from_secs(1)));
+
+        // Act
+        let uncertain = scope.cancel();
+        let admitted = operation.begin_ambiguous_mutation("conditional lease acquisition");
+
+        // Assert: narrowing a timeout must preserve the owner's cancellation.
+        assert!(!uncertain);
+        assert!(matches!(admitted, Err(MidgeError::Timeout(_))));
+        assert!(operation.deadline().is_expired());
+        assert!(!scope.cancel());
+    }
+
+    #[test]
+    fn should_share_mutation_ownership_when_operation_has_a_narrower_budget() {
+        // Arrange
+        let scope = active_scope();
+        let operation = scope.with_deadline(OperationDeadline::from_budget(Duration::from_secs(1)));
+
+        // Act
+        operation
+            .begin_ambiguous_mutation("conditional lease acquisition")
+            .unwrap();
+        let uncertain = scope.cancel();
+        operation.resolve_ambiguous_mutation();
+
+        // Assert: the original caller sees the admitted mutation and its resolution.
+        assert!(uncertain);
+        assert!(!scope.cancel());
+        assert!(matches!(operation.complete(), Err(MidgeError::Timeout(_))));
     }
 
     #[test]

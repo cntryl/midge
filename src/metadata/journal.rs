@@ -253,8 +253,31 @@ pub(crate) fn next_edit_id_with_fs(
     next_edit_id_after(highest_edit_id_with_repair_with_fs_unlocked(fs)?)
 }
 
-include!("journal/recovery.rs");
-include!("journal/publication.rs");
+mod publication;
+mod recovery;
+mod replay;
+
+#[cfg(test)]
+pub(crate) use publication::append_validated_edit_with_id;
+#[cfg(test)]
+pub use publication::{append_edit_batch, append_edit_batch_with_fs, append_edit_with_fs};
+pub(crate) use publication::{
+    append_validated_edit_batch_with_id_observed, append_validated_edit_with_id_observed,
+};
+#[cfg(test)]
+pub(crate) use recovery::salvage_edits_after_with_fs_unlocked;
+pub(crate) use recovery::{
+    highest_edit_id_with_fs, highest_edit_id_with_fs_unlocked,
+    highest_edit_id_with_repair_with_fs_unlocked, next_edit_id_after,
+    preserve_corrupt_journal_with_fs_unlocked, replay_edits_after_with_fs_unlocked,
+    replay_identified_edits_after_with_fs_unlocked_within,
+    salvage_edits_after_with_fs_unlocked_within,
+};
+pub(crate) use replay::replay_identified_edits_from_bytes;
+#[cfg(test)]
+use replay::{
+    open_journal_for_replay, read_journal_record, replay_journal_with_state, JournalRecordStatus,
+};
 
 /// Append `edit` through a `RealFs` rooted at `db_path`.
 #[cfg(test)]
@@ -293,8 +316,6 @@ fn replay_journal_with_ids_with_fs(
     replay_journal_with_state(fs).map(|replay| replay.edits)
 }
 
-include!("journal/replay.rs");
-
 pub(crate) fn truncate_journal_with_fs_unlocked(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<()> {
@@ -321,4 +342,4 @@ pub(crate) fn truncate_journal_with_fs_unlocked(
 }
 
 #[cfg(test)]
-include!("journal/tests.rs");
+mod tests;

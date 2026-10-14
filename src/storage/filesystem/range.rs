@@ -1,4 +1,9 @@
-fn range_io_error(error: &std::io::Error) -> crate::storage::StorageError {
+use super::{
+    fs, FileSystem, Hash, Hasher, Path, StorageCallback, StorageEvent, StorageObjectMetadata,
+    StorageOutcome, CONDITIONAL_LOCK_STRIPES, MUTATION_LOCKS,
+};
+
+pub(super) fn range_io_error(error: &std::io::Error) -> crate::storage::StorageError {
     if error.kind() == std::io::ErrorKind::NotFound {
         crate::storage::StorageError::not_found(error)
     } else {
@@ -37,7 +42,7 @@ fn range_metadata(
     }
 }
 
-fn range_file_metadata(
+pub(super) fn range_file_metadata(
     file: &fs::File,
 ) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
     #[cfg(windows)]
@@ -50,7 +55,9 @@ fn range_file_metadata(
     }
 }
 
-fn range_path_metadata(path: &Path) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
+pub(super) fn range_path_metadata(
+    path: &Path,
+) -> Result<StorageObjectMetadata, crate::storage::StorageError> {
     #[cfg(windows)]
     {
         let file = fs::File::open(path).map_err(|error| range_io_error(&error))?;
@@ -67,13 +74,13 @@ fn range_path_metadata(path: &Path) -> Result<StorageObjectMetadata, crate::stor
 /// objects are written or deleted; a collision only serializes two keys.
 /// Each operation holds at most one stripe, always after its in-process
 /// mutex, so sharing a stripe cannot deadlock.
-fn process_lock_stripe_name(full_path: &Path) -> String {
+pub(super) fn process_lock_stripe_name(full_path: &Path) -> String {
     let identity = full_path.to_string_lossy();
     let stripe = crc32c::crc32c(identity.as_bytes()) as usize % CONDITIONAL_LOCK_STRIPES;
     format!("stripe-{stripe:02x}.lock")
 }
 
-fn mutation_stripe(full_path: &Path) -> usize {
+pub(super) fn mutation_stripe(full_path: &Path) -> usize {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     full_path.hash(&mut hasher);
     usize::try_from(hasher.finish()).unwrap_or(0) % CONDITIONAL_LOCK_STRIPES
@@ -89,7 +96,7 @@ pub(super) struct MutationGuard {
     _failpoint_gate: Option<parking_lot::RwLockReadGuard<'static, ()>>,
 }
 
-fn mutation_lock(full_path: &Path) -> MutationGuard {
+pub(super) fn mutation_lock(full_path: &Path) -> MutationGuard {
     #[cfg(feature = "failpoints")]
     let failpoint_gate = crate::failpoints::read_gate();
     MutationGuard {
@@ -100,7 +107,7 @@ fn mutation_lock(full_path: &Path) -> MutationGuard {
 }
 
 impl FileSystem {
-    fn range_head_within(
+    pub(super) fn range_head_within(
         &self,
         key: &str,
         timeout: std::time::Duration,
@@ -127,7 +134,7 @@ impl FileSystem {
         });
     }
 
-    fn read_range_within(
+    pub(super) fn read_range_within(
         &self,
         key: &str,
         start: u64,
@@ -177,7 +184,7 @@ impl FileSystem {
         let _ = callback.send(result);
     }
 
-    fn head_within(&self, key: &str, callback: &StorageCallback) {
+    pub(super) fn head_within(&self, key: &str, callback: &StorageCallback) {
         let result = self
             .full_path(key)
             .and_then(|path| {
@@ -208,7 +215,7 @@ impl FileSystem {
         });
     }
 
-    fn metadata_read_within(
+    pub(super) fn metadata_read_within(
         &self,
         key: &str,
         timeout: std::time::Duration,

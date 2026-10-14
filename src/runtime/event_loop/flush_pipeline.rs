@@ -10,14 +10,12 @@ use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
 
-include!("flush_pipeline/scheduling.rs");
-
-include!("flush_pipeline/publication.rs");
-
-include!("flush_pipeline/settlement.rs");
+mod publication;
+mod scheduling;
+mod settlement;
 
 #[cfg(test)]
-include!("flush_pipeline/tests.rs");
+mod tests;
 
 #[cfg(test)]
 #[path = "flush_pipeline/accounting_tests.rs"]

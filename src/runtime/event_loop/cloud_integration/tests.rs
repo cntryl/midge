@@ -3,6 +3,7 @@ use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::super::EventLoop;
 use crate::runtime::durability::{DurabilityWaiter, TestDurabilityWaiter};
 use crate::runtime::hybrid_persistence::CloudPersistence;
+use crate::storage::cloud::CloudReadCapability;
 
 /// Wrap the raw hybrid backend in the runtime persistence layer under test.
 fn cloud_persistence(storage: &Arc<crate::storage::HybridStorage>) -> CloudPersistence {
@@ -608,9 +609,13 @@ impl FailThirdIntentPutBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for FailThirdIntentPutBackend {
+impl crate::storage::cloud::CloudReadCapability for FailThirdIntentPutBackend {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata);
 
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_range, submit_get_range_with_identity);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for FailThirdIntentPutBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -634,7 +639,7 @@ impl crate::storage::cloud::CloudBackend for FailThirdIntentPutBackend {
             return;
         }
 
-        crate::storage::cloud::CloudBackend::submit_put(
+        crate::storage::cloud::CloudWriteCapability::submit_put(
             self.inner.as_ref(),
             key,
             data,
@@ -642,9 +647,21 @@ impl crate::storage::cloud::CloudBackend for FailThirdIntentPutBackend {
             callback,
         );
     }
-
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
 }
+
+impl crate::storage::cloud::CloudDeleteCapability for FailThirdIntentPutBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for FailThirdIntentPutBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for FailThirdIntentPutBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for FailThirdIntentPutBackend {}
 
 struct ObserveIntentBeforeRemoteSstBackend {
     inner: Arc<crate::storage::cloud::MockCloudBackend>,
@@ -654,9 +671,13 @@ struct ObserveIntentBeforeRemoteSstBackend {
     remote_existed_at_intent_publish: Arc<AtomicBool>,
 }
 
-impl crate::storage::cloud::CloudBackend for ObserveIntentBeforeRemoteSstBackend {
+impl crate::storage::cloud::CloudReadCapability for ObserveIntentBeforeRemoteSstBackend {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata);
 
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_range, submit_get_range_with_identity);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for ObserveIntentBeforeRemoteSstBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -715,9 +736,21 @@ impl crate::storage::cloud::CloudBackend for ObserveIntentBeforeRemoteSstBackend
         }
         let _ = callback.send(event);
     }
-
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
 }
+
+impl crate::storage::cloud::CloudDeleteCapability for ObserveIntentBeforeRemoteSstBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for ObserveIntentBeforeRemoteSstBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for ObserveIntentBeforeRemoteSstBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for ObserveIntentBeforeRemoteSstBackend {}
 
 struct BlockingDeleteStorageBackend {
     inner: Arc<crate::storage::filesystem::FileSystem>,
@@ -1740,7 +1773,7 @@ fn register_manual_compaction_waiter_for_test(
         request_id,
         el.routing
             .router
-            .request_deadline(request_id, el.authority.runtime_response_timeout)
+            .request_deadline(request_id, el.routing.runtime_response_timeout)
             .expect("registered manual compaction caller deadline"),
     );
     response
@@ -1883,8 +1916,8 @@ impl ProviderTimeoutMetadataBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for ProviderTimeoutMetadataBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_put);
+impl crate::storage::cloud::CloudReadCapability for ProviderTimeoutMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata);
 
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if !key.contains("/metadata/generations/") {
@@ -1901,8 +1934,26 @@ impl crate::storage::cloud::CloudBackend for ProviderTimeoutMetadataBackend {
         });
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity);
 }
+
+impl crate::storage::cloud::CloudWriteCapability for ProviderTimeoutMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for ProviderTimeoutMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for ProviderTimeoutMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for ProviderTimeoutMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for ProviderTimeoutMetadataBackend {}
 
 impl BudgetConsumingMetadataProofBackend {
     fn new(inner: Arc<crate::storage::cloud::MockCloudBackend>, first_get_delay: Duration) -> Self {
@@ -1915,7 +1966,7 @@ impl BudgetConsumingMetadataProofBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataProofBackend {
+impl crate::storage::cloud::CloudReadCapability for BudgetConsumingMetadataProofBackend {
     fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if self.get_calls.fetch_add(1, Ordering::SeqCst) == 0 {
             let inner = Arc::clone(&self.inner);
@@ -1933,8 +1984,6 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataProofBackend
         }
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
-
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if self.get_calls.fetch_add(1, Ordering::SeqCst) == 0 {
             let inner = Arc::clone(&self.inner);
@@ -1949,8 +1998,22 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataProofBackend
         }
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity, submit_delete, submit_list);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity);
+}
 
+impl crate::storage::cloud::CloudWriteCapability for BudgetConsumingMetadataProofBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for BudgetConsumingMetadataProofBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for BudgetConsumingMetadataProofBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for BudgetConsumingMetadataProofBackend {
     fn submit_head(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
         self.retained_callbacks
             .lock()
@@ -1958,6 +2021,8 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataProofBackend
             .push(callback);
     }
 }
+
+impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataProofBackend {}
 
 impl BudgetConsumingMetadataBackend {
     fn new(first_get_delay: Duration) -> Self {
@@ -1970,7 +2035,7 @@ impl BudgetConsumingMetadataBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataBackend {
+impl crate::storage::cloud::CloudReadCapability for BudgetConsumingMetadataBackend {
     fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if self.get_calls.fetch_add(1, Ordering::SeqCst) == 0 {
             let key = key.to_string();
@@ -1993,8 +2058,6 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataBackend {
                 .push(callback);
         }
     }
-
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
 
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if self.get_calls.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -2019,8 +2082,22 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataBackend {
         }
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity, submit_delete, submit_list);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity);
+}
 
+impl crate::storage::cloud::CloudWriteCapability for BudgetConsumingMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for BudgetConsumingMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for BudgetConsumingMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for BudgetConsumingMetadataBackend {
     fn submit_head(&self, _key: &str, callback: crate::storage::cloud::CloudCallback) {
         self.retained_callbacks
             .lock()
@@ -2028,6 +2105,8 @@ impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataBackend {
             .push(callback);
     }
 }
+
+impl crate::storage::cloud::CloudBackend for BudgetConsumingMetadataBackend {}
 
 struct AdvanceCommittedPointerBeforeCasBackend {
     inner: crate::storage::cloud::MockCloudBackend,
@@ -2055,9 +2134,11 @@ impl AdvanceCommittedPointerBeforeCasBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for AdvanceCommittedPointerBeforeCasBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_get, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
+impl crate::storage::cloud::CloudReadCapability for AdvanceCommittedPointerBeforeCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_get, submit_get_range, submit_get_range_with_identity);
+}
 
+impl crate::storage::cloud::CloudWriteCapability for AdvanceCommittedPointerBeforeCasBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -2105,6 +2186,20 @@ impl crate::storage::cloud::CloudBackend for AdvanceCommittedPointerBeforeCasBac
     }
 }
 
+impl crate::storage::cloud::CloudDeleteCapability for AdvanceCommittedPointerBeforeCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for AdvanceCommittedPointerBeforeCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for AdvanceCommittedPointerBeforeCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for AdvanceCommittedPointerBeforeCasBackend {}
+
 #[test]
 fn should_bound_create_metadata_mirror_by_runtime_response_deadline(
 ) -> crate::common::MidgeResult<()> {
@@ -2114,7 +2209,7 @@ fn should_bound_create_metadata_mirror_by_runtime_response_deadline(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.authority.runtime_response_timeout = Duration::from_secs(5);
+    el.routing.runtime_response_timeout = Duration::from_secs(5);
     el.actors.cloud_coordinator.cloud_metadata_storage = Some(Arc::new(
         crate::storage::cloud::CloudStorage::new_with_timeout(
             Arc::new(BudgetConsumingMetadataBackend::new(Duration::from_millis(
@@ -2175,7 +2270,7 @@ fn should_share_create_deadline_with_remote_ddl_registry_cas() -> crate::common:
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.authority.runtime_response_timeout = Duration::from_secs(5);
+    el.routing.runtime_response_timeout = Duration::from_secs(5);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("open deadline-bounded DDL cloud backend"),
@@ -2257,7 +2352,7 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.authority.runtime_response_timeout = Duration::from_secs(1);
+    el.routing.runtime_response_timeout = Duration::from_secs(1);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("open delayed DDL cloud backend"),
@@ -2784,7 +2879,7 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
     add_valid_manifest_sst_for_test(&mut el, "deadline-prune.sst", max_sequence);
     // Apply the attempt budget after publishing the fixture's authority.
     // Setup is not a maintenance attempt and must not consume its deadline.
-    el.authority.runtime_response_timeout = Duration::from_millis(100);
+    el.routing.runtime_response_timeout = Duration::from_millis(100);
     delayed_cloud.arm();
 
     // Act: submission remains asynchronous, but joining the attempt must also
@@ -2829,7 +2924,7 @@ fn should_retry_callerless_wal_prune_with_bounded_attempt_after_provider_recover
     // Restore a normal maintenance budget for the recovery attempt. The
     // initial 100 ms budget is deliberately adversarial and can also expire
     // under parallel test-runner load after the injected delay is gone.
-    el.authority.runtime_response_timeout = Duration::from_secs(1);
+    el.routing.runtime_response_timeout = Duration::from_secs(1);
     el.prune_cloud_wal_segments_covered_by_manifest();
     drain_prune_completion_for_test(&mut el);
     assert!(
@@ -2859,7 +2954,7 @@ fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.authority.runtime_response_timeout = Duration::from_millis(500);
+    el.routing.runtime_response_timeout = Duration::from_millis(500);
     let segment_id = 62;
     let max_sequence = 62;
     seed_cloud_prune_candidate(&mut el, segment_id, max_sequence);
@@ -2929,7 +3024,7 @@ fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
     // parallel test run. The fixture itself deterministically withholds the
     // committed CAS callback, so the ambiguity does not depend on racing the
     // pre-CAS setup against an artificially tiny deadline.
-    el.authority.runtime_response_timeout = Duration::from_secs(1);
+    el.routing.runtime_response_timeout = Duration::from_secs(1);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("open ambiguous prune cloud backend"),
@@ -3167,7 +3262,7 @@ fn should_bound_retry_gc_metadata_publication_by_maintenance_deadline(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.authority.runtime_response_timeout = Duration::from_millis(500);
+    el.routing.runtime_response_timeout = Duration::from_millis(500);
     el.actors.cloud_coordinator.cloud_metadata_storage = Some(Arc::new(
         crate::storage::cloud::CloudStorage::new_with_timeout(
             Arc::new(BudgetConsumingMetadataBackend::new(Duration::from_millis(
@@ -6837,7 +6932,7 @@ fn should_use_latest_surviving_waiter_deadline_given_older_waiter_already_expire
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )
     .expect("create cloud event loop");
-    el.authority.runtime_response_timeout = Duration::from_secs(1);
+    el.routing.runtime_response_timeout = Duration::from_secs(1);
     let segment_id = 91_001;
     let old_request_id = 91_002;
     let new_request_id = 91_003;
@@ -6891,7 +6986,7 @@ fn should_preserve_later_segment_waiter_when_earlier_gap_waiter_expired(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.authority.runtime_response_timeout = waiter_budget;
+    el.routing.runtime_response_timeout = waiter_budget;
     append_cloud_async_put(&mut el)?;
     let (first_segment, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     append_cloud_async_put(&mut el)?;
@@ -7046,7 +7141,7 @@ fn should_bound_strict_seal_lease_validation_given_request_deadline_is_exhausted
     el.authority.fencing.leader_store =
         Some(std::sync::Arc::clone(&leader_store) as std::sync::Arc<dyn crate::lease::LeaderStore>);
     el.authority.fencing.leader_holder_id = Some("writer-1".to_string());
-    el.authority.runtime_response_timeout = Duration::ZERO;
+    el.routing.runtime_response_timeout = Duration::ZERO;
     let request_id = 91_101;
     let response_rx = el.routing.router.register(request_id, "SealWalForCloud");
     let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
@@ -7254,7 +7349,7 @@ fn should_requeue_publication_with_timeout_given_ack_deadline_expires_before_lea
     el.authority.fencing.leader_store =
         Some(std::sync::Arc::clone(&leader_store) as std::sync::Arc<dyn crate::lease::LeaderStore>);
     el.authority.fencing.leader_holder_id = Some("writer-1".to_string());
-    el.authority.runtime_response_timeout = Duration::ZERO;
+    el.routing.runtime_response_timeout = Duration::ZERO;
     let request_id = 91_201;
     let response_rx = el.routing.router.register(request_id, "SealWalForCloud");
     el.pipeline
@@ -7659,7 +7754,7 @@ fn should_bound_runtime_owned_wal_admission_by_shutdown_deadline() -> crate::com
         1,
     )));
     el.authority.fencing.leader_holder_id = Some("writer-1".to_string());
-    el.authority.runtime_response_timeout = Duration::from_millis(500);
+    el.routing.runtime_response_timeout = Duration::from_millis(500);
     el.shutdown.shutdown_cloud_drain_timeout = Duration::from_millis(40);
     let request_id = 90_404;
     let response_rx = el.routing.router.register(request_id, "Shutdown");
@@ -7702,7 +7797,7 @@ fn should_bound_pending_cloud_ack_given_shutdown_deadline() -> crate::common::Mi
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.authority.runtime_response_timeout = Duration::from_millis(500);
+    el.routing.runtime_response_timeout = Duration::from_millis(500);
     el.shutdown.shutdown_cloud_drain_timeout = Duration::from_millis(40);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
@@ -7843,7 +7938,7 @@ fn should_bound_callerless_ack_when_provider_exceeds_maintenance_budget(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.authority.runtime_response_timeout = Duration::from_millis(100);
+    el.routing.runtime_response_timeout = Duration::from_millis(100);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("open delayed acknowledgement cloud backend"),
@@ -8218,21 +8313,7 @@ impl SilentBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for SilentBackend {
-    fn submit_put(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        if self.armed.load(Ordering::SeqCst) {
-            self.retain(callback);
-        } else {
-            self.inner.submit_put(key, data, headers, callback);
-        }
-    }
-
+impl crate::storage::cloud::CloudReadCapability for SilentBackend {
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if self.armed.load(Ordering::SeqCst) {
             self.retain(callback);
@@ -8262,15 +8343,25 @@ impl crate::storage::cloud::CloudBackend for SilentBackend {
             self.inner.submit_get_range(key, start, end, callback);
         }
     }
+}
 
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+impl crate::storage::cloud::CloudWriteCapability for SilentBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
         if self.armed.load(Ordering::SeqCst) {
             self.retain(callback);
         } else {
-            self.inner.submit_head(key, callback);
+            self.inner.submit_put(key, data, headers, callback);
         }
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for SilentBackend {
     fn submit_delete(
         &self,
         key: &str,
@@ -8283,7 +8374,9 @@ impl crate::storage::cloud::CloudBackend for SilentBackend {
             self.inner.submit_delete(key, headers, callback);
         }
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for SilentBackend {
     fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
         if self.armed.load(Ordering::SeqCst) {
             self.retain(callback);
@@ -8292,6 +8385,18 @@ impl crate::storage::cloud::CloudBackend for SilentBackend {
         }
     }
 }
+
+impl crate::storage::cloud::CloudHeadCapability for SilentBackend {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if self.armed.load(Ordering::SeqCst) {
+            self.retain(callback);
+        } else {
+            self.inner.submit_head(key, callback);
+        }
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for SilentBackend {}
 
 /// The event loop thread runs the metadata mirror itself, so every read,
 /// write, ack and shutdown waits behind it. It used to wait with an unbounded
@@ -8304,7 +8409,7 @@ fn should_report_timeout_when_the_cloud_never_answers_the_event_loop_mirror(
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.authority.runtime_response_timeout = Duration::from_millis(200);
+    el.routing.runtime_response_timeout = Duration::from_millis(200);
     let backend = Arc::new(SilentBackend::default());
     let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::new_with_timeout(
         Arc::clone(&backend) as Arc<dyn crate::storage::cloud::CloudBackend>,
@@ -8723,7 +8828,7 @@ fn should_withdraw_first_upload_when_publishing_its_run_fails() -> crate::common
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.authority.runtime_response_timeout = Duration::from_millis(200);
+    el.routing.runtime_response_timeout = Duration::from_millis(200);
     append_cloud_async_put(&mut el)?;
     let (first, first_max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
     append_cloud_async_put(&mut el)?;
@@ -8998,7 +9103,7 @@ fn should_advance_frontier_through_run_when_its_lost_catalog_answer_had_committe
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.authority.runtime_response_timeout = Duration::from_millis(500);
+    el.routing.runtime_response_timeout = Duration::from_millis(500);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("open cloud store"),

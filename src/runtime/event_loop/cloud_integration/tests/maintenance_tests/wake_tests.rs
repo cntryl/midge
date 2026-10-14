@@ -24,7 +24,7 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
         91_008,
         el.routing
             .router
-            .request_deadline(91_008, el.authority.runtime_response_timeout)
+            .request_deadline(91_008, el.routing.runtime_response_timeout)
             .unwrap(),
     );
     el.actors.cloud_coordinator.cloud_wal.admit_prunes([42]);

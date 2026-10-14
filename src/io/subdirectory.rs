@@ -87,7 +87,9 @@ impl ReadFs for Subdirectory {
 
 impl Fs for Subdirectory {
     fn persistent_handle_capability(&self) -> Option<&dyn super::traits::PersistentHandleFs> {
-        Some(self)
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn super::traits::PersistentHandleFs)
     }
 
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
@@ -149,7 +151,7 @@ impl Fs for Subdirectory {
 
 impl super::traits::PersistentHandleFs for Subdirectory {
     fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        self.inner.open_persistent_handle(&self.path(path)?, opts)
+        crate::io::open_persistent_handle(self.inner.as_ref(), &self.path(path)?, opts)
     }
 }
 

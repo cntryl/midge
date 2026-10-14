@@ -4,6 +4,7 @@ use super::*;
 use crate::storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
+use crate::storage::cloud::{CloudHeadCapability, CloudReadCapability, CloudWriteCapability};
 use crate::storage::StorageBackend;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -50,23 +51,8 @@ struct ChangingReadback {
     injected: AtomicBool,
 }
 
-impl CloudBackend for ChangingReadback {
-    crate::storage::cloud::unsupported_cloud_backend!(
-        submit_get,
-        submit_get_with_metadata,
-        submit_delete,
-        submit_list,
-    );
-
-    fn submit_put(
-        &self,
-        key: &str,
-        bytes: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
-        self.inner.submit_put(key, bytes, headers, callback);
-    }
+impl crate::storage::cloud::CloudReadCapability for ChangingReadback {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_get, submit_get_with_metadata);
 
     fn submit_get_range(
         &self,
@@ -76,10 +62,6 @@ impl CloudBackend for ChangingReadback {
         _callback: CloudCallback,
     ) {
         unreachable!("publication requires pinned ranges")
-    }
-
-    fn submit_head(&self, key: &str, callback: CloudCallback) {
-        self.inner.submit_head(key, callback);
     }
 
     fn submit_get_range_with_identity(
@@ -111,6 +93,34 @@ impl CloudBackend for ChangingReadback {
         callback.send(event).unwrap();
     }
 }
+
+impl crate::storage::cloud::CloudWriteCapability for ChangingReadback {
+    fn submit_put(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        self.inner.submit_put(key, bytes, headers, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for ChangingReadback {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for ChangingReadback {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for ChangingReadback {
+    fn submit_head(&self, key: &str, callback: CloudCallback) {
+        self.inner.submit_head(key, callback);
+    }
+}
+
+impl CloudBackend for ChangingReadback {}
 
 #[test]
 fn should_reject_admitted_publication_when_readback_bytes_or_identity_changes() -> MidgeResult<()> {
@@ -163,27 +173,8 @@ struct HeldReadback {
     pending: parking_lot::Mutex<Option<HeldReadbackCompletion>>,
 }
 
-impl CloudBackend for HeldReadback {
-    crate::storage::cloud::unsupported_cloud_backend!(
-        submit_get,
-        submit_get_with_metadata,
-        submit_delete,
-        submit_list,
-    );
-
-    fn submit_put(
-        &self,
-        key: &str,
-        bytes: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
-        self.inner.submit_put(key, bytes, headers, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: CloudCallback) {
-        self.inner.submit_head(key, callback);
-    }
+impl crate::storage::cloud::CloudReadCapability for HeldReadback {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_get, submit_get_with_metadata);
 
     fn submit_get_range(
         &self,
@@ -220,6 +211,34 @@ impl CloudBackend for HeldReadback {
         });
     }
 }
+
+impl crate::storage::cloud::CloudWriteCapability for HeldReadback {
+    fn submit_put(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        self.inner.submit_put(key, bytes, headers, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for HeldReadback {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for HeldReadback {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for HeldReadback {
+    fn submit_head(&self, key: &str, callback: CloudCallback) {
+        self.inner.submit_head(key, callback);
+    }
+}
+
+impl CloudBackend for HeldReadback {}
 
 #[test]
 fn should_preserve_timeout_when_admitted_pinned_range_readback_exhausts_deadline() -> MidgeResult<()>

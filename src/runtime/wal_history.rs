@@ -72,27 +72,16 @@ fn with_writer_fence<T>(
         )));
     }
 
-    let mut operation = Some(operation);
-    let mut result = None;
-    let mut run = || {
-        if let Some(operation) = operation.take() {
-            result = Some(operation());
-        }
-    };
-    fence
-        .store
-        .with_writer_epoch(
-            &fence.holder_id,
-            fence.writer_epoch,
-            fence.timeout,
-            &mut run,
-        )
-        .map_err(|error| error.into_writer_effect_error("WAL history storage effect"))?;
-    result.unwrap_or_else(|| {
-        Err(MidgeError::Internal(
-            "writer authority completed without running its storage effect".into(),
-        ))
-    })
+    crate::wal::writer_effect::with_writer_effect(
+        |run| {
+            fence
+                .store
+                .with_writer_epoch(&fence.holder_id, fence.writer_epoch, fence.timeout, run)
+                .map_err(|error| error.into_writer_effect_error("WAL history storage effect"))
+        },
+        operation,
+    )
+    .map_err(|error| error.error)?
 }
 
 /// Where a [`WalHistory`] persists its ledger edits.

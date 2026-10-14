@@ -611,9 +611,11 @@ struct LoseMetadataCommitCallbackBackend {
     fired: std::sync::atomic::AtomicBool,
 }
 
-impl crate::storage::cloud::CloudBackend for LoseMetadataCommitCallbackBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
+impl crate::storage::cloud::CloudReadCapability for LoseMetadataCommitCallbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
 
+impl crate::storage::cloud::CloudWriteCapability for LoseMetadataCommitCallbackBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -654,9 +656,25 @@ impl crate::storage::cloud::CloudBackend for LoseMetadataCommitCallbackBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for FailOnceGenerationPutBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
+impl crate::storage::cloud::CloudDeleteCapability for LoseMetadataCommitCallbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
 
+impl crate::storage::cloud::CloudListCapability for LoseMetadataCommitCallbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for LoseMetadataCommitCallbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for LoseMetadataCommitCallbackBackend {}
+
+impl crate::storage::cloud::CloudReadCapability for FailOnceGenerationPutBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for FailOnceGenerationPutBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -682,6 +700,20 @@ impl crate::storage::cloud::CloudBackend for FailOnceGenerationPutBackend {
         self.inner.submit_put(key, data, headers, callback);
     }
 }
+
+impl crate::storage::cloud::CloudDeleteCapability for FailOnceGenerationPutBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for FailOnceGenerationPutBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for FailOnceGenerationPutBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for FailOnceGenerationPutBackend {}
 
 #[test]
 fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -> MidgeResult<()> {

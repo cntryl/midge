@@ -266,7 +266,32 @@ pub trait ReadFs: Send + Sync + 'static {
 pub trait PersistentHandleFs: Send + Sync {
     /// Open an owned handle whose lifetime is independent of the filesystem
     /// view used to create it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested file cannot be opened with the
+    /// supplied options.
     fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>>;
+}
+
+/// Open an owned file handle through the filesystem's advertised capability.
+///
+/// # Errors
+///
+/// Returns `Unsupported` when the view has no owned-handle capability, or the
+/// capability's error when the requested file cannot be opened.
+pub fn open_persistent_handle(
+    fs: &dyn Fs,
+    path: &FsPath,
+    opts: OpenOptions,
+) -> FsResult<Box<dyn File>> {
+    fs.persistent_handle_capability()
+        .ok_or_else(|| {
+            FsError::Unsupported(
+                "persistent file handles are unavailable for this backend".to_string(),
+            )
+        })?
+        .open_persistent(path, opts)
 }
 
 /// Filesystem abstraction - agnostic of domain
@@ -330,8 +355,10 @@ pub trait Fs: ReadFs {
     ///
     /// Backends with process-scoped locking should override this. Returning
     /// `AlreadyExists` means another process currently holds the lock;
-    /// `Unsupported` asks callers to use their portable fallback. The lock is
-    /// released when the returned guard is dropped.
+    /// `Unsupported` means the backend cannot provide this exclusion and
+    /// fencing callers must fail closed. The lock must be released when the
+    /// guard is dropped and when its owning process terminates. A simulated
+    /// crash/recovery must invalidate the crashed process's guards too.
     ///
     /// # Errors
     ///
@@ -352,22 +379,6 @@ pub trait Fs: ReadFs {
     ///
     /// Returns an error when the path cannot be opened with the requested options.
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>>;
-
-    /// Open a persistent file handle through the optional
-    /// [`PersistentHandleFs`] capability.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the backend cannot create the handle or does not support it.
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        self.persistent_handle_capability()
-            .ok_or_else(|| {
-                FsError::Unsupported(
-                    "persistent file handles are unavailable for this backend".to_string(),
-                )
-            })?
-            .open_persistent(path, opts)
-    }
 
     /// Remove a file
     ///

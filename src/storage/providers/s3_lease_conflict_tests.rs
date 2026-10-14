@@ -1,7 +1,9 @@
 //! Exercise lease conflict classification through the actual S3 HTTP adapter.
 
 use crate::lease::{CloudLeaseConfig, CloudStorageLease, PrimaryLease};
-use crate::storage::cloud::{CloudBackend, CloudEvent, CloudStorage, MockCloudBackend};
+use crate::storage::cloud::{
+    CloudEvent, CloudReadCapability, CloudStorage, CloudWriteCapability, MockCloudBackend,
+};
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};

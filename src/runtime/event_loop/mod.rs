@@ -30,6 +30,7 @@ mod fencing;
 mod flush;
 mod flush_pipeline;
 mod gc;
+mod groups;
 mod manifest;
 mod metadata_mirror;
 mod read_path;
@@ -176,17 +177,17 @@ struct EventLoopActors {
     gc_actor: GcActor,
     manifest_actor: ManifestActor,
     cloud_coordinator: CloudCoordinator,
-    metadata_publication_lock: MetadataPublicationLock,
-    trace_enabled: bool,
 }
 
 struct RequestRouting {
     router: Arc<ResponseRouter>,
     inline_responses: RefCell<HashMap<u64, Sender<RuntimeResponse>>>,
     pending_msg: Option<RuntimeMsg>,
+    runtime_response_timeout: Duration,
 }
 
 struct PublicationCoordination {
+    metadata_publication_lock: MetadataPublicationLock,
     verification_barrier: VerificationBarrier,
     publication_gate: ManifestPublicationGate,
     compaction_publish_result_rx: crossbeam::channel::Receiver<CompactionPublishCompletion>,
@@ -209,21 +210,23 @@ struct AuthorityReadResources {
     read_resources: Option<Arc<ReadResources>>,
     fencing: fencing::RuntimeFence,
     compaction_fence: compaction::CompactionPublicationFence,
-    runtime_response_timeout: std::time::Duration,
 }
 
-struct ShutdownDiagnostics {
+struct ShutdownState {
+    shutting_down: bool,
+    shutdown_cloud_drain_timeout: Duration,
+}
+
+struct EventLoopDiagnostics {
+    trace_enabled: bool,
     loop_debug: bool,
     loop_debug_wakes: u64,
     loop_debug_batch_total: u64,
-    shutting_down: bool,
-    shutdown_cloud_drain_timeout: Duration,
 }
 
 /// Main synchronous event loop for the runtime.
 ///
 /// Owns all actors and is responsible for routing inbound messages.
-#[allow(clippy::struct_excessive_bools)]
 pub struct EventLoop {
     state: RuntimeState,
     actors: EventLoopActors,
@@ -231,7 +234,8 @@ pub struct EventLoop {
     publication: PublicationCoordination,
     pipeline: PipelineCoordination,
     authority: AuthorityReadResources,
-    shutdown: ShutdownDiagnostics,
+    shutdown: ShutdownState,
+    diagnostics: EventLoopDiagnostics,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,26 +257,6 @@ impl EventLoop {
         wal_actor.attach_counters(&state.diagnostics);
         if let Some(storage) = &config.hybrid_storage {
             state.diagnostics.attach(storage.counters());
-        }
-    }
-
-    fn authority_read_resources(
-        read_resources: Option<Arc<ReadResources>>,
-        config: &super::RuntimeConfig,
-    ) -> AuthorityReadResources {
-        AuthorityReadResources {
-            snapshot_cache: None,
-            read_resources,
-            fencing: fencing::RuntimeFence {
-                lease_validity: config.lease_validity.clone(),
-                lease_healthy: config.lease_healthy.clone(),
-                ddl_authority_ambiguous: false,
-                writer_epoch: config.writer_epoch,
-                leader_store: config.leader_store.clone(),
-                leader_holder_id: config.leader_holder_id.clone(),
-            },
-            compaction_fence: compaction::CompactionPublicationFence::default(),
-            runtime_response_timeout: config.runtime_response_timeout,
         }
     }
 
@@ -344,15 +328,10 @@ impl EventLoop {
                 gc_actor,
                 manifest_actor: ManifestActor::new(),
                 cloud_coordinator: CloudCoordinator::new(&config),
-                metadata_publication_lock: config.metadata_publication_lock.clone(),
-                trace_enabled,
             },
-            routing: RequestRouting {
-                router,
-                inline_responses: RefCell::new(HashMap::new()),
-                pending_msg: None,
-            },
+            routing: RequestRouting::new(router, config.runtime_response_timeout),
             publication: PublicationCoordination {
+                metadata_publication_lock: config.metadata_publication_lock.clone(),
                 verification_barrier: VerificationBarrier::default(),
                 publication_gate: ManifestPublicationGate::default(),
                 compaction_publish_result_rx,
@@ -368,14 +347,12 @@ impl EventLoop {
                 worker_msg_tx,
                 write_stall_waiters: WriteStallWaiters::default(),
             },
-            authority: Self::authority_read_resources(read_resources, &config),
-            shutdown: ShutdownDiagnostics {
-                loop_debug: std::env::var_os("MIDGE_LOOP_DEBUG").is_some(),
-                loop_debug_wakes: 0,
-                loop_debug_batch_total: 0,
+            authority: AuthorityReadResources::new(read_resources, &config),
+            shutdown: ShutdownState {
                 shutting_down: false,
                 shutdown_cloud_drain_timeout: config.shutdown_cloud_drain_timeout,
             },
+            diagnostics: EventLoopDiagnostics::new(trace_enabled),
         };
 
         event_loop.finish_initialization(
@@ -561,7 +538,7 @@ impl EventLoop {
             let deadline = startup_scope.map_or_else(
                 || {
                     crate::common::OperationDeadline::from_budget(
-                        self.authority.runtime_response_timeout,
+                        self.routing.runtime_response_timeout,
                     )
                 },
                 crate::common::DeadlineScope::deadline,
@@ -602,15 +579,7 @@ impl EventLoop {
         &self,
         request_id: u64,
     ) -> crate::common::OperationDeadline {
-        self.routing.router.registered_at(request_id).map_or_else(
-            || crate::common::OperationDeadline::from_budget(Duration::ZERO),
-            |registered_at| {
-                crate::common::OperationDeadline::from_start(
-                    registered_at,
-                    self.authority.runtime_response_timeout,
-                )
-            },
-        )
+        self.routing.request_deadline(request_id)
     }
 
     /// Budget for cloud work the event loop performs on its own thread.
@@ -619,7 +588,7 @@ impl EventLoop {
     /// shutdown behind it, so it gets the same budget the runtime promises
     /// its callers rather than waiting indefinitely.
     pub(super) fn event_loop_cloud_deadline(&self) -> crate::common::OperationDeadline {
-        crate::common::OperationDeadline::from_budget(self.authority.runtime_response_timeout)
+        crate::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout)
     }
 
     /// Set the snapshot cache for read-path bypass.
@@ -726,39 +695,23 @@ impl EventLoop {
         response_tx: Sender<RuntimeResponse>,
     ) {
         self.routing
-            .inline_responses
-            .borrow_mut()
-            .insert(request_id, response_tx);
+            .register_inline_response(request_id, response_tx);
     }
 
     /// Helper: deliver a `RuntimeResponse` to the requester.
     #[inline]
     pub(super) fn respond(&self, request_id: u64, resp: RuntimeResponse) {
-        let inline_tx = self
-            .routing
-            .inline_responses
-            .borrow_mut()
-            .remove(&request_id);
-        if let Some(response_tx) = inline_tx {
-            // A failed send means the inline caller already timed out and
-            // dropped its receiver. That is the late-response signal for this
-            // route, which the router's pending table never sees.
-            if response_tx.send(resp).is_err() {
-                self.routing.router.record_late_response();
-            }
-        } else {
-            self.routing.router.complete(resp);
-        }
+        self.routing.respond(request_id, resp);
 
         // Optional trace
-        if self.actors.trace_enabled {
+        if self.diagnostics.trace_enabled {
             tracing::trace!(request_id, "response routed");
         }
     }
 
     pub(super) fn retry_gc(&mut self) -> HandleOutcome {
         let deadline =
-            crate::common::OperationDeadline::from_budget(self.authority.runtime_response_timeout);
+            crate::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout);
         gc::GcCoordinator::retry_within(self, &deadline)
     }
 

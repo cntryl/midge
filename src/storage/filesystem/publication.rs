@@ -1,6 +1,8 @@
+use super::{fs, Path, StorageOutcome, Write};
+
 /// Prefix of in-flight object temp files. Listing skips them, so a crash
 /// mid-write never exposes a partial object.
-const TEMP_OBJECT_MARKER: &str = ".tmp.";
+pub(super) const TEMP_OBJECT_MARKER: &str = ".tmp.";
 
 static TEMP_OBJECT_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// The last modified time, in nanoseconds since the epoch, stamped on a
@@ -12,7 +14,7 @@ static LAST_OBJECT_MODIFIED_NANOS: std::sync::atomic::AtomicU64 =
 const OBJECT_MODIFIED_STEP_NANOS: u64 = 1_000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Publish {
+pub(super) enum Publish {
     /// Replace any existing object.
     Replace,
     /// Fail with a precondition error if the object already exists.
@@ -24,7 +26,7 @@ enum Publish {
 /// through `io::durable_dir`, which flushes directory handles on Windows the
 /// same way `RealFs::sync_dir` does.
 #[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
-fn sync_directory(dir: &Path) -> std::io::Result<()> {
+pub(super) fn sync_directory(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         fs::File::open(dir)?.sync_all()
@@ -50,7 +52,9 @@ fn sync_directory(dir: &Path) -> std::io::Result<()> {
 /// macOS, 100 ns on Windows) together with a delete, a recreate and inode
 /// reuse. [`stamp_after_replaced`] handles filesystems that keep coarser
 /// times.
-fn next_object_modified_time(replaced: Option<std::time::SystemTime>) -> std::time::SystemTime {
+pub(super) fn next_object_modified_time(
+    replaced: Option<std::time::SystemTime>,
+) -> std::time::SystemTime {
     use std::sync::atomic::Ordering;
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = |time: SystemTime| {
@@ -82,7 +86,7 @@ const COARSE_MODIFIED_STEPS: [std::time::Duration; 2] = [
 /// back to the old time, so step past it in whole seconds instead; if even
 /// that cannot order the versions, fail the write rather than publish a
 /// version whose identity could repeat an old one (#557).
-fn stamp_after_replaced(
+pub(super) fn stamp_after_replaced(
     replaced: Option<std::time::SystemTime>,
     stamp: std::time::SystemTime,
     mut set: impl FnMut(std::time::SystemTime) -> std::io::Result<std::time::SystemTime>,
@@ -111,7 +115,7 @@ fn stamp_after_replaced(
 /// place before the directory is synced. Every version is stamped with a
 /// modified time later than any earlier version's, so identity-based etags
 /// change on every overwrite even when the inode is reused.
-fn publish_object_atomically(
+pub(super) fn publish_object_atomically(
     root: &Path,
     full_path: &Path,
     data: &[u8],

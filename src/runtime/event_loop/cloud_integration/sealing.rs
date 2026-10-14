@@ -388,7 +388,7 @@ impl EventLoop {
 
     pub(in crate::runtime::event_loop) fn drain_cloud_wal_upload_backlog(&mut self) {
         let deadline =
-            crate::common::OperationDeadline::from_budget(self.authority.runtime_response_timeout);
+            crate::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout);
         self.drain_cloud_wal_upload_backlog_within(&deadline);
     }
 

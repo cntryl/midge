@@ -1,7 +1,8 @@
 //! Startup authority checks share one scope; fencing cleanup keeps the original store.
 
 use super::traits::{
-    acquire_leadership_with_minimum_epoch_within, scope_lease_error, LeaderRecord,
+    acquire_leadership_with_minimum_epoch_within, scope_lease_error, LeaderAcquisition,
+    LeaderRecord,
 };
 use super::{CloudMetadataGeneration, CloudMetadataHead, LeaderStore, LeaseError};
 use crate::common::DeadlineScope;
@@ -75,12 +76,15 @@ impl LeaderStore for StartupLeaderStore {
         holder_id: &str,
         minimum_epoch: u64,
     ) -> Result<LeaderRecord, LeaseError> {
-        self.within(self.per_io_timeout, "leader acquisition", |_| {
+        self.within(self.per_io_timeout, "leader acquisition", |timeout| {
+            let scope = self
+                .scope
+                .with_deadline(crate::common::OperationDeadline::from_budget(timeout));
             let result = acquire_leadership_with_minimum_epoch_within(
                 self.inner.as_ref(),
                 holder_id,
                 minimum_epoch,
-                &self.scope,
+                &scope,
                 &mut |_| {},
             );
             if result.is_ok() {
@@ -90,22 +94,21 @@ impl LeaderStore for StartupLeaderStore {
         })
     }
 
-    fn acquire_leadership_with_minimum_epoch_with_timeout(
+    fn acquire_leadership_with_context(
         &self,
         holder_id: &str,
         minimum_epoch: u64,
-        timeout: Duration,
-        on_cleanup_epoch: &mut dyn FnMut(u64),
+        acquisition: &mut LeaderAcquisition<'_>,
     ) -> Result<LeaderRecord, LeaseError> {
-        self.within(timeout, "scoped leader acquisition", |timeout| {
-            self.inner
-                .acquire_leadership_with_minimum_epoch_with_timeout(
-                    holder_id,
-                    minimum_epoch,
-                    timeout,
-                    on_cleanup_epoch,
-                )
-        })
+        self.within(
+            acquisition.remaining(),
+            "scoped leader acquisition",
+            |timeout| {
+                acquisition.restrict_timeout(timeout);
+                self.inner
+                    .acquire_leadership_with_context(holder_id, minimum_epoch, acquisition)
+            },
+        )
     }
 
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {

@@ -10,8 +10,8 @@ struct RecoveryRangeBudgetBackend {
     max_range_bytes: std::sync::atomic::AtomicU64,
 }
 
-impl crate::storage::cloud::CloudBackend for RecoveryRangeBudgetBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_put, submit_get, submit_delete, submit_list, submit_head);
+impl crate::storage::cloud::CloudReadCapability for RecoveryRangeBudgetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_get);
 
     fn submit_get_range(
         &self,
@@ -40,6 +40,24 @@ impl crate::storage::cloud::CloudBackend for RecoveryRangeBudgetBackend {
             .submit_get_range_with_identity(key, start, end, expected, timeout, callback);
     }
 }
+
+impl crate::storage::cloud::CloudWriteCapability for RecoveryRangeBudgetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for RecoveryRangeBudgetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for RecoveryRangeBudgetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for RecoveryRangeBudgetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for RecoveryRangeBudgetBackend {}
 
 fn live_frontier(manifest: &Manifest, cf_id: u32) -> u64 {
     match manifest.flush_frontiers().get(cf_id).unwrap() {
@@ -2627,22 +2645,37 @@ impl crate::io::ReadFs for CountingFs {
     }
 }
 
+impl crate::io::PersistentHandleFs for CountingFs {
+    fn open_persistent(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+        let file = crate::io::open_persistent_handle(&self.inner, path, options)?;
+        Ok(Box::new(self.wrap(path, file)))
+    }
+}
+
 impl crate::io::Fs for CountingFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn open(
         &self,
         path: &crate::io::FsPath,
         options: crate::io::OpenOptions,
     ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
-        let file = self.inner.open_persistent_handle(path, options)?;
-        Ok(Box::new(self.wrap(path, file)))
-    }
-
-    fn open_persistent_handle(
-        &self,
-        path: &crate::io::FsPath,
-        options: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
-        let file = self.inner.open_persistent_handle(path, options)?;
+        let file = crate::io::open_persistent_handle(&self.inner, path, options)?;
         Ok(Box::new(self.wrap(path, file)))
     }
 

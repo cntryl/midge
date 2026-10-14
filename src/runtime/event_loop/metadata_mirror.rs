@@ -11,7 +11,7 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         self.actors.cloud_coordinator.mirror_metadata_within(
             self.state.fs.as_ref(),
-            &self.actors.metadata_publication_lock,
+            &self.publication.metadata_publication_lock,
             deadline,
             self.authority.fencing.leader_store.as_deref().map(|store| {
                 crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {

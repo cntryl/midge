@@ -1,6 +1,7 @@
 //! Provider lifetime and identity changes at the admitted control read boundary.
 
 use super::*;
+use crate::storage::cloud::CloudWriteCapability;
 use crate::storage::cloud::{CloudBackend, CloudCallback, CloudStorage, MockCloudBackend};
 
 #[derive(Default)]
@@ -10,29 +11,13 @@ struct InterruptedRange {
     replace: bool,
 }
 
-impl CloudBackend for InterruptedRange {
-    crate::storage::cloud::unsupported_cloud_backend!(
-        submit_get,
-        submit_get_with_metadata,
-        submit_delete,
-        submit_list,
-    );
+impl crate::storage::cloud::CloudReadCapability for InterruptedRange {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_get, submit_get_with_metadata);
 
-    fn submit_put(
-        &self,
-        key: &str,
-        bytes: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
-        self.inner.submit_put(key, bytes, headers, callback);
-    }
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         self.inner.submit_get_range(key, start, end, callback);
     }
-    fn submit_head(&self, key: &str, callback: CloudCallback) {
-        self.inner.submit_head(key, callback);
-    }
+
     fn submit_get_range_with_identity(
         &self,
         key: &str,
@@ -53,6 +38,34 @@ impl CloudBackend for InterruptedRange {
         }
     }
 }
+
+impl crate::storage::cloud::CloudWriteCapability for InterruptedRange {
+    fn submit_put(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        self.inner.submit_put(key, bytes, headers, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for InterruptedRange {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for InterruptedRange {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for InterruptedRange {
+    fn submit_head(&self, key: &str, callback: CloudCallback) {
+        self.inner.submit_head(key, callback);
+    }
+}
+
+impl CloudBackend for InterruptedRange {}
 
 #[test]
 fn should_retain_control_read_charge_until_timed_out_provider_releases_callback() {

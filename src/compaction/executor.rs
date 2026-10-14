@@ -11,15 +11,15 @@
 //! SST, the aggregate plan, or a second deduplicated output vector.
 
 use crate::common::MidgeResult;
-use crate::io::FsError;
-use crate::sst::traits::{RawSstVersion, RawSstVersionCursor, SstFactory};
-use crate::types::EntryType;
-#[cfg(test)]
-use crate::types::KeyState;
-use crate::types::RangeTombstone;
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
-use std::path::Path;
+use crate::sst::traits::RawSstVersion;
+
+mod merge;
+mod partition;
+
+pub(crate) use merge::{
+    collect_compaction_stream_inputs, merge_repair_inputs_to_run, TombstoneGcPolicy,
+};
+pub(crate) use partition::write_partitioned_compaction_outputs;
 
 /// A single logical version of a key observed during compaction.
 ///
@@ -44,10 +44,3 @@ pub(super) fn ensure_compaction_not_aborted(
     }
     Ok(())
 }
-
-include!("executor/merge.rs");
-
-include!("executor/partition.rs");
-
-#[cfg(test)]
-include!("executor/tests.rs");

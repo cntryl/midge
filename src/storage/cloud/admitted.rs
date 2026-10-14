@@ -1,9 +1,8 @@
 //! Deadline adapters that preserve asynchronous buffer ownership.
 
 use super::{
-    cloud_to_storage_outcome, Arc, CloudEvent, CloudReadCapability, CloudReadOptions,
-    CloudRequestOptions, CloudStorage, CloudWriteCapability, StorageCallback, StorageEvent,
-    StorageObjectMetadata, StorageOutcome,
+    cloud_to_storage_outcome, Arc, CloudEvent, CloudReadOptions, CloudRequestOptions, CloudStorage,
+    StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome,
 };
 
 impl CloudStorage {
@@ -35,8 +34,7 @@ impl CloudStorage {
         let request = CloudRequestOptions::default()
             .with_deadline(deadline)
             .with_reservation(reservation);
-        CloudReadCapability::read(
-            self.backend.as_ref(),
+        self.reads.read(
             &full_key,
             CloudReadOptions::default()
                 .with_request_options(request)
@@ -88,8 +86,7 @@ impl CloudStorage {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        CloudWriteCapability::write(
-            self.backend.as_ref(),
+        self.writes.write(
             &self.full_path(key),
             data,
             CloudRequestOptions::default()

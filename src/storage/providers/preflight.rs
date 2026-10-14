@@ -482,7 +482,7 @@ mod tests {
     #[cfg(feature = "cloud-common")]
     #[test]
     fn should_verify_only_one_byte_given_nonempty_namespace() {
-        use crate::storage::cloud::{CloudBackend, CloudEvent, MockCloudBackend};
+        use crate::storage::cloud::{CloudEvent, CloudWriteCapability, MockCloudBackend};
 
         // Arrange
         let backend = MockCloudBackend::new();
@@ -515,7 +515,7 @@ mod tests {
     #[cfg(feature = "cloud-common")]
     #[test]
     fn should_keep_preflight_inside_configured_namespace() {
-        use crate::storage::cloud::{CloudBackend, CloudEvent, MockCloudBackend};
+        use crate::storage::cloud::{CloudEvent, CloudWriteCapability, MockCloudBackend};
 
         // Arrange
         let backend = MockCloudBackend::new();
@@ -563,17 +563,8 @@ mod tests {
     }
 
     #[cfg(feature = "cloud-common")]
-    impl crate::storage::cloud::CloudBackend for RangeIgnoringBackend {
-        crate::storage::cloud::forward_cloud_backend!(
-            inner;
-            submit_put,
-            submit_get,
-            submit_get_with_metadata,
-            submit_get_range,
-            submit_delete,
-            submit_list,
-            submit_head,
-        );
+    impl crate::storage::cloud::CloudReadCapability for RangeIgnoringBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range);
 
         fn submit_get_range_with_identity(
             &self,
@@ -595,10 +586,28 @@ mod tests {
         }
     }
 
+    impl crate::storage::cloud::CloudWriteCapability for RangeIgnoringBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+    }
+
+    impl crate::storage::cloud::CloudDeleteCapability for RangeIgnoringBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+    }
+
+    impl crate::storage::cloud::CloudListCapability for RangeIgnoringBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+    }
+
+    impl crate::storage::cloud::CloudHeadCapability for RangeIgnoringBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+    }
+
+    impl crate::storage::cloud::CloudBackend for RangeIgnoringBackend {}
+
     #[cfg(feature = "cloud-common")]
     #[test]
     fn should_fail_preflight_ranged_read_when_provider_answers_200_with_full_body() {
-        use crate::storage::cloud::{CloudBackend, CloudEvent, MockCloudBackend};
+        use crate::storage::cloud::{CloudEvent, CloudWriteCapability, MockCloudBackend};
 
         // Arrange: a one-byte object, so a whole-object answer has the
         // requested length (#516).

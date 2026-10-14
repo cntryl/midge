@@ -1,3 +1,5 @@
+use super::{fs, FileSystem, MidgeError, MidgeResult, Path};
+
 impl FileSystem {
     /// Open the store at `base_path` only if its directory already exists,
     /// so read-only discovery never creates it.
@@ -23,7 +25,7 @@ impl FileSystem {
 
 /// A missing object is definitive only when its parent is a directory:
 /// Windows reports a path under a regular file as not found too (#584).
-fn object_is_definitively_missing(path: &Path, error: &std::io::Error) -> bool {
+pub(super) fn object_is_definitively_missing(path: &Path, error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::NotFound
         && path
             .parent()

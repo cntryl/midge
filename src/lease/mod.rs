@@ -241,20 +241,22 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
 ) -> Result<CreatedLease, LeaseError> {
     match storage {
         Storage::InMemory => Ok(CreatedLease {
-            lease: Arc::new(FileSystemLease::with_root(
+            lease: Arc::new(FileSystemLease::with_root_and_timeout(
                 Arc::clone(root),
                 lease_ttl,
                 clock_skew_tolerance,
                 clock.clone(),
+                storage_io_timeout,
             )),
             validity: None,
         }),
         Storage::Local { .. } => {
-            let lease = Arc::new(FileSystemLease::with_root(
+            let lease = Arc::new(FileSystemLease::with_root_and_timeout(
                 Arc::clone(root),
                 lease_ttl,
                 clock_skew_tolerance,
                 clock.clone(),
+                storage_io_timeout,
             ));
             Ok(CreatedLease {
                 validity: Some(lease.lease_validity()),

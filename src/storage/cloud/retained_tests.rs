@@ -7,15 +7,21 @@ use std::sync::{mpsc, Mutex};
 #[derive(Default)]
 struct PendingPut(Mutex<Option<(Vec<u8>, CloudCallback)>>);
 
-impl CloudBackend for PendingPut {
-    crate::storage::cloud::unsupported_cloud_backend!(
-        submit_get,
-        submit_get_with_metadata,
-        submit_delete,
-        submit_list,
-        submit_head,
-    );
+impl crate::storage::cloud::CloudReadCapability for PendingPut {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_get, submit_get_with_metadata);
 
+    fn submit_get_range(
+        &self,
+        _key: &str,
+        _start: u64,
+        _end: Option<u64>,
+        _callback: CloudCallback,
+    ) {
+        unreachable!("PUT-only test backend")
+    }
+}
+
+impl crate::storage::cloud::CloudWriteCapability for PendingPut {
     fn submit_put(
         &self,
         _key: &str,
@@ -28,17 +34,21 @@ impl CloudBackend for PendingPut {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((data, callback));
     }
-
-    fn submit_get_range(
-        &self,
-        _key: &str,
-        _start: u64,
-        _end: Option<u64>,
-        _callback: CloudCallback,
-    ) {
-        unreachable!("PUT-only test backend")
-    }
 }
+
+impl crate::storage::cloud::CloudDeleteCapability for PendingPut {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for PendingPut {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for PendingPut {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_head);
+}
+
+impl CloudBackend for PendingPut {}
 
 #[test]
 fn should_keep_upload_charged_when_callback_adapter_times_out_before_backend_completion() {

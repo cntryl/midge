@@ -1,12 +1,14 @@
+use super::{KeyState, MidgeError, MidgeResult, RangeTombstone, ReadSnapshot};
+
 impl ReadSnapshot {
-    fn state_sequence(state: &KeyState) -> Option<u64> {
+    pub(super) fn state_sequence(state: &KeyState) -> Option<u64> {
         match state {
             KeyState::Absent => None,
             KeyState::Tombstone(seq) | KeyState::Value(_, seq, _, _) => Some(*seq),
         }
     }
 
-    fn candidate_wins(existing: &KeyState, candidate: &KeyState) -> MidgeResult<bool> {
+    pub(super) fn candidate_wins(existing: &KeyState, candidate: &KeyState) -> MidgeResult<bool> {
         let existing_seq = Self::state_sequence(existing).unwrap_or(0);
         let candidate_seq = Self::state_sequence(candidate).unwrap_or(0);
         if !matches!(existing, KeyState::Absent)
@@ -27,7 +29,7 @@ impl ReadSnapshot {
     }
 
     #[cfg(test)]
-    fn merge_state(
+    pub(super) fn merge_state(
         states: &mut BTreeMap<Vec<u8>, KeyState>,
         key: Vec<u8>,
         state: KeyState,
@@ -45,7 +47,10 @@ impl ReadSnapshot {
         Ok(())
     }
 
-    fn merge_best_state(best_state: &mut Option<KeyState>, state: KeyState) -> MidgeResult<()> {
+    pub(super) fn merge_best_state(
+        best_state: &mut Option<KeyState>,
+        state: KeyState,
+    ) -> MidgeResult<()> {
         if matches!(state, KeyState::Absent) {
             return Ok(());
         }
@@ -60,12 +65,12 @@ impl ReadSnapshot {
     }
 
     #[cfg(test)]
-    fn is_visible_state(state: &KeyState, snapshot_seq: u64) -> bool {
+    pub(super) fn is_visible_state(state: &KeyState, snapshot_seq: u64) -> bool {
         snapshot_seq == u64::MAX
             || Self::state_sequence(state).is_some_and(|state_seq| state_seq <= snapshot_seq)
     }
 
-    fn range_tombstone_overlaps_query(
+    pub(super) fn range_tombstone_overlaps_query(
         tombstone: &RangeTombstone,
         start: Option<&[u8]>,
         end: Option<&[u8]>,
@@ -84,7 +89,7 @@ impl ReadSnapshot {
     }
 
     #[cfg(test)]
-    fn range_tombstone_covers_state(
+    pub(super) fn range_tombstone_covers_state(
         tombstones: &[RangeTombstone],
         key: &[u8],
         state: &KeyState,
@@ -94,6 +99,6 @@ impl ReadSnapshot {
             .iter()
             .any(|tombstone| tombstone.covers(key) && tombstone.seq >= state_seq)
     }
-
-
 }
+#[cfg(test)]
+use super::BTreeMap;

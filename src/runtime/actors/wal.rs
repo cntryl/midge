@@ -1040,26 +1040,30 @@ impl WalActor {
         let epoch = self.current_epoch;
         let timeout = self.storage_io_timeout;
         Some(Arc::new(move |operation: &mut dyn FnMut()| {
-            let mut validity_error = None;
-            let mut run = || {
-                if let Some(validity) = &validity {
-                    if let Err(error) = validity.remaining(epoch) {
-                        validity_error = Some(
-                            error.into_validation_error("monotonic writer lease validity lost"),
-                        );
-                        return;
+            crate::wal::writer_effect::with_writer_effect(
+                |run| {
+                    if let Some(store) = &leader_store {
+                        store
+                            .with_writer_epoch(&holder_id, epoch, timeout, run)
+                            .map_err(|error| {
+                                error.into_writer_effect_error("WAL writer storage effect")
+                            })
+                    } else {
+                        run();
+                        Ok(())
                     }
-                }
-                operation();
-            };
-            if let Some(store) = &leader_store {
-                store
-                    .with_writer_epoch(&holder_id, epoch, timeout, &mut run)
-                    .map_err(|error| error.into_writer_effect_error("WAL writer storage effect"))?;
-            } else {
-                run();
-            }
-            validity_error.map_or(Ok(()), Err)
+                },
+                || {
+                    if let Some(validity) = &validity {
+                        validity.remaining(epoch).map_err(|error| {
+                            error.into_validation_error("monotonic writer lease validity lost")
+                        })?;
+                    }
+                    operation();
+                    Ok(())
+                },
+            )
+            .map_err(|error| error.error)?
         }))
     }
 

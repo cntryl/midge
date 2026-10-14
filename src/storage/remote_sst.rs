@@ -314,6 +314,10 @@ impl ReadFs for RemoteSstFs {
 }
 
 impl Fs for RemoteSstFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::FsLock>> {
+        self.local.try_lock_exclusive(path)
+    }
+
     fn persistent_handle_capability(&self) -> Option<&dyn crate::io::traits::PersistentHandleFs> {
         Some(self)
     }
@@ -417,7 +421,7 @@ impl Fs for RemoteSstFs {
 impl crate::io::traits::PersistentHandleFs for RemoteSstFs {
     fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
         if self.pinned.is_none() && self.local.exists(path)? {
-            return self.local.open_persistent_handle(path, opts);
+            return crate::io::open_persistent_handle(self.local.as_ref(), path, opts);
         }
         if opts.mode != OpenMode::ReadOnly || opts.create || opts.create_new || opts.truncate {
             return Err(immutable_sst_error());
@@ -447,7 +451,9 @@ impl ReadFs for VerifiedLocalSstFs {
 
 impl Fs for VerifiedLocalSstFs {
     fn persistent_handle_capability(&self) -> Option<&dyn crate::io::traits::PersistentHandleFs> {
-        Some(self)
+        self.local
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::traits::PersistentHandleFs)
     }
 
     fn coordination_key(&self) -> u64 {
@@ -481,7 +487,7 @@ impl crate::io::traits::PersistentHandleFs for VerifiedLocalSstFs {
         if opts.mode != OpenMode::ReadOnly || opts.create || opts.create_new || opts.truncate {
             return Err(immutable_sst_error());
         }
-        self.local.open_persistent_handle(&self.path, opts)
+        crate::io::open_persistent_handle(self.local.as_ref(), &self.path, opts)
     }
 }
 
@@ -491,6 +497,37 @@ mod tests {
     use crate::sst::traits::{SstFactory, SstStateReader};
     use crate::storage::test_support::StorageBackendTestExt;
     use crate::types::EntryType;
+
+    #[test]
+    fn should_preserve_missing_owned_handle_support_when_verified_local_file_is_wrapped() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("verified.sst"), b"verified").unwrap();
+        let local: Arc<dyn Fs> = Arc::new(crate::io::transient_read::TransientReadFs {
+            inner: crate::io::RealFs::new(directory.path()).unwrap(),
+            fail_from: u64::MAX,
+        });
+        let view = VerifiedLocalSstFs {
+            local,
+            path: FsPath::new("verified.sst"),
+        };
+
+        // Act
+        let file = view.open_read(&FsPath::new("sst/verified.sst")).unwrap();
+        let bytes = file.read_at(0, 8).unwrap();
+
+        // Assert
+        assert_eq!(bytes, Bytes::from_static(b"verified"));
+        assert!(view.persistent_handle_capability().is_none());
+        assert!(matches!(
+            crate::io::open_persistent_handle(
+                &view,
+                &FsPath::new("sst/verified.sst"),
+                OpenOptions::READ_ONLY
+            ),
+            Err(FsError::Unsupported(_))
+        ));
+    }
 
     #[test]
     fn should_read_repair_scratch_locally_through_hybrid_compaction_factory(
@@ -998,6 +1035,10 @@ mod tests {
     }
 
     impl Fs for PublicationRecordingFs {
+        fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
         fn host_addressing(&self) -> Option<HostAddressing<'_>> {
             self.inner.host_addressing()
         }

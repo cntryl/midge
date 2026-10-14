@@ -1,18 +1,25 @@
-fn replay_journal_with_state(
+use super::{
+    journal_deserialize, Crc32, FsError, FsyncMarker, JournalEdit, JournalEditEnvelope,
+    ManifestEdit, MidgeResult, ADVANCE_FLUSH_FRONTIER_RECORD_TYPE, BATCH_RECORD_TYPE,
+    DROP_COLUMN_FAMILY_AT_RECORD_TYPE, FSYNC_MARKER_TYPE, JOURNAL_FILE,
+    RECLAIM_COLUMN_FAMILY_RECORD_TYPE,
+};
+
+pub(super) fn replay_journal_with_state(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<JournalReplay> {
     replay_journal_with_mode(fs, JournalReplayMode::Strict, None)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum JournalReplayMode {
+pub(super) enum JournalReplayMode {
     /// Any corrupt record fails replay.
     Strict,
     /// Stop at the first corrupt record and keep the durable prefix.
     SalvagePrefix,
 }
 
-fn replay_journal_with_mode(
+pub(super) fn replay_journal_with_mode(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
     mode: JournalReplayMode,
     scope: Option<&crate::common::DeadlineScope>,
@@ -153,17 +160,17 @@ pub(crate) fn replay_identified_edits_from_bytes(
         .collect())
 }
 
-fn check_replay_scope(scope: Option<&crate::common::DeadlineScope>) -> MidgeResult<()> {
+pub(super) fn check_replay_scope(scope: Option<&crate::common::DeadlineScope>) -> MidgeResult<()> {
     scope.map_or(Ok(()), |scope| scope.check("manifest journal replay"))
 }
 
-struct JournalReplay {
-    edits: Vec<JournalEdit>,
-    max_edit_id: u64,
-    file_len: u64,
-    tail: JournalReplayTail,
+pub(super) struct JournalReplay {
+    pub(super) edits: Vec<JournalEdit>,
+    pub(super) max_edit_id: u64,
+    pub(super) file_len: u64,
+    pub(super) tail: JournalReplayTail,
     /// First corrupt record, when replay ran in salvage mode and stopped.
-    corruption: Option<String>,
+    pub(super) corruption: Option<String>,
 }
 
 impl JournalReplay {
@@ -179,7 +186,7 @@ impl JournalReplay {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum JournalReplayTail {
+pub(super) enum JournalReplayTail {
     Clean,
     PartialEof {
         last_valid_offset: u64,
@@ -195,21 +202,21 @@ struct JournalReplayState {
     last_marker_offset: Option<u64>,
 }
 
-struct JournalRecord {
-    record_start: u64,
-    typ: u8,
-    payload: Vec<u8>,
-    got_crc: u32,
-    next_offset: u64,
+pub(super) struct JournalRecord {
+    pub(super) record_start: u64,
+    pub(super) typ: u8,
+    pub(super) payload: Vec<u8>,
+    pub(super) got_crc: u32,
+    pub(super) next_offset: u64,
 }
 
-enum JournalRecordStatus {
+pub(super) enum JournalRecordStatus {
     Record(JournalRecord),
     PartialHeader { record_start: u64 },
     PartialPayload { record_start: u64 },
 }
 
-fn open_journal_for_replay(
+pub(super) fn open_journal_for_replay(
     fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
 ) -> MidgeResult<Option<Box<dyn crate::io::traits::File + '_>>> {
     use crate::io::traits::FsPath;
@@ -229,7 +236,7 @@ fn open_journal_for_replay(
     }
 }
 
-fn read_journal_record(
+pub(super) fn read_journal_record(
     file: &dyn crate::io::ReadFile,
     offset: u64,
     file_len: u64,

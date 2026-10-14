@@ -416,7 +416,32 @@ impl ReadFs for SegmentCreateFailingFs {
     }
 }
 
+impl crate::io::PersistentHandleFs for SegmentCreateFailingFs {
+    fn open_persistent(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File>> {
+        if self.should_fail_open(path, opts) {
+            return Err(FsError::Unavailable(format!(
+                "segment creation failed for {}",
+                path.0
+            )));
+        }
+        crate::io::open_persistent_handle(&self.inner, path, opts)
+    }
+}
+
 impl Fs for SegmentCreateFailingFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
         if self.should_fail_open(path, opts) {
             return Err(FsError::Unavailable(format!(
@@ -425,20 +450,6 @@ impl Fs for SegmentCreateFailingFs {
             )));
         }
         self.inner.open(path, opts)
-    }
-
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        opts: FsOpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        if self.should_fail_open(path, opts) {
-            return Err(FsError::Unavailable(format!(
-                "segment creation failed for {}",
-                path.0
-            )));
-        }
-        self.inner.open_persistent_handle(path, opts)
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
@@ -501,7 +512,31 @@ impl ReadFs for SegmentWriterOpenFailingFs {
     }
 }
 
+impl crate::io::PersistentHandleFs for SegmentWriterOpenFailingFs {
+    fn open_persistent(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File>> {
+        if self.should_fail_open(path, opts) {
+            return Err(FsError::Unavailable(
+                "next WAL writer open failed".to_string(),
+            ));
+        }
+        crate::io::open_persistent_handle(&self.inner, path, opts)
+    }
+}
+
 impl Fs for SegmentWriterOpenFailingFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
         if self.should_fail_open(path, opts) {
             return Err(FsError::Unavailable(
@@ -509,19 +544,6 @@ impl Fs for SegmentWriterOpenFailingFs {
             ));
         }
         self.inner.open(path, opts)
-    }
-
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        opts: FsOpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        if self.should_fail_open(path, opts) {
-            return Err(FsError::Unavailable(
-                "next WAL writer open failed".to_string(),
-            ));
-        }
-        self.inner.open_persistent_handle(path, opts)
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
@@ -578,17 +600,28 @@ impl ReadFs for RotationPreflightFailingOnceFs {
     }
 }
 
+impl crate::io::PersistentHandleFs for RotationPreflightFailingOnceFs {
+    fn open_persistent(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File>> {
+        crate::io::open_persistent_handle(&self.inner, path, opts)
+    }
+}
+
 impl Fs for RotationPreflightFailingOnceFs {
-    fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
-        self.inner.open(path, opts)
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
     }
 
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        opts: FsOpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        self.inner.open_persistent_handle(path, opts)
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
+    fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
+        self.inner.open(path, opts)
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
@@ -2155,20 +2188,32 @@ impl ReadFs for DurableSyncCountingFs {
     }
 }
 
-impl Fs for DurableSyncCountingFs {
-    fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
+impl crate::io::PersistentHandleFs for DurableSyncCountingFs {
+    fn open_persistent(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File>> {
         Ok(Box::new(DurableSyncCountingFile {
-            inner: self.inner.open(path, opts)?,
+            inner: crate::io::open_persistent_handle(&self.inner, path, opts)?,
             durable_syncs: Arc::clone(&self.durable_syncs),
         }))
     }
-    fn open_persistent_handle(
+}
+
+impl Fs for DurableSyncCountingFs {
+    fn try_lock_exclusive(
         &self,
-        path: &FsPath,
-        opts: FsOpenOptions,
-    ) -> FsResult<Box<dyn File>> {
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
+    fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
         Ok(Box::new(DurableSyncCountingFile {
-            inner: self.inner.open_persistent_handle(path, opts)?,
+            inner: self.inner.open(path, opts)?,
             durable_syncs: Arc::clone(&self.durable_syncs),
         }))
     }
@@ -2958,6 +3003,13 @@ impl crate::io::ReadFs for SstOpenCountingFs {
 }
 
 impl crate::io::Fs for SstOpenCountingFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
     fn open(
         &self,
         path: &crate::io::FsPath,

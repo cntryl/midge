@@ -17,7 +17,44 @@ struct ExpiringCatalogRead {
     delete_submissions: std::sync::atomic::AtomicUsize,
 }
 
-impl crate::storage::cloud::CloudBackend for ExpiringCatalogRead {
+impl crate::storage::cloud::CloudReadCapability for ExpiringCatalogRead {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for ExpiringCatalogRead {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        if self.validity.remaining(7).is_err() {
+            self.writes_after_expiry
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.submit_put(key, data, headers, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for ExpiringCatalogRead {
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.delete_submissions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.submit_delete(key, headers, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudListCapability for ExpiringCatalogRead {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for ExpiringCatalogRead {
     fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         // The read begins while authorized and returns after expiry.
         let mut armed = self.expire_read_key.lock().unwrap();
@@ -43,34 +80,9 @@ impl crate::storage::cloud::CloudBackend for ExpiringCatalogRead {
         }
         self.inner.submit_head(key, callback);
     }
-
-    fn submit_put(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        if self.validity.remaining(7).is_err() {
-            self.writes_after_expiry
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        }
-        self.inner.submit_put(key, data, headers, callback);
-    }
-
-    fn submit_delete(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        self.delete_submissions
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.submit_delete(key, headers, callback);
-    }
-
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_list);
 }
+
+impl crate::storage::cloud::CloudBackend for ExpiringCatalogRead {}
 
 /// Sealed segment `segment_id` of the fixture's chain, written by epoch 7:
 /// segment `n` holds one put at sequence `n` and links segment `n - 1`.

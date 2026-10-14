@@ -1,3 +1,16 @@
+use super::{
+    Arc, FileMeta, KeyState, LevelRangeCandidates, MidgeError, MidgeResult, RangeCandidates,
+    RangeCoverSweep, RangeTombstone, ReadSnapshot, SstFileIo, SstStateReader, SstStateScan,
+};
+use crate::sst::read_path_metrics::SstReadObserver as _;
+
+#[cfg(test)]
+#[path = "l0_scan_tests.rs"]
+mod l0_scan_tests;
+#[cfg(test)]
+#[path = "tests.rs"]
+mod tests;
+
 enum SnapshotStateIterator {
     Memory(std::vec::IntoIter<(bytes::Bytes, KeyState)>),
     Sst(Box<SstStateScan>),
@@ -208,7 +221,7 @@ enum SnapshotScanLifecycle {
 }
 
 impl SnapshotScan {
-    fn new(
+    pub(super) fn new(
         snapshot: Arc<ReadSnapshot>,
         start: Option<Vec<u8>>,
         end: Option<Vec<u8>>,
@@ -230,7 +243,7 @@ impl SnapshotScan {
 
     /// Deterministic count of range-tombstone coverage steps performed.
     #[cfg(test)]
-    fn tombstone_work(&self) -> u64 {
+    pub(super) fn tombstone_work(&self) -> u64 {
         self.range_cover.work()
     }
 

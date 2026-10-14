@@ -1,4 +1,11 @@
-impl EventLoop {    fn runtime_fs_path(
+use super::{
+    Arc, EventLoop, FlushBuildOutput, FlushIdentity, FlushManifestPublication,
+    FlushMirrorCompletion, FlushMirrorTask, FlushPublicationDelta, FlushPublishCompletion,
+    ImmutableFlushPhase, Origin,
+};
+
+impl EventLoop {
+    pub(super) fn runtime_fs_path(
         &self,
         path: &std::path::Path,
     ) -> crate::common::MidgeResult<crate::io::FsPath> {
@@ -8,14 +15,14 @@ impl EventLoop {    fn runtime_fs_path(
     /// Picks the SST sequence for a flush output and, when the output can
     /// reach remote storage before it is published, makes the name durable.
     #[cfg(test)]
-    fn reserve_flush_sst_seq(
+    pub(super) fn reserve_flush_sst_seq(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
     ) -> crate::common::MidgeResult<u64> {
         self.reserve_flush_sst_seq_for(cf_id, Origin::Unclassified)
     }
 
-    fn reserve_flush_sst_seq_for(
+    pub(super) fn reserve_flush_sst_seq_for(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
         origin: Origin,
@@ -55,7 +62,7 @@ impl EventLoop {    fn runtime_fs_path(
         Ok(sst_seq)
     }
 
-    fn ensure_flush_sst_identity(
+    pub(super) fn ensure_flush_sst_identity(
         &mut self,
         identity: FlushIdentity,
     ) -> crate::common::MidgeResult<(String, u64)> {
@@ -107,7 +114,7 @@ impl EventLoop {    fn runtime_fs_path(
         Ok((sst_name, sst_seq))
     }
 
-    fn prepare_flush_publication(
+    pub(super) fn prepare_flush_publication(
         &mut self,
         identity: FlushIdentity,
         staging_path: std::path::PathBuf,
@@ -161,7 +168,10 @@ impl EventLoop {    fn runtime_fs_path(
         self.schedule_flush_publication(&flush, build);
     }
 
-    fn handle_flush_publish_completion(&mut self, completion: FlushPublishCompletion) -> bool {
+    pub(super) fn handle_flush_publish_completion(
+        &mut self,
+        completion: FlushPublishCompletion,
+    ) -> bool {
         self.state.flush_metrics.publish_count =
             self.state.flush_metrics.publish_count.saturating_add(1);
         self.state.flush_metrics.publish_ns_total = self
@@ -241,7 +251,7 @@ impl EventLoop {    fn runtime_fs_path(
         true
     }
 
-    fn commit_flush_metadata(
+    pub(super) fn commit_flush_metadata(
         &mut self,
         delta: &FlushPublicationDelta,
     ) -> crate::common::MidgeResult<()> {
@@ -272,7 +282,7 @@ impl EventLoop {    fn runtime_fs_path(
         Ok(())
     }
 
-    fn submit_flush_mirror(
+    pub(super) fn submit_flush_mirror(
         &mut self,
         delta: FlushPublicationDelta,
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
@@ -285,17 +295,20 @@ impl EventLoop {    fn runtime_fs_path(
                 self.actors.cloud_coordinator.hybrid_storage.clone(),
                 self.actors.cloud_coordinator.cloud_metadata_storage.clone(),
             )),
-            metadata_publication_lock: self.actors.metadata_publication_lock.clone(),
+            metadata_publication_lock: self.publication.metadata_publication_lock.clone(),
             lease_validity: self.authority.fencing.lease_validity.clone(),
             lease_healthy: self.authority.fencing.lease_healthy.clone(),
             leader_store: self.authority.fencing.leader_store.clone(),
             leader_holder_id: self.authority.fencing.leader_holder_id.clone(),
-            runtime_response_timeout: self.authority.runtime_response_timeout,
+            runtime_response_timeout: self.routing.runtime_response_timeout,
         };
         self.actors.flush_actor.submit_mirror(task)
     }
 
-    fn handle_flush_mirror_completion(&mut self, completion: FlushMirrorCompletion) -> bool {
+    pub(super) fn handle_flush_mirror_completion(
+        &mut self,
+        completion: FlushMirrorCompletion,
+    ) -> bool {
         if let Err(error) = self.validate_flush_completion(completion.delta.identity) {
             self.fail_flush_pipeline(
                 completion.delta.identity.flush_id,
@@ -326,7 +339,10 @@ impl EventLoop {    fn runtime_fs_path(
         true
     }
 
-    fn validate_flush_completion(&self, identity: FlushIdentity) -> crate::common::MidgeResult<()> {
+    pub(super) fn validate_flush_completion(
+        &self,
+        identity: FlushIdentity,
+    ) -> crate::common::MidgeResult<()> {
         self.check_lease_health()?;
         if identity.writer_epoch != self.authority.fencing.writer_epoch {
             return Err(crate::common::MidgeError::Fenced(format!(
@@ -337,7 +353,11 @@ impl EventLoop {    fn runtime_fs_path(
         if let Some(store) = &self.authority.fencing.leader_store {
             store
                 .validate_epoch(
-                    self.authority.fencing.leader_holder_id.as_deref().unwrap_or_default(),
+                    self.authority
+                        .fencing
+                        .leader_holder_id
+                        .as_deref()
+                        .unwrap_or_default(),
                     identity.writer_epoch,
                 )
                 .map_err(|error| {
@@ -366,7 +386,7 @@ impl EventLoop {    fn runtime_fs_path(
         Ok(())
     }
 
-    fn install_flush_publication(
+    pub(super) fn install_flush_publication(
         &mut self,
         delta: &FlushPublicationDelta,
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
@@ -414,7 +434,9 @@ impl EventLoop {    fn runtime_fs_path(
         if let Err(error) = self.refresh_cloud_flush_headroom() {
             tracing::warn!(%error, "flush staging headroom awaits output retirement");
         }
-        if let (Some(hybrid), Some(token)) = (&self.actors.cloud_coordinator.hybrid_storage, reservation) {
+        if let (Some(hybrid), Some(token)) =
+            (&self.actors.cloud_coordinator.hybrid_storage, reservation)
+        {
             hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
         }
         if cloud_metadata_published {
@@ -433,6 +455,4 @@ impl EventLoop {    fn runtime_fs_path(
             self.prune_local_wal_segments_covered_by_manifest();
         }
     }
-
-
 }

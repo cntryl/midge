@@ -69,8 +69,14 @@ impl ReadFs for AccountedFs {
 }
 
 impl Fs for AccountedFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
     fn persistent_handle_capability(&self) -> Option<&dyn crate::io::traits::PersistentHandleFs> {
-        Some(self)
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::traits::PersistentHandleFs)
     }
 
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
@@ -127,10 +133,10 @@ impl crate::io::traits::PersistentHandleFs for AccountedFs {
     fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
         let inner = if mutating_open(options) {
             observe_mutation(&self.ledger, || {
-                self.inner.open_persistent_handle(path, options)
+                crate::io::open_persistent_handle(self.inner.as_ref(), path, options)
             })
         } else {
-            self.inner.open_persistent_handle(path, options)
+            crate::io::open_persistent_handle(self.inner.as_ref(), path, options)
         }?;
         Ok(Box::new(AccountedFile {
             inner,

@@ -1216,7 +1216,30 @@ impl ReadFs for TruncateFailingFs {
     }
 }
 
+impl crate::io::PersistentHandleFs for TruncateFailingFs {
+    fn open_persistent(
+        &self,
+        path: &FsPath,
+        opts: OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+        crate::io::open_persistent_handle(&self.inner, path, opts)
+    }
+}
+
 impl Fs for TruncateFailingFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn open(
         &self,
         path: &FsPath,
@@ -1225,14 +1248,6 @@ impl Fs for TruncateFailingFs {
         Ok(Box::new(TruncateFailingFile {
             inner: self.inner.open(path, opts)?,
         }))
-    }
-
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        opts: OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
-        self.inner.open_persistent_handle(path, opts)
     }
 
     fn remove_file(&self, path: &FsPath) -> crate::io::FsResult<()> {

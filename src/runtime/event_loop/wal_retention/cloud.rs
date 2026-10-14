@@ -128,7 +128,7 @@ impl EventLoop {
         // here also bounds the whole retirement sequence rather than granting
         // each provider callback a fresh timeout.
         let attempt_budget = self
-            .authority
+            .routing
             .runtime_response_timeout
             .min(self.shutdown.shutdown_cloud_drain_timeout);
         let publication_owner =

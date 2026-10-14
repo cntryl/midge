@@ -261,12 +261,45 @@ pub(super) fn apply_caller_headers(
     let (headers, timeout) = crate::storage::cloud::split_request_timeout_header(headers)?;
     let conditional_mutation = headers.iter().any(|(name, value)| conditional(name, value));
     if let Some(timeout) = timeout {
+        let timeout = request
+            .timeout
+            .map_or(timeout, |current| current.min(timeout));
         request = request.with_timeout(timeout);
     }
     for (name, value) in headers {
         request = apply(request, name, value)?;
     }
     Ok((request, conditional_mutation))
+}
+
+/// Whether a read can receive a structured predicate rejection from a provider.
+pub(super) fn has_read_precondition(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, _)| {
+        [
+            "if-match",
+            "if-none-match",
+            "if-unmodified-since",
+            "x-goog-if-generation-match",
+            "x-goog-if-generation-not-match",
+        ]
+        .iter()
+        .any(|condition| name.eq_ignore_ascii_case(condition))
+    })
+}
+
+/// Preserve caller GET conditions while consuming the internal timeout header.
+#[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-azure"))]
+pub(super) fn apply_read_headers(
+    request: CloudRequest,
+    headers: Vec<(String, String)>,
+) -> Result<CloudRequest, String> {
+    apply_caller_headers(
+        request,
+        headers,
+        |_, _| false,
+        |request, name, value| Ok(request.with_header(name, value)),
+    )
+    .map(|(request, _)| request)
 }
 
 /// HEAD and LIST carry only an internal timeout header. Preserve their
@@ -450,6 +483,26 @@ mod tests {
                 ("x-test".into(), "value".into()),
             ]
         );
+    }
+
+    #[test]
+    #[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-azure"))]
+    fn should_preserve_shorter_timeout_when_read_headers_carry_a_larger_budget() {
+        // Arrange
+        let timeout = std::time::Duration::from_millis(100);
+        let request = CloudRequest::new(reqwest::Method::GET, "https://example.test/object".into())
+            .with_timeout(timeout);
+        let headers = vec![(
+            crate::storage::cloud::REQUEST_TIMEOUT_HEADER.into(),
+            "750".into(),
+        )];
+
+        // Act
+        let request = apply_read_headers(request, headers).unwrap();
+
+        // Assert
+        assert_eq!(request.timeout, Some(timeout));
+        assert_eq!(request.headers, Vec::new());
     }
 
     #[test]

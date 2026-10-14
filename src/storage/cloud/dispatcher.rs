@@ -9,7 +9,11 @@ use std::sync::Arc;
 
 /// Namespace-aware dispatcher that forwards calls to the active backend.
 pub struct CloudStorage {
-    pub(super) backend: Arc<dyn CloudBackend>,
+    pub(super) reads: Arc<dyn CloudReadCapability>,
+    pub(super) writes: Arc<dyn CloudWriteCapability>,
+    pub(super) deletes: Arc<dyn CloudDeleteCapability>,
+    pub(super) lists: Arc<dyn CloudListCapability>,
+    pub(super) heads: Arc<dyn CloudHeadCapability>,
     namespace: String,
     pub(super) callback_timeout: std::time::Duration,
     pub(super) startup_scope: Option<crate::common::DeadlineScope>,
@@ -31,7 +35,11 @@ impl CloudStorage {
         callback_timeout: std::time::Duration,
     ) -> Self {
         Self {
-            backend,
+            reads: backend.clone(),
+            writes: backend.clone(),
+            deletes: backend.clone(),
+            lists: backend.clone(),
+            heads: backend,
             namespace,
             callback_timeout,
             startup_scope: None,
@@ -50,7 +58,11 @@ impl CloudStorage {
 
     pub(crate) fn with_startup_scope(&self, scope: crate::common::DeadlineScope) -> Self {
         Self {
-            backend: Arc::clone(&self.backend),
+            reads: Arc::clone(&self.reads),
+            writes: Arc::clone(&self.writes),
+            deletes: Arc::clone(&self.deletes),
+            lists: Arc::clone(&self.lists),
+            heads: Arc::clone(&self.heads),
             namespace: self.namespace.clone(),
             callback_timeout: self.callback_timeout,
             startup_scope: Some(scope),
@@ -146,13 +158,14 @@ impl CloudStorage {
             .fold(CloudRequestOptions::default(), |options, (name, value)| {
                 options.with_header(name, value)
             });
-        CloudWriteCapability::write(self.backend.as_ref(), &full_key, data, options, callback);
+        self.writes.write(&full_key, data, options, callback);
     }
 
     #[cfg(test)]
     pub fn submit_get(&self, key: &str, callback: CloudCallback) {
         let full_key = self.full_path(key);
-        self.backend.submit_get(&full_key, callback);
+        self.reads
+            .read(&full_key, CloudReadOptions::default(), callback);
     }
 
     pub(crate) fn submit_get_within(
@@ -173,8 +186,7 @@ impl CloudStorage {
         }
         let request = CloudRequestOptions::default()
             .with_deadline(crate::common::OperationDeadline::from_budget(timeout));
-        CloudReadCapability::read(
-            self.backend.as_ref(),
+        self.reads.read(
             &self.full_path(key),
             CloudReadOptions::default().with_request_options(request),
             callback,
@@ -199,8 +211,7 @@ impl CloudStorage {
         }
         let request = CloudRequestOptions::default()
             .with_deadline(crate::common::OperationDeadline::from_budget(timeout));
-        CloudReadCapability::read(
-            self.backend.as_ref(),
+        self.reads.read(
             &self.full_path(key),
             CloudReadOptions::default()
                 .with_request_options(request)
@@ -218,8 +229,7 @@ impl CloudStorage {
         callback: CloudCallback,
     ) {
         let full_key = self.full_path(key);
-        self.backend
-            .submit_get_range(&full_key, start, end, callback);
+        self.reads.submit_get_range(&full_key, start, end, callback);
     }
 
     /// Submit an unconditional DELETE bounded by this adapter's callback
@@ -244,8 +254,7 @@ impl CloudStorage {
             return;
         }
         let full_key = self.full_path(key);
-        CloudDeleteCapability::delete(
-            self.backend.as_ref(),
+        self.deletes.delete(
             &full_key,
             CloudRequestOptions::default().with_headers(headers),
             callback,
@@ -274,8 +283,7 @@ impl CloudStorage {
             return;
         }
         let full_prefix = self.full_path(prefix);
-        CloudListCapability::list(
-            self.backend.as_ref(),
+        self.lists.list(
             &full_prefix,
             CloudRequestOptions::default()
                 .with_deadline(crate::common::OperationDeadline::from_budget(timeout)),
@@ -305,8 +313,7 @@ impl CloudStorage {
             return;
         }
         let full_key = self.full_path(key);
-        CloudHeadCapability::head(
-            self.backend.as_ref(),
+        self.heads.head(
             &full_key,
             CloudRequestOptions::default()
                 .with_deadline(crate::common::OperationDeadline::from_budget(timeout)),

@@ -716,7 +716,7 @@ impl OpenOptionsBuilder {
     /// lease, SST, transaction spill and cloud working files are served from
     /// it. A simulated cloud lives under the root's host directory, so a root
     /// without one needs [`Self::object_store_for_testing`]. The filesystem
-    /// must support [`crate::io::Fs::open_persistent_handle`], which SST
+    /// must expose [`crate::io::PersistentHandleFs`], which SST
     /// builds use for scratch.
     #[cfg(feature = "internal-testing")]
     #[doc(hidden)]

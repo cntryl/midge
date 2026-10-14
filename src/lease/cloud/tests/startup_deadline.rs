@@ -18,6 +18,7 @@ enum Replacement {
 
 #[derive(Clone, Copy, Debug)]
 enum Hold {
+    None,
     FirstLeaseGet,
     SentinelAfterLease,
     CommittedLeasePut,
@@ -39,6 +40,7 @@ struct EndpointObservations {
     remote_lease: Mutex<Option<LeaseDocument>>,
     attempted_lease: Mutex<Option<LeaseDocument>>,
     conditional_release_puts: AtomicUsize,
+    cancel_before_acquisition: Mutex<Option<DeadlineScope>>,
 }
 
 struct LeaseEndpoint {
@@ -94,7 +96,7 @@ impl EndpointState {
                             .acquisition_finished
                             .load(Ordering::Acquire)
                 }
-                Hold::RejectedLeasePut => false,
+                Hold::None | Hold::RejectedLeasePut => false,
             };
         if hold_read && (!self.held_once || self.hold.withholds_put_response()) {
             let report_first_hold = !self.held_once;
@@ -162,6 +164,17 @@ impl EndpointState {
             *self.observations.remote_lease.lock().unwrap() = Some(document);
         }
         self.objects.insert(key.clone(), (request.body, version));
+        if key.ends_with(AUTHORITY_SENTINEL_KEY) {
+            if let Some(scope) = self
+                .observations
+                .cancel_before_acquisition
+                .lock()
+                .unwrap()
+                .take()
+            {
+                scope.cancel();
+            }
+        }
         if lease_key {
             self.observations.lease_puts.fetch_add(1, Ordering::Release);
             if self.hold.withholds_put_response() && !self.held_once {
@@ -350,6 +363,86 @@ fn acquire_observation(hold: Hold) -> AcquisitionObservation {
         },
         attempted_lease,
     }
+}
+
+#[test]
+fn should_not_commit_native_lease_when_open_is_cancelled_before_acquisition_cas() {
+    // Arrange: the endpoint cancels the original open scope while completing
+    // the pending authority-marker PUT, before lease CAS admission.
+    let endpoint = LeaseEndpoint::start(Hold::None);
+    let provider = CloudProviderConfig::sqrzl_s3("test-bucket")
+        .with_endpoint(&endpoint.server.endpoint)
+        .unwrap();
+    let cloud = crate::storage::providers::build_cloud_storage_with_timeout(
+        &provider,
+        "cancelled-startup-lease",
+        Duration::from_secs(3),
+    )
+    .expect("native S3 lease backend");
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        cloud,
+    ));
+    let scope = DeadlineScope::new(OperationDeadline::from_budget(Duration::from_secs(5)));
+    *endpoint
+        .observations
+        .cancel_before_acquisition
+        .lock()
+        .unwrap() = Some(scope.clone());
+
+    // Act
+    let result = Arc::clone(&lease).try_acquire_with_minimum_epoch_within(0, &scope);
+    let lease_requests = endpoint
+        .observations
+        .lease_put_requests
+        .load(Ordering::Acquire);
+    let unresolved = scope.cancel();
+    lease
+        .release()
+        .expect("settle any baseline leaked candidate");
+
+    // Assert: cancellation before the risky step must prevent submitting it.
+    assert!(matches!(result, Err(LeaseError::Timeout(_))));
+    assert_eq!(lease_requests, 0, "cancelled open submitted a lease CAS");
+    assert!(!unresolved);
+    assert!(!lease.acquired.load(Ordering::Acquire));
+}
+
+#[test]
+fn should_bound_scoped_acquisition_when_provider_default_exceeds_io_budget() {
+    // Arrange: the open still has five seconds, but this authority operation
+    // has only 150ms. The native provider default is three seconds.
+    let endpoint = LeaseEndpoint::start(Hold::FirstLeaseGet);
+    let provider = CloudProviderConfig::sqrzl_s3("test-bucket")
+        .with_endpoint(&endpoint.server.endpoint)
+        .unwrap();
+    let cloud = crate::storage::providers::build_cloud_storage_with_timeout(
+        &provider,
+        "bounded-scoped-acquisition",
+        Duration::from_secs(3),
+    )
+    .expect("native S3 lease backend");
+    let lease = CloudStorageLease::new_provider_backed(test_config(), temp_cache_path(), cloud);
+    let scope = DeadlineScope::new(OperationDeadline::from_budget(Duration::from_secs(5)));
+    let store = crate::lease::scoped_leader_store(
+        lease.get_leader_store().unwrap(),
+        scope.clone(),
+        Duration::from_millis(150),
+    );
+
+    // Act
+    let start = Instant::now();
+    let result = store.acquire_leadership("bounded-scoped-owner");
+    let elapsed = start.elapsed();
+    let native_cancelled = endpoint.held.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // Assert: exhausting the operation budget does not cancel its original owner.
+    assert!(matches!(result, Err(LeaseError::Timeout(_))));
+    assert!(elapsed < Duration::from_millis(500), "elapsed: {elapsed:?}");
+    assert!(native_cancelled);
+    assert!(scope.check("original open budget").is_ok());
+    assert_eq!(endpoint.observations.lease_puts.load(Ordering::Acquire), 0);
 }
 
 #[test]

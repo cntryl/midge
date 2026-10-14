@@ -207,7 +207,7 @@ impl EventLoop {
         }
 
         let deadline =
-            crate::common::OperationDeadline::from_budget(self.authority.runtime_response_timeout);
+            crate::common::OperationDeadline::from_budget(self.routing.runtime_response_timeout);
         let _ = self.retry_gc_within(&deadline);
     }
 
@@ -217,34 +217,7 @@ impl EventLoop {
             m.record_event_loop_batch(batch as u64);
         });
 
-        if self.shutdown.loop_debug {
-            const LOOP_DEBUG_EVERY: u64 = 256;
-            self.shutdown.loop_debug_wakes += 1;
-            self.shutdown.loop_debug_batch_total += batch as u64;
-
-            if self
-                .shutdown
-                .loop_debug_wakes
-                .is_multiple_of(LOOP_DEBUG_EVERY)
-            {
-                let avg_batch = self
-                    .shutdown
-                    .loop_debug_batch_total
-                    .to_string()
-                    .parse::<f64>()
-                    .unwrap_or(0.0)
-                    / self
-                        .shutdown
-                        .loop_debug_wakes
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(1.0);
-                eprintln!(
-                    "[midge] loop_stats wakes={} avg_batch={:.2}",
-                    self.shutdown.loop_debug_wakes, avg_batch
-                );
-            }
-        }
+        self.diagnostics.record_wake_batch(batch);
     }
 
     pub(super) fn process_one(

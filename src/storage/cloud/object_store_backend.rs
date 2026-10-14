@@ -17,6 +17,17 @@ struct ObjectStoreBackend {
     timeout: Duration,
 }
 
+fn read_identity_matches(expected: &StorageObjectMetadata, actual: &StorageObjectMetadata) -> bool {
+    let identity =
+        crate::storage::conditional_object_identity(&expected.etag, expected.generation.as_deref());
+    identity.is_some()
+        && identity
+            == crate::storage::conditional_object_identity(
+                &actual.etag,
+                actual.generation.as_deref(),
+            )
+}
+
 impl CloudStorage {
     pub(crate) fn from_object_store(store: Arc<dyn ObjectStore>, timeout: Duration) -> Self {
         Self::new_with_timeout(
@@ -135,46 +146,96 @@ impl ObjectStoreBackend {
     }
 }
 
-impl CloudBackend for ObjectStoreBackend {
-    fn submit_put_with_reservation(
+impl crate::storage::cloud::CloudReadCapability for ObjectStoreBackend {
+    fn submit_get_range_with_request(
         &self,
         key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        range: std::ops::Range<u64>,
+        expected: StorageObjectMetadata,
+        options: super::CloudRequestOptions,
         callback: CloudCallback,
     ) {
-        let result = self.request(key, &headers).and_then(|mut request| {
-            request.reservation = reservation;
-            let (tx, rx) = mpsc::channel();
-            self.store.submit_write_request(request.clone(), data, tx);
-            match wait(&rx, &request)? {
-                StorageEvent::WriteComplete {
-                    key: actual,
-                    result,
-                } if actual == key => outcome(result),
-                _ => Err(CloudError::Protocol(
-                    "unexpected object store PUT callback".into(),
-                )),
+        let result = self.request(key, &options.headers).and_then(|mut request| {
+            if let StoragePrecondition::IfMatch(identity) = &request.precondition {
+                if !read_identity_matches(identity, &expected) {
+                    return Err(CloudError::PreconditionFailed(
+                        "range read conditions disagree".into(),
+                    ));
+                }
+            } else if request.precondition != StoragePrecondition::None {
+                return Err(CloudError::PreconditionFailed(
+                    "range read conditions disagree".into(),
+                ));
             }
+            let timeout = options
+                .timeout()
+                .unwrap_or(self.timeout)
+                .min(request.timeout);
+            request.deadline = OperationDeadline::from_budget(timeout);
+            request.timeout = timeout;
+            request.precondition = StoragePrecondition::IfMatch(expected);
+            request.reservation = options.reservation;
+            let (tx, rx) = mpsc::channel();
+            self.store
+                .submit_range_read_request(request.clone(), range.clone(), tx);
+            wait(&rx, &request).and_then(|answer| answer.map_err(cloud_error))
         });
-        let _ = callback.send(CloudEvent::Put {
+        let _ = callback.send(CloudEvent::GetRange {
             key: key.into(),
+            start: range.start,
+            end: Some(range.end),
             result,
         });
     }
-    fn submit_put(
+
+    fn submit_get_with_headers(
         &self,
         key: &str,
-        data: Vec<u8>,
         headers: Vec<(String, String)>,
+        timeout: Option<Duration>,
+        include_metadata: bool,
         callback: CloudCallback,
     ) {
-        self.submit_put_with_reservation(key, data, headers, None, callback);
+        let result = self.request(key, &headers).and_then(|mut request| {
+            if let Some(timeout) = timeout {
+                let timeout = timeout.min(request.timeout);
+                request.deadline = OperationDeadline::from_budget(timeout);
+                request.timeout = timeout;
+            }
+            let (tx, rx) = mpsc::channel();
+            let mut read_request = request.clone();
+            read_request.precondition = StoragePrecondition::None;
+            self.store.submit_metadata_read_request(read_request, tx);
+            let (bytes, actual) = wait(&rx, &request)?.map_err(cloud_error)?;
+            match &request.precondition {
+                StoragePrecondition::None => {}
+                StoragePrecondition::IfMatch(expected)
+                    if read_identity_matches(expected, &actual) => {}
+                StoragePrecondition::IfAbsent | StoragePrecondition::IfMatch(_) => {
+                    return Err(CloudError::PreconditionFailed(
+                        "object read condition failed".into(),
+                    ));
+                }
+            }
+            Ok((bytes, actual))
+        });
+        let event = if include_metadata {
+            CloudEvent::GetWithMetadata {
+                key: key.into(),
+                result,
+            }
+        } else {
+            CloudEvent::Get {
+                key: key.into(),
+                result: result.map(|(bytes, _)| bytes),
+            }
+        };
+        let _ = callback.send(event);
     }
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.submit_get_with_timeout(key, self.timeout, callback);
     }
+
     fn submit_get_with_timeout(&self, key: &str, timeout: Duration, callback: CloudCallback) {
         let result = self
             .get(key, timeout.min(self.timeout))
@@ -184,9 +245,11 @@ impl CloudBackend for ObjectStoreBackend {
             result,
         });
     }
+
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
         self.submit_get_with_metadata_with_timeout(key, self.timeout, callback);
     }
+
     fn submit_get_with_metadata_with_timeout(
         &self,
         key: &str,
@@ -199,6 +262,7 @@ impl CloudBackend for ObjectStoreBackend {
             result,
         });
     }
+
     fn submit_get_range_with_identity(
         &self,
         key: &str,
@@ -238,6 +302,7 @@ impl CloudBackend for ObjectStoreBackend {
             result,
         });
     }
+
     #[cfg(test)]
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         let result = self.get(key, self.timeout).and_then(|(bytes, _)| {
@@ -258,6 +323,49 @@ impl CloudBackend for ObjectStoreBackend {
             result,
         });
     }
+}
+
+impl crate::storage::cloud::CloudWriteCapability for ObjectStoreBackend {
+    fn submit_put_with_reservation(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
+        let result = self.request(key, &headers).and_then(|mut request| {
+            request.reservation = reservation;
+            let (tx, rx) = mpsc::channel();
+            self.store.submit_write_request(request.clone(), data, tx);
+            match wait(&rx, &request)? {
+                StorageEvent::WriteComplete {
+                    key: actual,
+                    result,
+                } if actual == key => outcome(result),
+                _ => Err(CloudError::Protocol(
+                    "unexpected object store PUT callback".into(),
+                )),
+            }
+        });
+        let _ = callback.send(CloudEvent::Put {
+            key: key.into(),
+            result,
+        });
+    }
+
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        self.submit_put_with_reservation(key, data, headers, None, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for ObjectStoreBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         let result = self.request(key, &headers).and_then(|request| {
             let (tx, rx) = mpsc::channel();
@@ -277,9 +385,40 @@ impl CloudBackend for ObjectStoreBackend {
             result,
         });
     }
+}
+
+impl crate::storage::cloud::CloudListCapability for ObjectStoreBackend {
+    fn submit_list(&self, prefix: &str, callback: CloudCallback) {
+        self.submit_list_with_headers(prefix, Vec::new(), callback);
+    }
+
+    fn submit_list_with_headers(
+        &self,
+        prefix: &str,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        let result = self.request(prefix, &headers).and_then(|request| {
+            let scope = DeadlineScope::new(request.deadline);
+            self.store
+                .keys_under(prefix, Some(&scope))
+                .map_err(|error| match error {
+                    crate::common::MidgeError::Timeout(message) => CloudError::Timeout(message),
+                    error => CloudError::Protocol(error.to_string()),
+                })
+        });
+        let _ = callback.send(CloudEvent::List {
+            prefix: prefix.into(),
+            result,
+        });
+    }
+}
+
+impl crate::storage::cloud::CloudHeadCapability for ObjectStoreBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.submit_head_with_headers(key, Vec::new(), callback);
     }
+
     fn submit_head_with_headers(
         &self,
         key: &str,
@@ -304,35 +443,132 @@ impl CloudBackend for ObjectStoreBackend {
             result,
         });
     }
-    fn submit_list(&self, prefix: &str, callback: CloudCallback) {
-        self.submit_list_with_headers(prefix, Vec::new(), callback);
-    }
-    fn submit_list_with_headers(
-        &self,
-        prefix: &str,
-        headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
-        let result = self.request(prefix, &headers).and_then(|request| {
-            let scope = DeadlineScope::new(request.deadline);
-            self.store
-                .keys_under(prefix, Some(&scope))
-                .map_err(|error| match error {
-                    crate::common::MidgeError::Timeout(message) => CloudError::Timeout(message),
-                    error => CloudError::Protocol(error.to_string()),
-                })
-        });
-        let _ = callback.send(CloudEvent::List {
-            prefix: prefix.into(),
-            result,
-        });
-    }
 }
+
+impl CloudBackend for ObjectStoreBackend {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::cloud::BlockingCloud;
+    use crate::storage::cloud::{BlockingCloud, CloudReadCapability, CloudWriteCapability};
+
+    #[test]
+    fn should_reject_stale_read_headers_when_read_options_select_object_version() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
+        let backend = ObjectStoreBackend {
+            store,
+            timeout: Duration::from_secs(5),
+        };
+        let (tx, rx) = mpsc::channel();
+        backend.submit_put("object", b"current".to_vec(), Vec::new(), tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CloudEvent::Put { result: Ok(()), .. }
+        ));
+        let (_, current) = backend.get("object", Duration::from_secs(5)).unwrap();
+
+        // Act
+        for form in 0..3 {
+            let (tx, rx) = mpsc::channel();
+            let request = super::super::CloudRequestOptions::default()
+                .with_header("If-Match", "stale-version");
+            let mut options =
+                super::super::CloudReadOptions::default().with_request_options(request);
+            options = match form {
+                1 => options.with_metadata(),
+                2 => options.with_range(0..3, current.clone()),
+                _ => options,
+            };
+            backend.read("object", options, tx);
+
+            // Assert
+            match rx.recv().unwrap() {
+                CloudEvent::Get {
+                    result: Err(error), ..
+                }
+                | CloudEvent::GetWithMetadata {
+                    result: Err(error), ..
+                }
+                | CloudEvent::GetRange {
+                    result: Err(error), ..
+                } => {
+                    assert!(
+                        matches!(error, CloudError::PreconditionFailed(_)),
+                        "{error:?}"
+                    );
+                }
+                event => panic!("unexpected conditional read event: {event:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn should_return_payload_when_cloud_read_condition_matches_object_identity() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let backend = ObjectStoreBackend {
+            store: Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
+            timeout: Duration::from_secs(5),
+        };
+        let (tx, rx) = mpsc::channel();
+        backend.submit_put("object", b"current".to_vec(), Vec::new(), tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CloudEvent::Put { result: Ok(()), .. }
+        ));
+        let (_, current) = backend.get("object", Duration::from_secs(5)).unwrap();
+        let (tx, rx) = mpsc::channel();
+        backend.store.submit_range_head_request(
+            StorageRequest::new(
+                "object",
+                OperationDeadline::unbounded(),
+                Duration::from_secs(5),
+            ),
+            tx,
+        );
+        let range_identity = match rx.recv().unwrap() {
+            StorageEvent::HeadComplete {
+                result: StorageOutcome::Ok(identity),
+                ..
+            } => identity,
+            event => panic!("unexpected range identity event: {event:?}"),
+        };
+
+        // Act
+        for form in 0..3 {
+            let selected = if form == 2 { &range_identity } else { &current };
+            let request = super::super::CloudRequestOptions::default()
+                .with_header("If-Match", selected.etag.clone());
+            let options = super::super::CloudReadOptions::default().with_request_options(request);
+            let options = match form {
+                1 => options.with_metadata(),
+                2 => options.with_range(0..3, selected.clone()),
+                _ => options,
+            };
+            let (tx, rx) = mpsc::channel();
+            backend.read("object", options, tx);
+            let bytes = match rx.recv().unwrap() {
+                CloudEvent::Get { result, .. } | CloudEvent::GetRange { result, .. } => {
+                    result.unwrap()
+                }
+                CloudEvent::GetWithMetadata { result, .. } => result.unwrap().0,
+                event => panic!("unexpected conditional read event: {event:?}"),
+            };
+
+            // Assert
+            assert_eq!(
+                bytes,
+                if form == 2 {
+                    &b"cur"[..]
+                } else {
+                    &b"current"[..]
+                }
+            );
+        }
+    }
 
     #[test]
     fn should_preserve_conditional_object_identity_when_wrapping_a_filesystem_store() {

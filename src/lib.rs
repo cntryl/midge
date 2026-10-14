@@ -161,8 +161,9 @@ pub mod __internal {
     pub mod io {
         pub use crate::io::traits::{DirEntry, Metadata};
         pub use crate::io::{
-            Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, MockFs, OpenMode,
-            OpenOptions, ReadFile, ReadFs, RealFs,
+            open_persistent_handle, Durability, File, Fs, FsError, FsPath, FsResult,
+            HostAddressing, MockFs, OpenMode, OpenOptions, PersistentHandleFs, ReadFile, ReadFs,
+            RealFs,
         };
     }
     pub mod memtable {
@@ -222,7 +223,11 @@ pub mod __internal {
             #[cfg(feature = "cloud-common")]
             pub use crate::storage::cloud::MockCloudBackend;
             #[doc(inline)]
-            pub use crate::storage::cloud::{CloudBackend, CloudCallback};
+            pub use crate::storage::cloud::{
+                CloudBackend, CloudCallback, CloudDeleteCapability, CloudHeadCapability,
+                CloudListCapability, CloudReadCapability, CloudReadOptions, CloudRequestOptions,
+                CloudWriteCapability,
+            };
         }
     }
     /// Simulated storage for crash and fault campaigns.

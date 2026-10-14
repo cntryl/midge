@@ -4,7 +4,9 @@
 use super::{Failure, Fate, Operation, RequestId, Schedule, SimulatedObjectStore};
 use crate::common::{MidgeError, OperationDeadline};
 use crate::storage::cloud::{
-    BlockingCloud, CloudBackend, CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata,
+    BlockingCloud, CloudDeleteCapability, CloudError, CloudEvent, CloudHeadCapability,
+    CloudListCapability, CloudOutcome, CloudReadCapability, CloudStorage, CloudWriteCapability,
+    ObjectMetadata,
 };
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};

@@ -1,11 +1,22 @@
+use super::{
+    Arc, EventLoop, FlushBuildCompletion, FlushBuildOutput, FlushIdentity, FlushPublishTask,
+    FlushWorkerResult, ImmutableFlush, ImmutableFlushPhase, Origin,
+};
+
 impl EventLoop {
-    pub(super) fn column_family_flush_pipeline_active(&self, cf_id: u32) -> bool {
+    pub(in crate::runtime::event_loop) fn column_family_flush_pipeline_active(
+        &self,
+        cf_id: u32,
+    ) -> bool {
         self.state
             .get_cf(cf_id)
             .is_some_and(|cf| !cf.immutable_flushes.is_empty())
     }
 
-    pub(super) fn column_family_publication_pipeline_active(&self, cf_id: u32) -> bool {
+    pub(in crate::runtime::event_loop) fn column_family_publication_pipeline_active(
+        &self,
+        cf_id: u32,
+    ) -> bool {
         if self.column_family_flush_pipeline_active(cf_id) {
             return true;
         }
@@ -22,7 +33,7 @@ impl EventLoop {
             || !self.state.compaction.compacting_ssts.is_empty()
     }
 
-    pub(super) fn ordinary_flush_origin(&self) -> Origin {
+    pub(in crate::runtime::event_loop) fn ordinary_flush_origin(&self) -> Origin {
         if self.actors.cloud_coordinator.hybrid_storage.is_some() {
             Origin::CloudFlush
         } else {
@@ -30,7 +41,7 @@ impl EventLoop {
         }
     }
 
-    pub(super) fn freeze_active_memtable(
+    pub(in crate::runtime::event_loop) fn freeze_active_memtable(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
     ) -> crate::common::MidgeResult<Option<u64>> {
@@ -38,7 +49,7 @@ impl EventLoop {
         self.freeze_active_memtable_for(cf_id, origin)
     }
 
-    pub(super) fn freeze_active_memtable_for(
+    pub(in crate::runtime::event_loop) fn freeze_active_memtable_for(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
         origin: Origin,
@@ -103,18 +114,21 @@ impl EventLoop {
         Ok(Some(flush.flush_id))
     }
 
-    pub(super) fn schedule_next_flush_worker(&mut self) {
+    pub(in crate::runtime::event_loop) fn schedule_next_flush_worker(&mut self) {
         self.schedule_next_flush_worker_with_shutdown(false);
     }
 
-    pub(super) fn schedule_next_flush_worker_during_shutdown(&mut self) {
+    pub(in crate::runtime::event_loop) fn schedule_next_flush_worker_during_shutdown(&mut self) {
         self.schedule_next_flush_worker_with_shutdown(true);
     }
 
     /// Whether a queued flush cannot start right now. The run loop uses the
     /// same condition, so a queued flush it cannot start does not count as
     /// actionable work and spin the loop.
-    pub(super) fn flush_start_blocked(&self, allow_during_shutdown: bool) -> bool {
+    pub(in crate::runtime::event_loop) fn flush_start_blocked(
+        &self,
+        allow_during_shutdown: bool,
+    ) -> bool {
         (self.shutdown.shutting_down && !allow_during_shutdown)
             || self.state.is_memory_mode()
             || self.actors.flush_actor.is_inflight()
@@ -126,7 +140,7 @@ impl EventLoop {
                     || (self.compaction_compute_owned() && !self.has_manual_flush_obligation())))
     }
 
-    fn schedule_next_flush_worker_with_shutdown(&mut self, allow_during_shutdown: bool) {
+    pub(super) fn schedule_next_flush_worker_with_shutdown(&mut self, allow_during_shutdown: bool) {
         if !allow_during_shutdown
             && self.cloud_maintenance_enabled()
             && !self.actors.cloud_coordinator.cloud_maintenance.dispatching
@@ -197,7 +211,11 @@ impl EventLoop {
         }
     }
 
-    fn schedule_flush_publication(&mut self, flush: &ImmutableFlush, build: FlushBuildOutput) {
+    pub(super) fn schedule_flush_publication(
+        &mut self,
+        flush: &ImmutableFlush,
+        build: FlushBuildOutput,
+    ) {
         let (Some(sst_name), Some(sst_seq)) = (flush.sst_name.clone(), flush.sst_seq) else {
             self.fail_flush_pipeline(
                 flush.flush_id,
@@ -218,7 +236,11 @@ impl EventLoop {
             crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
                 flush_id: flush.flush_id,
             };
-        if !self.publication.publication_gate.try_acquire(publication_owner.clone()) {
+        if !self
+            .publication
+            .publication_gate
+            .try_acquire(publication_owner.clone())
+        {
             if let Some((_, current)) = self.state.immutable_flush_by_id_mut(flush.flush_id) {
                 current.phase = ImmutableFlushPhase::Queued;
             }
@@ -254,13 +276,18 @@ impl EventLoop {
                     submitted_at.elapsed(),
                     true,
                 );
-                self.publication.publication_gate.release(&publication_owner);
+                self.publication
+                    .publication_gate
+                    .release(&publication_owner);
                 self.fail_flush_pipeline(flush.flush_id, None, &error);
             }
         }
     }
 
-    pub(super) fn handle_flush_worker_result(&mut self, result: FlushWorkerResult) {
+    pub(in crate::runtime::event_loop) fn handle_flush_worker_result(
+        &mut self,
+        result: FlushWorkerResult,
+    ) {
         let should_continue = match result {
             FlushWorkerResult::Build(completion) => self.handle_flush_build_completion(completion),
             FlushWorkerResult::Publish(completion) => {
@@ -277,7 +304,10 @@ impl EventLoop {
         self.schedule_next_flush_worker();
     }
 
-    fn handle_flush_build_completion(&mut self, mut completion: FlushBuildCompletion) -> bool {
+    pub(super) fn handle_flush_build_completion(
+        &mut self,
+        mut completion: FlushBuildCompletion,
+    ) -> bool {
         self.state.flush_metrics.build_count =
             self.state.flush_metrics.build_count.saturating_add(1);
         self.state.flush_metrics.build_ns_total = self
@@ -328,7 +358,7 @@ impl EventLoop {
         true
     }
 
-    fn cleanup_failed_flush_build(&self, completion: &mut FlushBuildCompletion) {
+    pub(super) fn cleanup_failed_flush_build(&self, completion: &mut FlushBuildCompletion) {
         let mut temp = completion.staging_path.as_os_str().to_os_string();
         temp.push(".tmp");
         for path in [&completion.staging_path, &std::path::PathBuf::from(temp)] {
@@ -351,6 +381,4 @@ impl EventLoop {
             }
         }
     }
-
-
 }

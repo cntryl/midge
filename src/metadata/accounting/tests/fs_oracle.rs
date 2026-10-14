@@ -186,7 +186,32 @@ impl ReadFs for ObservedFs {
     }
 }
 
+impl crate::io::PersistentHandleFs for ObservedFs {
+    fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
+        crate::io::open_persistent_handle(self.inner.as_ref(), path, options).map(|inner| {
+            Box::new(ObservedFile {
+                inner,
+                path: path.clone(),
+                observations: Arc::clone(&self.observations),
+            }) as Box<dyn File>
+        })
+    }
+}
+
 impl Fs for ObservedFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
         self.inner
             .local_output_view()
@@ -226,22 +251,6 @@ impl Fs for ObservedFs {
                 observations: Arc::clone(&self.observations),
             }) as Box<dyn File + '_>
         })
-    }
-
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        options: OpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        self.inner
-            .open_persistent_handle(path, options)
-            .map(|inner| {
-                Box::new(ObservedFile {
-                    inner,
-                    path: path.clone(),
-                    observations: Arc::clone(&self.observations),
-                }) as Box<dyn File>
-            })
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {

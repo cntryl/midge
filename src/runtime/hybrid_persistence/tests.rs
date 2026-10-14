@@ -597,7 +597,11 @@ struct WinningInitialCatalogCasBackend {
     inject_winner: AtomicBool,
 }
 
-impl CloudBackend for WinningInitialCatalogCasBackend {
+impl crate::storage::cloud::CloudReadCapability for WinningInitialCatalogCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for WinningInitialCatalogCasBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -619,9 +623,21 @@ impl CloudBackend for WinningInitialCatalogCasBackend {
         }
         self.inner.submit_put(key, data, headers, callback);
     }
-
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
 }
+
+impl crate::storage::cloud::CloudDeleteCapability for WinningInitialCatalogCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for WinningInitialCatalogCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for WinningInitialCatalogCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl CloudBackend for WinningInitialCatalogCasBackend {}
 
 impl PausingCatalogCasBackend {
     fn new(inner: Arc<MockCloudBackend>) -> Self {
@@ -647,7 +663,11 @@ impl PausingCatalogCasBackend {
     }
 }
 
-impl CloudBackend for PausingCatalogCasBackend {
+impl crate::storage::cloud::CloudReadCapability for PausingCatalogCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for PausingCatalogCasBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -669,9 +689,21 @@ impl CloudBackend for PausingCatalogCasBackend {
         }
         self.inner.submit_put(key, data, headers, callback);
     }
-
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
 }
+
+impl crate::storage::cloud::CloudDeleteCapability for PausingCatalogCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for PausingCatalogCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for PausingCatalogCasBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl CloudBackend for PausingCatalogCasBackend {}
 
 #[test]
 fn should_route_each_object_class_to_its_separate_cloud_store() {

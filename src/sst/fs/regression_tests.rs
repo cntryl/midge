@@ -268,6 +268,10 @@ impl ReadFs for AddressingDelegatingFs {
 }
 
 impl Fs for AddressingDelegatingFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
     fn host_addressing(&self) -> Option<HostAddressing<'_>> {
         self.inner.host_addressing()
     }

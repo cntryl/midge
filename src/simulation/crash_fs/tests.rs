@@ -647,9 +647,8 @@ fn should_fence_crashed_process_when_it_acts_after_crash() {
     let device = CrashDevice::new();
     let crashed = device.fs();
     durable_file(&crashed, "segment", b"data");
-    let handle = crashed
-        .open_persistent_handle(&path("segment"), CREATE)
-        .expect("open handle");
+    let handle =
+        crate::io::open_persistent_handle(&crashed, &path("segment"), CREATE).expect("open handle");
 
     // Act
     device.process_crash();
@@ -740,9 +739,8 @@ fn should_keep_unlinked_open_file_readable_until_its_handle_closes() {
     let device = CrashDevice::new();
     let fs = device.fs();
     durable_file(&fs, "pinned", b"pinned");
-    let handle = fs
-        .open_persistent_handle(&path("pinned"), READ_ONLY)
-        .expect("pin file");
+    let handle =
+        crate::io::open_persistent_handle(&fs, &path("pinned"), READ_ONLY).expect("pin file");
 
     // Act
     fs.remove_file(&path("pinned")).expect("unlink");

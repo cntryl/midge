@@ -404,16 +404,16 @@ impl EventLoop {
             .durability
             .cloud_durability_request_ids_at_or_after(segment_id);
         if request_ids.is_empty() {
-            return OperationDeadline::from_budget(self.authority.runtime_response_timeout);
+            return OperationDeadline::from_budget(self.routing.runtime_response_timeout);
         }
         let latest_start = request_ids
             .iter()
             .filter_map(|request_id| self.routing.router.registered_at(*request_id))
             .max();
         latest_start.map_or_else(
-            || OperationDeadline::from_budget(self.authority.runtime_response_timeout),
+            || OperationDeadline::from_budget(self.routing.runtime_response_timeout),
             |latest_start| {
-                OperationDeadline::from_start(latest_start, self.authority.runtime_response_timeout)
+                OperationDeadline::from_start(latest_start, self.routing.runtime_response_timeout)
             },
         )
     }

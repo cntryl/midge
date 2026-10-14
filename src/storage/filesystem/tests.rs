@@ -1,5 +1,7 @@
+use super::*;
+
 #[cfg(test)]
-mod tests {
+mod operation_tests {
     use super::*;
     use crate::storage::test_support::StorageBackendTestExt;
     use std::sync::{mpsc, Arc, Barrier};
@@ -888,6 +890,7 @@ mod atomic_publish_tests {
 
 #[cfg(all(test, feature = "failpoints"))]
 mod mutation_lock_order_tests {
+    use super::super::range::{mutation_lock, mutation_stripe};
     use super::*;
 
     #[test]

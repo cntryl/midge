@@ -1,3 +1,13 @@
+use super::publication::repair_partial_journal_tail;
+use super::replay::{
+    check_replay_scope, open_journal_for_replay, replay_journal_with_mode,
+    replay_journal_with_state, JournalReplayMode, JournalReplayTail,
+};
+use super::{
+    checkpoint_edit_id_with_fs, millis_since_epoch, with_manifest_writer_lock, FsError,
+    ManifestEdit, MidgeResult, JOURNAL_FILE,
+};
+
 pub(crate) fn next_edit_id_after(highest: u64) -> MidgeResult<u64> {
     highest.checked_add(1).ok_or_else(|| {
         crate::common::MidgeError::ResourceLimit("manifest journal edit IDs exhausted".into())

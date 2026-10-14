@@ -268,11 +268,7 @@ impl InventoryCloudBackend {
 }
 
 #[cfg(any(test, feature = "cloud-common"))]
-impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.head(key, callback);
-    }
-
+impl crate::storage::cloud::CloudReadCapability for InventoryCloudBackend {
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         let _ = callback.send(crate::storage::cloud::CloudEvent::Get {
             key: key.to_string(),
@@ -308,7 +304,9 @@ impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {
             )),
         });
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for InventoryCloudBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -323,7 +321,9 @@ impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {
             )),
         });
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for InventoryCloudBackend {
     fn submit_delete(
         &self,
         key: &str,
@@ -337,7 +337,9 @@ impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {
             )),
         });
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for InventoryCloudBackend {
     fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
         let _ = callback.send(crate::storage::cloud::CloudEvent::List {
             prefix: prefix.to_string(),
@@ -347,6 +349,14 @@ impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {
         });
     }
 }
+
+impl crate::storage::cloud::CloudHeadCapability for InventoryCloudBackend {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.head(key, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {}
 
 pub(super) struct ObservedBackend {
     inner: crate::storage::filesystem::FileSystem,

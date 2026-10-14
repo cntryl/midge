@@ -50,6 +50,240 @@ const DIALECTS: [Dialect; 4] = [
     Dialect::GcsJson,
 ];
 
+fn read_header_response(dialect: Dialect, ranged: bool) -> Response {
+    let mut response = Response::new(
+        if ranged { 206 } else { 200 },
+        if ranged {
+            b"ab".to_vec()
+        } else {
+            b"abcd".to_vec()
+        },
+    );
+    response.headers.push(("ETag".into(), "\"version\"".into()));
+    if matches!(dialect, Dialect::GcsXml | Dialect::GcsJson) {
+        response
+            .headers
+            .push(("x-goog-generation".into(), "7".into()));
+    }
+    if ranged {
+        response
+            .headers
+            .push(("Content-Range".into(), "bytes 0-1/4".into()));
+    }
+    response
+}
+
+#[test]
+fn should_send_read_headers_when_native_read_options_select_metadata_or_range() {
+    // Arrange
+    for dialect in DIALECTS {
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let server = NativeHttpServer::start(move |_, request| {
+            let ranged = request.headers.iter().any(|(name, _)| name == "range");
+            observed_tx.send(request).unwrap();
+            Some(read_header_response(dialect, ranged))
+        });
+        let provider = dialect.provider().with_endpoint(&server.endpoint).unwrap();
+        let cloud = crate::storage::providers::build_cloud_storage_with_timeout(
+            &provider,
+            "native-headers",
+            Duration::from_secs(3),
+        )
+        .unwrap();
+
+        // Act
+        for form in 0..3 {
+            let mut request = CloudRequestOptions::default()
+                .with_deadline(OperationDeadline::from_budget(Duration::from_secs(2)))
+                .with_header("If-Match", "\"version\"")
+                .with_header("X-Read-Trace", "trace");
+            if form == 2 {
+                request = request.with_header("Range", "bytes=0-1");
+                if matches!(dialect, Dialect::GcsXml | Dialect::GcsJson) {
+                    request = request.with_header("x-goog-if-generation-match", "7");
+                }
+            }
+            let options = CloudReadOptions::default().with_request_options(request);
+            let options = match form {
+                1 => options.with_metadata(),
+                2 => options.with_range(
+                    0..2,
+                    ObjectMetadata {
+                        size: 4,
+                        etag: "\"version\"".into(),
+                        generation: matches!(dialect, Dialect::GcsXml | Dialect::GcsJson)
+                            .then(|| "7".into()),
+                    },
+                ),
+                _ => options,
+            };
+            let (tx, rx) = mpsc::channel();
+            cloud.reads.read(&cloud.full_path("object"), options, tx);
+            let event = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            let request = observed_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+
+            // Assert
+            assert_eq!(request.method, "GET");
+            assert!(
+                request
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "if-match" && value == "\"version\""),
+                "{dialect:?} form {form}: conditional header absent"
+            );
+            assert_eq!(
+                request
+                    .headers
+                    .iter()
+                    .filter(|(name, _)| name == "if-match")
+                    .count(),
+                1,
+                "{dialect:?} form {form}: duplicate identity headers"
+            );
+            if form == 2 {
+                assert_eq!(
+                    request
+                        .headers
+                        .iter()
+                        .filter(|(name, _)| name == "range")
+                        .count(),
+                    1,
+                    "{dialect:?}: duplicate range headers"
+                );
+                if matches!(dialect, Dialect::GcsJson) {
+                    assert_eq!(request.path.matches("ifGenerationMatch=7").count(), 1);
+                }
+            }
+            assert!(
+                request
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "x-read-trace" && value == "trace"),
+                "{dialect:?} form {form}: caller header absent"
+            );
+            assert!(
+                matches!(
+                    event,
+                    CloudEvent::Get { result: Ok(_), .. }
+                        | CloudEvent::GetWithMetadata { result: Ok(_), .. }
+                        | CloudEvent::GetRange { result: Ok(_), .. }
+                ),
+                "{dialect:?} form {form}: {event:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn should_report_failed_read_condition_when_native_get_returns_precondition_rejection() {
+    // Arrange
+    for dialect in DIALECTS {
+        let server = NativeHttpServer::start(move |_, request| {
+            assert_eq!(request.method, "GET");
+            assert!(request
+                .headers
+                .iter()
+                .any(|(name, value)| name == "if-match" && value == "\"stale\""));
+            let body = match dialect {
+                Dialect::S3 | Dialect::GcsXml => b"<Error><Code>PreconditionFailed</Code></Error>".to_vec(),
+                Dialect::Azure => b"<Error><Code>ConditionNotMet</Code></Error>".to_vec(),
+                Dialect::GcsJson => br#"{"error":{"code":412,"message":"condition failed","errors":[{"reason":"conditionNotMet"}]}}"#.to_vec(),
+            };
+            Some(Response::new(412, body))
+        });
+        let provider = dialect.provider().with_endpoint(&server.endpoint).unwrap();
+        let cloud = crate::storage::providers::build_cloud_storage_with_timeout(
+            &provider,
+            "native-headers",
+            Duration::from_secs(3),
+        )
+        .unwrap();
+
+        // Act
+        for metadata in [false, true] {
+            let request = CloudRequestOptions::default().with_header("If-Match", "\"stale\"");
+            let options = CloudReadOptions::default().with_request_options(request);
+            let options = if metadata {
+                options.with_metadata()
+            } else {
+                options
+            };
+            let (tx, rx) = mpsc::channel();
+            cloud.reads.read(&cloud.full_path("object"), options, tx);
+
+            // Assert
+            match rx.recv_timeout(Duration::from_secs(3)).unwrap() {
+                CloudEvent::Get {
+                    result: Err(error), ..
+                }
+                | CloudEvent::GetWithMetadata {
+                    result: Err(error), ..
+                } => assert!(
+                    matches!(error, CloudError::PreconditionFailed(_)),
+                    "{dialect:?}: {error:?}"
+                ),
+                event => panic!("{dialect:?}: unexpected conditional read result {event:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn should_reject_conflicting_native_range_headers_before_provider_submission() {
+    // Arrange
+    for dialect in DIALECTS {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&requests);
+        let server = NativeHttpServer::start(move |_, _| {
+            observed.fetch_add(1, Ordering::AcqRel);
+            Some(read_header_response(dialect, true))
+        });
+        let provider = dialect.provider().with_endpoint(&server.endpoint).unwrap();
+        let cloud = crate::storage::providers::build_cloud_storage_with_timeout(
+            &provider,
+            "native-headers",
+            Duration::from_secs(3),
+        )
+        .unwrap();
+
+        // Act
+        for (name, value) in [
+            ("If-Match", "\"stale\""),
+            ("If-None-Match", "*"),
+            ("Range", "bytes=2-3"),
+            ("x-ms-range", "bytes=2-3"),
+            ("x-goog-if-generation-match", "8"),
+        ] {
+            let request = CloudRequestOptions::default().with_header(name, value);
+            let options = CloudReadOptions::default()
+                .with_request_options(request)
+                .with_range(
+                    0..2,
+                    ObjectMetadata {
+                        size: 4,
+                        etag: "\"version\"".into(),
+                        generation: matches!(dialect, Dialect::GcsXml | Dialect::GcsJson)
+                            .then(|| "7".into()),
+                    },
+                );
+            let (tx, rx) = mpsc::channel();
+            cloud.reads.read(&cloud.full_path("object"), options, tx);
+            let event = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+
+            // Assert
+            assert_eq!(
+                requests.load(Ordering::Acquire),
+                0,
+                "{dialect:?}: submitted conflicting {name}"
+            );
+            assert!(
+                matches!(event, CloudEvent::GetRange { result: Err(_), .. }),
+                "{dialect:?}: {event:?}"
+            );
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum HeldPath {
     Head,
@@ -257,7 +491,7 @@ fn pagination_observation(dialect: Dialect) -> PaginationObservation {
     // Qualify all three real pages and warm the executor before timed phases.
     let (sender, receiver) = mpsc::channel();
     cloud
-        .backend
+        .lists
         .submit_list_with_headers(&cloud.full_path(""), headers.clone(), sender);
     let positive = receiver.recv_timeout(Duration::from_secs(6)).unwrap();
     let expected: Vec<_> = (1..=3)
@@ -275,7 +509,7 @@ fn pagination_observation(dialect: Dialect) -> PaginationObservation {
     control.arm(started);
     // One native LIST budget spans the successful prefix and the held final page.
     cloud
-        .backend
+        .lists
         .submit_list_with_headers(&cloud.full_path(""), headers, sender);
     let event = receiver.recv_timeout(Duration::from_secs(6)).unwrap();
     let elapsed = started.elapsed();

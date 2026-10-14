@@ -106,17 +106,17 @@ fn spill_file_error(error: FsError) -> MidgeError {
 
 impl RunFile {
     pub(super) fn open(root: &dyn Fs, path: &FsPath) -> MidgeResult<Self> {
-        let file = root
-            .open_persistent_handle(
-                path,
-                OpenOptions {
-                    mode: OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
-            .map_err(spill_file_error)?;
+        let file = crate::io::open_persistent_handle(
+            root,
+            path,
+            OpenOptions {
+                mode: OpenMode::ReadOnly,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .map_err(spill_file_error)?;
         let file = FileReader::new(file)?;
         #[cfg(test)]
         let tracker = RUN_FILE_TRACKER.with(|tracker| tracker.borrow().clone());
@@ -473,17 +473,17 @@ fn spill_size_bound(ops: &[OrdinalOp]) -> MidgeResult<u64> {
 
 /// Create a spill file that must not already exist.
 pub(super) fn create_spill_file(root: &dyn Fs, path: &FsPath) -> MidgeResult<FileWriter> {
-    let file = root
-        .open_persistent_handle(
-            path,
-            OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: false,
-                create_new: true,
-                truncate: false,
-            },
-        )
-        .map_err(spill_file_error)?;
+    let file = crate::io::open_persistent_handle(
+        root,
+        path,
+        OpenOptions {
+            mode: OpenMode::ReadWrite,
+            create: false,
+            create_new: true,
+            truncate: false,
+        },
+    )
+    .map_err(spill_file_error)?;
     Ok(FileWriter::new(file))
 }
 

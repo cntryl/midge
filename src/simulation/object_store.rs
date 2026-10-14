@@ -706,7 +706,7 @@ impl SimulatedObjectStore {
     }
 }
 
-impl CloudBackend for SimulatedObjectStore {
+impl crate::storage::cloud::CloudReadCapability for SimulatedObjectStore {
     fn submit_get_range_with_identity(
         &self,
         key: &str,
@@ -724,25 +724,6 @@ impl CloudBackend for SimulatedObjectStore {
                 start,
                 end: Some(end),
                 expected: Some(expected),
-            },
-            &callback,
-        );
-    }
-
-    fn submit_put(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
-        self.submit(
-            Operation::Put,
-            key,
-            Effect::Put {
-                key: key.to_string(),
-                bytes: data,
-                headers,
             },
             &callback,
         );
@@ -786,7 +767,30 @@ impl CloudBackend for SimulatedObjectStore {
             &callback,
         );
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for SimulatedObjectStore {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        self.submit(
+            Operation::Put,
+            key,
+            Effect::Put {
+                key: key.to_string(),
+                bytes: data,
+                headers,
+            },
+            &callback,
+        );
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for SimulatedObjectStore {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.submit(
             Operation::Delete,
@@ -798,7 +802,9 @@ impl CloudBackend for SimulatedObjectStore {
             &callback,
         );
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for SimulatedObjectStore {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.submit(
             Operation::List,
@@ -809,7 +815,9 @@ impl CloudBackend for SimulatedObjectStore {
             &callback,
         );
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for SimulatedObjectStore {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.submit(
             Operation::Head,
@@ -821,6 +829,8 @@ impl CloudBackend for SimulatedObjectStore {
         );
     }
 }
+
+impl CloudBackend for SimulatedObjectStore {}
 
 #[cfg(test)]
 mod tests;

@@ -204,10 +204,19 @@ impl FileSystem {
     }
 }
 
-include!("filesystem/publication.rs");
-include!("filesystem/range.rs");
-include!("filesystem/inventory.rs");
-include!("filesystem/backend.rs");
+mod backend;
+mod inventory;
+mod publication;
+mod range;
+
+use range::process_lock_stripe_name;
 
 #[cfg(test)]
-include!("filesystem/tests.rs");
+use inventory::object_is_definitively_missing;
+#[cfg(test)]
+use publication::stamp_after_replaced;
+#[cfg(windows)]
+use range::range_io_error;
+
+#[cfg(test)]
+mod tests;

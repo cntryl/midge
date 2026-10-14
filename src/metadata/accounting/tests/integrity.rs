@@ -47,7 +47,8 @@ fn should_detect_late_mutation_when_an_accounted_view_changes_namespace() {
     view.remove_file(&FsPath::new("renamed")).unwrap();
     view.remove_dir_all(&FsPath::new("late-directory")).unwrap();
     drop(
-        view.open_persistent_handle(
+        crate::io::open_persistent_handle(
+            view.as_ref(),
             &FsPath::new("created"),
             OpenOptions {
                 mode: OpenMode::ReadWrite,
@@ -106,17 +107,17 @@ fn should_detect_late_return_when_operation_finishes_during_actual_sync() {
         Medium::Persistent,
     );
     let view = account_fs(raw, operation.ledger());
-    let mut file = view
-        .open_persistent_handle(
-            &FsPath::new("retained"),
-            OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )
-        .unwrap();
+    let mut file = crate::io::open_persistent_handle(
+        view.as_ref(),
+        &FsPath::new("retained"),
+        OpenOptions {
+            mode: OpenMode::ReadWrite,
+            create: false,
+            create_new: false,
+            truncate: false,
+        },
+    )
+    .unwrap();
     let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
     let (release_tx, release_rx) = crossbeam::channel::bounded(1);
     oracle.hold_next_successful_sync(entered_tx, release_rx);
@@ -179,17 +180,17 @@ fn should_detect_late_accounting_when_a_persistent_file_outlives_its_operation()
         Medium::Persistent,
     );
     let view = account_fs(raw, operation.ledger());
-    let mut file = view
-        .open_persistent_handle(
-            &FsPath::new(crate::metadata::files::JOURNAL),
-            OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: true,
-                create_new: false,
-                truncate: false,
-            },
-        )
-        .expect("acquire actual persistent handle");
+    let mut file = crate::io::open_persistent_handle(
+        view.as_ref(),
+        &FsPath::new(crate::metadata::files::JOURNAL),
+        OpenOptions {
+            mode: OpenMode::ReadWrite,
+            create: true,
+            create_new: false,
+            truncate: false,
+        },
+    )
+    .expect("acquire actual persistent handle");
     file.append(Bytes::from_static(b"first"))
         .expect("actual append");
     file.sync(Durability::Durable).expect("actual file sync");
@@ -247,17 +248,17 @@ fn should_detect_late_mutation_when_a_persistent_file_truncates_without_payload(
         Medium::Persistent,
     );
     let view = account_fs(raw, operation.ledger());
-    let mut file = view
-        .open_persistent_handle(
-            &path,
-            OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )
-        .expect("acquire existing actual persistent handle");
+    let mut file = crate::io::open_persistent_handle(
+        view.as_ref(),
+        &path,
+        OpenOptions {
+            mode: OpenMode::ReadWrite,
+            create: false,
+            create_new: false,
+            truncate: false,
+        },
+    )
+    .expect("acquire existing actual persistent handle");
     operation.finish(true);
     // Read-only escaped use is healthy and cannot invent a mutation observation.
     assert_eq!(file.read_at(0, 3).unwrap().as_ref(), b"ret");

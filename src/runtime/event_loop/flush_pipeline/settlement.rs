@@ -1,4 +1,7 @@
-impl EventLoop {    fn settle_stale_publish_reservation(&mut self, completion: &FlushPublishCompletion) {
+use super::{Duration, EventLoop, FlushPublishCompletion, FsError, RuntimeResponse};
+
+impl EventLoop {
+    pub(super) fn settle_stale_publish_reservation(&mut self, completion: &FlushPublishCompletion) {
         let (Some(hybrid), Some(token)) = (
             self.actors.cloud_coordinator.hybrid_storage.clone(),
             completion.reservation,
@@ -54,7 +57,7 @@ impl EventLoop {    fn settle_stale_publish_reservation(&mut self, completion: &
         }
     }
 
-    fn fail_flush_pipeline(
+    pub(super) fn fail_flush_pipeline(
         &mut self,
         flush_id: u64,
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
@@ -93,7 +96,11 @@ impl EventLoop {    fn settle_stale_publish_reservation(&mut self, completion: &
         self.refresh_write_stall_timing();
     }
 
-    fn fail_deferred_column_family_drops(&mut self, cf_id: u32, error: &crate::common::MidgeError) {
+    pub(super) fn fail_deferred_column_family_drops(
+        &mut self,
+        cf_id: u32,
+        error: &crate::common::MidgeError,
+    ) {
         let mut retained = std::collections::VecDeque::new();
         for message in self.publication.publication_gate.take_deferred() {
             match message {
@@ -130,7 +137,9 @@ impl EventLoop {    fn settle_stale_publish_reservation(&mut self, completion: &
     /// result, which is what `Aborted` says. The original message is kept
     /// intact, and `Aborted` is `Severity::Transient`, so the caller retries
     /// the safe drop.
-    fn deferred_drop_failure(error: &crate::common::MidgeError) -> crate::common::MidgeError {
+    pub(super) fn deferred_drop_failure(
+        error: &crate::common::MidgeError,
+    ) -> crate::common::MidgeError {
         match error {
             crate::common::MidgeError::Busy(message) => crate::common::MidgeError::Aborted(
                 format!("column family drop abandoned by a failed flush: {message}"),
@@ -139,7 +148,11 @@ impl EventLoop {    fn settle_stale_publish_reservation(&mut self, completion: &
         }
     }
 
-    pub(super) fn flush_frontier_satisfied(&self, cf_id: u32, frontier: u64) -> bool {
+    pub(in crate::runtime::event_loop) fn flush_frontier_satisfied(
+        &self,
+        cf_id: u32,
+        frontier: u64,
+    ) -> bool {
         self.state.get_cf(cf_id).is_none_or(|cf| {
             cf.immutable_flushes
                 .iter()
@@ -147,7 +160,7 @@ impl EventLoop {    fn settle_stale_publish_reservation(&mut self, completion: &
         })
     }
 
-    fn complete_flush_waiters(&mut self, cf_id: u32) {
+    pub(super) fn complete_flush_waiters(&mut self, cf_id: u32) {
         let Some(waiters) = self.publication.flush_barrier_waiters.remove(&cf_id) else {
             return;
         };
@@ -165,11 +178,13 @@ impl EventLoop {    fn settle_stale_publish_reservation(&mut self, completion: &
             }
         }
         if !pending.is_empty() {
-            self.publication.flush_barrier_waiters.insert(cf_id, pending);
+            self.publication
+                .flush_barrier_waiters
+                .insert(cf_id, pending);
         }
     }
 
-    fn fail_flush_waiters(
+    pub(super) fn fail_flush_waiters(
         &mut self,
         cf_id: u32,
         failed_sequence: u64,
@@ -193,22 +208,26 @@ impl EventLoop {    fn settle_stale_publish_reservation(&mut self, completion: &
             }
         }
         if !pending.is_empty() {
-            self.publication.flush_barrier_waiters.insert(cf_id, pending);
+            self.publication
+                .flush_barrier_waiters
+                .insert(cf_id, pending);
         }
     }
 
-    pub(super) fn drain_flush_worker_results(&mut self) {
+    pub(in crate::runtime::event_loop) fn drain_flush_worker_results(&mut self) {
         while let Ok(result) = self.pipeline.flush_worker_result_rx.try_recv() {
             self.handle_flush_worker_result(result);
         }
     }
 
-    pub(super) fn drain_inline_flush_worker(&mut self) {
+    pub(in crate::runtime::event_loop) fn drain_inline_flush_worker(&mut self) {
         if !self.pipeline.inline_flush_worker {
             return;
         }
         while self.actors.flush_actor.is_inflight() {
-            match self.pipeline.flush_worker_result_rx
+            match self
+                .pipeline
+                .flush_worker_result_rx
                 .recv_timeout(Duration::from_secs(5))
             {
                 Ok(result) => self.handle_flush_worker_result(result),
@@ -217,7 +236,7 @@ impl EventLoop {    fn settle_stale_publish_reservation(&mut self, completion: &
         }
     }
 
-    pub(super) fn drain_auto_flush_memtables(&mut self) -> usize {
+    pub(in crate::runtime::event_loop) fn drain_auto_flush_memtables(&mut self) -> usize {
         if self.state.is_memory_mode() || self.shutdown.shutting_down {
             return 0;
         }
@@ -244,7 +263,10 @@ impl EventLoop {    fn settle_stale_publish_reservation(&mut self, completion: &
         while let Some(candidate) = self.state.next_flush_candidate_skipping(
             rule,
             &attempted_cfs,
-            self.actors.cloud_coordinator.cloud_wal.oldest_published_facts(),
+            self.actors
+                .cloud_coordinator
+                .cloud_wal
+                .oldest_published_facts(),
         ) {
             attempted_cfs.insert(candidate.cf_id);
             if candidate.reason != crate::runtime::state::FlushReason::PendingImmutable {
@@ -263,7 +285,7 @@ impl EventLoop {    fn settle_stale_publish_reservation(&mut self, completion: &
         frozen_count
     }
 
-    pub(super) fn refresh_write_stall_timing(&mut self) {
+    pub(in crate::runtime::event_loop) fn refresh_write_stall_timing(&mut self) {
         let stalled = self.state.has_any_hard_write_stall();
         match (stalled, self.state.flush_metrics.write_stall_started_at) {
             (true, None) => {

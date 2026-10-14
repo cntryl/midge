@@ -36,7 +36,7 @@ impl PublisherBackend {
     }
 }
 
-impl CloudBackend for PublisherBackend {
+impl crate::storage::cloud::CloudReadCapability for PublisherBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.pause_publisher_read();
         self.inner.submit_get(key, callback);
@@ -50,7 +50,9 @@ impl CloudBackend for PublisherBackend {
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         self.inner.submit_get_range(key, start, end, callback);
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for PublisherBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -61,19 +63,27 @@ impl CloudBackend for PublisherBackend {
         self.puts.fetch_add(1, Ordering::AcqRel);
         self.inner.submit_put(key, data, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for PublisherBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for PublisherBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for PublisherBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_head(key, callback);
     }
 }
+
+impl CloudBackend for PublisherBackend {}
 
 struct PublisherRelease(Option<crossbeam::channel::Sender<()>>);
 

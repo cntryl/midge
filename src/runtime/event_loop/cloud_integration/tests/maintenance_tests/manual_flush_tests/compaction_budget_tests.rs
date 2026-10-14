@@ -18,6 +18,7 @@ use crate::runtime::actors::compaction::publication::{
 use crate::storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
+use crate::storage::cloud::{CloudReadCapability, CloudWriteCapability};
 
 mod authority_timeout_tests;
 mod deadline_owner_tests;
@@ -176,7 +177,7 @@ impl PhasedMetadataBackend {
     }
 }
 
-impl CloudBackend for PhasedMetadataBackend {
+impl crate::storage::cloud::CloudReadCapability for PhasedMetadataBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_get(key, callback);
     }
@@ -197,7 +198,9 @@ impl CloudBackend for PhasedMetadataBackend {
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         self.inner.submit_get_range(key, start, end, callback);
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for PhasedMetadataBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -207,19 +210,27 @@ impl CloudBackend for PhasedMetadataBackend {
     ) {
         self.conditional_put(key, data, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for PhasedMetadataBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for PhasedMetadataBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for PhasedMetadataBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_head(key, callback);
     }
 }
+
+impl CloudBackend for PhasedMetadataBackend {}
 
 #[derive(Debug)]
 struct PhaseEvidence {
@@ -256,7 +267,7 @@ impl BudgetFixture {
                 .retain(|file| file.cf_id == 0);
         }
         el.state.set_compaction_enabled(false);
-        el.authority.runtime_response_timeout = CALLER_BUDGET;
+        el.routing.runtime_response_timeout = CALLER_BUDGET;
         crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
             .map_err(MidgeError::Internal)?;
         let inputs = el
@@ -322,7 +333,7 @@ impl BudgetFixture {
             crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
                 cloud: &self.cloud,
                 fs: self.el.state.fs.as_ref(),
-                publication_lock: &self.el.actors.metadata_publication_lock,
+                publication_lock: &self.el.publication.metadata_publication_lock,
                 lock_wait_budget: PROVIDER_CAP,
                 deadline: &deadline,
                 authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
