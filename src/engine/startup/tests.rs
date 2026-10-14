@@ -222,6 +222,29 @@ fn should_apply_open_options_block_cache_policy_to_runtime_config() -> MidgeResu
     Ok(())
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_apply_open_options_retry_policy_to_local_runtime_config() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let opts = OpenOptions::local(directory.path())
+        .fast_cloud_retries_for_testing()
+        .build()?;
+    let storage_path = StartupStoragePath::resolve(&opts)?;
+    let startup_lease = StartupLease::acquire(&opts, &storage_path, 0)?;
+
+    // Act
+    let materialized =
+        RuntimeStorageMaterialization::materialize(&opts, &storage_path, &startup_lease)?;
+
+    // Assert
+    assert_eq!(
+        materialized.runtime_config.retry_policy,
+        opts.retry_policy()
+    );
+    Ok(())
+}
+
 #[test]
 fn should_run_heartbeat_before_cloud_recovery_can_block_startup() -> MidgeResult<()> {
     // Arrange

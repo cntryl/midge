@@ -1208,6 +1208,7 @@ impl RuntimeStorageMaterialization {
             runtime_response_timeout: opts.runtime_response_timeout(),
             shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
             cloud_runtime_policy,
+            retry_policy: opts.retry_policy(),
             compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),

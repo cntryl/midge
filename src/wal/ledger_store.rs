@@ -215,7 +215,8 @@ impl LedgerStore {
             ));
         }
         self.heal()?;
-        self.ledger.check(edit)?;
+        let mut next = self.ledger.clone();
+        next.apply(edit)?;
         let frame = encode_frame(&Frame::Edit(edit.clone()))?;
         if let Err(error) = self.write_frame(&frame) {
             if matches!(&error, MidgeError::Fenced(_)) {
@@ -225,12 +226,7 @@ impl LedgerStore {
             }
             return Err(error);
         }
-        if let Err(error) = self.ledger.apply(edit) {
-            self.failed = true;
-            return Err(MidgeError::Internal(format!(
-                "WAL ledger edit became invalid after its durable append: {error}"
-            )));
-        }
+        self.ledger = next;
         if let Some(image) = &self.image {
             let mut next_image = image.to_vec();
             next_image.extend_from_slice(&frame);
