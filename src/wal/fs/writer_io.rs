@@ -5,21 +5,27 @@
 //!
 //! Architectural rules (Maintainer: read carefully and DO NOT modify):
 //! ---------------------------------------------------------------
-//! • `FsWalWriterIo` ONLY appends bytes to the active WAL file `wal.log`.
-//! • It NEVER assigns sequence numbers.
-//! • It NEVER rotates WAL segments.
-//! • It NEVER writes metadata beyond the encoded WAL record format.
+//! • `FsWalWriterIo` ONLY appends bytes to the WAL ledger's open segment,
+//!   which holds only its header when the writer opens it.
+//! • It NEVER assigns sequence numbers; it refuses a record whose sequence
+//!   would not follow the segment's last one.
+//! • It NEVER rotates WAL segments. It writes one frame beyond the records:
+//!   the footer that seals the segment, after which it appends nothing.
 //! • It MUST write records as: `<u32 length prefix><u32 crc32c><encoded record bytes>`.
 //! • It MUST update the write position monotonically.
 //! • It MUST flush/sync exactly and only when asked.
 //! • All concurrency protection is via `Mutex` — do NOT add async constructs.
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::io::FsError;
 use crate::io::{Fs, FsPath};
 use crate::wal::encoding;
-use crate::wal::traits::{WalAppendError, WalWriter};
+use crate::wal::format::{
+    Footer, SealedFacts, SegmentDigest, SegmentHeader, SegmentTail, HEADER_LEN,
+};
+use crate::wal::traits::{GroupedWalWriter, WalAppendError, WalWriter};
 use crate::wal::types::{WalPos, WalRecord};
+use crate::wal::writer_authority::PendingWriterEffect;
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,7 +37,7 @@ const MAX_WAIT_ATTEMPTS: u32 = 50;
 
 /// Filesystem-backed WAL writer using `io::Fs`.
 ///
-/// This struct is responsible ONLY for writing bytes to `wal.log`.
+/// This struct is responsible ONLY for writing bytes to the open segment.
 /// It does not manage segment rotation, sequence assignment, recovery,
 /// or any other higher-level concerns. Those belong to the WAL actor.
 pub struct FsWalWriterIo {
@@ -63,9 +69,19 @@ pub struct FsWalWriterIo {
 
     // Maximum wait for append, flush, sync, and close acknowledgements.
     io_timeout: Duration,
+
+    /// The header of the segment this writer appends to.
+    header: SegmentHeader,
+    /// The records acknowledged into the segment.
+    tail: Mutex<SegmentTail>,
+    /// The digest of every byte written, shared with the runner.
+    digest: Arc<Mutex<SegmentDigest>>,
+    /// The footer was written: nothing more may be appended.
+    sealed: std::sync::atomic::AtomicBool,
 }
 impl FsWalWriterIo {
-    /// Create a new WAL writer targeting `wal.log` using the provided filesystem.
+    /// Create a new WAL writer appending to the file at `path_str` in the
+    /// provided filesystem.
     ///
     /// # Errors
     ///
@@ -111,6 +127,12 @@ impl FsWalWriterIo {
         io_timeout: Duration,
         counters: crate::telemetry::CounterSink,
     ) -> MidgeResult<Self> {
+        if !fs
+            .exists(&FsPath::new(path_str))
+            .map_err(FsError::into_midge)?
+        {
+            create_test_segment(fs.as_ref(), path_str)?;
+        }
         Self::new_with_authority(path_str, fs, io_timeout, counters, None)
     }
 
@@ -122,45 +144,38 @@ impl FsWalWriterIo {
         authority: Option<crate::wal::traits::WriteAuthority>,
     ) -> MidgeResult<Self> {
         if let Some(check) = &authority {
-            check()?;
+            let mut no_op = || {};
+            check.run(&mut no_op)?;
         }
         let path = FsPath::new(path_str);
-
-        // Verify file exists or can be created by checking metadata
-        let mut file = fs
+        // The segment holds exactly its header, which the WAL history wrote
+        // and synced, directory entry included, before naming it.
+        let file = fs
             .open(
                 &path,
                 crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: true,
+                    mode: crate::io::OpenMode::ReadOnly,
+                    create: false,
                     create_new: false,
                     truncate: false,
                 },
             )
             .map_err(FsError::into_midge)?;
-
-        // Get current file size
-        let metadata = fs.metadata(&path).map_err(FsError::into_midge)?;
-        let current_pos = metadata.len;
-        if let Some(check) = &authority {
-            check()?;
+        let current_pos = file.len().map_err(FsError::into_midge)?;
+        if current_pos != HEADER_LEN as u64 {
+            return Err(MidgeError::Corruption(format!(
+                "WAL segment {path} holds {current_pos} bytes; a writer opens only a segment holding just its header"
+            )));
         }
-        if current_pos == 0 {
-            // A new (or still empty) active WAL: frames fsynced into it later
-            // are lost after a crash unless its directory entry is durable.
-            file.sync(crate::io::Durability::Durable)
-                .map_err(FsError::into_midge)?;
-            let parent = std::path::Path::new(path_str)
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .map_or_else(
-                    || FsPath::new("."),
-                    |parent| FsPath::new(parent.to_string_lossy()),
-                );
-            fs.sync_dir(&parent, crate::io::Durability::Durable)
-                .map_err(FsError::into_midge)?;
-        }
+        let header_bytes = file
+            .read_at(0, HEADER_LEN as u64)
+            .map_err(FsError::into_midge)?;
+        let header = SegmentHeader::decode(&header_bytes)?;
         drop(file);
+        if let Some(check) = &authority {
+            let mut no_op = || {};
+            check.run(&mut no_op)?;
+        }
 
         let writer = Self {
             fs,
@@ -175,10 +190,15 @@ impl FsWalWriterIo {
             writer_thread: Mutex::new(None),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             io_timeout,
+            header,
+            tail: Mutex::new(SegmentTail::default()),
+            digest: Arc::new(Mutex::new(SegmentDigest::of(&header_bytes))),
+            sealed: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Spawn background writer thread
         let config = WriterConfig {
+            #[cfg(test)]
             write_authority: Arc::clone(&writer.write_authority),
             fs: Arc::clone(&writer.fs),
             path,
@@ -190,6 +210,7 @@ impl FsWalWriterIo {
             current_pos: writer.current_pos.clone(),
             shutdown: writer.shutdown.clone(),
             counters: writer.counters.clone(),
+            digest: Arc::clone(&writer.digest),
         };
         let runner = WriterRunner::new(config);
         let handle = std::thread::Builder::new()
@@ -211,6 +232,75 @@ impl FsWalWriterIo {
             m.record_wal_encode(u64::try_from(e_elapsed.as_nanos()).unwrap_or(u64::MAX));
         });
         Ok(())
+    }
+
+    /// Refuse an append once the footer is written, or one whose records
+    /// would not follow the segment's last sequence: a segment's sequences
+    /// strictly increase from its header's first one.
+    fn admit_records<'a>(
+        &self,
+        records: impl IntoIterator<Item = &'a WalRecord>,
+    ) -> Result<(), WalAppendError> {
+        if self.sealed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(WalAppendError::unchanged(MidgeError::Internal(format!(
+                "WAL segment {} is sealed; nothing more may be appended to it",
+                self.header.id
+            ))));
+        }
+        self.tail
+            .lock()
+            .admit_all(&self.header, records.into_iter().map(|record| record.seq))
+            .map_err(|reason| {
+                WalAppendError::unchanged(MidgeError::Internal(format!(
+                    "WAL segment {} refuses the append: {reason}",
+                    self.header.id
+                )))
+            })
+    }
+
+    /// Count records the runner acknowledged into the segment.
+    fn count_records<'a>(&self, records: impl IntoIterator<Item = &'a WalRecord>) {
+        let mut tail = self.tail.lock();
+        for record in records {
+            tail.count(record.seq, record.cf_id);
+        }
+    }
+
+    /// Wait, at most `timeout`, until every queued write is written: the
+    /// digest then covers the whole segment.
+    fn drained_digest(
+        &self,
+        timeout: Duration,
+    ) -> MidgeResult<parking_lot::MutexGuard<'_, SegmentDigest>> {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(error) = self.writer_failure() {
+                return Err(error);
+            }
+            let digest = self.digest.lock();
+            if self.queue.lock().is_empty() && digest.data_len() == self.current_pos() {
+                return Ok(digest);
+            }
+            drop(digest);
+            if started.elapsed() >= timeout {
+                return Err(MidgeError::Timeout(format!(
+                    "WAL writes did not drain within {timeout:?}"
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// The footer sealing every record written, once the writes drained.
+    fn sealing(&self, timeout: Duration) -> MidgeResult<Footer> {
+        if self.sealed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(MidgeError::Internal(format!(
+                "WAL segment {} is already sealed",
+                self.header.id
+            )));
+        }
+        let digest = self.drained_digest(timeout)?;
+        Ok(Footer::sealing(&self.header, &self.tail.lock(), &digest))
     }
 
     fn take_buffer(&self) -> Vec<u8> {
@@ -237,6 +327,23 @@ impl FsWalWriterIo {
         buf: Vec<u8>,
         acknowledgement_timeout: Duration,
     ) -> Result<WalPos, WalAppendError> {
+        self.enqueue_in_group(buf, acknowledgement_timeout, None)
+    }
+
+    fn enqueue_in_group(
+        &self,
+        buf: Vec<u8>,
+        acknowledgement_timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Result<WalPos, WalAppendError> {
+        if let Some(error) = self.writer_failure() {
+            return Err(WalAppendError::unchanged(error));
+        }
+        let admission_start = std::time::Instant::now();
+        let authority = self.write_authority.read().clone();
+        let (effect, root) = PendingWriterEffect::admit(authority, group, acknowledgement_timeout)
+            .map_err(WalAppendError::unchanged)?;
+        let native = group.is_some() || root.is_some();
         let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel(1);
 
         // Enqueue with backpressure: if queue is full, wait for it to drain.
@@ -247,8 +354,22 @@ impl FsWalWriterIo {
             }
 
             let mut q = self.queue.lock();
+            // Terminal cleanup takes this same lock before publishing failure
+            // and draining tickets. Nothing can queue after the worker exits.
+            if let Some(err) = self.writer_failure() {
+                return Err(WalAppendError::unchanged(err));
+            }
+            Self::check_append_budget(native, admission_start, acknowledgement_timeout)?;
             if q.len() < super::writer_runner::MAX_QUEUE_DEPTH {
-                q.push(super::writer_runner::QueuedWrite::new(buf, ack_tx));
+                let id = {
+                    let mut state = self.sync_state.lock();
+                    Self::check_append_budget(native, admission_start, acknowledgement_timeout)?;
+                    state.submitted_writes += 1;
+                    state.submitted_writes
+                };
+                q.push(super::writer_runner::QueuedWrite::admitted(
+                    buf, ack_tx, effect, id,
+                ));
                 self.queue_cond.notify_one();
 
                 drop(q);
@@ -259,7 +380,12 @@ impl FsWalWriterIo {
                     });
                 }
 
-                return match ack_rx.recv_timeout(acknowledgement_timeout) {
+                let wait_timeout = if native {
+                    acknowledgement_timeout.saturating_sub(admission_start.elapsed())
+                } else {
+                    acknowledgement_timeout
+                };
+                return match ack_rx.recv_timeout(wait_timeout) {
                     Ok(result) => result,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                         let message = format!(
@@ -288,6 +414,11 @@ impl FsWalWriterIo {
             }
 
             let wait_duration = std::time::Duration::from_millis(backoff_ms);
+            let wait_duration = if native {
+                wait_duration.min(acknowledgement_timeout.saturating_sub(admission_start.elapsed()))
+            } else {
+                wait_duration
+            };
             self.queue_cond.wait_for(&mut q, wait_duration);
             drop(q);
 
@@ -308,11 +439,32 @@ impl FsWalWriterIo {
             )),
         ))
     }
+
+    fn check_append_budget(
+        native: bool,
+        started: std::time::Instant,
+        timeout: Duration,
+    ) -> Result<(), WalAppendError> {
+        if native && started.elapsed() >= timeout {
+            return Err(WalAppendError::unchanged(MidgeError::Timeout(format!(
+                "WAL append deadline expired before queue submission after {timeout:?}"
+            ))));
+        }
+        Ok(())
+    }
 }
 
 impl WalWriter for FsWalWriterIo {
     fn set_write_authority(&self, authority: Option<crate::wal::traits::WriteAuthority>) {
         *self.write_authority.write() = authority;
+    }
+
+    fn writer_group_capability(&self) -> Option<&dyn GroupedWalWriter> {
+        self.write_authority
+            .read()
+            .as_ref()
+            .and_then(|authority| authority.groups())
+            .map(|_| self as &dyn GroupedWalWriter)
     }
 
     fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos> {
@@ -321,11 +473,14 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn append_record_accounted(&self, record: &WalRecord) -> Result<WalPos, WalAppendError> {
+        self.admit_records([record])?;
         let mut buf = self.take_buffer();
         buf.clear();
         self.encode_record_frame(record, &mut buf)
             .map_err(WalAppendError::unchanged)?;
-        self.enqueue_encoded_accounted(buf, self.io_timeout)
+        let position = self.enqueue_encoded_accounted(buf, self.io_timeout)?;
+        self.count_records([record]);
+        Ok(position)
     }
 
     fn append_batch(&self, records: &[WalRecord]) -> MidgeResult<WalPos> {
@@ -334,9 +489,80 @@ impl WalWriter for FsWalWriterIo {
     }
 
     fn append_batch_accounted(&self, records: &[WalRecord]) -> Result<WalPos, WalAppendError> {
+        self.append_batch_with_group(records, None)
+    }
+
+    fn sync(&self) -> MidgeResult<()> {
+        self.sync_with_timeout(self.io_timeout)
+    }
+
+    fn sync_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
+        self.sync_with_group(timeout, None)
+    }
+
+    fn current_pos(&self) -> WalPos {
+        self.current_pos.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn tail(&self) -> SegmentTail {
+        self.tail.lock().clone()
+    }
+
+    fn seal_facts(&self, timeout: Duration) -> MidgeResult<SealedFacts> {
+        self.sealing(timeout).map(|footer| footer.sealed_facts())
+    }
+
+    fn write_footer(&self, facts: &SealedFacts, timeout: Duration) -> MidgeResult<()> {
+        let footer = self.sealing(timeout)?;
+        if footer.sealed_facts() != *facts {
+            return Err(MidgeError::Internal(format!(
+                "WAL segment {} changed after its seal facts were taken",
+                self.header.id
+            )));
+        }
+        let frame = footer.encode_frame()?;
+        self.sealed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.enqueue_encoded_accounted(frame, timeout)
+            .map_err(|failure| failure.error)?;
+        self.sync_with_timeout(timeout)
+    }
+}
+
+impl GroupedWalWriter for FsWalWriterIo {
+    fn begin_group(&self, timeout: Duration) -> MidgeResult<crate::lease::WriterEffectGroup> {
+        let authority = self.write_authority.read().clone();
+        authority
+            .as_ref()
+            .and_then(|authority| authority.groups())
+            .ok_or_else(|| MidgeError::Internal("WAL writer has no native group authority".into()))?
+            .begin_group(timeout)
+    }
+    fn append_batch_in_group(
+        &self,
+        records: &[WalRecord],
+        group: &crate::lease::WriterEffectGroup,
+    ) -> Result<WalPos, WalAppendError> {
+        self.append_batch_with_group(records, Some(group))
+    }
+    fn sync_in_group(
+        &self,
+        timeout: Duration,
+        group: &crate::lease::WriterEffectGroup,
+    ) -> MidgeResult<()> {
+        self.sync_with_group(timeout, Some(group))
+    }
+}
+
+impl FsWalWriterIo {
+    fn append_batch_with_group(
+        &self,
+        records: &[WalRecord],
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Result<WalPos, WalAppendError> {
         if records.is_empty() {
             return Ok(self.current_pos());
         }
+        self.admit_records(records)?;
         let mut buf = self.take_buffer();
         buf.clear();
         let mut last_record_offset = 0u64;
@@ -347,26 +573,45 @@ impl WalWriter for FsWalWriterIo {
             self.encode_record_frame(record, &mut buf)
                 .map_err(WalAppendError::unchanged)?;
         }
-        let batch_start = self.enqueue_encoded_accounted(buf, self.io_timeout)?;
+        let batch_start = self.enqueue_in_group(buf, self.io_timeout, group)?;
+        self.count_records(records);
         Ok(batch_start.saturating_add(last_record_offset))
     }
 
-    fn sync(&self) -> MidgeResult<()> {
-        self.sync_with_timeout(self.io_timeout)
-    }
-
-    fn sync_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
+    fn sync_with_group(
+        &self,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<()> {
         if let Some(error) = self.writer_failure() {
             return Err(error);
         }
+        let sync_start = std::time::Instant::now();
+        let authority = self.write_authority.read().clone();
+        let (effect, root) = PendingWriterEffect::admit(authority, group, timeout)?;
+        let native = group.is_some() || root.is_some();
         // Request a durable fsync and wait for writer to perform it.
         // Note: we MUST request fsync even if queue is empty, because data may have
         // been written to the file but not yet fsynced (the writer thread writes
         // asynchronously).
-        let sync_start = std::time::Instant::now();
         let my_sync_id = {
+            let _queue = self.queue.lock();
             let mut s = self.sync_state.lock();
+            if let Some(error) = s.failure() {
+                return Err(error);
+            }
+            if native && sync_start.elapsed() >= timeout {
+                return Err(MidgeError::Timeout(format!(
+                    "WAL sync deadline expired before queue submission after {timeout:?}"
+                )));
+            }
             s.pending_fsyncs = s.pending_fsyncs.saturating_add(1);
+            let request = super::writer_runner::PendingSync {
+                id: s.pending_fsyncs,
+                writes_through: s.submitted_writes,
+                effect,
+            };
+            s.requests.push_back(request);
             s.pending_fsyncs
         };
         // Wake writer so it can perform fsync
@@ -402,10 +647,51 @@ impl WalWriter for FsWalWriterIo {
         }
         Ok(())
     }
+}
 
-    fn current_pos(&self) -> WalPos {
-        self.current_pos.load(std::sync::atomic::Ordering::SeqCst)
-    }
+/// Create `path` holding the header of segment 1 of a history of its own,
+/// synced with its directory entry, for tests that write a segment
+/// directly. A segment file name gives the header its id.
+///
+/// # Errors
+///
+/// The I/O error.
+#[cfg(test)]
+pub(crate) fn create_test_segment(fs: &dyn Fs, path: &str) -> MidgeResult<()> {
+    let path = FsPath::new(path);
+    let name = path.0.rsplit('/').next().unwrap_or_default();
+    let header = SegmentHeader {
+        id: crate::wal::parse_segment_file_name(name).unwrap_or(1),
+        epoch: 0,
+        holder: [0; 16],
+        first_seq: 1,
+        prev: crate::wal::format::ChainLink::GENESIS,
+    };
+    let mut file = fs
+        .open(
+            &path,
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: true,
+                create_new: false,
+                truncate: true,
+            },
+        )
+        .map_err(FsError::into_midge)?;
+    file.write_at(0, bytes::Bytes::copy_from_slice(&header.encode()))
+        .map_err(FsError::into_midge)?;
+    file.sync(crate::io::Durability::Durable)
+        .map_err(FsError::into_midge)?;
+    drop(file);
+    let parent = std::path::Path::new(&path.0)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map_or_else(
+            || FsPath::new("."),
+            |parent| FsPath::new(parent.to_string_lossy()),
+        );
+    fs.sync_dir(&parent, crate::io::Durability::Durable)
+        .map_err(FsError::into_midge)
 }
 
 impl Drop for FsWalWriterIo {
@@ -427,10 +713,14 @@ impl Drop for FsWalWriterIo {
 mod tests {
     use super::*;
     use crate::io::traits::{DirEntry, Metadata};
-    use crate::io::{Durability, File, FsResult, OpenOptions};
+    use crate::io::{Durability, File, FsResult, OpenOptions, ReadFs};
+    use crate::lease::LeaderStore;
     use crate::wal::types::{WalOpKind, WalRecord};
     use bytes::Bytes;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Barrier;
+
+    mod writer_groups;
 
     fn writer_without_background_worker() -> FsWalWriterIo {
         FsWalWriterIo {
@@ -446,6 +736,16 @@ mod tests {
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             current_pos: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             io_timeout: Duration::from_millis(10),
+            header: SegmentHeader {
+                id: 1,
+                epoch: 0,
+                holder: [0; 16],
+                first_seq: 1,
+                prev: crate::wal::format::ChainLink::GENESIS,
+            },
+            tail: Mutex::new(SegmentTail::default()),
+            digest: Arc::new(Mutex::new(SegmentDigest::of(&[]))),
+            sealed: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -454,21 +754,23 @@ mod tests {
         durable_sync_count: Arc<AtomicUsize>,
     }
 
-    impl File for SyncCountingFile {
+    impl crate::io::ReadFile for SyncCountingFile {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             self.inner.read_at(offset, len)
         }
 
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+    }
+
+    impl File for SyncCountingFile {
         fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
             self.inner.write_at(offset, data)
         }
 
         fn append(&mut self, data: Bytes) -> FsResult<u64> {
             self.inner.append(data)
-        }
-
-        fn len(&self) -> FsResult<u64> {
-            self.inner.len()
         }
 
         fn sync(&mut self, durability: Durability) -> FsResult<()> {
@@ -492,28 +794,10 @@ mod tests {
         durable_sync_count: Arc<AtomicUsize>,
     }
 
-    impl Fs for SyncCountingFs {
-        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-            self.inner.open(path, options)
-        }
-
-        fn open_persistent_handle(
-            &self,
-            path: &FsPath,
-            options: OpenOptions,
-        ) -> FsResult<Box<dyn File>> {
-            if let Some(gate) = &self.open_gate {
-                gate.0.send(()).unwrap();
-                gate.1.lock().unwrap().recv().unwrap();
-            }
-            Ok(Box::new(SyncCountingFile {
-                inner: self.inner.open_persistent_handle(path, options)?,
-                durable_sync_count: Arc::clone(&self.durable_sync_count),
-            }))
-        }
-
-        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
-            self.inner.remove_file(path)
+    impl ReadFs for SyncCountingFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -524,12 +808,48 @@ mod tests {
             self.inner.metadata(path)
         }
 
-        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
-            self.inner.create_dir_all(path)
-        }
-
         fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
             self.inner.list_dir(path)
+        }
+    }
+
+    impl crate::io::PersistentHandleFs for SyncCountingFs {
+        fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
+            if let Some(gate) = &self.open_gate {
+                gate.0.send(()).unwrap();
+                gate.1.lock().unwrap().recv().unwrap();
+            }
+            Ok(Box::new(SyncCountingFile {
+                inner: crate::io::open_persistent_handle(&self.inner, path, options)?,
+                durable_sync_count: Arc::clone(&self.durable_sync_count),
+            }))
+        }
+    }
+
+    impl Fs for SyncCountingFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
+        fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+            self.inner
+                .persistent_handle_capability()
+                .map(|_| self as &dyn crate::io::PersistentHandleFs)
+        }
+
+        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, options)
+        }
+
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
         }
 
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -571,11 +891,17 @@ mod tests {
         }
     }
 
-    impl File for GatedNoSpaceFile {
+    impl crate::io::ReadFile for GatedNoSpaceFile {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             self.inner.read_at(offset, len)
         }
 
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+    }
+
+    impl File for GatedNoSpaceFile {
         fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
             Err(self.fail_after_release())
         }
@@ -584,38 +910,15 @@ mod tests {
             Err(self.fail_after_release())
         }
 
-        fn len(&self) -> FsResult<u64> {
-            self.inner.len()
-        }
-
         fn sync(&mut self, durability: Durability) -> FsResult<()> {
             self.inner.sync(durability)
         }
     }
 
-    impl Fs for GatedNoSpaceFs {
-        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-            self.inner.open(path, options)
-        }
-
-        fn open_persistent_handle(
-            &self,
-            path: &FsPath,
-            options: OpenOptions,
-        ) -> FsResult<Box<dyn File>> {
-            Ok(Box::new(GatedNoSpaceFile {
-                inner: self.inner.open_persistent_handle(path, options)?,
-                entered: self
-                    .entered
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone(),
-                release: Arc::clone(&self.release),
-            }))
-        }
-
-        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
-            self.inner.remove_file(path)
+    impl ReadFs for GatedNoSpaceFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -626,12 +929,49 @@ mod tests {
             self.inner.metadata(path)
         }
 
-        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
-            self.inner.create_dir_all(path)
-        }
-
         fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
             self.inner.list_dir(path)
+        }
+    }
+
+    impl crate::io::PersistentHandleFs for GatedNoSpaceFs {
+        fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
+            Ok(Box::new(GatedNoSpaceFile {
+                inner: crate::io::open_persistent_handle(&self.inner, path, options)?,
+                entered: self
+                    .entered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+                release: Arc::clone(&self.release),
+            }))
+        }
+    }
+
+    impl Fs for GatedNoSpaceFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
+        fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+            self.inner
+                .persistent_handle_capability()
+                .map(|_| self as &dyn crate::io::PersistentHandleFs)
+        }
+
+        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, options)
+        }
+
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
         }
 
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -679,30 +1019,23 @@ mod tests {
         // Act
         let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn crate::io::Fs>)?;
 
-        // Assert: construction must actually create the backing WAL file
-        // (not just report success).
-        assert_eq!(writer.current_pos(), 0);
-        assert_eq!(
-            fs.get_file("wal.log"),
-            Some(Vec::new()),
-            "constructing the writer should create the WAL file on disk"
-        );
+        // Assert: construction must actually create the backing segment
+        // with its header (not just report success), and appends follow it.
+        assert_eq!(writer.current_pos(), HEADER_LEN as u64);
+        let created = fs.get_file("wal.log").expect("the WAL file exists");
+        assert_eq!(created.len(), HEADER_LEN);
+        SegmentHeader::decode(&created)?;
 
         let record = WalRecord::new(
             WalOpKind::Put,
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             1,
-            1,
         );
         writer.append_record(&record)?;
         drop(writer);
         let written_len = fs.get_file("wal.log").expect("wal file should exist").len() as u64;
-
-        // Reopening the same file must resume from its existing length
-        // instead of always defaulting current_pos to zero.
-        let reopened = FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn crate::io::Fs>)?;
-        assert_eq!(reopened.current_pos(), written_len);
+        assert!(written_len > HEADER_LEN as u64);
         Ok(())
     }
 
@@ -763,7 +1096,6 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             1,
-            1,
         );
 
         // Act
@@ -804,7 +1136,6 @@ mod tests {
             Bytes::from_static(b"close-key"),
             Some(Bytes::from_static(b"close-value")),
             1,
-            1,
         );
         writer.append_record(&record)?;
         let appended_pos = writer.current_pos();
@@ -833,15 +1164,14 @@ mod tests {
             Bytes::from_static(b"k"),
             Some(Bytes::from_static(b"v")),
             1,
-            7,
         );
 
         // Act
         let pos = writer.append_record(&record)?;
 
-        // Assert
-        assert_eq!(pos, 0);
-        assert!(writer.current_pos() > 0);
+        // Assert: the first record follows the segment header.
+        assert_eq!(pos, HEADER_LEN as u64);
+        assert!(writer.current_pos() > HEADER_LEN as u64);
         Ok(())
     }
 
@@ -853,7 +1183,6 @@ mod tests {
             Bytes::from_static(b"key"),
             Some(Bytes::from_static(b"value")),
             42,
-            7,
         );
         record.txn_id = Some(9);
         let payload = crate::wal::encoding::encode(&record)?;
@@ -878,16 +1207,19 @@ mod tests {
             .activate(1, std::time::Instant::now() + Duration::from_mins(1))
             .unwrap();
         let check = Arc::clone(&validity);
+        create_test_segment(fs.as_ref(), "wal.log")?;
         let writer = FsWalWriterIo::new_with_authority(
             "wal.log",
             fs.clone(),
             Duration::from_secs(5),
             crate::telemetry::CounterSink::default(),
-            Some(Arc::new(move || {
+            Some(Arc::new(move |operation: &mut dyn FnMut()| {
                 check
                     .remaining(1)
                     .map(|_| ())
-                    .map_err(|error| error.into_validation_error("physical WAL fsync authority"))
+                    .map_err(|error| error.into_validation_error("physical WAL fsync authority"))?;
+                operation();
+                Ok(())
             })),
         )?;
         validity.expire_for_test();
@@ -896,6 +1228,167 @@ mod tests {
         // Assert
         assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
         assert_eq!(fs.durable_sync_count.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn should_hold_filesystem_writer_fence_around_background_append() -> MidgeResult<()> {
+        // Arrange
+        let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+        let store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+            Arc::clone(&fs),
+            crate::lease::LeaseClock::default(),
+        ));
+        let predecessor = store.acquire_leadership("predecessor").unwrap();
+        let predecessor_epoch = predecessor.epoch;
+        create_test_segment(fs.as_ref(), "wal.log")?;
+        let entered = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let authority_store = Arc::clone(&store);
+        let authority_entered = Arc::clone(&entered);
+        let authority_resume = Arc::clone(&resume);
+        let authority_calls = Arc::clone(&calls);
+        let writer = Arc::new(FsWalWriterIo::new_with_authority(
+            "wal.log",
+            Arc::clone(&fs),
+            Duration::from_secs(5),
+            crate::telemetry::CounterSink::default(),
+            Some(Arc::new(move |operation: &mut dyn FnMut()| {
+                let call = authority_calls.fetch_add(1, Ordering::SeqCst);
+                let mut run = || {
+                    if call >= 2 {
+                        authority_entered.wait();
+                        authority_resume.wait();
+                    }
+                    operation();
+                };
+                authority_store
+                    .with_writer_epoch(
+                        "predecessor",
+                        predecessor_epoch,
+                        Duration::from_secs(1),
+                        &mut run,
+                    )
+                    .map_err(|error| error.into_validation_error("background WAL append"))
+            })),
+        )?);
+        let append_writer = Arc::clone(&writer);
+
+        // Act: pause inside the actual background write while its epoch guard
+        // is held, then try takeover from a second store handle.
+        let append = std::thread::spawn(move || {
+            append_writer.append_record(&WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"fenced-key"),
+                Some(Bytes::from_static(b"value")),
+                1,
+            ))
+        });
+        entered.wait();
+        let successor_attempt = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || store.acquire_leadership("successor"))
+        };
+        resume.wait();
+        append.join().expect("append thread completed")?;
+        let successor = successor_attempt
+            .join()
+            .expect("successor attempt completed")
+            .unwrap();
+
+        // Assert
+        assert!(successor.epoch > predecessor.epoch);
+        drop(writer);
+        Ok(())
+    }
+
+    #[test]
+    fn should_complete_same_epoch_reservation_while_background_append_holds_native_fence(
+    ) -> MidgeResult<()> {
+        // Arrange: the engine's WAL writer and event loop share one filesystem
+        // lease and can request effects concurrently in the same epoch.
+        let directory = tempfile::tempdir().expect("temporary database root");
+        let fs: Arc<dyn Fs> =
+            Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+        let store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+            Arc::clone(&fs),
+            crate::lease::LeaseClock::default(),
+        ));
+        let lease = store.acquire_leadership("holder").unwrap();
+        let epoch = lease.epoch;
+        let wal = crate::io::subdirectory(Arc::clone(&fs), crate::wal::WAL_DIR);
+        let fence = crate::runtime::wal_history::WalHistoryFence::new(
+            Arc::clone(&store) as Arc<dyn LeaderStore>,
+            "holder".into(),
+            epoch,
+            Duration::from_secs(2),
+        );
+        let mut history = crate::runtime::wal_history::WalHistory::open_with_fence(
+            Arc::clone(&wal),
+            1,
+            epoch,
+            &fence,
+        )?;
+        let writer = FsWalWriterIo::new_with_counters(
+            &crate::wal::segment_file_name(1),
+            Arc::clone(&wal),
+            Duration::from_secs(2),
+            crate::telemetry::CounterSink::default(),
+        )?;
+        let entered = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let first_effect = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let authority_store = Arc::clone(&store);
+        let authority_entered = Arc::clone(&entered);
+        let authority_resume = Arc::clone(&resume);
+        let authority_first_effect = Arc::clone(&first_effect);
+        writer.set_write_authority(Some(Arc::new(move |operation: &mut dyn FnMut()| {
+            let mut run = || {
+                if authority_first_effect.swap(false, Ordering::AcqRel) {
+                    authority_entered.wait();
+                    authority_resume.wait();
+                }
+                operation();
+            };
+            authority_store
+                .with_writer_epoch("holder", epoch, Duration::from_secs(2), &mut run)
+                .map_err(|error| error.into_validation_error("background WAL append"))
+        })));
+        let writer = Arc::new(writer);
+        let append_writer = Arc::clone(&writer);
+        let append = std::thread::spawn(move || {
+            append_writer.append_record(&WalRecord::new(
+                WalOpKind::Put,
+                Bytes::from_static(b"concurrent-key"),
+                Some(Bytes::from_static(b"value")),
+                1,
+            ))
+        });
+        entered.wait();
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let reserve = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal reservation start");
+            result_tx
+                .send(history.reserve(10))
+                .expect("send reservation result");
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("reservation thread started");
+
+        // Act: same-epoch effects share the continuously held native grant.
+        // Reservation finishes before the background append is resumed.
+        let early_result = result_rx.recv_timeout(Duration::from_secs(1));
+        resume.wait();
+        append.join().expect("background append thread completed")?;
+        reserve.join().expect("reservation thread completed");
+
+        // Assert
+        early_result.expect("reservation completed while append was paused")?;
+        drop(writer);
         Ok(())
     }
 
@@ -913,16 +1406,19 @@ mod tests {
             .activate(1, std::time::Instant::now() + Duration::from_mins(1))
             .unwrap();
         let check = Arc::clone(&validity);
+        create_test_segment(fs.as_ref(), "wal.log")?;
         let writer = Arc::new(FsWalWriterIo::new_with_authority(
             "wal.log",
             fs.clone(),
             Duration::from_secs(10),
             crate::telemetry::CounterSink::default(),
-            Some(Arc::new(move || {
+            Some(Arc::new(move |operation: &mut dyn FnMut()| {
                 check
                     .remaining(1)
                     .map(|_| ())
-                    .map_err(|error| error.into_validation_error("queued WAL authority"))
+                    .map_err(|error| error.into_validation_error("queued WAL authority"))?;
+                operation();
+                Ok(())
             })),
         )?);
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -932,7 +1428,6 @@ mod tests {
                 WalOpKind::Put,
                 Bytes::from_static(b"key"),
                 Some(Bytes::from_static(b"value")),
-                1,
                 1,
             ))
         });
@@ -953,8 +1448,11 @@ mod tests {
                 unchanged: true
             })
         ));
-        assert_eq!(fs.metadata(&FsPath::new("wal.log")).unwrap().len, 0);
-        assert_eq!(writer.current_pos(), 0);
+        assert_eq!(
+            fs.metadata(&FsPath::new("wal.log")).unwrap().len,
+            HEADER_LEN as u64
+        );
+        assert_eq!(writer.current_pos(), HEADER_LEN as u64);
         Ok(())
     }
 
@@ -983,7 +1481,6 @@ mod tests {
                     WalOpKind::Put,
                     Bytes::from_static(b"key"),
                     Some(Bytes::from_static(b"value")),
-                    1,
                     1,
                 ))
             })

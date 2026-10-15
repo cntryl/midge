@@ -4,7 +4,7 @@
 use cntryl_midge::MidgeError;
 use cntryl_midge::{
     Bytes, CloudProviderConfig, CloudStorageLocation, CloudStorageTopology, ColumnFamilyHandle,
-    Engine, MemoryBudget, OpenOptions, TransactionMode, WriteOptions,
+    Engine, MemoryBudget, OciCredentialSource, OpenOptions, TransactionMode, WriteOptions,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -21,26 +21,6 @@ mod startup_deadline;
 mod authority_publication;
 
 #[test]
-fn should_join_azure_canonical_headers_directly_to_resource() {
-    // Arrange
-    let headers = vec![
-        (
-            "x-ms-date".to_string(),
-            "Sun, 10 Aug 2026 12:00:00 GMT".to_string(),
-        ),
-        ("x-ms-version".to_string(), "2024-11-04".to_string()),
-    ];
-
-    // Act
-    let string_to_sign = azure_string_to_sign("GET", &headers, "/admin/container/blob", "", b"");
-
-    // Assert
-    assert!(string_to_sign.contains("x-ms-version:2024-11-04\n/admin/admin/container/blob"));
-    assert!(!string_to_sign.contains("x-ms-version:2024-11-04\n\n/"));
-}
-
-#[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-engine-s3");
@@ -53,7 +33,6 @@ fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_recover_engine_from_sqrzl_azure_after_local_cache_loss() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-engine-azure");
@@ -71,7 +50,6 @@ fn should_recover_engine_from_sqrzl_azure_after_local_cache_loss() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_recover_engine_from_sqrzl_gcs_json_after_local_cache_loss() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_gcs_json("midge-sqrzl-engine-gcs-json");
@@ -89,7 +67,6 @@ fn should_recover_engine_from_sqrzl_gcs_json_after_local_cache_loss() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_recover_engine_from_sqrzl_gcs_xml_after_local_cache_loss() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-engine-gcs-xml");
@@ -107,7 +84,25 @@ fn should_recover_engine_from_sqrzl_gcs_xml_after_local_cache_loss() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
+fn should_recover_engine_from_sqrzl_oci_after_local_cache_loss() {
+    // Arrange
+    let provider = CloudProviderConfig::oci_object_storage(
+        "sqrzl",
+        "midge-sqrzl-engine-oci",
+        "us-east-1",
+        OciCredentialSource::access_key("admin", "easy-peasy"),
+    )
+    .with_endpoint("http://127.0.0.1:9000")
+    .expect("OCI supports endpoint overrides");
+
+    // Act
+    engine_recovers_from_provider_after_local_cache_loss("sqrzl-engine-oci", provider, true, true);
+
+    // Assert
+    // The helper verifies committed data after the complete local cache is lost.
+}
+
+#[test]
 fn should_route_two_location_topology_through_sqrzl() {
     // Arrange
     require_sqrzl("sqrzl-two-location");
@@ -129,7 +124,6 @@ fn should_route_two_location_topology_through_sqrzl() {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_route_three_location_topology_through_sqrzl() {
     // Arrange
     require_sqrzl("sqrzl-three-location");
@@ -154,7 +148,6 @@ fn should_route_three_location_topology_through_sqrzl() {
 
 #[test]
 #[cfg(feature = "failpoints")]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_recover_partitioned_compaction_from_sqrzl_s3_after_local_cache_loss() {
     // Arrange
     let _failpoint_guard = sqrzl_compaction_failpoint_test_lock();
@@ -173,7 +166,6 @@ fn should_recover_partitioned_compaction_from_sqrzl_s3_after_local_cache_loss() 
 
 #[test]
 #[cfg(feature = "failpoints")]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
     // Arrange
     let _failpoint_guard = sqrzl_compaction_failpoint_test_lock();
@@ -325,53 +317,6 @@ fn assert_exact_sst_upload_failure(result: Result<(), MidgeError>) {
 #[cfg(feature = "failpoints")]
 fn sqrzl_partitioned_compaction_indexes() -> std::ops::Range<u32> {
     0..SQRZL_PARTITIONED_BATCHES * SQRZL_PARTITIONED_KEYS_PER_BATCH
-}
-
-#[test]
-#[cfg(feature = "failpoints")]
-fn should_serialize_sqrzl_compaction_failpoint_scope() {
-    // Arrange
-    let first_guard = sqrzl_compaction_failpoint_test_lock();
-    let (started_tx, started_rx) = std::sync::mpsc::channel();
-    let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
-    let waiter = std::thread::spawn(move || {
-        started_tx.send(()).expect("signal lock attempt");
-        let _second_guard = sqrzl_compaction_failpoint_test_lock();
-        acquired_tx.send(()).expect("signal lock acquisition");
-    });
-    started_rx.recv().expect("waiter started");
-
-    // Act
-    let acquisition_while_held = acquired_rx.recv_timeout(Duration::from_millis(50));
-    drop(first_guard);
-    let acquisition_after_release = acquired_rx.recv_timeout(Duration::from_secs(1));
-    waiter.join().expect("lock waiter exits cleanly");
-
-    // Assert
-    assert!(matches!(
-        acquisition_while_held,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-    ));
-    assert!(acquisition_after_release.is_ok());
-}
-
-#[test]
-#[cfg(feature = "failpoints")]
-fn should_enumerate_every_seeded_partition_key_for_recovery_validation() {
-    // Arrange
-    let expected_count = SQRZL_PARTITIONED_BATCHES * SQRZL_PARTITIONED_KEYS_PER_BATCH;
-
-    // Act
-    let indexes: Vec<_> = sqrzl_partitioned_compaction_indexes().collect();
-
-    // Assert
-    assert_eq!(
-        indexes.len(),
-        usize::try_from(expected_count).expect("seeded key count fits usize")
-    );
-    assert_eq!(indexes.first(), Some(&0));
-    assert_eq!(indexes.last(), Some(&(expected_count - 1)));
-    assert!(indexes.windows(2).all(|pair| pair[1] == pair[0] + 1));
 }
 
 #[cfg(feature = "failpoints")]

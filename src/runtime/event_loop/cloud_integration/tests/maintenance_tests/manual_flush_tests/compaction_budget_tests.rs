@@ -18,6 +18,7 @@ use crate::runtime::actors::compaction::publication::{
 use crate::storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
+use crate::storage::cloud::{CloudReadCapability, CloudWriteCapability};
 
 mod authority_timeout_tests;
 mod deadline_owner_tests;
@@ -176,7 +177,7 @@ impl PhasedMetadataBackend {
     }
 }
 
-impl CloudBackend for PhasedMetadataBackend {
+impl crate::storage::cloud::CloudReadCapability for PhasedMetadataBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_get(key, callback);
     }
@@ -197,7 +198,9 @@ impl CloudBackend for PhasedMetadataBackend {
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         self.inner.submit_get_range(key, start, end, callback);
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for PhasedMetadataBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -207,19 +210,27 @@ impl CloudBackend for PhasedMetadataBackend {
     ) {
         self.conditional_put(key, data, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for PhasedMetadataBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for PhasedMetadataBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for PhasedMetadataBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_head(key, callback);
     }
 }
+
+impl CloudBackend for PhasedMetadataBackend {}
 
 #[derive(Debug)]
 struct PhaseEvidence {
@@ -256,7 +267,7 @@ impl BudgetFixture {
                 .retain(|file| file.cf_id == 0);
         }
         el.state.set_compaction_enabled(false);
-        el.runtime_response_timeout = CALLER_BUDGET;
+        el.routing.runtime_response_timeout = CALLER_BUDGET;
         crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
             .map_err(MidgeError::Internal)?;
         let inputs = el
@@ -267,7 +278,7 @@ impl BudgetFixture {
             .map(|file| {
                 Ok((
                     file.name.clone(),
-                    std::fs::read(el.state.sst_dir.join(&file.name))?,
+                    std::fs::read(el.state.host_sst_dir().join(&file.name))?,
                 ))
             })
             .collect::<MidgeResult<Vec<_>>>()?;
@@ -288,15 +299,15 @@ impl BudgetFixture {
         let token = Arc::clone(&lease)
             .try_acquire()
             .map_err(|error| error.into_validation_error("fixture lease acquisition"))?;
-        el.fencing.writer_epoch = lease.epoch();
-        el.fencing.leader_holder_id = Some(lease.holder_id());
-        el.fencing.leader_store = lease.get_leader_store();
-        el.fencing.lease_validity = Some(lease.lease_validity());
-        el.fencing.lease_healthy = Some(Arc::new(AtomicBool::new(true)));
-        el.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&cloud));
+        el.authority.fencing.writer_epoch = lease.epoch();
+        el.authority.fencing.leader_holder_id = Some(lease.holder_id());
+        el.authority.fencing.leader_store = lease.get_leader_store();
+        el.authority.fencing.lease_validity = Some(lease.lease_validity());
+        el.authority.fencing.lease_healthy = Some(Arc::new(AtomicBool::new(true)));
+        el.actors.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&cloud));
         let (publication_tx, publication_rx) = crossbeam::channel::unbounded();
-        el.compaction_publish_actor = CompactionPublishActor::new(publication_tx, false)?;
-        el.compaction_publish_result_rx = publication_rx;
+        el.actors.compaction_publish_actor = CompactionPublishActor::new(publication_tx, false)?;
+        el.publication.compaction_publish_result_rx = publication_rx;
         let mut fixture = Self {
             el,
             compute,
@@ -322,9 +333,8 @@ impl BudgetFixture {
             crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
                 cloud: &self.cloud,
                 fs: self.el.state.fs.as_ref(),
-                publication_lock: &self.el.metadata_publication_lock,
+                publication_lock: &self.el.publication.metadata_publication_lock,
                 lock_wait_budget: PROVIDER_CAP,
-                local_manifest_sequence: self.el.state.manifest.last_persisted_sequence,
                 deadline: &deadline,
                 authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
                     store: store.as_ref(),
@@ -347,11 +357,12 @@ impl BudgetFixture {
     fn start_manual(&mut self) -> (Instant, crossbeam::channel::Receiver<RuntimeResponse>) {
         // Capture only after all fixture/lease/baseline work has finished.
         let started = Instant::now();
-        let response = self
-            .el
-            .router
-            .register_at_for_test(MANUAL_REQUEST, "CompactAll", started);
-        self.el.cloud_coordinator.cloud_maintenance.next =
+        let response =
+            self.el
+                .routing
+                .router
+                .register_at_for_test(MANUAL_REQUEST, "CompactAll", started);
+        self.el.actors.cloud_coordinator.cloud_maintenance.next =
             crate::runtime::event_loop::cloud_maintenance::MaintenanceTask::Compaction;
         CompactionCoordinator::compact_all(&mut self.el, MANUAL_REQUEST);
         (started, response)
@@ -383,6 +394,7 @@ impl BudgetFixture {
     fn complete_actual_phase(&mut self, next_hold: Option<ReadHold>) -> PhaseEvidence {
         let completion = self
             .el
+            .publication
             .compaction_publish_result_rx
             .recv_timeout(FIXTURE_WAIT)
             .expect("actual publication worker completion");
@@ -410,6 +422,7 @@ impl BudgetFixture {
         crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
             &self.cloud,
             store.as_ref(),
+            &crate::io::real::test_root(directory.path()),
             directory.path(),
             crate::config::RecoveryPolicy::Strict,
         )?;
@@ -421,6 +434,7 @@ impl BudgetFixture {
         for output in &self.outputs {
             let reader = self
                 .el
+                .actors
                 .compaction_actor
                 .open_sst_reader(&Path::new("sst").join(output))?;
             rows.extend(reader.scan_range_raw_state(None, None)?);
@@ -448,7 +462,7 @@ impl BudgetFixture {
             while let Ok(message) = self.compute.try_recv() {
                 self.el.process_one(message, &messages);
             }
-            if let Some(message) = self.el.pending_msg.take() {
+            if let Some(message) = self.el.routing.pending_msg.take() {
                 self.el.process_restored_one(message, &messages);
             }
             self.el.run_request_fairness_slot();
@@ -468,9 +482,13 @@ impl BudgetFixture {
         self.backend.release.store(true, Ordering::Release);
         // A publisher may still be reading accepted output identity. Join it
         // before actor cancellation can settle bookkeeping or remove scratch.
-        self.el.compaction_publish_actor.shutdown_and_join()?;
+        self.el
+            .actors
+            .compaction_publish_actor
+            .shutdown_and_join()?;
         let storage = self
             .el
+            .actors
             .cloud_coordinator
             .hybrid_storage
             .as_ref()
@@ -479,9 +497,10 @@ impl BudgetFixture {
                     as Arc<dyn crate::runtime::actors::compaction::CompactionStorage>
             });
         self.el
+            .actors
             .compaction_actor
             .cancel_and_join_worker(&mut self.el.state, storage.as_ref());
-        self.el.gc_actor.shutdown_workers();
+        self.el.actors.gc_actor.shutdown_workers();
         self.el.join_cloud_wal_prune_worker();
         self.stopped = true;
         self.lease
@@ -547,7 +566,7 @@ fn complete_manual_case() -> MidgeResult<()> {
     let committed = fixture.committed_manifest();
     let outcome = fixture.drive_manual_response(&response);
     let route_state = describe_settle_state(&fixture.el);
-    fixture.el.gc_actor.shutdown_workers();
+    fixture.el.actors.gc_actor.shutdown_workers();
     let input_retired: Vec<_> = fixture
         .inputs
         .iter()
@@ -563,6 +582,7 @@ fn complete_manual_case() -> MidgeResult<()> {
     );
     let quotas = fixture
         .el
+        .actors
         .cloud_coordinator
         .hybrid_storage
         .as_ref()
@@ -653,7 +673,7 @@ fn second_phase_timeout_case() -> MidgeResult<()> {
     let rows = fixture.exact_output_rows();
     let committed = fixture.committed_manifest();
     let outcome = fixture.drive_manual_response(&response);
-    fixture.el.gc_actor.shutdown_workers();
+    fixture.el.actors.gc_actor.shutdown_workers();
     let names: Vec<_> = fixture
         .inputs
         .iter()

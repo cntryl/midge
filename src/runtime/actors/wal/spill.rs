@@ -58,7 +58,7 @@ impl WalActor {
             self.validate_assertion_only_spill(state, &assertions, start_sequence)?;
             return Ok((state.sequence, 0, false));
         }
-        Self::validate_spilled_transaction(
+        let cf_id = Self::validate_spilled_transaction(
             state,
             self.read_resources.clone(),
             source,
@@ -66,13 +66,14 @@ impl WalActor {
             start_sequence,
             conflict_policy,
         )?;
+        Self::ensure_family_accepts_writes(state, cf_id)?;
 
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
         self.ensure_write_durability_available(state, effective_durability)?;
         if self.max_replayable_txn_bytes.is_some() {
             self.ensure_replayable_transaction(Self::spilled_replay_bytes(source)?)?;
         }
-        let sequence_plan = Self::allocate_transaction_sequences(state, source.len())?;
+        let sequence_plan = Self::allocate_transaction_sequences(state, source.len(), cf_id)?;
         let commit_time_millis = state.observed_time_millis();
         source.for_each(|ordinal, op| {
             let sequence = sequence_plan
@@ -88,15 +89,29 @@ impl WalActor {
         })?;
         crate::failpoints::fail_point!("midge::wal::after_spilled_preparation");
         self.ensure_lease_validity()?;
+        let admitted = self.admit_spilled_wal(
+            source,
+            &sequence_plan,
+            effective_durability,
+            commit_time_millis,
+        )?;
+        let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
         let mut wal_may_have_changed = false;
-        let (wal_bytes, wal_records) = match self.append_spilled_wal_records(
+        let append_result = self.append_spilled_wal_records(
             request_id,
             source,
             &sequence_plan,
             effective_durability,
             commit_time_millis,
             &mut wal_may_have_changed,
-        ) {
+        );
+        // An ambiguous writer failure may still land bytes after it returns.
+        // Keep the full reservation until restart reconciles the poisoned WAL;
+        // its current position is not proof of the final physical footprint.
+        if append_result.is_ok() || !wal_may_have_changed {
+            self.settle_wal_append(admitted, previous_position);
+        }
+        let (wal_bytes, wal_records) = match append_result {
             Ok(result) => result,
             Err(error) => {
                 if wal_may_have_changed {
@@ -105,7 +120,11 @@ impl WalActor {
                         format!("spilled transaction WAL append failed: {error}"),
                     );
                 }
-                return Err(error);
+                return Err(if wal_may_have_changed {
+                    Self::appended_unit_error(error)
+                } else {
+                    error
+                });
             }
         };
         state.wal.pending_writes = state.wal.pending_writes.saturating_add(wal_records);
@@ -113,32 +132,13 @@ impl WalActor {
         self.pending_sync_count = self.pending_sync_count.saturating_add(wal_records);
         self.bytes_since_sync = self.bytes_since_sync.saturating_add(wal_bytes);
 
-        self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)?;
-        self.ensure_lease_validity()?;
-        if let Err(error) = self.apply_spilled_transaction_ops(
+        self.make_durable_and_apply_spill(
             state,
             source,
             &sequence_plan,
-            effective_durability,
-            commit_time_millis,
-        ) {
-            // The WAL already holds the whole transaction, so recovery will
-            // apply all of it. Some ops may be in the memtable now; stop the
-            // writer rather than keep serving a partially applied commit.
-            let message = format!(
-                "spilled transaction {} is durably logged but failed to apply to memtables; \
-                 it will be fully applied on restart: {error}",
-                sequence_plan.txn_id
-            );
-            self.fence_transition(state, message.clone());
-            state.mark_persistence_anomaly();
-            // Durably logged but not applied: a restart applies it (#537).
-            return Err(if matches!(error, MidgeError::Fenced(_)) {
-                error
-            } else {
-                MidgeError::RecoveryFailed(message)
-            });
-        }
+            (effective_durability, commit_time_millis),
+            wal_records > 0,
+        )?;
 
         let deferred = matches!(
             effective_durability,
@@ -151,6 +151,53 @@ impl WalActor {
             "streamed spilled WAL transaction apply"
         );
         Ok((sequence_plan.commit_seq, source.len(), deferred))
+    }
+
+    /// Make an appended spilled unit durable under its policy, then apply it.
+    /// `logged` says whether its WAL frames were appended.
+    fn make_durable_and_apply_spill(
+        &mut self,
+        state: &mut RuntimeState,
+        source: &crate::runtime::transaction_spill::TransactionOpSource,
+        sequence_plan: &TxnSequencePlan,
+        (effective_durability, commit_time_millis): (DurabilityPolicy, u64),
+        logged: bool,
+    ) -> MidgeResult<()> {
+        // A failed sync fences the WAL. None of the unit is in the memtables,
+        // so replay keeps or drops it whole whatever frontier a later flush
+        // publishes; an appended unit's outcome is unknown.
+        self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)
+            .map_err(|error| {
+                if logged {
+                    Self::appended_unit_error(error)
+                } else {
+                    error
+                }
+            })?;
+        // The WAL now holds the unit and `state.sequence` is past its commit.
+        // A lease that lapsed since is a failed apply.
+        let mut applied_ops = 0_usize;
+        if let Err(error) = self.ensure_lease_validity().and_then(|()| {
+            self.apply_spilled_transaction_ops(
+                state,
+                source,
+                sequence_plan,
+                effective_durability,
+                commit_time_millis,
+                &mut applied_ops,
+            )
+        }) {
+            return Err(self.fail_unapplied_transactions(
+                state,
+                &[sequence_plan],
+                super::UnappliedOutcome {
+                    logged,
+                    partly_applied: applied_ops > 0,
+                },
+                error,
+            ));
+        }
+        Ok(())
     }
 
     fn validate_assertion_only_spill(
@@ -175,7 +222,17 @@ impl WalActor {
         assertions: &[crate::runtime::KeyAssertion],
         start_sequence: u64,
         conflict_policy: crate::runtime::ConflictPolicy,
-    ) -> MidgeResult<()> {
+    ) -> MidgeResult<crate::types::ColumnFamilyId> {
+        // A transaction writes one family; check before anything is read.
+        let mut families = Vec::new();
+        source.for_each(|_, op| {
+            let cf_id = crate::runtime::transaction_spill::op_cf_id(&op);
+            if !families.contains(&cf_id) {
+                families.push(cf_id);
+            }
+            Ok(())
+        })?;
+        let family = Self::transaction_family(families.into_iter())?;
         // Assertions are enforced regardless of ConflictPolicy — see the
         // in-memory counterpart in validate_transaction_preconditions.
         // One snapshot per family serves assertions and conflict checks.
@@ -231,7 +288,7 @@ impl WalActor {
                 "transaction spill operation count does not match its header".to_string(),
             ));
         }
-        Ok(())
+        Ok(family)
     }
 
     fn ensure_no_write_conflict_for_op(
@@ -286,6 +343,50 @@ impl WalActor {
         Ok(())
     }
 
+    /// Reserve the entire streamed unit before writing its first frame. The
+    /// sizing pass stays bounded to one operation, just like the append pass.
+    fn admit_spilled_wal(
+        &self,
+        source: &crate::runtime::transaction_spill::TransactionOpSource,
+        plan: &TxnSequencePlan,
+        durability: DurabilityPolicy,
+        commit_time_millis: u64,
+    ) -> MidgeResult<u64> {
+        let Some(storage) = self.storage_budget.as_ref().filter(|storage| {
+            self.writer().is_some()
+                && storage.ephemeral_sst_cache_enabled()
+                && durability != DurabilityPolicy::BestEffort
+        }) else {
+            return Ok(0);
+        };
+        let mut bytes = 0_u64;
+        let mut add = |record: &WalRecord| -> MidgeResult<()> {
+            let frame = crate::wal::encoding::record_frame_size_bound(record)?;
+            bytes = bytes
+                .checked_add(u64::try_from(frame).unwrap_or(u64::MAX))
+                .ok_or_else(|| MidgeError::ResourceLimit("WAL transaction size overflow".into()))?;
+            Ok(())
+        };
+        for (kind, sequence) in [
+            (WalOpKind::TxnBegin, plan.begin_seq),
+            (WalOpKind::TxnCommit, plan.commit_seq),
+        ] {
+            let mut record =
+                WalRecord::new_cf(plan.cf_id, kind, Bytes::from_static(b"txn"), None, sequence);
+            record.txn_id = Some(plan.txn_id);
+            add(&record)?;
+        }
+        source.for_each(|ordinal, op| {
+            let sequence = plan.first_op_seq.checked_add(ordinal).ok_or_else(|| {
+                MidgeError::ResourceLimit("transaction spill sequence allocation overflow".into())
+            })?;
+            let op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
+            add(&op.wal_record(plan.txn_id))
+        })?;
+        storage.admit_local_wal_bytes(bytes)?;
+        Ok(bytes)
+    }
+
     fn append_spilled_wal_records(
         &mut self,
         request_id: u64,
@@ -300,19 +401,17 @@ impl WalActor {
         }
 
         let mut begin = WalRecord::new_cf(
-            0,
+            sequence_plan.cf_id,
             WalOpKind::TxnBegin,
             Bytes::from_static(b"txn"),
             None,
             sequence_plan.begin_seq,
-            self.current_epoch,
         );
         begin.txn_id = Some(sequence_plan.txn_id);
         let mut total_bytes = begin.estimated_size();
         let append_started_at = Instant::now();
         self.append_spilled_record(&begin, wal_may_have_changed)?;
 
-        let epoch = self.current_epoch;
         source.for_each(|ordinal, op| {
             let sequence = sequence_plan
                 .first_op_seq
@@ -323,7 +422,7 @@ impl WalActor {
                     )
                 })?;
             let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
-            let record = apply_op.wal_record(sequence_plan.txn_id, epoch);
+            let record = apply_op.wal_record(sequence_plan.txn_id);
             total_bytes = total_bytes.saturating_add(record.estimated_size());
             self.append_spilled_record(&record, wal_may_have_changed)
         })?;
@@ -336,19 +435,19 @@ impl WalActor {
             ))
         );
         let mut commit = WalRecord::new_cf(
-            0,
+            sequence_plan.cf_id,
             WalOpKind::TxnCommit,
             Bytes::from_static(b"txn"),
             None,
             sequence_plan.commit_seq,
-            self.current_epoch,
         );
         commit.txn_id = Some(sequence_plan.txn_id);
         total_bytes = total_bytes.saturating_add(commit.estimated_size());
         self.append_spilled_record(&commit, wal_may_have_changed)?;
         self.finish_append_instrumentation(total_bytes as u64, append_started_at.elapsed());
-        self.record_segment_sequence(sequence_plan.commit_seq);
-        WalTransitionBoundary::AfterAppendBeforeAccounting.check()?;
+        if let Err(error) = WalTransitionBoundary::AfterAppendBeforeAccounting.check() {
+            return Err(Self::appended_unit_error(error));
+        }
         crate::failpoints::fail_point!("midge::wal::spilled_after_append_batch_before_sync");
         tracing::trace!(request_id, "appended split transaction WAL frames");
         Ok((total_bytes, source.len().saturating_add(2)))
@@ -359,26 +458,17 @@ impl WalActor {
         record: &WalRecord,
         wal_may_have_changed: &mut bool,
     ) -> MidgeResult<()> {
-        let admitted = self.admit_wal_records(std::slice::from_ref(record))?;
-        let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
-        if let Err(error) = self.ensure_lease_validity() {
-            self.settle_wal_append(admitted, previous_position);
-            return Err(error);
-        }
+        self.ensure_lease_validity()?;
         let Some(writer) = self.writer_mut() else {
-            if let Some(storage) = &self.storage_budget {
-                storage.settle_local_wal_admission(admitted, 0);
-            }
             return Err(MidgeError::Internal(
                 "transaction WAL writer disappeared during append".to_string(),
             ));
         };
         if let Err(failure) = writer.append_record_accounted(record) {
             *wal_may_have_changed |= !failure.unchanged;
-            return Err(self.settle_failed_wal_append(admitted, failure));
+            return Err(self.settle_failed_wal_append(0, failure));
         }
         *wal_may_have_changed = true;
-        self.settle_wal_append(admitted, previous_position);
         Ok(())
     }
 
@@ -389,6 +479,7 @@ impl WalActor {
         sequence_plan: &TxnSequencePlan,
         effective_durability: DurabilityPolicy,
         commit_time_millis: u64,
+        applied_ops: &mut usize,
     ) -> MidgeResult<()> {
         source.for_each(|ordinal, op| {
             crate::failpoints::fail_point!("midge::wal::spilled_apply_op", |_| Err(
@@ -399,7 +490,9 @@ impl WalActor {
             let sequence = sequence_plan.first_op_seq.saturating_add(ordinal);
             let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
             self.ensure_lease_validity()?;
-            Self::apply_transaction_op_to_memtable(state, apply_op)
+            Self::apply_transaction_op_to_memtable(state, apply_op)?;
+            *applied_ops += 1;
+            Ok(())
         })?;
         tracing::trace!(
             commit_sequence = sequence_plan.commit_seq,

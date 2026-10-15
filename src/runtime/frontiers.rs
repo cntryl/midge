@@ -55,8 +55,27 @@ impl WalFrontiers {
     }
 
     /// Record cloud durability through `sequence`.
+    #[cfg(test)]
     pub(crate) fn advance_cloud_to(&mut self, sequence: u64) {
         self.cloud_durable = self.cloud_durable.max(sequence);
+    }
+
+    /// Record cloud durability through `sequence`, then over the sequences
+    /// no WAL record holds (#843): those after `open_prev_last`, the last
+    /// record before the open segment, and below `open_first_seq`, which an
+    /// earlier process reserved or no record took before a rotation. Once
+    /// the cloud holds every record through the segment before the open one,
+    /// it holds every record below the open one.
+    pub(crate) fn advance_cloud_over(
+        &mut self,
+        sequence: u64,
+        open_prev_last: u64,
+        open_first_seq: u64,
+    ) {
+        self.cloud_durable = self.cloud_durable.max(sequence);
+        if self.cloud_durable >= open_prev_last {
+            self.cloud_durable = self.cloud_durable.max(open_first_seq.saturating_sub(1));
+        }
     }
 
     /// Recovery only: restart the cloud frontier at what the manifest proves,
@@ -101,6 +120,21 @@ mod tests {
         assert_eq!(frontiers.last_synced(), 20);
         assert_eq!(frontiers.local_durable(), 20);
         assert_eq!(frontiers.cloud_durable(), 15);
+    }
+
+    #[test]
+    fn should_extend_cloud_frontier_over_unwritten_sequences_once_their_prefix_is_durable() {
+        // Arrange: the open segment starts at 1001, after a record at 3.
+        let mut frontiers = WalFrontiers::default();
+
+        // Act
+        frontiers.advance_cloud_over(2, 3, 1001);
+        let before = frontiers.cloud_durable();
+        frontiers.advance_cloud_over(3, 3, 1001);
+
+        // Assert
+        assert_eq!(before, 2);
+        assert_eq!(frontiers.cloud_durable(), 1000);
     }
 
     #[test]

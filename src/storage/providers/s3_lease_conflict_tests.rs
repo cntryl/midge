@@ -1,7 +1,9 @@
 //! Exercise lease conflict classification through the actual S3 HTTP adapter.
 
 use crate::lease::{CloudLeaseConfig, CloudStorageLease, PrimaryLease};
-use crate::storage::cloud::{CloudBackend, CloudEvent, CloudStorage, MockCloudBackend};
+use crate::storage::cloud::{
+    CloudEvent, CloudReadCapability, CloudStorage, CloudWriteCapability, MockCloudBackend,
+};
 use std::fmt::Write as _;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -287,7 +289,7 @@ fn replace_lease_for_rejection(backend: &MockCloudBackend, key: &str, replace_ow
             "crc32c": 0,
         })
     });
-    let pointer = serde_json::json!({"manifest_sequence": 1, "objects": objects});
+    let pointer = serde_json::json!({"id": 1, "manifest_horizon": 1, "objects": objects});
     let current = String::from_utf8(current).unwrap();
     assert!(current.contains("metadata: null\n"));
     let current = if replace_owner {

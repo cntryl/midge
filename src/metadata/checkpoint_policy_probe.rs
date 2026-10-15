@@ -57,11 +57,12 @@ pub fn run_checkpoint_policy_probe(
     let mut verified_replays = 0;
     let started = Instant::now();
     for cycle in 1..=cycles {
-        let edit = ManifestEdit::BumpWalSeq {
-            seq: u64::try_from(cycle + 1).expect("bounded cycle"),
+        let edit = ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: u64::try_from(cycle + 1).expect("bounded cycle"),
         };
         let id = store.append_for(Origin::OrdinaryLocalFlush, &edit)?;
-        manifest.apply_edit(&edit);
+        manifest.apply_edit(&edit)?;
         manifest.note_applied_journal_edit(id);
         let bytes = fs
             .metadata(&FsPath::new("manifest.journal"))
@@ -116,7 +117,9 @@ fn seed_manifest(files: usize) -> Manifest {
         name: "probe".into(),
         created_at: 0,
     };
-    manifest.apply_edit(&cf);
+    manifest
+        .apply_edit(&cf)
+        .expect("valid manifest fixture edit");
     for index in 0..files {
         manifest.files.push(FileMeta {
             name: format!("cf-1-sst-{index:08}.sst"),

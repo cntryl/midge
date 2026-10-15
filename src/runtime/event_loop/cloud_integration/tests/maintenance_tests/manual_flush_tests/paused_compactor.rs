@@ -24,12 +24,11 @@ impl Drop for ComputeRelease {
     }
 }
 
-pub(super) fn install(
-    el: &mut EventLoop,
-) -> MidgeResult<(ComputeRelease, crossbeam::channel::Receiver<()>)> {
+pub(super) fn install(el: &mut EventLoop) -> (ComputeRelease, crossbeam::channel::Receiver<()>) {
     let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-        Arc::new(crate::io::RealFs::new(&el.state.db_path).map_err(FsError::into_midge)?),
-        el.cloud_coordinator
+        Arc::clone(&el.state.fs),
+        el.actors
+            .cloud_coordinator
             .hybrid_storage
             .as_ref()
             .expect("cloud storage")
@@ -37,19 +36,22 @@ pub(super) fn install(
         Duration::from_secs(3),
     ));
     let delegate = Arc::new(
-        crate::sst::FsSstFactoryIo::new(reads, 64 * 1024)
-            .with_compaction_scratch_directory(el.state.sst_dir.join(".flush-staging")),
+        crate::runtime::event_loop::resources::compaction_sst_factory(
+            reads,
+            crate::codec::CompressionPolicy::default(),
+        ),
     );
     let (reached, arrived) = crossbeam::channel::bounded(1);
     let (release, resumed) = crossbeam::channel::bounded(1);
-    el.compaction_actor = crate::runtime::actors::CompactionActor::new(Arc::new(PausedFactory {
-        delegate,
-        gate: Arc::new(Mutex::new(Some(FinalizeGate {
-            reached,
-            release: resumed,
-        }))),
-    }));
-    Ok((ComputeRelease(Some(release)), arrived))
+    el.actors.compaction_actor =
+        crate::runtime::actors::CompactionActor::new(Arc::new(PausedFactory {
+            delegate,
+            gate: Arc::new(Mutex::new(Some(FinalizeGate {
+                reached,
+                release: resumed,
+            }))),
+        }));
+    (ComputeRelease(Some(release)), arrived)
 }
 
 struct PausedFactory {

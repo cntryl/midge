@@ -244,32 +244,32 @@ impl ActiveWalFixture {
             bytes::Bytes::from_static(b"recovered-key"),
             Some(bytes::Bytes::from_static(b"acknowledged-value")),
             1,
-            0,
         );
         let payload = crate::wal::encoding::encode(&record).unwrap();
-        let mut bytes = Vec::new();
-        crate::wal::frame::append_frame(&mut bytes, &payload).unwrap();
-        std::fs::write(
-            database.join("wal").join(crate::wal::ACTIVE_FILE_NAME),
-            &bytes,
-        )
-        .unwrap();
+        let mut body = Vec::new();
+        crate::wal::frame::append_frame(&mut body, &payload).unwrap();
+        // Release the ledger recovery opened, then record segment 1 open
+        // with the acknowledged record and reopen it.
+        state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+        let segment = database.join("wal").join(crate::wal::segment_file_name(1));
+        std::fs::remove_file(&segment).unwrap();
+        std::fs::write(&segment, &body).unwrap();
+        let wal: Arc<dyn crate::io::Fs> =
+            Arc::new(crate::io::RealFs::new(database.join("wal")).unwrap());
+        crate::runtime::wal_history::fixture::replace(&wal, &[], 1).unwrap();
+        state.wal.history = crate::runtime::wal_history::WalHistory::open(wal, 1, 0).unwrap();
+        let bytes = std::fs::read(&segment).unwrap();
         state.sequence = 1;
-        state.wal.current_segment_id = 1;
-        let local = Arc::new(
-            crate::storage::filesystem::FileSystem::new(directory.path().join("hybrid-local"))
-                .unwrap(),
-        );
         let cloud = Arc::new(
             crate::storage::filesystem::FileSystem::new(directory.path().join("cloud-store"))
                 .unwrap(),
         );
         let storage = Arc::new(crate::storage::HybridStorage::with_test_upload_limits(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
             1,
-            bytes.len() as u64,
+            // The sealed segment adds a footer to `bytes`.
+            bytes.len() as u64 + 256,
         ));
         crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::clone(&storage))
             .fence_cloud_wal_catalog(1)
@@ -278,12 +278,6 @@ impl ActiveWalFixture {
         let config = RuntimeConfig {
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
             hybrid_storage: Some(storage),
-            recovered_cloud_active_wal: Some(crate::runtime::RecoveredCloudActiveWal {
-                max_sequence: 1,
-                writer_epoch: 0,
-                record_count: 1,
-                valid_bytes: bytes.len(),
-            }),
             writer_epoch: 1,
             startup_observer: Some(events.clone()),
             ..RuntimeConfig::default()
@@ -325,8 +319,13 @@ fn should_seal_actual_recovered_active_wal_when_short_open_budget_precedes_large
         });
 
         // Assert: a larger I/O cap must not reject individually fast mandatory work.
+        // The recovered tail is sealed: its bytes, then a footer.
         prepared.unwrap();
-        assert_eq!(sealed_bytes, Some(fixture.bytes));
+        let sealed_bytes = sealed_bytes.expect("the recovered tail survives");
+        assert!(sealed_bytes.starts_with(&fixture.bytes));
+        assert!(crate::wal::format::segment::footer_link(&sealed_bytes)
+            .unwrap()
+            .is_some());
         assert_eq!(fixture.events.prepared.load(Ordering::Acquire), 1);
         assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
         assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
@@ -384,6 +383,8 @@ fn should_retain_recovered_active_wal_when_entered_startup_authority_read_times_
     crate::failpoints::with_read_gate(|| {
         // Arrange: real owned Runtime/actors must reach the fixture authority
         // before its 80ms read clock starts. This is not aggregate-open expiry.
+        // Recovery seals the tail locally first (#843); the authority read
+        // guards the uploads that tail owes.
         let mut fixture = ActiveWalFixture::new();
         let validations = Arc::new(AtomicUsize::new(0));
         let read_expired = Arc::new(AtomicBool::new(false));
@@ -414,22 +415,22 @@ fn should_retain_recovered_active_wal_when_entered_startup_authority_read_times_
                 .directory
                 .path()
                 .join("database/wal")
-                .join(crate::wal::ACTIVE_FILE_NAME),
+                .join(crate::wal::segment_file_name(1)),
         )
         .unwrap();
-        let rotated = fixture
-            .directory
-            .path()
-            .join("database/wal")
-            .join(crate::wal::segment_file_name(1))
-            .exists();
 
-        // Assert: exact seeded/framed WAL survives the entered authority failure.
+        // Assert: the recovered records survive the entered authority
+        // failure, sealed where they were.
         assert!(timeout);
         assert_eq!(validations.load(Ordering::Acquire), 1);
         assert!(read_expired.load(Ordering::Acquire));
-        assert_eq!(retained, fixture.bytes);
-        assert!(!rotated);
+        assert!(retained.starts_with(&fixture.bytes));
+        assert_eq!(
+            crate::wal::format::segment::footer_link(&retained)
+                .unwrap()
+                .map(|link| link.last_seq),
+            Some(1)
+        );
         assert_eq!(fixture.events.prepared.load(Ordering::Acquire), 0);
         assert_eq!(fixture.events.admitted.load(Ordering::Acquire), 0);
         assert_eq!(fixture.events.aborted.load(Ordering::Acquire), 1);
@@ -471,14 +472,14 @@ fn should_retain_recovered_active_wal_when_startup_budget_expires_before_authori
                 .directory
                 .path()
                 .join("database/wal")
-                .join(crate::wal::ACTIVE_FILE_NAME),
+                .join(crate::wal::segment_file_name(1)),
         )
         .unwrap();
         let rotated = fixture
             .directory
             .path()
             .join("database/wal")
-            .join(crate::wal::segment_file_name(1))
+            .join(crate::wal::segment_file_name(2))
             .exists();
 
         // Assert: fail closed and preserve bytes without pretending the read ran.

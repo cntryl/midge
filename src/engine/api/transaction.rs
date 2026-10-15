@@ -16,7 +16,6 @@ use crate::runtime::transaction_spill::{
 };
 use crate::runtime::{KeyAssertion, RuntimeHandle};
 use crate::types::ConflictPolicy;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -164,7 +163,7 @@ pub(crate) struct TransactionInit {
     pub(crate) start_sequence: u64,
     pub(crate) read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
     pub(crate) cloud_mode: bool,
-    pub(crate) db_path: PathBuf,
+    pub(crate) root: Arc<dyn crate::io::Fs>,
     pub(crate) memory_mode: bool,
     pub(crate) transaction_memory_pool: Arc<TransactionMemoryPool>,
     pub(crate) runtime_transaction_guard: crate::runtime::RuntimeTransactionGuard,
@@ -407,7 +406,7 @@ impl Transaction {
             conflict_policy: ConflictPolicy::LastWriteWins,
             write_set: TransactionWriteSet::new(
                 Arc::clone(&init.transaction_memory_pool),
-                &init.db_path,
+                &init.root,
                 init.memory_mode,
                 init.id,
             )
@@ -504,7 +503,7 @@ impl Transaction {
     /// # Errors
     ///
     /// Returns `MidgeError::InvalidArgument` when called on a read-only transaction
-    /// or when `start_key > end_key`.
+    /// or when `start_key >= end_key`.
     /// Returns `MidgeError::ResourceLimit` before staging when either endpoint
     /// exceeds point-key admission limits or the encoded range exceeds 64 MiB.
     pub fn delete_range(&mut self, start_key: Vec<u8>, end_key: Vec<u8>) -> MidgeResult<()> {
@@ -513,9 +512,9 @@ impl Transaction {
                 "Cannot write in ReadOnly transaction".to_string(),
             ));
         }
-        if start_key.as_slice() > end_key.as_slice() {
+        if start_key.as_slice() >= end_key.as_slice() {
             return Err(MidgeError::InvalidArgument(
-                "delete_range requires start_key <= end_key".to_string(),
+                "delete_range requires start_key < end_key".to_string(),
             ));
         }
         self.write_set
@@ -599,6 +598,16 @@ impl Transaction {
     ///
     /// Returns an error when commit coordination, WAL durability, or cloud durability
     /// confirmation fails.
+    ///
+    /// For a commit with writes, [`MidgeError::OutcomeUnknown`](crate::MidgeError::OutcomeUnknown)
+    /// means the write crossed a point where it may be visible or replayed
+    /// after restart, but Midge could not confirm the requested durability.
+    /// Check whether it applied, for example with an application-level
+    /// idempotency key, before writing it again. A runtime response
+    /// [`MidgeError::Timeout`](crate::MidgeError::Timeout) also leaves the
+    /// outcome unknown because it does not cancel accepted work. Midge never
+    /// retries a write after either response itself. `Fenced` is returned
+    /// when the transaction was not applied and has no WAL record to replay.
     pub fn commit(mut self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
         let mut timing = CommitTiming::maybe_start();
 
@@ -687,7 +696,16 @@ impl Transaction {
                 CommitTiming::record_durability(&mut timing, durability_started_at);
                 result
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                if matches!(error, MidgeError::WriteStall(_)) {
+                    self.runtime_handle
+                        .diagnostics
+                        .record_write_admission_rejection(
+                            crate::diagnostics::WriteAdmissionRejection::Commit,
+                        );
+                }
+                Err(error)
+            }
         };
 
         let unregister_started_at = CommitTiming::phase_start(timing.as_ref());
@@ -903,18 +921,15 @@ impl Drop for Transaction {
 
 /// Classify a failure from the durability step that runs after a commit was
 /// already applied and made visible. Retry-later kinds would invite callers
-/// to apply a non-idempotent mutation twice, so they become `Timeout`, which
-/// the durability contract defines as "may have been applied; outcome
-/// unknown". Other kinds already say the writer cannot continue.
+/// to apply a non-idempotent mutation twice. Every failure at this stage is
+/// `OutcomeUnknown`: the cause cannot turn an applied write into `NotApplied`.
 fn post_apply_durability_error(error: MidgeError, sequence: u64) -> MidgeError {
     match error {
-        MidgeError::Busy(detail) | MidgeError::WriteStall(detail) | MidgeError::NoSpace(detail) => {
-            MidgeError::Timeout(format!(
-                "transaction was applied at sequence {sequence}, but its durability \
-                 could not be confirmed ({detail}); treat the outcome as unknown"
-            ))
-        }
-        other => other,
+        MidgeError::OutcomeUnknown(_) => error,
+        other => MidgeError::OutcomeUnknown(format!(
+            "transaction was applied at sequence {sequence}, but its durability \
+                 could not be confirmed ({other}); treat the outcome as unknown"
+        )),
     }
 }
 
@@ -936,14 +951,14 @@ mod tests {
 
             // Assert
             assert!(
-                matches!(&reported, MidgeError::Timeout(message) if message.contains("applied")),
+                matches!(&reported, MidgeError::OutcomeUnknown(message) if message.contains("applied")),
                 "an applied commit must not look retryable: {reported:?}"
             );
         }
     }
 
     #[test]
-    fn should_keep_non_retryable_error_when_durability_step_fails_after_apply() {
+    fn should_report_unknown_outcome_when_writer_is_fenced_after_apply() {
         // Arrange
         let error = MidgeError::Fenced("lease lost".into());
 
@@ -951,6 +966,46 @@ mod tests {
         let reported = post_apply_durability_error(error, 42);
 
         // Assert
-        assert!(matches!(reported, MidgeError::Fenced(_)));
+        assert!(
+            matches!(reported, MidgeError::OutcomeUnknown(message) if message.contains("lease lost"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod range_admission_tests {
+    use super::*;
+
+    #[test]
+    fn should_reject_equal_range_before_staging_a_write() {
+        // Arrange
+        let engine = crate::Engine::open(crate::OpenOptions::in_memory().build().unwrap()).unwrap();
+        let family = engine.get_column_family("default").unwrap();
+        let mut transaction = engine
+            .begin_tx(family.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        let before = engine
+            .metrics()
+            .get_runtime_metrics()
+            .unwrap()
+            .current_sequence;
+
+        // Act
+        let rejected = transaction.delete_range(b"same".to_vec(), b"same".to_vec());
+
+        // Assert
+        assert!(matches!(rejected, Err(MidgeError::InvalidArgument(_))));
+        assert!(!transaction.has_writes());
+        transaction
+            .commit(crate::WriteOptions::best_effort())
+            .unwrap();
+        assert_eq!(
+            engine
+                .metrics()
+                .get_runtime_metrics()
+                .unwrap()
+                .current_sequence,
+            before
+        );
     }
 }

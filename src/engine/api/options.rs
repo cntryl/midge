@@ -131,6 +131,31 @@ struct IoTimeouts<T> {
     runtime_response: T,
 }
 
+/// A test-supplied database root. `OpenOptions` stays `Debug` without
+/// requiring every filesystem adapter to be.
+#[cfg(feature = "internal-testing")]
+#[derive(Clone)]
+struct InjectedFilesystem(Arc<dyn crate::io::Fs>);
+
+#[cfg(feature = "internal-testing")]
+impl std::fmt::Debug for InjectedFilesystem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InjectedFilesystem")
+    }
+}
+
+/// A test-supplied object store standing in for every cloud object store.
+#[cfg(feature = "internal-testing")]
+#[derive(Clone)]
+struct InjectedObjectStore(Arc<dyn crate::storage::cloud::CloudBackend>);
+
+#[cfg(feature = "internal-testing")]
+impl std::fmt::Debug for InjectedObjectStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("InjectedObjectStore")
+    }
+}
+
 /// Immutable, validated database open options.
 ///
 /// Values of this type can only be produced by [`OpenOptionsBuilder::build`].
@@ -154,9 +179,14 @@ pub struct OpenOptions {
     cache: CachePolicyConfig,
     compaction: crate::compaction::OpenCompactionConfig,
     cloud: CloudWritePolicyConfig,
+    retry_policy: crate::runtime::RuntimeRetryPolicy,
     io_timeouts: IoTimeouts<Duration>,
     open_timeout: Option<Duration>,
     startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
+    #[cfg(feature = "internal-testing")]
+    filesystem: Option<InjectedFilesystem>,
+    #[cfg(feature = "internal-testing")]
+    object_store: Option<InjectedObjectStore>,
     wal: crate::wal::WalBatchingConfig,
     lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
@@ -177,9 +207,14 @@ pub struct OpenOptionsBuilder {
     cache: CachePolicyConfig,
     compaction: crate::compaction::OpenCompactionConfig,
     cloud: CloudWritePolicyConfig,
+    retry_policy: crate::runtime::RuntimeRetryPolicy,
     io_timeouts: IoTimeouts<Option<Duration>>,
     open_timeout: Option<Duration>,
     startup_observer: Option<Arc<dyn crate::runtime::StartupObserver>>,
+    #[cfg(feature = "internal-testing")]
+    filesystem: Option<InjectedFilesystem>,
+    #[cfg(feature = "internal-testing")]
+    object_store: Option<InjectedObjectStore>,
     wal: crate::wal::WalBatchingConfig,
     lease: LeaseConfig,
     ttl_clock: crate::common::time::ClockHandle,
@@ -420,6 +455,10 @@ impl OpenOptions {
         }
     }
 
+    pub(crate) fn retry_policy(&self) -> crate::runtime::RuntimeRetryPolicy {
+        self.retry_policy
+    }
+
     pub(crate) fn background_compaction_enabled(&self) -> bool {
         self.compaction.background_enabled
     }
@@ -459,6 +498,41 @@ impl OpenOptions {
         self.lease.ttl
     }
 
+    pub(crate) fn lease_clock(&self) -> crate::lease::LeaseClock {
+        self.lease.clock.clone()
+    }
+
+    /// The filesystem a test injected in place of the host root, if any.
+    pub(crate) fn injected_filesystem(&self) -> Option<Arc<dyn crate::io::Fs>> {
+        #[cfg(feature = "internal-testing")]
+        {
+            self.filesystem
+                .as_ref()
+                .map(|injected| Arc::clone(&injected.0))
+        }
+        #[cfg(not(feature = "internal-testing"))]
+        {
+            None
+        }
+    }
+
+    /// The object store a test injected in place of every cloud object store,
+    /// if any.
+    pub(crate) fn injected_object_store(
+        &self,
+    ) -> Option<Arc<dyn crate::storage::cloud::CloudBackend>> {
+        #[cfg(feature = "internal-testing")]
+        {
+            self.object_store
+                .as_ref()
+                .map(|injected| Arc::clone(&injected.0))
+        }
+        #[cfg(not(feature = "internal-testing"))]
+        {
+            None
+        }
+    }
+
     pub(crate) fn ttl_clock(&self) -> Arc<crate::common::time::ObservedClock> {
         Arc::clone(&self.ttl_clock.0)
     }
@@ -482,12 +556,17 @@ impl OpenOptionsBuilder {
                 Self::derive_compression_policy(Goal::default()),
             ),
             cloud: CloudWritePolicyConfig::default(),
+            retry_policy: crate::runtime::RuntimeRetryPolicy::default(),
             io_timeouts: IoTimeouts {
                 storage: crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
                 runtime_response: None,
             },
             open_timeout: None,
             startup_observer: None,
+            #[cfg(feature = "internal-testing")]
+            filesystem: None,
+            #[cfg(feature = "internal-testing")]
+            object_store: None,
             wal: crate::wal::WalBatchingConfig::new(0, None),
             lease: LeaseConfig::new(Duration::from_secs(30), None, None),
             ttl_clock: crate::common::time::ClockHandle(Arc::new(
@@ -574,6 +653,15 @@ impl OpenOptionsBuilder {
         self
     }
 
+    /// Shorten cloud retry delays for deterministic campaign and integration tests.
+    #[cfg(feature = "failpoints")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn fast_cloud_retries_for_testing(mut self) -> Self {
+        self.retry_policy = crate::runtime::RuntimeRetryPolicy::fast_for_testing();
+        self
+    }
+
     /// Set the recovery policy.
     #[must_use]
     pub fn recovery_policy(mut self, policy: RecoveryPolicy) -> Self {
@@ -622,6 +710,97 @@ impl OpenOptionsBuilder {
         self
     }
 
+    /// Serve the database from `filesystem` instead of the host directory, so
+    /// tests can fault or crash its storage effects. The filesystem is the
+    /// database root; the configured path names it only. Metadata, WAL,
+    /// lease, SST, transaction spill and cloud working files are served from
+    /// it. A simulated cloud lives under the root's host directory, so a root
+    /// without one needs [`Self::object_store_for_testing`]. The filesystem
+    /// must expose [`crate::io::PersistentHandleFs`], which SST
+    /// builds use for scratch.
+    #[cfg(feature = "internal-testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn filesystem_for_testing(mut self, filesystem: Arc<dyn crate::io::Fs>) -> Self {
+        self.filesystem = Some(InjectedFilesystem(filesystem));
+        self
+    }
+
+    /// Serve every cloud object store, and in provider mode the lease
+    /// document, from `store` instead of the configured provider or the
+    /// simulated cloud directory. The configured provider and prefixes only
+    /// name the objects. Cloud and simulated-cloud storage only.
+    #[cfg(feature = "internal-testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn object_store_for_testing(
+        mut self,
+        store: Arc<dyn crate::storage::cloud::CloudBackend>,
+    ) -> Self {
+        self.object_store = Some(InjectedObjectStore(store));
+        self
+    }
+
+    fn validate_storage(&self) -> MidgeResult<()> {
+        #[cfg(feature = "internal-testing")]
+        self.validate_injected_storage()?;
+        if self.cloud.local_storage_budget_bytes == Some(0) {
+            return Err(MidgeError::InvalidArgument(
+                "local storage budget must be greater than zero".to_string(),
+            ));
+        }
+        if let Storage::Cloud { topology, .. } = &self.storage {
+            let report = topology.validate();
+            if !report.is_valid {
+                let summaries = report
+                    .findings
+                    .iter()
+                    .filter(|finding| finding.outcome == crate::config::CloudCheckOutcome::Failed)
+                    .map(|finding| format!("{:?}: {}", finding.roles, finding.message))
+                    .collect::<Vec<_>>();
+                return Err(MidgeError::InvalidArgument(format!(
+                    "invalid cloud storage topology: {}",
+                    summaries.join("; ")
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Injected stores must leave nothing on the configured host path.
+    #[cfg(feature = "internal-testing")]
+    fn validate_injected_storage(&self) -> MidgeResult<()> {
+        let cloud = matches!(
+            self.storage,
+            Storage::Cloud { .. } | Storage::CloudSimulated { .. }
+        );
+        if self.object_store.is_some() && !cloud {
+            return Err(MidgeError::InvalidArgument(
+                "an injected object store serves cloud databases only".to_string(),
+            ));
+        }
+        if self.filesystem.is_some() && matches!(self.storage, Storage::InMemory) {
+            return Err(MidgeError::InvalidArgument(
+                "an in-memory database has no root to inject".to_string(),
+            ));
+        }
+        let hostless_root = self
+            .filesystem
+            .as_ref()
+            .is_some_and(|root| root.0.host_addressing().is_none());
+        if matches!(self.storage, Storage::CloudSimulated { .. })
+            && hostless_root
+            && self.object_store.is_none()
+        {
+            return Err(MidgeError::InvalidArgument(
+                "a simulated cloud lives under the root's host directory; a root without \
+                 one needs an injected object store"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Override the CloudAsync drain budget used by deterministic shutdown
     /// fault-injection tests.
     #[cfg(feature = "failpoints")]
@@ -656,6 +835,20 @@ impl OpenOptionsBuilder {
     #[must_use]
     pub fn lease_ttl(mut self, ttl: Duration) -> Self {
         self.lease.ttl = ttl;
+        self
+    }
+
+    /// Read the wall time the lease stamps its records with, and judges
+    /// expiry by, from `clock` instead of the system clock. A test advances
+    /// the clock a new process reads to take a lease over without waiting out
+    /// the TTL. The holder's local validity stays monotonic, but a provider
+    /// lease also checks its own document's expiry by this clock when it
+    /// renews or publishes, so advancing a live holder's clock fences it.
+    #[cfg(feature = "internal-testing")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn lease_clock_for_testing(mut self, clock: Arc<dyn crate::Clock>) -> Self {
+        self.lease.clock = crate::lease::LeaseClock::injected(clock);
         self
     }
 
@@ -709,26 +902,7 @@ impl OpenOptionsBuilder {
     /// providers' millisecond-granularity deadlines, and the enclosing runtime
     /// response timeout must be greater than the storage I/O timeout.
     pub fn build(self) -> MidgeResult<OpenOptions> {
-        if self.cloud.local_storage_budget_bytes == Some(0) {
-            return Err(MidgeError::InvalidArgument(
-                "local storage budget must be greater than zero".to_string(),
-            ));
-        }
-        if let Storage::Cloud { topology, .. } = &self.storage {
-            let report = topology.validate();
-            if !report.is_valid {
-                let summaries = report
-                    .findings
-                    .iter()
-                    .filter(|finding| finding.outcome == crate::config::CloudCheckOutcome::Failed)
-                    .map(|finding| format!("{:?}: {}", finding.roles, finding.message))
-                    .collect::<Vec<_>>();
-                return Err(MidgeError::InvalidArgument(format!(
-                    "invalid cloud storage topology: {}",
-                    summaries.join("; ")
-                )));
-            }
-        }
+        self.validate_storage()?;
         if self.io_timeouts.storage < Duration::from_millis(1) {
             return Err(MidgeError::InvalidArgument(
                 "storage I/O timeout must be at least 1 millisecond".to_string(),
@@ -797,12 +971,17 @@ impl OpenOptionsBuilder {
                 compression_policy,
             ),
             cloud: self.cloud,
+            retry_policy: self.retry_policy,
             io_timeouts: IoTimeouts {
                 storage: self.io_timeouts.storage,
                 runtime_response: runtime_response_timeout,
             },
             open_timeout: self.open_timeout,
             startup_observer: self.startup_observer,
+            #[cfg(feature = "internal-testing")]
+            filesystem: self.filesystem,
+            #[cfg(feature = "internal-testing")]
+            object_store: self.object_store,
             wal: crate::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
             lease: self.lease,
             ttl_clock: self.ttl_clock,

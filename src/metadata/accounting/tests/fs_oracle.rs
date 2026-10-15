@@ -1,7 +1,9 @@
 //! Independent delegated-RealFs oracle; test-only, not producer counters.
 
 use crate::io::traits::{DirEntry, Metadata, ReadObserver};
-use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenOptions};
+use crate::io::{
+    Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, OpenOptions, ReadFs,
+};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -165,7 +167,51 @@ fn snapshot_temporary(path: &FsPath) -> bool {
     path.0 == super::fs_tests::SNAPSHOT_STAGE
 }
 
+impl ReadFs for ObservedFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
+impl crate::io::PersistentHandleFs for ObservedFs {
+    fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
+        crate::io::open_persistent_handle(self.inner.as_ref(), path, options).map(|inner| {
+            Box::new(ObservedFile {
+                inner,
+                path: path.clone(),
+                observations: Arc::clone(&self.observations),
+            }) as Box<dyn File>
+        })
+    }
+}
+
 impl Fs for ObservedFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
         self.inner
             .local_output_view()
@@ -207,40 +253,12 @@ impl Fs for ObservedFs {
         })
     }
 
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        options: OpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        self.inner
-            .open_persistent_handle(path, options)
-            .map(|inner| {
-                Box::new(ObservedFile {
-                    inner,
-                    path: path.clone(),
-                    observations: Arc::clone(&self.observations),
-                }) as Box<dyn File>
-            })
-    }
-
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -259,11 +277,17 @@ impl Fs for ObservedFs {
     }
 }
 
-impl File for ObservedFile<'_> {
+impl crate::io::ReadFile for ObservedFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
 
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for ObservedFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         let offered = data.len();
         let result = if snapshot_temporary(&self.path)
@@ -293,10 +317,6 @@ impl File for ObservedFile<'_> {
             self.observations.complete_payload(PayloadKind::Append)?;
             Ok(offset)
         })
-    }
-
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
     }
 
     fn sync(&mut self, durability: Durability) -> FsResult<()> {

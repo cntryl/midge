@@ -2,6 +2,12 @@ name: Benchmark Tier 3
 
 on:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: Measurement intensity (smoke, standard, extended)
+        type: choice
+        options: [smoke, standard, extended]
+        default: standard
 
 permissions:
   contents: read
@@ -14,23 +20,37 @@ jobs:
   bench:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
-    steps:
 
+    strategy:
+      fail-fast: false
+      matrix:
+        bench:
+          - tier3_system_engine
+          - tier3_system_mvcc
+          - tier3_system_sst
+          - tier3_system_scan
+          - tier3_system_lifecycle
+
+    env:
+      CARGO_INCREMENTAL: "0"
+      # Use the harness defaults for each measurement intensity.
+      STRESS_PROFILE: ${{ inputs.profile == 'smoke' && 'smoke' || inputs.profile == 'extended' && 'lab' || 'default' }}
+
+    steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Update Rust to stable
         run: rustup update stable
 
-      - name: Run registered Tier 3 targets
-        shell: bash
-        run: cargo bench --bench 'tier3_*'
+      - name: Run benchmarks
+        run: cargo bench --locked --bench '${{ matrix.bench }}'
 
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: bench-tier3-${{ github.sha }}
+          name: bench-tier3-${{ matrix.bench }}-${{ github.sha }}
           path: |
             target/stress/**
             target/midge-stress/**

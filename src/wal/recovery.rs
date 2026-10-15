@@ -1,35 +1,17 @@
 //! WAL recovery - replay WAL files to restore state after crash
 //!
 //! On startup, persistent WAL files are replayed to reconstruct the
-//! memtables for each column family.
-//!
-//! Recovery order:
-//! 1) Rotated segment files: `{segment_id}.wal` in ascending `segment_id` order
-//! 2) Active file: `wal.log` (if present)
+//! memtables for each column family. Callers say which files to replay as
+//! [`ReplaySegments`]: sealed segments in order, then the active file.
 
 use super::types::{ColumnFamilyId, WalOpRole, WalRecord};
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
+use crate::io::{FsError, FsPath, ReadFs};
 use crate::memtable::SkipListMemtable;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::sync::Arc;
 use tracing::instrument;
-
-#[cfg(test)]
-thread_local! {
-    static WAL_REPLAY_FILE_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-fn reset_wal_replay_file_open_count() {
-    WAL_REPLAY_FILE_OPEN_COUNT.set(0);
-}
-
-#[cfg(test)]
-fn wal_replay_file_open_count() -> usize {
-    WAL_REPLAY_FILE_OPEN_COUNT.get()
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayPolicy {
@@ -43,10 +25,112 @@ enum ReplayFileKind {
     FinalActive,
 }
 
-#[derive(Debug)]
+pub(crate) use crate::wal::planner::Expectation;
+
+#[derive(Debug, Clone)]
 struct ReplayFile {
+    id: crate::wal::ledger::SegmentId,
     path: FsPath,
     kind: ReplayFileKind,
+    expect: Expectation,
+}
+
+/// The WAL files one replay reads: sealed segments, oldest first, every
+/// frame of which must be whole and which end in their footer, then at most
+/// one open segment, replayed last, whose incomplete tail is a write the
+/// crash interrupted. The first segment links `anchor`, unchecked when it is
+/// unknown; each later one links the footer of the one before.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ReplaySegments {
+    anchor: Option<crate::wal::format::ChainLink>,
+    files: Vec<ReplayFile>,
+}
+
+impl ReplaySegments {
+    /// Segments replayed after `anchor`, or after any link when `None`.
+    pub(crate) fn new(anchor: Option<crate::wal::format::ChainLink>) -> Self {
+        Self {
+            anchor,
+            files: Vec::new(),
+        }
+    }
+
+    /// Every member of `ledger` at its path, checked against the facts the
+    /// ledger holds, after the ledger's anchor: the local plan
+    /// ([`crate::wal::planner::local`]).
+    pub(crate) fn from_ledger(
+        ledger: &crate::wal::ledger::WalLedger,
+        path: impl Fn(crate::wal::ledger::SegmentId) -> FsPath,
+    ) -> Self {
+        let plan = crate::wal::planner::local(ledger);
+        Self::from_plan(plan.anchor, &plan.replay, path)
+    }
+
+    /// The segments a recovery plan replays, in its order, at their paths,
+    /// after `anchor`.
+    pub(crate) fn from_plan(
+        anchor: crate::wal::format::ChainLink,
+        planned: &[crate::wal::planner::PlannedSegment],
+        path: impl Fn(crate::wal::ledger::SegmentId) -> FsPath,
+    ) -> Self {
+        let mut segments = Self::new(Some(anchor));
+        for segment in planned {
+            if segment.sealed {
+                segments.push_sealed(segment.id, path(segment.id), segment.expect.clone());
+            } else {
+                segments.push_open(segment.id, path(segment.id), segment.expect.clone());
+            }
+        }
+        segments
+    }
+
+    /// Replay sealed segment `id` from `path` next.
+    pub(crate) fn push_sealed(
+        &mut self,
+        id: crate::wal::ledger::SegmentId,
+        path: FsPath,
+        expect: Expectation,
+    ) {
+        self.files.push(ReplayFile {
+            id,
+            path,
+            kind: ReplayFileKind::Sealed,
+            expect,
+        });
+    }
+
+    /// Replay open segment `id` from `path` last.
+    pub(crate) fn push_open(
+        &mut self,
+        id: crate::wal::ledger::SegmentId,
+        path: FsPath,
+        expect: Expectation,
+    ) {
+        self.files.push(ReplayFile {
+            id,
+            path,
+            kind: ReplayFileKind::FinalActive,
+            expect,
+        });
+    }
+
+    fn files(&self) -> &[ReplayFile] {
+        &self.files
+    }
+
+    /// How many files the replay reads.
+    pub(crate) fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// The open segment the replay reads last, if any.
+    #[cfg(test)]
+    pub(crate) fn open_segment(&self) -> Option<crate::wal::ledger::SegmentId> {
+        self.files
+            .last()
+            .filter(|file| file.kind == ReplayFileKind::FinalActive)
+            .map(|file| file.id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,43 +185,49 @@ impl From<MidgeError> for ReplayFailure {
     }
 }
 
-/// Which writer epochs one WAL file may hold.
-///
-/// Every WAL record carries the epoch of the writer that appended it. A file
-/// written in place (the active WAL, a locally rotated segment) can span a
-/// restart, and a paused, fenced writer can still append a lower-epoch record
-/// after its successor. Replay skips such records as stale, so every walker
-/// over a local file must accept them too, or validation would reject or
-/// truncate a file that replay recovers in full (#487).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EpochPolicy {
-    /// A published cloud segment object: one writer sealed every record.
-    SingleEpoch,
-    /// A local file: epochs may rise, and a lower-epoch record after a newer
-    /// one is stale. It is still validated but does not lower the newest epoch.
-    SkipStale,
-}
-
-impl EpochPolicy {
-    /// Checks `record_epoch` against the newest epoch seen so far in the file
-    /// and returns the newest epoch after this record.
-    pub(crate) fn admit(self, newest: Option<u64>, record_epoch: u64) -> Result<u64, String> {
-        match (self, newest) {
-            (_, None) => Ok(record_epoch),
-            (Self::SingleEpoch, Some(epoch)) if epoch != record_epoch => {
-                Err(format!("mixes writer epochs {epoch} and {record_epoch}"))
-            }
-            (_, Some(epoch)) => Ok(epoch.max(record_epoch)),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// What one segment's walk verified so far, resumable: the scan of its
+/// header and records, and where the next frame starts.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct VerifiedWalPrefix {
-    pub(crate) max_sequence: u64,
-    pub(crate) writer_epoch: u64,
-    pub(crate) record_count: usize,
     pub(crate) valid_bytes: usize,
+    /// The scan the walk resumes, once the header was read. Boxed: its
+    /// digest state is large, and failures carry the prefix.
+    pub(crate) scan: Option<Box<crate::wal::format::SegmentScan>>,
+}
+
+impl VerifiedWalPrefix {
+    /// The greatest sequence the verified records hold, or zero.
+    pub(crate) fn max_sequence(&self) -> u64 {
+        self.scan
+            .as_ref()
+            .and_then(|scan| scan.tail().last_seq)
+            .unwrap_or(0)
+    }
+
+    /// The records verified so far.
+    pub(crate) fn record_count(&self) -> u64 {
+        self.scan
+            .as_ref()
+            .map_or(0, |scan| scan.tail().record_count)
+    }
+
+    /// Whether the segment's footer was verified, nothing following it.
+    pub(crate) fn sealed(&self) -> bool {
+        self.scan
+            .as_ref()
+            .is_some_and(|scan| scan.footer().is_some())
+    }
+
+    /// What the segment says it is, once its footer sealed it.
+    pub(crate) fn identity(&self) -> Option<crate::wal::format::SegmentIdentity> {
+        let scan = self.scan.as_ref()?;
+        let footer = scan.footer()?;
+        Some(crate::wal::format::SegmentIdentity {
+            epoch: scan.header().epoch,
+            prev: scan.header().prev,
+            link: footer.sealed_facts().link,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -148,7 +238,7 @@ pub(crate) struct WalPrefixInspectionFailure {
 
 impl WalPrefixInspectionFailure {
     pub(crate) fn verified_prefix(&self) -> VerifiedWalPrefix {
-        self.verified_prefix
+        self.verified_prefix.clone()
     }
 
     pub(crate) fn is_incomplete_tail(&self) -> bool {
@@ -189,15 +279,6 @@ fn map_fs_error(err: FsError) -> MidgeError {
     err.into_midge()
 }
 
-fn join(dir: &FsPath, leaf: &str) -> FsPath {
-    let base = dir.0.trim_end_matches('/');
-    if base.is_empty() {
-        FsPath::new(leaf)
-    } else {
-        FsPath::new(format!("{base}/{leaf}"))
-    }
-}
-
 /// Statistics from WAL recovery
 #[derive(Debug, Clone)]
 pub struct RecoveryStats {
@@ -219,12 +300,6 @@ pub struct RecoveryStats {
     /// Total nanoseconds spent in overall replay (per call)
     pub total_replay_ns: u128,
 
-    /// Highest writer epoch seen across all replayable WAL records.
-    /// Lower-epoch records are skipped when they overlap a newer epoch's
-    /// sequence frontier or appear after a newer epoch in replay order.
-    pub max_epoch_seen: u64,
-    /// Number of WAL records skipped because their `writer_epoch` was stale.
-    pub stale_records_skipped: u64,
     /// Final active WAL whose incomplete tail replay tolerated. Replay stays
     /// read-only; an owner that reopens the file for append must first
     /// truncate it to `valid_bytes`, or new frames land after the torn bytes.
@@ -238,12 +313,10 @@ pub struct RecoveryStats {
 /// Point at which salvage replay stopped, and the WAL it never reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WalSalvageStop {
-    /// File holding the first corrupt frame.
-    pub(crate) path: FsPath,
+    /// Segment holding the first corrupt frame.
+    pub(crate) segment: crate::wal::ledger::SegmentId,
     /// Verified prefix of `path` that replay applied.
     pub(crate) valid_bytes: u64,
-    /// Files after `path` in replay order, never replayed.
-    pub(crate) unreplayed_paths: Vec<FsPath>,
     /// Highest verified sequence in the unreplayed files and, for a decoded
     /// record failure, in the readable remainder of the stop file.
     pub(crate) max_unreplayed_sequence: Option<u64>,
@@ -273,8 +346,6 @@ impl RecoveryStats {
             wal_read_ns: 0,
             apply_ns: 0,
             total_replay_ns: 0,
-            max_epoch_seen: 0,
-            stale_records_skipped: 0,
             tolerated_active_tail: None,
             salvage_stop: None,
         }
@@ -297,41 +368,8 @@ impl RecoveryStats {
     }
 }
 
-/// Replay WAL files under `wal_dir`, rebuilding memtables per column family.
-///
-/// Returns aggregated recovery statistics. Caller is responsible for attaching
-/// the recovered memtables to the runtime state.
-#[instrument(level = "info", skip(storage, memtables), fields(wal_dir = ?wal_dir))]
-///
-/// # Errors
-///
-/// Returns an error if WAL enumeration, decoding, or record application fails.
-#[cfg(test)]
-pub fn replay_wal(
-    storage: &dyn Fs,
-    wal_dir: &FsPath,
-    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
-) -> MidgeResult<RecoveryStats> {
-    replay_wal_with_policy(storage, wal_dir, memtables, ReplayPolicy::Strict)
-}
-
-#[instrument(level = "info", skip(storage, memtables), fields(wal_dir = ?wal_dir, replay_policy = ?replay_policy))]
-///
-/// # Errors
-///
-/// Returns an error if WAL enumeration, decoding, or record application fails
-/// according to the selected replay policy.
-#[cfg(test)]
-pub fn replay_wal_with_policy(
-    storage: &dyn Fs,
-    wal_dir: &FsPath,
-    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
-    replay_policy: ReplayPolicy,
-) -> MidgeResult<RecoveryStats> {
-    replay_local(storage, wal_dir, memtables, replay_policy, None, None)
-}
-
-/// Replay a local WAL directory through the one streaming engine (#524).
+/// Replay `segments` through the one streaming engine (#524) as storage
+/// verification does.
 ///
 /// Local recovery keeps two behaviours the cloud path does not need: a
 /// split-marker transaction spills to disk, since local writers spill
@@ -339,25 +377,24 @@ pub fn replay_wal_with_policy(
 /// fails to replay stops at its frame like a corrupt one. Limits are
 /// unbounded, so no checkpoint is needed.
 fn replay_local(
-    storage: &dyn Fs,
-    wal_dir: &FsPath,
+    storage: &dyn ReadFs,
+    segments: &ReplaySegments,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     replay_policy: ReplayPolicy,
-    should_apply: Option<&dyn Fn(&WalRecord) -> bool>,
+    selection: crate::wal::replay::ReplaySelection<'_>,
     deadline: Option<&crate::common::OperationDeadline>,
 ) -> MidgeResult<RecoveryStats> {
     streaming::replay_wal_with_options(
         storage,
-        wal_dir,
+        segments,
         memtables,
         replay_policy,
-        should_apply,
         streaming::StreamingReplayLimits::local(),
         streaming::ReplayOptions {
             deadline,
             salvage_record_errors: true,
             spill_pending_txns: true,
-            ..streaming::ReplayOptions::default()
+            ..streaming::ReplayOptions::new(selection)
         },
         &mut |_, _| Ok(()),
     )
@@ -373,230 +410,76 @@ fn replay_local(
 /// Returns the error replay would return, or `Timeout` once `deadline`
 /// expires between frames.
 pub(crate) fn validate_wal_with_policy(
-    storage: &dyn Fs,
-    wal_dir: &FsPath,
+    storage: &dyn ReadFs,
+    segments: &ReplaySegments,
     replay_policy: ReplayPolicy,
     deadline: Option<&crate::common::OperationDeadline>,
 ) -> MidgeResult<RecoveryStats> {
     let mut no_memtables = HashMap::new();
     replay_local(
         storage,
-        wal_dir,
+        segments,
         &mut no_memtables,
         replay_policy,
-        Some(&|_| false),
+        crate::wal::replay::ReplaySelection::ValidateOnly,
         deadline,
     )
 }
 
-#[cfg(test)]
-pub(crate) fn replay_wal_with_manifest_filter(
-    storage: &dyn Fs,
-    wal_dir: &FsPath,
+pub(crate) fn replay_wal_with_frontiers_within(
+    storage: &dyn ReadFs,
+    segments: &ReplaySegments,
     memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
     replay_policy: ReplayPolicy,
-    should_apply: &dyn Fn(&WalRecord) -> bool,
-) -> MidgeResult<RecoveryStats> {
-    replay_local(
-        storage,
-        wal_dir,
-        memtables,
-        replay_policy,
-        Some(should_apply),
-        None,
-    )
-}
-
-pub(crate) fn replay_wal_with_manifest_filter_within(
-    storage: &dyn Fs,
-    wal_dir: &FsPath,
-    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
-    replay_policy: ReplayPolicy,
-    should_apply: &dyn Fn(&WalRecord) -> MidgeResult<bool>,
+    frontiers: &crate::metadata::frontiers::FlushFrontiers,
     scope: Option<&crate::common::DeadlineScope>,
 ) -> MidgeResult<RecoveryStats> {
     streaming::replay_wal_with_options(
         storage,
-        wal_dir,
+        segments,
         memtables,
         replay_policy,
-        None,
         streaming::StreamingReplayLimits::local(),
         streaming::ReplayOptions {
             scope,
-            fallible_should_apply: Some(should_apply),
             salvage_record_errors: true,
             spill_pending_txns: true,
-            ..streaming::ReplayOptions::default()
+            ..streaming::ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(
+                frontiers,
+            ))
         },
         &mut |_, _| Ok(()),
     )
 }
 
-fn collect_replay_paths(storage: &dyn Fs, wal_dir: &FsPath) -> MidgeResult<Vec<ReplayFile>> {
-    if !storage.exists(wal_dir).map_err(map_fs_error)? {
-        return Ok(Vec::new());
-    }
-
-    let mut segment_files: std::collections::BTreeMap<u64, (String, FsPath)> =
-        std::collections::BTreeMap::new();
-    let mut wal_log_path: Option<FsPath> = None;
-
-    let entries = match storage.list_dir(wal_dir) {
-        Ok(v) => v,
-        Err(FsError::NotFound(_)) => return Ok(Vec::new()),
-        Err(e) => return Err(map_fs_error(e)),
-    };
-
-    for entry in entries {
-        if entry.is_dir {
-            continue;
-        }
-        let file_name = entry.name;
-        if file_name == crate::wal::ACTIVE_FILE_NAME {
-            wal_log_path = Some(join(wal_dir, crate::wal::ACTIVE_FILE_NAME));
-            continue;
-        }
-
-        if let Some(segment_id) = crate::wal::parse_segment_id(&file_name) {
-            let prefer_candidate =
-                segment_files
-                    .get(&segment_id)
-                    .is_none_or(|(existing_name, _)| {
-                        existing_name != &crate::wal::cloud_segment::file_name(segment_id)
-                            && file_name == crate::wal::cloud_segment::file_name(segment_id)
-                    });
-
-            if prefer_candidate {
-                segment_files.insert(segment_id, (file_name.clone(), join(wal_dir, &file_name)));
-            }
-        }
-    }
-
-    let mut replay_paths: Vec<ReplayFile> = segment_files
-        .into_iter()
-        .map(|(_, (_, path))| ReplayFile {
-            path,
-            kind: ReplayFileKind::Sealed,
-        })
-        .collect();
-    if let Some(wal_log) = wal_log_path {
-        replay_paths.push(ReplayFile {
-            path: wal_log,
-            kind: ReplayFileKind::FinalActive,
-        });
-    }
-
-    Ok(replay_paths)
-}
-
-#[derive(Debug, Default)]
-struct WriterEpochFrontiers {
-    first_sequence_by_epoch: std::collections::BTreeMap<u64, u64>,
-    first_ordinal_by_epoch: std::collections::BTreeMap<u64, u64>,
-}
-
-impl WriterEpochFrontiers {
-    fn record(&mut self, record: &WalRecord, ordinal: u64) {
-        if record.writer_epoch == 0 {
-            return;
-        }
-        self.first_sequence_by_epoch
-            .entry(record.writer_epoch)
-            .and_modify(|seq| *seq = (*seq).min(record.seq))
-            .or_insert(record.seq);
-        self.first_ordinal_by_epoch
-            .entry(record.writer_epoch)
-            .and_modify(|first_ordinal| *first_ordinal = (*first_ordinal).min(ordinal))
-            .or_insert(ordinal);
-    }
-
-    fn max_epoch_seen(&self) -> u64 {
-        self.first_sequence_by_epoch
-            .keys()
-            .next_back()
-            .copied()
-            .unwrap_or(0)
-    }
-
-    fn is_stale(&self, record: &WalRecord, ordinal: u64) -> bool {
-        if record.writer_epoch == 0 {
-            return false;
-        }
-
-        self.first_sequence_by_epoch
-            .range((
-                std::ops::Bound::Excluded(record.writer_epoch),
-                std::ops::Bound::Unbounded,
-            ))
-            .any(|(epoch, first_seq)| {
-                record.seq >= *first_seq
-                    || self
-                        .first_ordinal_by_epoch
-                        .get(epoch)
-                        .is_some_and(|first_ordinal| *first_ordinal < ordinal)
-            })
-    }
-}
-
-/// Highest writer epoch recorded in the WAL files under `wal_dir`.
-///
-/// Reads the same files and applies the same corruption policy as replay,
-/// without applying any records, so startup can supply it as the lease epoch
-/// floor (`format/lease.md` §4 step 4) before acquiring leadership. Under
-/// salvage, discovery stops at the same corrupt-prefix boundary replay does.
-///
-/// # Errors
-///
-/// Returns an error if WAL enumeration or reading fails, or if a frame is
-/// corrupt and `replay_policy` does not tolerate it.
-pub(crate) fn max_writer_epoch(
-    storage: &dyn Fs,
-    wal_dir: &FsPath,
-    replay_policy: ReplayPolicy,
-) -> MidgeResult<u64> {
-    let replay_paths = collect_replay_paths(storage, wal_dir)?;
-    let (frontiers, _had_corruption) = streaming::discover_frontiers(
-        storage,
-        &replay_paths,
-        replay_policy,
-        streaming::StreamingReplayLimits::local(),
-        streaming::ReplayOptions::default(),
-    )?;
-    Ok(frontiers.max_epoch_seen())
-}
-
 struct ReplayedWalFrame {
     record: WalRecord,
+    /// The frame's verified payload, which the segment digest covers.
+    payload: bytes::Bytes,
     next_pos: u64,
 }
 
 enum NextWalFrame {
     Eof,
     Frame(ReplayedWalFrame),
+    /// The segment's footer frame, and the offset after it.
+    Footer {
+        payload: bytes::Bytes,
+        next_pos: u64,
+    },
 }
 
 fn open_wal_replay_file<'a>(
-    storage: &'a dyn Fs,
+    storage: &'a dyn ReadFs,
     file_path: &FsPath,
     file_read_ns: &mut u128,
-) -> MidgeResult<Option<Box<dyn File + 'a>>> {
+) -> MidgeResult<Option<Box<dyn crate::io::ReadFile + 'a>>> {
     if !storage.exists(file_path).map_err(map_fs_error)? {
         return Ok(None);
     }
 
     let open_start = std::time::Instant::now();
-    #[cfg(test)]
-    WAL_REPLAY_FILE_OPEN_COUNT.set(WAL_REPLAY_FILE_OPEN_COUNT.get().saturating_add(1));
-    let file = match storage.open(
-        file_path,
-        OpenOptions {
-            mode: OpenMode::ReadOnly,
-            create: false,
-            create_new: false,
-            truncate: false,
-        },
-    ) {
+    let file = match storage.open_read(file_path) {
         Ok(file) => file,
         Err(FsError::NotFound(_)) => return Ok(None),
         Err(e) => return Err(map_fs_error(e)),
@@ -664,5 +547,7 @@ fn apply_record<S: BuildHasher>(
 
 pub(crate) mod streaming;
 
+#[cfg(test)]
+mod fixture;
 #[cfg(test)]
 mod tests;

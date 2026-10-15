@@ -23,7 +23,7 @@ mod sst_reads_integration {
         use std::io::{Read, Seek, Write};
 
         let sst_path = std::fs::read_dir(db_path.join("sst"))?
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read SST directory entry"))
             .map(|entry| entry.path())
             .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
             .expect("flushed SST file");
@@ -40,10 +40,16 @@ mod sst_reads_integration {
         Ok(())
     }
 
+    fn assert_published_sst(engine: &cntryl_midge::Engine) -> MidgeResult<()> {
+        let layout = engine.metrics().get_storage_layout()?;
+        assert!(layout.levels.iter().any(|level| level.file_count > 0));
+        Ok(())
+    }
+
     #[test]
     fn should_read_from_sst_after_flush() -> MidgeResult<()> {
         // Arrange: Create engine
-        let engine = open_with_mode(&opts_for_mode("memory"), "memory");
+        let engine = open_with_mode(&opts_for_mode("local"), "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write keys that will be flushed to SST
@@ -56,7 +62,7 @@ mod sst_reads_integration {
 
         // Force flush to SST
         engine.flush_cf(&cf)?;
-        std::thread::sleep(std::time::Duration::from_millis(100)); // Give flush time to complete
+        assert_published_sst(&engine)?;
 
         // Act: Read keys that should be in SST now
         let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
@@ -69,14 +75,13 @@ mod sst_reads_integration {
         assert_eq!(value2, Some(b"value_from_sst".to_vec().into()));
         assert_eq!(value3, None);
 
-        println!("SST reads completed successfully");
         Ok(())
     }
 
     #[test]
-    fn should_use_key_ranges_for_higher_levels() -> MidgeResult<()> {
+    fn should_read_boundary_keys_given_flushed_sst() -> MidgeResult<()> {
         // Arrange: Create engine
-        let engine = open_with_mode(&opts_for_mode("memory"), "memory");
+        let engine = open_with_mode(&opts_for_mode("local"), "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write sorted keys
@@ -88,7 +93,7 @@ mod sst_reads_integration {
         }
 
         engine.flush_cf(&cf)?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_published_sst(&engine)?;
 
         // Act: Read various keys
         let read_tx = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)?;
@@ -103,14 +108,13 @@ mod sst_reads_integration {
         assert_eq!(last, Some(b"test_value".to_vec().into()));
         assert_eq!(missing, None);
 
-        println!("Range-aware SST reads completed successfully");
         Ok(())
     }
 
     #[test]
     fn should_handle_memtable_and_sst_reads() -> MidgeResult<()> {
         // Arrange: Mix of memtable and SST data
-        let engine = open_with_mode(&opts_for_mode("memory"), "memory");
+        let engine = open_with_mode(&opts_for_mode("local"), "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write to SST
@@ -118,7 +122,7 @@ mod sst_reads_integration {
         tx1.put(b"sst_key".to_vec(), b"sst_value".to_vec(), None)?;
         tx1.commit(WriteOptions::buffered())?;
         engine.flush_cf(&cf)?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_published_sst(&engine)?;
 
         // Write to memtable
         let mut tx2 = engine.begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)?;
@@ -142,7 +146,6 @@ mod sst_reads_integration {
         let updated = read_tx2.get(b"sst_key")?;
         assert_eq!(updated, Some(b"updated_value".to_vec().into()));
 
-        println!("Mixed memtable/SST reads completed successfully");
         Ok(())
     }
 
@@ -271,8 +274,8 @@ mod sst_regressions {
             .unwrap();
 
         // Assert
-        assert_eq!(after_reopen.as_deref().map(<[u8]>::len), Some(value.len()));
-        assert_eq!(result.as_deref().map(<[u8]>::len), Some(value.len()));
+        assert_eq!(after_reopen.as_deref(), Some(value.as_slice()));
+        assert_eq!(result.as_deref(), Some(value.as_slice()));
     }
 
     #[test]
@@ -347,6 +350,30 @@ mod sst_regressions {
 
     #[test]
     fn should_continue_writing_across_l0_ceiling_when_background_compaction_is_disabled() {
+        // Arrange: callers immediately attempt the next commit after each flush.
+        let recover_before_commit = false;
+        // Act
+        let (_, published_compactions, rewritten_bytes) =
+            exercise_l0_pressure_recovery(recover_before_commit);
+        // Assert: disabled ordinary background work still completes real pressure recovery.
+        assert!(published_compactions > 0);
+        assert!(rewritten_bytes > 0);
+    }
+
+    #[test]
+    fn should_continue_writing_when_pressure_recovery_precedes_commit() {
+        // Arrange: callers wait for recovery to clear pressure before admitting each write.
+        let recover_before_commit = true;
+        // Act
+        let (rejected, published_compactions, rewritten_bytes) =
+            exercise_l0_pressure_recovery(recover_before_commit);
+        // Assert: completed recovery can keep every caller from observing a rejection.
+        assert_eq!(rejected, 0);
+        assert!(published_compactions > 0);
+        assert!(rewritten_bytes > 0);
+    }
+
+    fn exercise_l0_pressure_recovery(recover_before_commit: bool) -> (u64, u64, u64) {
         use cntryl_midge::{Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions};
         use std::time::Duration;
         // Arrange
@@ -359,9 +386,16 @@ mod sst_regressions {
         )
         .unwrap();
         let cf = engine.create_column_family("l0-pressure").unwrap();
+        let mut rejected = 0_u64;
         // Act: 32 separate flushes exceed the default hard L0 ceiling. Only the
         // production pressure-recovery path can restore admission in this process.
         for index in 0_u32..32 {
+            if recover_before_commit {
+                assert!(engine
+                    .wait_for_write_stall_clear(cf.id(), Duration::from_secs(10))
+                    .unwrap());
+            }
+            let before = engine.metrics().get_runtime_metrics().unwrap();
             let commit = || {
                 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
                 tx.put(index.to_be_bytes().to_vec(), b"value".to_vec(), None)?;
@@ -370,6 +404,13 @@ mod sst_regressions {
             match commit() {
                 Ok(()) => {}
                 Err(MidgeError::WriteStall(_)) => {
+                    rejected += 1;
+                    let after = engine.metrics().get_runtime_metrics().unwrap();
+                    assert_eq!(after.current_sequence, before.current_sequence);
+                    assert_eq!(after.wal_append_count, before.wal_append_count);
+                    let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+                    assert_eq!(read.get(&index.to_be_bytes()).unwrap(), None);
+                    drop(read);
                     assert!(engine
                         .wait_for_write_stall_clear(cf.id(), Duration::from_secs(10))
                         .unwrap());
@@ -379,6 +420,16 @@ mod sst_regressions {
             }
             engine.flush_cf(&cf).unwrap();
         }
+        // Publication can win the race with the caller's next admission. Count
+        // actual completed pressure work instead of requiring a losing caller.
+        let recovered = engine.metrics().get_runtime_metrics().unwrap();
+        let counts = cntryl_midge::__internal::diagnostics::write_admission_snapshot(&engine);
+        assert_eq!(counts.commit_write_stall_total, rejected);
+        assert_eq!(counts.l0_total + counts.ingest_hint_total, rejected);
+        assert_eq!(
+            counts.queue_total + counts.cloud_generation_total + counts.cloud_wal_total,
+            0
+        );
         engine.shutdown(Duration::from_secs(30)).unwrap();
         let reopened = Engine::open(
             OpenOptions::local(dir.path())
@@ -398,6 +449,15 @@ mod sst_regressions {
                 Some(b"value".as_slice())
             );
         }
+        eprintln!(
+            "L0 recovery: wait_before_commit={recover_before_commit} rejected={rejected} published_compactions={} rewritten_bytes={}",
+            recovered.compactions_run, recovered.compaction_bytes_rewritten,
+        );
+        (
+            rejected,
+            recovered.compactions_run,
+            recovered.compaction_bytes_rewritten,
+        )
     }
 }
 
@@ -728,7 +788,7 @@ mod streaming_scan_hardening {
         use std::io::{Read, Seek, Write};
 
         let sst_path = std::fs::read_dir(db_path.join("sst"))?
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read SST directory entry"))
             .map(|entry| entry.path())
             .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
             .expect("flushed SST file");
@@ -1292,7 +1352,7 @@ mod compression_compatibility {
         write_fresh_adaptive_database(temp.path(), &records);
         let sst_path = fs::read_dir(temp.path().join("sst"))
             .expect("read SST directory")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read SST directory entry"))
             .map(|entry| entry.path())
             .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
             .expect("SST path");
@@ -1461,13 +1521,11 @@ mod compression_compatibility {
 
 mod compatibility_fixtures {
     use cntryl_midge::{
-        Engine, EngineHealth, MidgeError, OpenOptions, Query, RecoveryPolicy, TransactionMode,
-        WriteOptions,
+        Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy, TransactionMode,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
-    use xxhash_rust::xxh3::xxh3_64;
 
     fn fixtures_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compatibility")
@@ -1516,79 +1574,83 @@ mod compatibility_fixtures {
         }
     }
 
-    fn logical_rows_digest(rows: &[(bytes::Bytes, bytes::Bytes)]) -> u64 {
-        let mut canonical = Vec::new();
-        for (key, value) in rows {
-            canonical.extend_from_slice(
-                &u32::try_from(key.len())
-                    .expect("fixture key length fits u32")
-                    .to_le_bytes(),
+    #[test]
+    fn should_preserve_populated_v8_fixture_given_strict_recovery_when_reopening() {
+        // Arrange
+        let temp = copy_fixture_dir("v8_populated_v4_sst_db");
+        let before = fs::read(temp.path().join("FORMAT")).expect("read fixture marker");
+
+        for _ in 0..2 {
+            // Act
+            let report = cntryl_midge::StorageVerifier::verify_path(temp.path())
+                .expect("verify format 8 fixture");
+            let mut engine = Engine::open(
+                OpenOptions::local(temp.path())
+                    .recovery_policy(RecoveryPolicy::Strict)
+                    .build()
+                    .expect("build fixture options"),
+            )
+            .expect("open format 8 fixture");
+            let cf = engine
+                .get_column_family("default")
+                .expect("fixture column family");
+            let read = engine
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                .expect("begin fixture read");
+
+            // Assert
+            assert_eq!(report.health, EngineHealth::Healthy);
+            assert_eq!(report.sst_files_verified, 1);
+            assert_eq!(
+                read.get(b"fixture/alpha")
+                    .expect("read persisted point")
+                    .as_deref(),
+                Some(b"value-alpha".as_slice())
             );
-            canonical.extend_from_slice(key);
-            canonical.extend_from_slice(
-                &u32::try_from(value.len())
-                    .expect("fixture value length fits u32")
-                    .to_le_bytes(),
+            drop(read);
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown fixture engine");
+            assert_eq!(
+                fs::read(temp.path().join("FORMAT")).expect("reread fixture marker"),
+                before
             );
-            canonical.extend_from_slice(value);
         }
-        xxh3_64(&canonical)
     }
 
     #[test]
-    fn should_verify_populated_release_v3_v4_fixture_given_supported_format_when_reopening() {
-        // Arrange
+    fn should_reject_populated_release_v3_fixture_given_unsupported_format_when_reopening() {
+        // Arrange: format 3 predates the WAL segment ledger (#842).
         let temp = copy_fixture_dir("v3_populated_v4_sst_db");
+        let before = fs::read(temp.path().join("FORMAT")).expect("read fixture marker");
 
         // Act
-        let report = cntryl_midge::StorageVerifier::verify_path(temp.path())
-            .expect("verify release fixture");
-        assert_eq!(report.health, EngineHealth::Healthy);
-        assert_eq!(report.manifest_files_verified, 1);
-        assert_eq!(report.sst_files_verified, 1);
-        assert_eq!(report.bytes_verified, 437);
-        assert_eq!(report.data_blocks_verified, 1);
-        assert_eq!(report.wal_recovery_records_replayed, 0);
-        assert_eq!(report.wal_recovery_bytes_replayed, 0);
-        assert_eq!(report.intent_entries_loaded, 0);
-
-        let mut engine = Engine::open(
+        let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())
+            .expect_err("format 3 fixture must fail verify");
+        let Err(open_error) = Engine::open(
             OpenOptions::local(temp.path())
                 .recovery_policy(RecoveryPolicy::Strict)
                 .build()
                 .expect("build options"),
-        )
-        .expect("open release fixture");
-        let cf = engine
-            .get_column_family("default")
-            .expect("fixture default column family");
-        let read = engine
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin fixture read");
-        let rows = read
-            .scan(&Query::new())
-            .expect("scan fixture")
-            .try_collect()
-            .expect("collect fixture rows");
-        let runtime = engine
-            .metrics()
-            .get_runtime_metrics()
-            .expect("runtime metrics");
+        ) else {
+            panic!("format 3 fixture must fail open");
+        };
 
         // Assert
-        assert_eq!(runtime.health, EngineHealth::Healthy);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(logical_rows_digest(&rows), 14_948_492_731_235_234_299);
-        drop(read);
-        engine
-            .shutdown(Duration::from_secs(5))
-            .expect("shutdown fixture engine");
+        assert_compatibility_error(verify_error);
+        assert_compatibility_error(open_error);
+        assert_eq!(
+            fs::read(temp.path().join("FORMAT")).expect("reread fixture marker"),
+            before,
+            "a rejected open must not rewrite the marker"
+        );
+        assert!(!temp.path().join("wal").join("LEDGER").exists());
     }
 
     #[test]
     fn should_reject_manifest_bounds_when_valid_sst_summary_disagrees() {
         // Arrange: the release fixture has a valid SST and a readable point value.
-        let baseline = copy_fixture_dir("v3_populated_v4_sst_db");
+        let baseline = copy_fixture_dir("v8_populated_v4_sst_db");
         let baseline_report = cntryl_midge::StorageVerifier::verify_path(baseline.path())
             .expect("verify unmodified fixture");
         assert_eq!(baseline_report.health, EngineHealth::Healthy);
@@ -1617,7 +1679,7 @@ mod compatibility_fixtures {
             .expect("shutdown baseline engine");
 
         for wrong_key_bounds in [true, false] {
-            let temp = copy_fixture_dir("v3_populated_v4_sst_db");
+            let temp = copy_fixture_dir("v8_populated_v4_sst_db");
             for name in ["manifest.json", "manifest.snapshot.json"] {
                 let path = temp.path().join(name);
                 let mut manifest: serde_json::Value =
@@ -1627,8 +1689,11 @@ mod compatibility_fixtures {
                     .as_object_mut()
                     .expect("fixture SST metadata");
                 if wrong_key_bounds {
-                    file.insert("smallest_key".into(), serde_json::json!(b"zzz".to_vec()));
-                    file.insert("largest_key".into(), serde_json::json!(b"zzz".to_vec()));
+                    file.insert(
+                        "smallest_key".into(),
+                        serde_json::json!(hex::encode(b"zzz")),
+                    );
+                    file.insert("largest_key".into(), serde_json::json!(hex::encode(b"zzz")));
                     file.insert("key_bounds_complete".into(), serde_json::json!(true));
                 } else {
                     file.insert("smallest_seq".into(), serde_json::json!(99));
@@ -1657,7 +1722,7 @@ mod compatibility_fixtures {
         for complete in [true, false] {
             // Arrange: complete bounds agree with the SST; older advisory bounds
             // may disagree without hiding a point key from readers.
-            let temp = copy_fixture_dir("v3_populated_v4_sst_db");
+            let temp = copy_fixture_dir("v8_populated_v4_sst_db");
             for name in ["manifest.json", "manifest.snapshot.json"] {
                 let path = temp.path().join(name);
                 let mut manifest: serde_json::Value =
@@ -1668,8 +1733,11 @@ mod compatibility_fixtures {
                     .expect("fixture SST metadata");
                 file.insert("key_bounds_complete".into(), serde_json::json!(complete));
                 if !complete {
-                    file.insert("smallest_key".into(), serde_json::json!(b"zzz".to_vec()));
-                    file.insert("largest_key".into(), serde_json::json!(b"zzz".to_vec()));
+                    file.insert(
+                        "smallest_key".into(),
+                        serde_json::json!(hex::encode(b"zzz")),
+                    );
+                    file.insert("largest_key".into(), serde_json::json!(hex::encode(b"zzz")));
                 }
                 fs::write(
                     &path,
@@ -1734,9 +1802,9 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_future_v5_fixture_given_unsupported_version_when_reopening() {
+    fn should_reject_future_v9_fixture_given_unsupported_version_when_reopening() {
         // Arrange
-        let temp = copy_fixture_dir("future_v5");
+        let temp = copy_fixture_dir("future_v9");
 
         // Act
         let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())
@@ -1753,56 +1821,5 @@ mod compatibility_fixtures {
         };
         // Assert
         assert_compatibility_error(open_error);
-    }
-
-    #[test]
-    fn should_reload_mixed_key_bound_encodings_when_v3_fixture_upgrades_to_v4() {
-        // Arrange: the v3 fixture's manifest stores key bounds as byte arrays.
-        let temp = copy_fixture_dir("v3_populated_v4_sst_db");
-        let options = || {
-            OpenOptions::local(temp.path())
-                .recovery_policy(RecoveryPolicy::Strict)
-                .build()
-                .expect("build options")
-        };
-
-        // Act: a writable open upgrades FORMAT, then a flush adds a hex-encoded entry.
-        let mut engine = Engine::open(options()).expect("open v3 fixture");
-        let cf = engine
-            .get_column_family("default")
-            .expect("fixture default column family");
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin write");
-        tx.put(b"upgrade/key".to_vec(), b"v4".to_vec(), None)
-            .expect("put");
-        tx.commit(WriteOptions::sync()).expect("commit");
-        engine.flush_cf(&cf).expect("flush");
-        engine
-            .shutdown(Duration::from_secs(5))
-            .expect("shutdown after upgrade");
-        let marker = fs::read_to_string(temp.path().join("FORMAT")).expect("read FORMAT");
-
-        let mut reopened = Engine::open(options()).expect("reopen upgraded fixture");
-        let cf = reopened
-            .get_column_family("default")
-            .expect("default column family");
-        let read = reopened
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin read");
-        let rows = read
-            .scan(&Query::new())
-            .expect("scan")
-            .try_collect()
-            .expect("collect rows");
-        drop(read);
-        reopened
-            .shutdown(Duration::from_secs(5))
-            .expect("shutdown reopened engine");
-
-        // Assert
-        assert_eq!(marker.trim(), "midge-format-version=4");
-        assert_eq!(rows.len(), 4);
-        assert!(rows.iter().any(|(key, _)| key.as_ref() == b"upgrade/key"));
     }
 }

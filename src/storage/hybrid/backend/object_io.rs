@@ -1,4 +1,4 @@
-//! Raw local/cloud object operations and callback trait bridging.
+//! Raw remote object operations and callback trait bridging.
 
 use super::{
     Arc, Duration, HybridStorage, StorageBackend, StorageEvent, StorageObjectMetadata,

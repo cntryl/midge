@@ -19,14 +19,13 @@ fn parse_stdout(output: &Output) -> Value {
 
 fn write_empty_database(path: &Path) {
     std::fs::create_dir_all(path).expect("create database directory");
-    std::fs::write(path.join("FORMAT"), "midge-format-version=3\n").expect("write format marker");
+    std::fs::write(path.join("FORMAT"), "midge-format-version=8\n").expect("write format marker");
     std::fs::write(
         path.join("manifest.json"),
         serde_json::to_vec_pretty(&json!({
-            "last_persisted_sequence": 0,
+            "flushed_through": [{"cf_id": 0, "through_sequence": 0}],
             "files": [],
             "column_families": [],
-            "next_wal_seq": 1,
             "next_sst_seqs": {},
             "edit_checkpoint_id": 0
         }))
@@ -36,9 +35,9 @@ fn write_empty_database(path: &Path) {
 }
 
 #[test]
-fn should_emit_v1_json_given_healthy_database_when_midge_verify_runs() {
+fn should_emit_v1_json_given_populated_release_fixture_when_midge_verify_runs() {
     // Arrange
-    let path = fixture_path("tests/fixtures/compatibility/v3_populated_v4_sst_db");
+    let path = fixture_path("tests/fixtures/compatibility/v8_populated_v4_sst_db");
     let expected: Value =
         serde_json::from_str(include_str!("fixtures/verification/healthy_v1.json"))
             .expect("parse healthy report golden");
@@ -49,6 +48,30 @@ fn should_emit_v1_json_given_healthy_database_when_midge_verify_runs() {
     // Assert
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(parse_stdout(&output), expected);
+    assert_eq!(output.stderr, [] as [u8; 0]);
+}
+
+#[test]
+fn should_reject_populated_v3_fixture_when_midge_verify_runs() {
+    // Arrange
+    let path = fixture_path("tests/fixtures/compatibility/v3_populated_v4_sst_db");
+    let before = std::fs::read(path.join("FORMAT")).expect("read fixture marker");
+
+    // Act
+    let output = run_verify(&["verify", "--json", path.to_str().expect("fixture path")]);
+
+    // Assert
+    assert_eq!(output.status.code(), Some(4));
+    let report = parse_stdout(&output);
+    assert_eq!(report["error_kind"], "corruption");
+    assert!(report["message"]
+        .as_str()
+        .expect("compatibility message")
+        .contains("Compatibility error: unsupported on-disk format version 3"));
+    assert_eq!(
+        std::fs::read(path.join("FORMAT")).expect("reread fixture marker"),
+        before
+    );
     assert_eq!(output.stderr, [] as [u8; 0]);
 }
 
@@ -118,10 +141,10 @@ fn should_emit_v1_storage_error_json_given_missing_database_when_midge_verify_ru
 #[test]
 fn should_emit_v1_corruption_error_json_given_future_format_when_midge_verify_runs() {
     // Arrange
-    let path = fixture_path("tests/fixtures/compatibility/future_v5");
+    let path = fixture_path("tests/fixtures/compatibility/future_v9");
     let output_path = path.to_str().expect("fixture path");
     let expected_message = format!(
-        "Compatibility error: unsupported on-disk format version 5 at '{output_path}'; this build supports versions 3..=4"
+        "Compatibility error: unsupported on-disk format version 9 at '{output_path}'; this build supports versions 8..=8"
     );
     let expected_template = include_str!("fixtures/verification/corruption_error_v1.json").trim();
     let expected: Value = serde_json::from_str(&expected_template.replace(

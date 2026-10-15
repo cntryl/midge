@@ -29,6 +29,7 @@ pub(crate) mod sst_read_view;
 pub mod state;
 pub(crate) mod storage_residue;
 pub(crate) mod transaction_spill;
+pub(crate) mod wal_history;
 pub(crate) mod wal_transition;
 pub(crate) mod wal_transition_boundary;
 
@@ -50,9 +51,9 @@ pub use read_snapshot::ReadSnapshot;
 pub use crate::types::ConflictPolicy;
 pub use state::RuntimeState;
 
+pub(crate) use config::RecoveredCloudWalSegment;
 pub use config::RuntimeConfig;
-pub(crate) use config::{CloudRuntimePolicy, CloudWalSealPolicy};
-pub(crate) use config::{RecoveredCloudActiveWal, RecoveredCloudWalSegment};
+pub(crate) use config::{CloudRuntimePolicy, CloudWalSealPolicy, RuntimeRetryPolicy};
 pub use handle::RuntimeHandle;
 pub(crate) use lifecycle::{RuntimeLifecycle, RuntimeLifecycleState, RuntimeTransactionGuard};
 pub(crate) use metadata_publication::MetadataPublicationLock;

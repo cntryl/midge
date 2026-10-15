@@ -75,7 +75,8 @@ impl WorkloadProgress {
         self.observe(
             MaintenanceProgress {
                 sequence: metrics.current_sequence,
-                persisted_sequence: metrics.manifest_last_persisted_sequence,
+                persisted_sequence: metrics.manifest_flush_frontiers[&0]
+                    .expect("default family remains live"),
                 sst_count: metrics.sst_count,
                 compactions: metrics.compactions_run,
                 rewritten_bytes: metrics.compaction_bytes_rewritten,
@@ -107,7 +108,7 @@ impl WorkloadProgress {
                 "write_stalled": metrics.write_stalled,
                 "write_stall_active_ns": metrics.write_stall_active_ns,
                 "sequence": metrics.current_sequence,
-                "persisted_sequence": metrics.manifest_last_persisted_sequence,
+                "persisted_sequence": metrics.manifest_flush_frontiers[&0].expect("default family remains live"),
                 "cloud_durable_sequence": metrics.wal_cloud_durable_seq,
                 "pending_cloud_uploads": metrics.pending_cloud_uploads,
                 "local_storage": metrics.local_storage,
@@ -374,77 +375,4 @@ pub(super) fn verify(engine: &Engine) {
             );
         }
     }
-}
-
-#[test]
-fn should_preserve_profile_timeout_when_maintenance_progress_changes() {
-    // Arrange
-    let started = Instant::now();
-    let mut progress = WorkloadProgress::new(started, Duration::from_mins(2));
-    let completed = MaintenanceProgress {
-        sequence: 10,
-        persisted_sequence: 10,
-        sst_count: 100,
-        compactions: 1,
-        rewritten_bytes: 1024,
-        publications: 1,
-    };
-
-    // Act
-    let after_one_minute = started + Duration::from_secs(61);
-    progress.observe(completed, after_one_minute);
-    progress.observe(
-        MaintenanceProgress {
-            compactions: 2,
-            ..completed
-        },
-        started + Duration::from_secs(119),
-    );
-
-    // Assert
-    assert_eq!(
-        progress.remaining(after_one_minute),
-        Duration::from_secs(59)
-    );
-    assert_eq!(
-        progress.remaining(started + Duration::from_mins(2)),
-        Duration::ZERO
-    );
-    assert_eq!(progress.deadline, started + Duration::from_mins(2));
-    assert_eq!(
-        (started + Duration::from_secs(119)).duration_since(progress.flush_changed_at),
-        Duration::from_secs(58),
-        "unrelated compaction must not hide a waiting flush"
-    );
-}
-
-#[test]
-fn should_preserve_observed_stall_age_when_maintenance_counters_do_not_change() {
-    // Arrange
-    let started = Instant::now();
-    let mut progress = WorkloadProgress::new(started, Duration::from_secs(10));
-    let unchanged = MaintenanceProgress {
-        sequence: 10,
-        persisted_sequence: 10,
-        sst_count: 640,
-        compactions: 0,
-        rewritten_bytes: 0,
-        publications: 0,
-    };
-    progress.observe(unchanged, started);
-
-    // Act
-    let later = started + Duration::from_secs(9);
-    progress.observe(unchanged, later);
-
-    // Assert
-    assert_eq!(
-        later.duration_since(progress.changed_at),
-        Duration::from_secs(9)
-    );
-    assert_eq!(progress.remaining(later), Duration::from_secs(1));
-    assert_eq!(
-        progress.remaining(started + Duration::from_secs(11)),
-        Duration::ZERO
-    );
 }

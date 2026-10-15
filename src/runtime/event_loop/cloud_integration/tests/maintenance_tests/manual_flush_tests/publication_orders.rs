@@ -36,7 +36,7 @@ impl PublisherBackend {
     }
 }
 
-impl CloudBackend for PublisherBackend {
+impl crate::storage::cloud::CloudReadCapability for PublisherBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.pause_publisher_read();
         self.inner.submit_get(key, callback);
@@ -50,7 +50,9 @@ impl CloudBackend for PublisherBackend {
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         self.inner.submit_get_range(key, start, end, callback);
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for PublisherBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -61,19 +63,27 @@ impl CloudBackend for PublisherBackend {
         self.puts.fetch_add(1, Ordering::AcqRel);
         self.inner.submit_put(key, data, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for PublisherBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for PublisherBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for PublisherBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_head(key, callback);
     }
 }
+
+impl CloudBackend for PublisherBackend {}
 
 struct PublisherRelease(Option<crossbeam::channel::Sender<()>>);
 
@@ -119,8 +129,8 @@ fn metadata_fixture(el: &mut EventLoop) -> MidgeResult<MetadataFixture> {
     let lease = attach_provider_metadata_lease(el, Arc::clone(&cloud), "manual-compaction-order");
     assert_eq!(el.state.writer_epoch, lease.epoch());
     let (publisher_tx, publisher_rx) = crossbeam::channel::unbounded();
-    el.compaction_publish_actor = CompactionPublishActor::new(publisher_tx, false)?;
-    el.compaction_publish_result_rx = publisher_rx;
+    el.actors.compaction_publish_actor = CompactionPublishActor::new(publisher_tx, false)?;
+    el.publication.compaction_publish_result_rx = publisher_rx;
     Ok(MetadataFixture {
         cloud,
         backend,
@@ -170,6 +180,7 @@ fn read_committed_manifest(metadata: &MetadataFixture) -> MidgeResult<crate::met
     crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
         &metadata.cloud,
         store.as_ref(),
+        &crate::io::real::test_root(directory.path()),
         directory.path(),
         crate::config::RecoveryPolicy::Strict,
     )?;
@@ -204,8 +215,8 @@ fn assert_committed_files(
         "committed name reservations must survive either publication order"
     );
     assert_eq!(
-        committed.last_persisted_sequence,
-        el.state.manifest.last_persisted_sequence
+        test_flush_frontier(&committed, 0),
+        test_flush_frontier(&el.state.manifest, 0)
     );
     assert_eq!(
         committed
@@ -227,10 +238,11 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
 ) -> MidgeResult<()> {
     // Arrange: force a genuine durable name-block mirror before building.
     let (mut el, worker, _) = cloud_debt(4)?;
-    el.state.sequence = el.state.manifest.last_persisted_sequence;
+    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
     let mut metadata = metadata_fixture(&mut el)?;
-    let (mut compute_release, finalized) = paused_compactor::install(&mut el)?;
+    let (mut compute_release, finalized) = paused_compactor::install(&mut el);
     let plan = el
+        .actors
         .compaction_actor
         .check_manual_compaction(&el.state)?
         .expect("real cloud plan");
@@ -250,6 +262,7 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
     let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
     let assigned = assigned_name(&el, flush_id);
     let build = el
+        .pipeline
         .flush_worker_result_rx
         .recv_timeout(TEST_WAIT)
         .expect("actual flush Build");
@@ -307,10 +320,11 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
 fn should_defer_compaction_completion_when_manual_flush_publishes_first() -> MidgeResult<()> {
     // Arrange
     let (mut el, worker, _) = cloud_debt(4)?;
-    el.state.sequence = el.state.manifest.last_persisted_sequence;
+    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
     let metadata = metadata_fixture(&mut el)?;
-    let (mut compute_release, finalized) = paused_compactor::install(&mut el)?;
+    let (mut compute_release, finalized) = paused_compactor::install(&mut el);
     let plan = el
+        .actors
         .compaction_actor
         .check_manual_compaction(&el.state)?
         .expect("real cloud plan");
@@ -328,17 +342,18 @@ fn should_defer_compaction_completion_when_manual_flush_publishes_first() -> Mid
     let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
     let (name, _) = assigned_name(&el, flush_id).expect("canonical identity before build");
     let build = el
+        .pipeline
         .flush_worker_result_rx
         .recv_timeout(TEST_WAIT)
         .expect("actual Build");
     assert!(matches!(build, FlushWorkerResult::Build(_)));
     el.handle_flush_worker_result(build);
     let flush_owner = ManifestPublicationOwner::Flush { flush_id };
-    let owner_before = el.publication_gate.is_owned_by(&flush_owner);
+    let owner_before = el.publication.publication_gate.is_owned_by(&flush_owner);
     compute_release.release();
     complete_compaction(&mut el, &worker);
-    let completion_deferred = el.publication_gate.deferred_messages_len() == 1;
-    let no_compaction_publication = el.compaction_publication.get().is_none();
+    let completion_deferred = el.publication.publication_gate.deferred_messages_len() == 1;
+    let no_compaction_publication = el.publication.compaction_publication.get().is_none();
     let inputs_retained = inputs
         .iter()
         .all(|input| remote_sst_path_for_test(&el, input).exists());

@@ -147,16 +147,15 @@ impl RetryFixture {
             .build()?;
         let gate = Arc::new(PublicationGate::default());
         let (storage, events) = fixture_storage(directory.path(), &gate)?;
-        let state = RuntimeState::try_new(
-            directory.path().to_path_buf(),
-            false,
-            options.recovery_policy(),
-        )?;
+        let state = RuntimeState::try_new(directory.path(), false, options.recovery_policy())?;
         let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
             options.storage(),
+            &crate::lease::test_lease_root(options.storage()),
+            None,
             options.lease_clock_skew_tolerance(),
             options.storage_io_timeout(),
             options.lease_ttl(),
+            &options.lease_clock(),
         )?;
         let guard = Arc::clone(&created.lease).try_acquire()?;
         let healthy = Arc::new(AtomicBool::new(true));
@@ -164,6 +163,12 @@ impl RetryFixture {
         CloudPersistence::new(Arc::clone(&storage))
             .fence_cloud_wal_catalog(created.lease.epoch())?;
         let mut config = fixture_config(&options, &created, &healthy, &storage, events);
+        config.cloud_metadata_storage = Some(fixture_metadata_storage(
+            directory.path(),
+            &state,
+            &created,
+            &storage,
+        )?);
         config.sst_read_fs = Some(Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
             Arc::new(
                 crate::io::RealFs::new(directory.path()).map_err(crate::io::FsError::into_midge)?,
@@ -211,6 +216,52 @@ impl Drop for RetryFixture {
     }
 }
 
+fn fixture_metadata_storage(
+    directory: &std::path::Path,
+    state: &RuntimeState,
+    created: &CreatedLease,
+    storage: &crate::storage::HybridStorage,
+) -> MidgeResult<Arc<crate::storage::cloud::CloudStorage>> {
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+        Arc::new(crate::storage::filesystem::FileSystem::new(
+            crate::storage::simulated::simulated_cloud_root(directory),
+        )?),
+        WORKER_WAIT,
+    ));
+    crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
+        .map_err(MidgeError::Internal)?;
+    let store = created
+        .lease
+        .get_leader_store()
+        .expect("simulated cloud lease has a shared leader store");
+    let authority = crate::runtime::ddl::DdlLeaseAuthority {
+        store: Arc::clone(&store),
+        holder_id: created.lease.holder_id(),
+        writer_epoch: created.lease.epoch(),
+    };
+    crate::runtime::ddl::fence_remote_registry_on_startup(
+        storage,
+        &authority,
+        &crate::common::OperationDeadline::from_budget(WORKER_WAIT),
+    )?;
+    crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+        crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+            cloud: &cloud,
+            fs: state.fs.as_ref(),
+            publication_lock: &crate::runtime::MetadataPublicationLock::default(),
+            lock_wait_budget: WORKER_WAIT,
+            deadline: &crate::common::OperationDeadline::from_budget(WORKER_WAIT),
+            authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                store: authority.store.as_ref(),
+                holder_id: &authority.holder_id,
+                writer_epoch: authority.writer_epoch,
+            },
+        },
+        |_| Ok(()),
+    )?;
+    Ok(cloud)
+}
+
 fn fixture_storage(
     directory: &std::path::Path,
     gate: &Arc<PublicationGate>,
@@ -219,9 +270,6 @@ fn fixture_storage(
     crossbeam::channel::Receiver<StorageEvent>,
 )> {
     let cloud_root = crate::storage::simulated::simulated_cloud_root(directory);
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        directory.join("hybrid_local"),
-    )?);
     let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
         cloud_root.clone(),
     )?);
@@ -234,7 +282,6 @@ fn fixture_storage(
     );
     let storage = Arc::new(
         crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
-            local,
             cloud.clone(),
             sst,
             cloud,
@@ -319,9 +366,11 @@ fn fixture_engine(
         runtime: Some(runtime),
         runtime_handle,
         db_path: directory.to_path_buf(),
+        root: crate::io::real::test_root(directory),
         memory_mode: false,
         cloud_mode: true,
         simulated_cloud_mode: true,
+        backup_source: Some(directory.to_path_buf()),
         sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
         column_families,

@@ -9,28 +9,24 @@ impl EventLoop {
         &self,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
-        self.cloud_coordinator.mirror_metadata_within(
+        self.actors.cloud_coordinator.mirror_metadata_within(
             self.state.fs.as_ref(),
-            &self.metadata_publication_lock,
-            self.state.manifest.last_persisted_sequence,
+            &self.publication.metadata_publication_lock,
             deadline,
-            self.fencing.leader_store.as_deref().map(|store| {
+            self.authority.fencing.leader_store.as_deref().map(|store| {
                 crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
                     store,
-                    holder_id: self.fencing.leader_holder_id.as_deref().unwrap_or_default(),
-                    writer_epoch: self.fencing.writer_epoch,
+                    holder_id: self
+                        .authority
+                        .fencing
+                        .leader_holder_id
+                        .as_deref()
+                        .unwrap_or_default(),
+                    writer_epoch: self.authority.fencing.writer_epoch,
                 }
             }),
             |deadline| self.validate_runtime_writer_lease_within(deadline),
         )
-    }
-
-    pub(super) fn mirror_metadata_after_local_commit(
-        &mut self,
-        context: &str,
-    ) -> crate::common::MidgeResult<()> {
-        let deadline = self.event_loop_cloud_deadline();
-        self.mirror_metadata_after_local_commit_within(context, &deadline)
     }
 
     pub(super) fn mirror_metadata_after_local_commit_within(

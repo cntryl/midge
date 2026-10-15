@@ -40,6 +40,7 @@ impl FsSstFactoryIo {
         );
         writer.streaming = Some(StreamingState::new_tracked(
             Some(budget),
+            self.output_fs(),
             Arc::clone(&self.scratch_outstanding),
             self.compaction_scratch_directory.as_deref(),
         )?);
@@ -56,6 +57,7 @@ impl FsSstFactoryIo {
         }
     }
 
+    /// Keep build scratch in `directory`, a location in the output filesystem.
     pub(crate) fn with_compaction_scratch_directory(
         mut self,
         directory: std::path::PathBuf,
@@ -84,6 +86,7 @@ impl FsSstFactoryIo {
     /// # Errors
     ///
     /// Returns an error if the file cannot be opened or parsed as an SST reader.
+    #[cfg(test)]
     pub fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         self.open_internal(path, None)
     }
@@ -178,17 +181,23 @@ struct StreamingState {
 }
 
 impl StreamingState {
-    fn new(budget: Option<crate::common::resource_budget::ResourceBudget>) -> MidgeResult<Self> {
-        Self::new_tracked(budget, Arc::default(), None)
+    /// Untracked scratch at the root of the writer's output filesystem.
+    fn new(
+        budget: Option<crate::common::resource_budget::ResourceBudget>,
+        fs: &Arc<dyn Fs>,
+    ) -> MidgeResult<Self> {
+        let fs = fs.local_output_view().unwrap_or_else(|| Arc::clone(fs));
+        Self::new_tracked(budget, fs, Arc::default(), None)
     }
 
     fn new_tracked(
         budget: Option<crate::common::resource_budget::ResourceBudget>,
+        fs: Arc<dyn Fs>,
         outstanding: Arc<std::sync::atomic::AtomicUsize>,
         directory: Option<&Path>,
     ) -> MidgeResult<Self> {
         Ok(Self {
-            sink: sink::ScratchBlockSink::new(budget, outstanding, directory)?,
+            sink: sink::ScratchBlockSink::new(budget, fs, outstanding, directory)?,
             pipeline: pipeline::BlockPipeline::new(),
         })
     }
@@ -379,7 +388,7 @@ impl DynSstWriter for FsSstWriter {
             ));
         }
         if self.streaming.is_none() {
-            self.streaming = Some(StreamingState::new(self.budget.clone())?);
+            self.streaming = Some(StreamingState::new(self.budget.clone(), &self.fs)?);
         }
 
         let block_size = self.block_size;
@@ -453,10 +462,8 @@ impl DynSstWriter for FsSstWriter {
             &range_tombstones,
             &compression_policy,
         )?;
-        let mut source = scratch.reopen().map_err(crate::common::MidgeError::Io)?;
-        let result = crate::sst::fs::persist_sst_stream_to_path(&fs, &mut source, path);
-        drop(source);
-        let cleanup = scratch.close().map_err(crate::common::MidgeError::Io);
+        let result = crate::sst::fs::persist_sst_stream_to_path(&fs, &mut scratch.reader(), path);
+        let cleanup = scratch.close();
         result.and(cleanup)
     }
 
@@ -473,13 +480,12 @@ impl DynSstWriter for FsSstWriter {
         if let Some(streaming) = streaming {
             let scratch =
                 Self::finish_streaming(streaming, &range_tombstones, &compression_policy)?;
-            let mut source = scratch.reopen().map_err(crate::common::MidgeError::Io)?;
             let mut bytes = Vec::new();
-            source
+            scratch
+                .reader()
                 .read_to_end(&mut bytes)
                 .map_err(crate::common::MidgeError::Io)?;
-            drop(source);
-            scratch.close().map_err(crate::common::MidgeError::Io)?;
+            scratch.close()?;
             return Ok(bytes);
         }
 
@@ -521,6 +527,7 @@ impl SstFactory for FsSstFactoryIo {
         );
         writer.streaming = Some(StreamingState::new_tracked(
             Some(budget),
+            self.output_fs(),
             Arc::clone(&self.scratch_outstanding),
             self.compaction_scratch_directory.as_deref(),
         )?);
@@ -529,6 +536,7 @@ impl SstFactory for FsSstFactoryIo {
     }
 
     /// Open an existing SST file
+    #[cfg(test)]
     fn open(&self, path: &Path) -> MidgeResult<Box<dyn crate::sst::traits::SstReaderExt>> {
         FsSstFactoryIo::open(self, path)
     }

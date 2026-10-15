@@ -13,9 +13,15 @@ use crate::runtime::{next_request_id, RuntimeMsg};
 use crate::sst::SstFactory;
 #[cfg(test)]
 use crate::types::EntryType;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
+
+/// The compaction factory is rooted at the SST directory, so compaction names
+/// its inputs, outputs and repair scratch relative to it; outputs land at its
+/// top level.
+const OUTPUT_DIR: &str = "";
 
 #[cfg(test)]
 #[path = "compaction/publication_tests.rs"]
@@ -184,24 +190,22 @@ impl CompactionStorage for crate::storage::HybridStorage {
         let (metadata, size, crc) =
             summarize_output_partition(fs, cf_id, level, name, path, admission)?;
         let key = crate::cloud_layout::object_key(name);
+        let fs_path = crate::sst::fs::fs_relative_sst_path(fs, path)?;
+        let source = crate::storage::hybrid::backend::ImmutableFileSource {
+            key: &key,
+            fs: fs.as_ref(),
+            path: &fs_path,
+            size,
+            checksum: crc,
+        };
         let proof = if let Some(deadline) = admission.manual_deadline {
-            self.publish_immutable_file_within(
-                crate::storage::hybrid::backend::ImmutableFileSource {
-                    key: &key,
-                    path,
-                    size,
-                    checksum: crc,
-                },
-                admission.budget,
-                &deadline,
-            )?
+            self.publish_immutable_file_within(source, admission.budget, &deadline)?
         } else {
-            self.publish_immutable_file(&key, path, size, crc, admission.budget)?
+            self.publish_immutable_file(source, admission.budget)?
         };
         // Input authority has not changed. If the job fails, the completion
         // path deletes this unreferenced object; it cannot lose an input.
         if self.ephemeral_sst_cache_enabled() {
-            let fs_path = crate::sst::fs::fs_relative_sst_path(fs, path)?;
             fs.remove_file(&fs_path).map_err(FsError::into_midge)?;
         }
         Ok(PreparedCompactionOutput {
@@ -576,14 +580,14 @@ impl CompactionActor {
             return Err(error);
         }
         if let Some(tx) = worker_msg_tx {
-            let result = self.run_async_compaction(state, tx, &plan, sba.cloned());
+            let result = self.run_async_compaction(tx, &plan, sba.cloned());
             if result.is_err() {
                 self.abort_compaction(state, &plan, sba, result.as_ref().err());
             }
             return result;
         }
 
-        let result = self.run_sync_compaction(state, &plan, sba);
+        let result = self.run_sync_compaction(&plan, sba);
         if result.is_err() {
             self.abort_compaction(state, &plan, sba, result.as_ref().err());
         }
@@ -599,13 +603,12 @@ impl CompactionActor {
     ) {
         self.finish_active_bookkeeping(state, &plan.input_files);
         if let (Some(hybrid), Some(token)) = (sba, self.storage_reservation.take()) {
-            self.settle_compaction_error_reservation(state, hybrid.as_ref(), token, error);
+            self.settle_compaction_error_reservation(hybrid.as_ref(), token, error);
         }
     }
 
     pub(crate) fn settle_compaction_error_reservation(
         &self,
-        state: &RuntimeState,
         hybrid: &dyn CompactionStorage,
         token: crate::storage::hybrid::actor::StorageReservationToken,
         error: Option<&MidgeError>,
@@ -613,7 +616,7 @@ impl CompactionActor {
         if hybrid.ephemeral_sst_cache_enabled()
             && error.is_some()
             && (!self.sst_factory.compaction_scratch_cleanup_verified()
-                || !self.repair_scratch_cleanup_verified(state))
+                || !self.repair_scratch_cleanup_verified())
         {
             // Error type cannot prove deletion: cancellation, resource limits
             // and corrupt inputs can all follow partial scratch writes.
@@ -622,17 +625,16 @@ impl CompactionActor {
                 "retaining compaction staging allowance because scratch cleanup is unverified"
             );
         } else {
-            self.settle_failed_compaction_reservation(state, hybrid, token);
+            self.settle_failed_compaction_reservation(hybrid, token);
         }
     }
 
     pub(crate) fn settle_failed_compaction_reservation(
         &self,
-        state: &RuntimeState,
         hybrid: &dyn CompactionStorage,
         token: crate::storage::hybrid::actor::StorageReservationToken,
     ) {
-        if hybrid.ephemeral_sst_cache_enabled() && !self.repair_scratch_cleanup_verified(state) {
+        if hybrid.ephemeral_sst_cache_enabled() && !self.repair_scratch_cleanup_verified() {
             tracing::warn!(?token, "retaining compaction staging allowance because overlap-repair scratch cleanup is unverified");
             return;
         }
@@ -640,7 +642,7 @@ impl CompactionActor {
             hybrid.abort(token);
             return;
         }
-        match self.retained_output_bytes(&state.sst_dir) {
+        match self.retained_output_bytes(Path::new(OUTPUT_DIR)) {
             Ok(bytes) => hybrid.retain_inputs(token, &[bytes]),
             Err(error) => {
                 // An unreadable directory cannot prove cleanup. Leaving the
@@ -650,9 +652,9 @@ impl CompactionActor {
         }
     }
 
-    fn repair_scratch_cleanup_verified(&self, state: &RuntimeState) -> bool {
+    fn repair_scratch_cleanup_verified(&self) -> bool {
         let fs = self.sst_factory.output_fs();
-        let path = state.sst_dir.join(".compaction-repair");
+        let path = Path::new(OUTPUT_DIR).join(crate::sst::fs::REPAIR_DIR_NAME);
         let key = match crate::sst::fs::fs_relative_sst_path(&fs, &path) {
             Ok(key) => key,
             Err(error) => {
@@ -838,7 +840,7 @@ impl CompactionActor {
         let mut cleanup_failed = false;
         let fs = self.sst_factory.output_fs();
         for output in staged_outputs {
-            let path = state.sst_dir.join(&output);
+            let path = Path::new(OUTPUT_DIR).join(&output);
             let result = crate::sst::fs::fs_relative_sst_path(&fs, &path)
                 .and_then(|fs_path| fs.remove_file(&fs_path).map_err(FsError::into_midge));
             match result {
@@ -863,7 +865,7 @@ impl CompactionActor {
                     "retaining canceled compaction staging allowance after cleanup failure"
                 );
             } else {
-                self.settle_failed_compaction_reservation(state, hybrid.as_ref(), token);
+                self.settle_failed_compaction_reservation(hybrid.as_ref(), token);
             }
         }
     }
@@ -1022,7 +1024,6 @@ impl CompactionActor {
 
     fn run_sync_compaction(
         &mut self,
-        state: &RuntimeState,
         plan: &crate::compaction::CompactionPlan,
         sba: Option<&Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<Vec<String>> {
@@ -1030,7 +1031,7 @@ impl CompactionActor {
             plan,
             self.compactor.config.max_compaction_input_files,
             self.sst_factory.as_ref(),
-            &state.sst_dir,
+            Path::new(OUTPUT_DIR),
             None,
             sba,
             CompactionOutputWork {
@@ -1123,13 +1124,12 @@ impl CompactionActor {
 
     fn run_async_compaction(
         &mut self,
-        state: &RuntimeState,
         tx: crossbeam::channel::Sender<RuntimeMsg>,
         plan: &crate::compaction::CompactionPlan,
         hybrid_storage: Option<Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<Vec<String>> {
         let sst_factory = Arc::clone(&self.sst_factory);
-        let sst_dir = state.sst_dir.clone();
+        let output_dir = Path::new(OUTPUT_DIR);
         let input_files = plan.input_files.clone();
         let plan_clone = plan.clone();
         self.worker_cancel.store(false, Ordering::Release);
@@ -1150,7 +1150,7 @@ impl CompactionActor {
                     &plan_clone,
                     source_fan_in,
                     sst_factory.as_ref(),
-                    &sst_dir,
+                    output_dir,
                     Some(&abort_check),
                     hybrid_storage.as_ref(),
                     CompactionOutputWork { prepared: &prepared_outputs, manual_deadline },
@@ -1403,16 +1403,14 @@ mod tests {
         // Arrange
         let temp = tempfile::tempdir()?;
         let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-        let fs = Arc::new(crate::io::RealFs::new(&state.sst_dir).map_err(FsError::into_midge)?);
-        let mut actor = CompactionActor::new(Arc::new(crate::sst::FsSstFactoryIo::new(fs, 4096)));
-        let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-            temp.path().join("local"),
-        )?);
+        let mut actor = CompactionActor::new(Arc::new(crate::sst::FsSstFactoryIo::new(
+            crate::io::subdirectory(Arc::clone(&state.fs), crate::sst::fs::SST_DIR),
+            4096,
+        )));
         let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
             temp.path().join("cloud"),
         )?);
         let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::new(1_000),
         ));
@@ -1421,8 +1419,9 @@ mod tests {
         let plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(42);
         actor.prepare_compaction(&mut state, &plan, Some(&compaction_storage))?;
         let residue = state
-            .sst_dir
+            .host_sst_dir()
             .join(crate::cloud_layout::compaction_file_name(0, 1, 42, 0));
+        std::fs::create_dir_all(state.host_sst_dir())?;
         std::fs::write(&residue, [0_u8; 300])?;
 
         // Act
@@ -2024,7 +2023,7 @@ mod tests {
         factory: &dyn SstFactory,
         input_name: &str,
     ) -> Vec<u8> {
-        let input_path = state.sst_dir.join(input_name);
+        let input_path = state.host_sst_dir().join(input_name);
         let mut input_writer = factory.create().expect("create input SST writer");
         input_writer
             .add_with_meta(
@@ -2059,27 +2058,23 @@ mod tests {
         // Arrange
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-        std::fs::create_dir_all(&state.sst_dir).expect("create SST dir");
+        std::fs::create_dir_all(state.host_sst_dir()).expect("create SST dir");
         let input_name = "000000_00_00000000000000000001.sst".to_string();
         let output_name = "000000_01_00000000000000000002.sst".to_string();
-        let input_path = state.sst_dir.join(&input_name);
-        let output_path = state.sst_dir.join(&output_name);
-        let real_fs = Arc::new(crate::io::RealFs::new(&state.sst_dir).expect("create real SST fs"));
+        let input_path = state.host_sst_dir().join(&input_name);
+        let output_path = state.host_sst_dir().join(&output_name);
+        let real_fs =
+            Arc::new(crate::io::RealFs::new(state.host_sst_dir()).expect("create real SST fs"));
         let delegate: Arc<dyn crate::sst::SstFactory> =
             Arc::new(crate::sst::FsSstFactoryIo::new(real_fs, 4096));
         let input_bytes =
             write_shutdown_compaction_input(&mut state, delegate.as_ref(), &input_name);
 
-        let local = Arc::new(
-            crate::storage::filesystem::FileSystem::new(temp.path().join("hybrid-local"))
-                .expect("create local storage"),
-        );
         let cloud = Arc::new(
             crate::storage::filesystem::FileSystem::new(temp.path().join("hybrid-cloud"))
                 .expect("create cloud storage"),
         );
         let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));

@@ -332,10 +332,31 @@ mod engine_wal {
     use crate::common::*;
     use cntryl_midge::WriteOptions;
 
+    fn reopen_from_wal(
+        opts: &MidgeOptions,
+        mut engine: cntryl_midge::Engine,
+    ) -> cntryl_midge::Engine {
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown without flushing resident data");
+        let reopened = open_with_mode(opts, "local");
+        assert!(
+            reopened
+                .metrics()
+                .get_recovery_metrics()
+                .expect("recovery metrics")
+                .wal_recovery_records_replayed
+                > 0,
+            "fixture must exercise production WAL replay"
+        );
+        reopened
+    }
+
     #[test]
-    fn should_recover_data_from_wal_after_flush() {
+    fn should_recover_unflushed_values_given_wal_replay_after_restart() {
         // Arrange
-        let engine = open_with_mode(&opts_for_mode("local"), "local");
+        let opts = opts_for_mode("local");
+        let engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..50 {
@@ -349,26 +370,36 @@ mod engine_wal {
         }
 
         // Act
-        engine.flush_cf(&cf).expect("flush cf");
+        let engine = reopen_from_wal(&opts, engine);
+        let cf = engine.get_column_family("test").expect("recovered family");
 
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin read tx");
-        let count = tx
+        let rows = tx
             .scan(&cntryl_midge::Query::new())
             .expect("scan")
             .try_collect()
-            .expect("collect scan")
-            .len();
+            .expect("collect scan");
 
         // Assert
-        assert_eq!(count, 50, "expected all WAL-backed keys to survive flush");
+        let expected: Vec<_> = (0..50)
+            .map(|index| {
+                (
+                    bytes::Bytes::from(format!("wal_key_{index:04}")),
+                    bytes::Bytes::from_static(b"wal_value"),
+                )
+            })
+            .collect();
+        assert_eq!(rows, expected);
     }
 
     #[test]
     fn should_handle_large_values_in_wal() {
         // Arrange
-        let engine = open_with_mode(&opts_for_mode("local"), "local");
+        let mut opts = opts_for_mode("local");
+        opts.memtable_size = 2 * 1024 * 1024;
+        let engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         let large_value = vec![0xFF; 1_000_000];
@@ -381,7 +412,8 @@ mod engine_wal {
         tx.commit(WriteOptions::buffered()).expect("commit");
 
         // Act
-        engine.flush_cf(&cf).expect("flush cf");
+        let engine = reopen_from_wal(&opts, engine);
+        let cf = engine.get_column_family("test").expect("recovered family");
 
         let read_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -390,8 +422,8 @@ mod engine_wal {
 
         // Assert
         assert_eq!(
-            retrieved.as_ref().map(bytes::Bytes::len),
-            Some(1_000_000),
+            retrieved.as_deref(),
+            Some(large_value.as_slice()),
             "expected the full large value to survive recovery"
         );
     }
@@ -399,7 +431,8 @@ mod engine_wal {
     #[test]
     fn should_recover_deletes_from_wal() {
         // Arrange
-        let engine = open_with_mode(&opts_for_mode("local"), "local");
+        let opts = opts_for_mode("local");
+        let engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..30 {
@@ -423,27 +456,25 @@ mod engine_wal {
             .expect("commit deletes");
 
         // Act
-        engine.flush_cf(&cf).expect("flush cf");
-
-        let mut deleted_count = 0;
-        for i in 0..10 {
-            let key = format!("del_key_{i:04}");
-            let read_tx = engine
-                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
-                .expect("begin read tx");
-            if read_tx.get(key.as_bytes()).expect("get").is_none() {
-                deleted_count += 1;
-            }
-        }
+        let engine = reopen_from_wal(&opts, engine);
+        let cf = engine.get_column_family("test").expect("recovered family");
+        let read_tx = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .expect("begin read tx");
 
         // Assert
-        assert_eq!(deleted_count, 10, "expected all deletes to be recovered");
+        for i in 0..30 {
+            let key = format!("del_key_{i:04}");
+            let expected = (i >= 10).then(|| bytes::Bytes::from_static(b"value"));
+            assert_eq!(read_tx.get(key.as_bytes()).expect("get"), expected);
+        }
     }
 
     #[test]
     fn should_recover_range_tombstones_from_wal() {
         // Arrange
-        let engine = open_with_mode(&opts_for_mode("local"), "local");
+        let opts = opts_for_mode("local");
+        let engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         for i in 0..100 {
@@ -465,7 +496,8 @@ mod engine_wal {
             .expect("commit range delete");
 
         // Act
-        engine.flush_cf(&cf).expect("flush cf");
+        let engine = reopen_from_wal(&opts, engine);
+        let cf = engine.get_column_family("test").expect("recovered family");
 
         let scan_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -475,16 +507,17 @@ mod engine_wal {
             .expect("scan")
             .try_collect()
             .expect("collect scan");
-        let in_range = rows
-            .iter()
-            .filter(|(k, _)| {
-                let k_str = String::from_utf8_lossy(k.as_ref());
-                k_str.as_ref() >= "k020" && k_str.as_ref() < "k080"
-            })
-            .count();
-
         // Assert
-        assert_eq!(in_range, 0, "expected the tombstoned range to be empty");
+        let expected: Vec<_> = (0..100)
+            .filter(|index| !(20..80).contains(index))
+            .map(|index| {
+                (
+                    bytes::Bytes::from(format!("k{index:03}")),
+                    bytes::Bytes::from_static(b"value"),
+                )
+            })
+            .collect();
+        assert_eq!(rows, expected);
     }
 
     #[test]
@@ -545,8 +578,8 @@ mod engine_wal {
         // Act: write one more batch that is *not* flushed, so it's only durable
         // via the (now rotated-many-times) WAL, then restart the engine. This
         // is what distinguishes rotation handling from a plain post-flush
-        // recovery check: replay must walk every rotated segment plus the
-        // final unflushed one to reconstruct the full data set.
+        // recovery check: persisted SSTs and the final unflushed WAL segment
+        // must reconstruct the full data set together.
         for i in 0..100 {
             let key = format!("batch5_key{i:04}");
             let mut tx = engine
@@ -567,26 +600,31 @@ mod engine_wal {
         let read_tx = reopened
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin read tx after restart");
-        let total_after_restart = read_tx
+        let rows_after_restart = read_tx
             .scan(&cntryl_midge::Query::new())
             .expect("scan after restart")
             .try_collect()
-            .expect("collect scan after restart")
-            .len();
+            .expect("collect scan after restart");
 
-        // Assert: recovery replayed across every rotated WAL segment plus the
-        // final unflushed one.
-        assert_eq!(
-            total_after_restart,
-            (batch_count + 1) * 100,
-            "expected data spanning every rotated WAL segment to survive restart"
-        );
+        // Assert
+        let expected: Vec<_> = (0..=batch_count)
+            .flat_map(|batch| {
+                (0..100).map(move |index| {
+                    (
+                        bytes::Bytes::from(format!("batch{batch}_key{index:04}")),
+                        bytes::Bytes::from_static(b"batch_value"),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(rows_after_restart, expected);
     }
 
     #[test]
     fn should_recover_mixed_operations_from_wal() {
         // Arrange
-        let engine = open_with_mode(&opts_for_mode("local"), "local");
+        let opts = opts_for_mode("local");
+        let engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         let mut tx0 = engine
@@ -632,7 +670,8 @@ mod engine_wal {
             .expect("commit range delete");
 
         // Act
-        engine.flush_cf(&cf).expect("flush cf");
+        let engine = reopen_from_wal(&opts, engine);
+        let cf = engine.get_column_family("test").expect("recovered family");
 
         let verify_tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
@@ -643,21 +682,26 @@ mod engine_wal {
             .expect("scan")
             .try_collect()
             .expect("collect scan");
-        let dr_remaining = rows
-            .iter()
-            .filter(|(k, _)| {
-                let k_str = String::from_utf8_lossy(k.as_ref());
-                k_str.as_ref() >= "dr_05" && k_str.as_ref() < "dr_15"
-            })
-            .count();
-
         // Assert
         assert_eq!(
             put_val.as_deref(),
             Some(&b"put_value_v2"[..]),
             "expected the last write to win"
         );
-        assert_eq!(dr_remaining, 0, "expected the range delete to win");
+        let mut expected: Vec<_> = (0..20)
+            .filter(|index| !(5..15).contains(index))
+            .map(|index| {
+                (
+                    bytes::Bytes::from(format!("dr_{index:02}")),
+                    bytes::Bytes::from_static(b"v"),
+                )
+            })
+            .collect();
+        expected.push((
+            bytes::Bytes::from_static(b"put_key"),
+            bytes::Bytes::from_static(b"put_value_v2"),
+        ));
+        assert_eq!(rows, expected);
     }
 }
 
@@ -666,7 +710,6 @@ mod engine_ttl {
 
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
-    use std::thread;
     use std::time::Duration;
     use std::{fs, path::Path};
 
@@ -702,6 +745,67 @@ mod engine_ttl {
                 .expect("build options"),
         )
         .expect("open engine")
+    }
+
+    fn open_mode_with_clock(opts: &MidgeOptions, clock: Arc<ManualClock>) -> Engine {
+        let builder = match &opts.storage_mode {
+            StorageMode::Memory => OpenOptions::in_memory(),
+            StorageMode::LocalDisk { db_path } => OpenOptions::local(db_path),
+            StorageMode::CloudBacked { local_cache_path } => {
+                OpenOptions::cloud_simulated(local_cache_path, "test-bucket", "test-prefix/")
+            }
+        };
+        Engine::open(
+            builder
+                .ttl_clock(clock)
+                .background_compaction(opts.enable_compaction)
+                .with_memtable_size_limit(opts.memtable_size)
+                .with_memtable_flush_threshold(opts.memtable_size)
+                .build()
+                .expect("TTL fixture options"),
+        )
+        .expect("open TTL fixture")
+    }
+
+    fn assert_ttl_survives_restart(mode: &str, opts: &MidgeOptions, flush: bool) {
+        let clock = Arc::new(ManualClock::new(10_000));
+        let mut engine = open_mode_with_clock(opts, Arc::clone(&clock));
+        let cf = engine
+            .create_column_family("ttl-restart")
+            .expect("create family");
+        let mut write = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        write
+            .put(b"expiring".to_vec(), b"value".to_vec(), Some(1))
+            .unwrap();
+        write
+            .put(b"stable".to_vec(), b"control".to_vec(), None)
+            .unwrap();
+        write.commit(sync_write_options(mode)).unwrap();
+        if flush {
+            engine.flush_cf(&cf).unwrap();
+        }
+        engine.shutdown(Duration::from_secs(5)).unwrap();
+
+        clock.set(10_999);
+        let engine = open_mode_with_clock(opts, Arc::clone(&clock));
+        let cf = engine
+            .get_column_family("ttl-restart")
+            .expect("recover existing family");
+        let before = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+        assert_eq!(
+            before.get(b"expiring").unwrap(),
+            Some(Bytes::from_static(b"value"))
+        );
+        drop(before);
+        clock.set(11_000);
+        let expired = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+        assert_eq!(expired.get(b"expiring").unwrap(), None);
+        assert_eq!(
+            expired.get(b"stable").unwrap(),
+            Some(Bytes::from_static(b"control"))
+        );
     }
 
     #[test]
@@ -749,15 +853,30 @@ mod engine_ttl {
         transaction
             .put(b"a".to_vec(), b"a".to_vec(), Some(1))
             .expect("put a");
+        clock.set(20_250);
         transaction
             .put(b"b".to_vec(), b"b".to_vec(), Some(1))
             .expect("put b");
 
         // Act
+        clock.set(20_500);
         transaction
             .commit(WriteOptions::buffered())
             .expect("commit");
-        clock.set(21_000);
+        clock.set(21_499);
+        let before_expiry = engine
+            .begin_tx(0, TransactionMode::ReadOnly)
+            .expect("read before shared expiration");
+        assert_eq!(
+            before_expiry.get(b"a").unwrap(),
+            Some(Bytes::from_static(b"a"))
+        );
+        assert_eq!(
+            before_expiry.get(b"b").unwrap(),
+            Some(Bytes::from_static(b"b"))
+        );
+        drop(before_expiry);
+        clock.set(21_500);
         let read = engine
             .begin_tx(0, TransactionMode::ReadOnly)
             .expect("begin read");
@@ -949,8 +1068,14 @@ mod engine_ttl {
     }
 
     fn contains_spill_run(path: &Path) -> bool {
-        fs::read_dir(path).is_ok_and(|entries| {
-            entries.filter_map(Result::ok).any(|entry| {
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+            Err(error) => panic!("list spill directory {}: {error}", path.display()),
+        };
+        entries
+            .map(|entry| entry.expect("read spill directory entry"))
+            .any(|entry| {
                 let path = entry.path();
                 if path.is_dir() {
                     contains_spill_run(&path)
@@ -958,7 +1083,6 @@ mod engine_ttl {
                     path.extension().is_some_and(|extension| extension == "run")
                 }
             })
-        })
     }
 
     #[test]
@@ -1120,7 +1244,8 @@ mod engine_ttl {
     fn should_return_none_given_ttl_elapsed_when_reading() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
-            let engine = Arc::new(open_with_mode(&opts, mode));
+            let clock = Arc::new(ManualClock::new(10_000));
+            let engine = open_mode_with_clock(&opts, Arc::clone(&clock));
             let cf = engine.create_column_family("test").expect("create cf");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -1130,7 +1255,7 @@ mod engine_ttl {
             tx.commit(buffered_write_options(mode)).unwrap();
 
             // Act
-            thread::sleep(Duration::from_millis(1100)); // Wait for expiration
+            clock.set(11_000);
             let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
             let result = read_tx.get(b"key1").unwrap();
 
@@ -1143,7 +1268,8 @@ mod engine_ttl {
     fn should_not_expire_key_given_zero_ttl_when_zero_means_infinite() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
-            let engine = Arc::new(open_with_mode(&opts, mode));
+            let clock = Arc::new(ManualClock::new(10_000));
+            let engine = open_mode_with_clock(&opts, Arc::clone(&clock));
             let cf = engine.create_column_family("test").expect("create cf");
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -1153,7 +1279,7 @@ mod engine_ttl {
             tx.commit(buffered_write_options(mode)).unwrap();
 
             // Act
-            thread::sleep(Duration::from_millis(100));
+            clock.set(100_000);
             let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
             let result = read_tx.get(b"key1").unwrap();
 
@@ -1170,29 +1296,10 @@ mod engine_ttl {
     fn should_persist_ttl_metadata_given_restart_when_reopening() {
         for_each_storage_mode(&["local", "cloud"], |mode, opts| {
             // Arrange
-            // Act (Phase 1)
-            {
-                let mut engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .unwrap();
-                tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600))
-                    .unwrap(); // 1 hour
-                tx.commit(buffered_write_options(mode)).unwrap();
-                engine
-                    .shutdown(Duration::from_secs(5))
-                    .expect("shutdown before reopen");
-            }
-
-            // Assert (Phase 2)
-            {
-                let engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
-                let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
-                let result = read_tx.get(b"key1").unwrap();
-                assert_eq!(result, Some(Bytes::from_static(b"value1")));
-            }
+            let flush = false;
+            // Act
+            // Assert
+            assert_ttl_survives_restart(mode, &opts, flush);
         });
     }
 
@@ -1200,33 +1307,10 @@ mod engine_ttl {
     fn should_persist_ttl_metadata_given_flush_and_restart_when_reopening() {
         for_each_storage_mode(&["local", "cloud"], |mode, opts| {
             // Arrange
-            {
-                let mut engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .unwrap();
-                tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(3600))
-                    .unwrap();
-                tx.commit(buffered_write_options(mode)).unwrap();
-                engine.flush_cf(&cf).unwrap();
-                engine
-                    .shutdown(Duration::from_secs(5))
-                    .expect("shutdown before reopen");
-            }
-
+            let flush = true;
             // Act
-            {
-                let engine = open_with_mode(&opts, mode);
-                let cf = engine
-                    .get_column_family("test")
-                    .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
-                let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
-                let result = read_tx.get(b"key1").unwrap();
-
-                // Assert
-                assert_eq!(result, Some(Bytes::from_static(b"value1")));
-            }
+            // Assert
+            assert_ttl_survives_restart(mode, &opts, flush);
         });
     }
 
@@ -1234,33 +1318,38 @@ mod engine_ttl {
     fn should_expire_after_restart_given_ttl_elapsed_during_shutdown_when_reopening() {
         for_each_storage_mode(&["local", "cloud"], |mode, opts| {
             // Arrange
+            let clock = Arc::new(ManualClock::new(10_000));
             // Act (Phase 1)
             {
-                let mut engine = open_with_mode(&opts, mode);
-                let cf = engine
-                    .get_column_family("test")
-                    .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
+                let mut engine = open_mode_with_clock(&opts, Arc::clone(&clock));
+                let cf = engine.create_column_family("test").expect("create family");
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .unwrap();
                 tx.put(b"key1".to_vec(), b"value1".to_vec(), Some(1))
                     .unwrap(); // 1 second
-                tx.commit(buffered_write_options(mode)).unwrap();
-                thread::sleep(Duration::from_millis(1100)); // Wait for expiration
+                tx.put(b"stable".to_vec(), b"control".to_vec(), None)
+                    .unwrap();
+                tx.commit(sync_write_options(mode)).unwrap();
                 engine
                     .shutdown(Duration::from_secs(5))
                     .expect("shutdown before reopen");
             }
+            clock.set(11_000);
 
             // Assert (Phase 2)
             {
-                let engine = open_with_mode(&opts, mode);
+                let engine = open_mode_with_clock(&opts, clock);
                 let cf = engine
                     .get_column_family("test")
-                    .unwrap_or_else(|| engine.create_column_family("test").expect("create cf"));
+                    .expect("recover existing family");
                 let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
                 let result = read_tx.get(b"key1").unwrap();
                 assert_eq!(result, None);
+                assert_eq!(
+                    read_tx.get(b"stable").unwrap(),
+                    Some(Bytes::from_static(b"control"))
+                );
             }
         });
     }
@@ -1270,14 +1359,15 @@ mod engine_ttl {
     // ============================================================================
 
     #[test]
-    fn should_remove_expired_entries_given_compaction_when_ttl_exceeded() {
-        for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+    fn should_keep_expired_entries_invisible_given_compaction_when_ttl_exceeded() {
+        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange: four separate L0 generations so `compact_all()` crosses
             // the default L0 file-count trigger and performs a real merge,
             // rather than flush_cf() alone (the test name promises compaction
             // specifically). The TTL'd key sits alongside unrelated filler
             // keys so a genuine multi-file merge is required to resolve it.
-            let engine = Arc::new(open_with_mode(&opts, mode));
+            let clock = Arc::new(ManualClock::new(10_000));
+            let engine = open_mode_with_clock(&opts, Arc::clone(&clock));
             let cf = engine.create_column_family("test").expect("create cf");
             for batch in 0..3 {
                 let mut tx = engine
@@ -1295,7 +1385,7 @@ mod engine_ttl {
                 .unwrap(); // 1 second
             tx.commit(buffered_write_options(mode)).unwrap();
             engine.flush_cf(&cf).unwrap();
-            thread::sleep(Duration::from_millis(1100));
+            clock.set(11_000);
 
             // Act - trigger a real compaction (not just a flush)
             engine.compact_all().unwrap();
@@ -1319,7 +1409,7 @@ mod engine_ttl {
 
     #[test]
     fn should_preserve_non_expired_entries_given_compaction_when_ttl_not_exceeded() {
-        for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange: same reasoning as the sibling expiry test — four L0
             // generations so `compact_all()` performs a genuine merge instead
             // of a silent no-op.
@@ -1364,7 +1454,8 @@ mod engine_ttl {
     fn should_handle_mixed_ttl_keys_given_some_expire_when_reading() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
-            let engine = Arc::new(open_with_mode(&opts, mode));
+            let clock = Arc::new(ManualClock::new(10_000));
+            let engine = open_mode_with_clock(&opts, Arc::clone(&clock));
             let cf = engine.create_column_family("test").expect("create cf");
             let mut tx1 = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -1386,7 +1477,7 @@ mod engine_ttl {
             tx3.commit(buffered_write_options(mode)).unwrap();
 
             // Act
-            thread::sleep(Duration::from_millis(1100));
+            clock.set(11_000);
             let read_tx1 = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
             let result1 = read_tx1.get(b"key1").unwrap();
             let read_tx2 = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -1409,7 +1500,8 @@ mod engine_ttl {
     fn should_update_ttl_given_overwrite_with_new_ttl_when_writing() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
-            let engine = Arc::new(open_with_mode(&opts, mode));
+            let clock = Arc::new(ManualClock::new(10_000));
+            let engine = open_mode_with_clock(&opts, Arc::clone(&clock));
             let cf = engine.create_column_family("test").expect("create cf");
             let mut tx1 = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -1417,7 +1509,7 @@ mod engine_ttl {
             tx1.put(b"key1".to_vec(), b"value1".to_vec(), Some(1))
                 .unwrap(); // 1 second
             tx1.commit(buffered_write_options(mode)).unwrap();
-            thread::sleep(Duration::from_millis(500));
+            clock.set(10_500);
 
             // Act - overwrite with longer TTL
             let mut tx2 = engine
@@ -1426,7 +1518,7 @@ mod engine_ttl {
             tx2.put(b"key1".to_vec(), b"value2".to_vec(), Some(3600))
                 .unwrap(); // 1 hour
             tx2.commit(buffered_write_options(mode)).unwrap();
-            thread::sleep(Duration::from_millis(700)); // Original would have expired
+            clock.set(11_000); // The original TTL has expired.
 
             // Assert - should still be readable with new TTL
             let read_tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
@@ -1441,11 +1533,12 @@ mod engine_ttl {
 
     #[test]
     fn should_expire_keys_covered_by_range_tombstone_during_compaction() {
-        for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             eprintln!("\n=== TTL: Expire Keys Covered by Range Tombstone (mode: {mode}) ===");
 
             // Arrange: Write keys with TTL in range [k3, k8)
-            let engine = Arc::new(open_with_mode(&opts, mode));
+            let clock = Arc::new(ManualClock::new(10_000));
+            let engine = open_mode_with_clock(&opts, Arc::clone(&clock));
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write keys k1..k10 with 1 second TTL
@@ -1470,8 +1563,14 @@ mod engine_ttl {
             delete_tx.commit(buffered_write_options(mode)).unwrap();
             engine.flush_cf(&cf).expect("flush");
 
-            // Wait for TTL expiry
-            thread::sleep(Duration::from_millis(1100));
+            let before_expiry = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+            assert_eq!(before_expiry.get(b"k5").unwrap(), None);
+            assert_eq!(
+                before_expiry.get(b"k2").unwrap(),
+                Some(Bytes::from_static(b"ttl_value"))
+            );
+            drop(before_expiry);
+            clock.set(11_000);
 
             // Act: Trigger compaction
             engine.compact_all().expect("compact TTL levels");
@@ -1498,69 +1597,95 @@ mod engine_ttl {
 
     #[test]
     fn should_handle_ttl_expiry_during_multi_level_compaction() {
-        for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
+        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             eprintln!("\n=== TTL: Multi-Level Compaction with Expiry (mode: {mode}) ===");
 
             // Arrange: Build multi-level LSM with different TTLs
-            let engine = Arc::new(open_with_mode(&opts, mode));
+            let clock = Arc::new(ManualClock::new(10_000));
+            let engine = open_mode_with_clock(&opts, Arc::clone(&clock));
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // L0: Write keys with 1-second TTL
+            // Promote even keys with short TTL into L1.
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
             for i in 0..50 {
-                let key = format!("level0_key_{i:04}");
+                let key = format!("ttl-key-{:04}", i * 2);
                 tx.put(key.as_bytes().to_vec(), b"l0_value".to_vec(), Some(1))
                     .unwrap();
             }
             tx.commit(buffered_write_options(mode)).unwrap();
             engine.flush_cf(&cf).expect("flush L0");
+            engine
+                .compact_all()
+                .expect("promote first generation into L1");
+            let original_l1: Vec<_> = engine
+                .metrics()
+                .get_storage_layout()
+                .unwrap()
+                .levels
+                .iter()
+                .filter(|level| level.level == 1)
+                .flat_map(|level| &level.files)
+                .map(|file| file.name.clone())
+                .collect();
+            assert!(!original_l1.is_empty(), "expired generation must reach L1");
 
-            // L1: Write keys with longer TTL
+            // Odd keys in L0 overlap the expired L1 key bounds.
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
-            for i in 50..100 {
-                let key = format!("level1_key_{i:04}");
+            for i in 0..50 {
+                let key = format!("ttl-key-{:04}", i * 2 + 1);
                 tx.put(key.as_bytes().to_vec(), b"l1_value".to_vec(), Some(3600))
                     .unwrap();
             }
             tx.commit(buffered_write_options(mode)).unwrap();
             engine.flush_cf(&cf).expect("flush L1");
 
-            // Wait for L0 TTL to expire
-            thread::sleep(Duration::from_millis(1100));
+            clock.set(11_000);
 
             // Act: Trigger compaction (L0â†’L1)
-            engine.compact_all().ok();
+            engine.compact_all().expect("compact TTL generations");
 
-            // Assert: L0 expired keys removed; L1 keys unchanged
+            // Assert: the old L1 input participated in the merge.
+            assert!(engine
+                .metrics()
+                .get_storage_layout()
+                .unwrap()
+                .levels
+                .iter()
+                .flat_map(|level| &level.files)
+                .all(|file| !original_l1.contains(&file.name)));
             let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
-
-            // L0 keys should be gone (expired)
-            let l0_found = (0..50)
-                .filter(|i| {
-                    let key = format!("level0_key_{i:04}");
-                    tx.get(key.as_bytes())
-                        .expect("read expired L0 key")
-                        .is_some()
+            for index in 0..50 {
+                assert_eq!(
+                    tx.get(format!("ttl-key-{:04}", index * 2).as_bytes())
+                        .unwrap(),
+                    None
+                );
+                let key = format!("ttl-key-{:04}", index * 2 + 1);
+                assert_eq!(
+                    tx.get(key.as_bytes()).expect("read retained TTL key"),
+                    Some(Bytes::from_static(b"l1_value")),
+                    "mode: {mode}, key: {key}"
+                );
+            }
+            let expected: Vec<_> = (0..50)
+                .map(|index| {
+                    (
+                        Bytes::from(format!("ttl-key-{:04}", index * 2 + 1)),
+                        Bytes::from_static(b"l1_value"),
+                    )
                 })
-                .count();
-            assert_eq!(l0_found, 0, "L0 expired keys should be removed");
-
-            // L1 keys should remain (not expired)
-            let l1_found = (50..100)
-                .filter(|i| {
-                    let key = format!("level1_key_{i:04}");
-                    tx.get(key.as_bytes())
-                        .expect("read retained L1 key")
-                        .is_some()
-                })
-                .count();
-            assert!(l1_found >= 40, "L1 keys should remain");
-
-            eprintln!("âœ“ Multi-level compaction handled TTL correctly; L1 retained: {l1_found}");
+                .collect();
+            assert_eq!(
+                tx.scan(&cntryl_midge::Query::new())
+                    .unwrap()
+                    .try_collect()
+                    .unwrap(),
+                expected
+            );
         });
     }
 
@@ -1570,7 +1695,8 @@ mod engine_ttl {
             eprintln!("\n=== TTL: Don't Expose TTL+Tombstone (mode: {mode}) ===");
 
             // Arrange: Create scenario with both TTL and tombstone covering same key
-            let engine = Arc::new(open_with_mode(&opts, mode));
+            let clock = Arc::new(ManualClock::new(10_000));
+            let engine = open_mode_with_clock(&opts, Arc::clone(&clock));
             let cf = engine.create_column_family("test").expect("create cf");
 
             // Write k5 with 1-second TTL (not flushed)
@@ -1581,15 +1707,15 @@ mod engine_ttl {
                 .unwrap();
             tx.commit(buffered_write_options(mode)).unwrap();
 
-            // Immediately write range tombstone [k1, k10)
+            // Immediately write a range tombstone that covers k5 lexicographically.
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
-            tx.delete_range(b"k1".to_vec(), b"k10".to_vec()).unwrap();
+            tx.delete_range(b"k1".to_vec(), b"k9".to_vec()).unwrap();
             tx.commit(buffered_write_options(mode)).unwrap();
 
             // Act: Read k5 after TTL expiry
-            thread::sleep(Duration::from_millis(1100));
+            clock.set(11_000);
             let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
             let result = tx.get(b"k5").unwrap();
 
@@ -2622,35 +2748,42 @@ mod engine_delete_range {
     }
 
     #[test]
-    fn should_handle_empty_range_given_start_equals_end_when_delete_range() {
+    fn should_reject_equal_delete_range_before_staging_when_transaction_remains_usable() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
-
             let mut tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
-            tx.put(b"key".to_vec(), b"val".to_vec(), None).expect("put");
+            tx.put(b"key".to_vec(), b"val".to_vec(), None).unwrap();
             tx.commit(buffered_write_options(mode)).unwrap();
 
             // Act
             let mut delete_tx = engine
                 .begin_tx(cf.id(), TransactionMode::ReadWrite)
                 .unwrap();
-            delete_tx
-                .delete_range(b"key".to_vec(), b"key".to_vec())
-                .expect("delete_range");
-            delete_tx
-                .commit(buffered_write_options(mode))
-                .expect("commit delete_range");
+            let result = delete_tx.delete_range(b"key".to_vec(), b"key".to_vec());
 
             // Assert
+            assert!(
+                matches!(result, Err(cntryl_midge::MidgeError::InvalidArgument(_))),
+                "mode: {mode}"
+            );
+            delete_tx
+                .put(b"after".to_vec(), b"valid".to_vec(), None)
+                .unwrap();
+            delete_tx.commit(buffered_write_options(mode)).unwrap();
             let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
             assert_eq!(
-                tx.get(b"key").expect("get"),
+                tx.get(b"key").unwrap(),
                 Some(Bytes::from_static(b"val")),
-                "key should exist (empty range) in mode: {mode}"
+                "mode: {mode}"
+            );
+            assert_eq!(
+                tx.get(b"after").unwrap(),
+                Some(Bytes::from_static(b"valid")),
+                "mode: {mode}"
             );
         });
     }
@@ -2890,12 +3023,10 @@ mod engine_exclusivity {
     const CRASHED_CHILD_ENV_DB_PATH: &str = "MIDGE_EXCLUSIVITY_CRASHED_CHILD_DB_PATH";
 
     /// Helper: create a temp directory for testing
-    fn temp_db_path() -> PathBuf {
+    fn temp_db_path() -> (tempfile::TempDir, PathBuf) {
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let path = temp_dir.path().to_path_buf();
-        // Keep temp_dir alive so it doesn't get deleted
-        std::mem::forget(temp_dir);
-        path
+        (temp_dir, path)
     }
 
     fn local_options(path: &std::path::Path) -> cntryl_midge::OpenOptions {
@@ -2913,7 +3044,7 @@ mod engine_exclusivity {
     #[test]
     fn should_open_single_instance_when_no_contention() {
         // Arrange
-        let db_path = temp_db_path();
+        let (_directory, db_path) = temp_db_path();
         let opts = local_options(&db_path);
 
         // Act
@@ -2932,7 +3063,7 @@ mod engine_exclusivity {
     #[test]
     fn should_reject_second_engine_open_given_existing_primary_lease_when_starting() {
         // Arrange
-        let db_path = temp_db_path();
+        let (_directory, db_path) = temp_db_path();
 
         // Open first instance
 
@@ -2965,7 +3096,7 @@ mod engine_exclusivity {
     #[test]
     fn should_allow_second_instance_when_first_is_shutdown() {
         // Arrange
-        let db_path = temp_db_path();
+        let (_directory, db_path) = temp_db_path();
 
         // Open and drop first instance
 
@@ -2979,9 +3110,6 @@ mod engine_exclusivity {
                 .expect("shutdown first instance");
         }
 
-        // Small delay to ensure lease is released
-        thread::sleep(Duration::from_millis(50));
-
         // Second instance should now succeed
         let engine2 = Engine::open(local_options(&db_path))
             .expect("second instance should open after first is dropped");
@@ -2993,7 +3121,7 @@ mod engine_exclusivity {
     #[test]
     fn should_maintain_lease_health_during_normal_operation() {
         // Arrange
-        let db_path = temp_db_path();
+        let (_directory, db_path) = temp_db_path();
         let engine = Engine::open(local_options(&db_path)).expect("should open");
         assert!(engine.is_primary_lease_healthy());
 
@@ -3012,7 +3140,8 @@ mod engine_exclusivity {
     #[test]
     fn should_block_concurrent_opens_when_racing() {
         // Arrange
-        let db_path = Arc::new(temp_db_path());
+        let (_directory, db_path) = temp_db_path();
+        let db_path = Arc::new(db_path);
         let barrier = Arc::new(std::sync::Barrier::new(3));
 
         let mut handles = vec![];
@@ -3099,7 +3228,7 @@ mod engine_exclusivity {
     #[test]
     fn should_reject_writes_if_lease_becomes_unhealthy() {
         // Arrange
-        let db_path = temp_db_path();
+        let (_directory, db_path) = temp_db_path();
         let engine = Engine::open(local_options(&db_path)).expect("should open");
         assert!(engine.is_primary_lease_healthy());
 
@@ -3156,7 +3285,7 @@ mod engine_exclusivity {
     #[test]
     fn should_release_primary_lease_given_clean_shutdown_when_shutdown_completes() {
         // Arrange
-        let db_path = temp_db_path();
+        let (_directory, db_path) = temp_db_path();
 
         // Act
         // Open, perform some work, and shut down.
@@ -3164,16 +3293,10 @@ mod engine_exclusivity {
             let mut engine = Engine::open(local_options(&db_path)).expect("should open");
             assert!(engine.is_primary_lease_healthy());
 
-            // Simulate some work
-            thread::sleep(Duration::from_millis(100));
-
             engine
                 .shutdown(Duration::from_secs(2))
                 .expect("clean shutdown");
         }
-
-        // Give OS time to release file lock
-        thread::sleep(Duration::from_millis(50));
 
         // Should be able to open again immediately
         let engine2 =
@@ -3192,7 +3315,7 @@ mod engine_exclusivity {
         eprintln!("\n=== Exclusivity: Rapid Open/Close Cycling ===");
 
         // Arrange
-        let db_path = temp_db_path();
+        let (_directory, db_path) = temp_db_path();
 
         // Act: Rapid cycle opens and closes
         for cycle in 0..50 {
@@ -3268,7 +3391,7 @@ mod engine_exclusivity {
         // Arrange: a child process acquires the lease and then "crashes" by
         // calling exit() directly, leaving the on-disk lease record held and
         // unexpired (its TTL is far longer than this test takes to run).
-        let db_path = temp_db_path();
+        let (_directory, db_path) = temp_db_path();
         run_crashed_child_holding_lease(&db_path);
 
         // Act
@@ -3310,6 +3433,31 @@ mod engine_compaction {
     use cntryl_midge::Query;
     use std::collections::HashSet;
 
+    fn sst_names(engine: &cntryl_midge::Engine) -> HashSet<String> {
+        engine
+            .metrics()
+            .get_storage_layout()
+            .expect("storage layout")
+            .levels
+            .into_iter()
+            .flat_map(|level| level.files.into_iter().map(|file| file.name))
+            .collect()
+    }
+
+    fn assert_retired_ssts_removed(path: &std::path::Path, inputs: &HashSet<String>) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while inputs
+            .iter()
+            .any(|name| path.join("sst").join(name).exists())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "retired SST inputs remain on disk"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     // ============================================================================
     // TEST GROUP 1: Snapshot Reads Across Flush
     // ============================================================================
@@ -3330,12 +3478,24 @@ mod engine_compaction {
                 .expect("commit initial value");
         }
 
-        engine.flush_cf(&cf).expect("flush initial data");
         let snapshot = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin snapshot tx");
 
         // Act
+        let mut update = engine
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin update after snapshot");
+        update
+            .put(
+                b"concurrent_key_0000".to_vec(),
+                b"updated_value".to_vec(),
+                None,
+            )
+            .expect("update after snapshot");
+        update
+            .commit(cntryl_midge::WriteOptions::sync())
+            .expect("commit update");
         engine.flush_cf(&cf).expect("flush while snapshot is open");
 
         // Assert
@@ -3351,7 +3511,7 @@ mod engine_compaction {
         let current_val = tx
             .get(b"concurrent_key_0000")
             .expect("read current value after flush");
-        assert_eq!(current_val, Some(Bytes::from_static(b"initial_value")));
+        assert_eq!(current_val, Some(Bytes::from_static(b"updated_value")));
     }
 
     // ============================================================================
@@ -3484,8 +3644,13 @@ mod engine_compaction {
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin read tx");
-        let val = tx.get(b"large_00").expect("get large value");
-        assert_eq!(val.as_ref().map(Bytes::len), Some(100_000));
+        for index in 0..10 {
+            let key = format!("large_{index:02}");
+            assert_eq!(
+                tx.get(key.as_bytes()).expect("get large value").as_deref(),
+                Some(large_value.as_slice())
+            );
+        }
     }
 
     // ============================================================================
@@ -3579,7 +3744,8 @@ mod engine_compaction {
     #[test]
     fn should_publish_compacted_ssts_in_manifest_when_compaction_completes() {
         // Arrange: Create engine and write data to trigger L0 compaction
-        let engine = open_with_mode(&opts_for_mode("local"), "local");
+        let opts = opts_for_mode("local");
+        let mut engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Write enough data to create multiple L0 files via flush
@@ -3596,12 +3762,29 @@ mod engine_compaction {
                 .expect("commit batch");
             engine.flush_cf(&cf).expect("flush batch");
         }
+        let inputs = sst_names(&engine);
+        assert_eq!(inputs.len(), 5, "fixture must publish five input SSTs");
 
         // Act: Trigger compaction (merges L0 files to L1)
         engine.compact_all().expect("trigger compaction");
+        let outputs = sst_names(&engine);
+        assert!(!outputs.is_empty());
+        assert!(
+            inputs.is_disjoint(&outputs),
+            "compaction must replace its inputs"
+        );
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown after publication");
+        let engine = open_with_mode(&opts, "local");
+        let cf = engine.get_column_family("test").expect("recovered family");
+        assert_eq!(
+            sst_names(&engine),
+            outputs,
+            "output membership must persist"
+        );
 
         // Assert: All data remains queryable through compacted SSTs
-        // This proves the manifest was updated with output SSTs and reads use them
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin read tx after compaction");
@@ -3617,16 +3800,15 @@ mod engine_compaction {
             "All 500 keys should be queryable after compaction (proves manifest was updated)"
         );
 
-        // Verify specific keys exist with correct values
-        let value = tx
-            .get(b"batch00_key0000")
-            .expect("get key after compaction");
-        assert_eq!(value, Some(Bytes::copy_from_slice(b"value")));
-
-        let value = tx
-            .get(b"batch04_key0099")
-            .expect("get last key after compaction");
-        assert_eq!(value, Some(Bytes::copy_from_slice(b"value")));
+        for batch in 0..5 {
+            for index in 0..100 {
+                let key = format!("batch{batch:02}_key{index:04}");
+                assert_eq!(
+                    tx.get(key.as_bytes()).unwrap(),
+                    Some(Bytes::from_static(b"value"))
+                );
+            }
+        }
     }
 
     /// Slice 6: Verify that input SSTs are cleaned up (deleted) after compaction
@@ -3637,14 +3819,15 @@ mod engine_compaction {
     /// 2. Manifest is persisted to disk
     /// 3. Input SSTs are deleted from the filesystem
     ///
-    /// Strategy: Create two compaction rounds. The second compaction would include
-    /// old L0 files if they existed (proving they weren't deleted in round 1).
-    /// Since the second compaction succeeds with correct key counts, we prove
-    /// old files were deleted after round 1's manifest publish.
     #[test]
     fn should_cleanup_input_ssts_after_compaction_manifest_publishes() {
         // Arrange: Create 5 L0 files (5 batches Ã— 100 keys each)
-        let engine = open_with_mode(&opts_for_mode("local"), "local");
+        let opts = opts_for_mode("local");
+        let db_path = match &opts.storage_mode {
+            StorageMode::LocalDisk { db_path } => db_path.clone(),
+            _ => unreachable!("local fixture"),
+        };
+        let engine = open_with_mode(&opts, "local");
         let cf = engine.create_column_family("test").expect("create cf");
         for batch in 0..5 {
             let mut tx = engine
@@ -3659,10 +3842,14 @@ mod engine_compaction {
                 .expect("commit batch");
             engine.flush_cf(&cf).expect("flush batch");
         }
+        let inputs = sst_names(&engine);
+        assert_eq!(inputs.len(), 5);
 
         // Act: Compact twice, verifying cleanup between rounds.
         // Round 1 walks bounded batches until all five L0 inputs are replaced.
         engine.compact_all().expect("first compaction");
+        assert!(inputs.is_disjoint(&sst_names(&engine)));
+        assert_retired_ssts_removed(&db_path, &inputs);
 
         // Add new batch (creates new L0)
         let mut tx = engine
@@ -3677,12 +3864,10 @@ mod engine_compaction {
             .expect("commit new batch");
         engine.flush_cf(&cf).expect("flush new batch");
 
-        // Round 2 merges the new L0 with any overlapping L1 output. If the old L0
-        // files still existed, they would incorrectly re-enter this work.
+        // Round 2 must preserve the first round's data and the newly flushed data.
         engine.compact_all().expect("second compaction");
 
-        // Assert: All data (500 old + 100 new) is queryable
-        // This proves old L0 files were deleted after round 1's manifest publish
+        // Assert: all data (500 old + 100 new) remains queryable after physical cleanup.
         let tx = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin read tx after cleanup");
@@ -3693,10 +3878,7 @@ mod engine_compaction {
             .try_collect()
             .expect("collect all keys")
             .len();
-        assert_eq!(
-            count, 600,
-            "All 600 keys (500 old + 100 new) present after cleanup proves old L0s deleted"
-        );
+        assert_eq!(count, 600, "all keys must survive compaction input cleanup");
 
         // Verify old and new data values are correct
         let old_val = tx.get(b"batch00_key0000").expect("get old batch key");
@@ -3932,7 +4114,7 @@ mod smoke {
     #[test]
     fn should_read_written_value_given_flushed_value_when_read() {
         // Arrange
-        let engine = open_with_mode(&opts_for_mode("memory"), "memory");
+        let engine = open_with_mode(&opts_for_mode("local"), "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -3986,7 +4168,7 @@ mod smoke {
     #[test]
     fn should_preserve_tombstone_given_flushed_tombstone_when_read() {
         // Arrange
-        let engine = open_with_mode(&opts_for_mode("memory"), "memory");
+        let engine = open_with_mode(&opts_for_mode("local"), "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -4131,7 +4313,7 @@ mod smoke {
     #[test]
     fn should_preserve_latest_version_given_repeated_flushes_when_read() {
         // Arrange
-        let engine = open_with_mode(&opts_for_mode("memory"), "memory");
+        let engine = open_with_mode(&opts_for_mode("local"), "local");
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Act
@@ -4236,13 +4418,13 @@ mod smoke {
     }
 
     #[test]
-    fn should_reopen_committed_values_given_engine_dropped_without_close_when_reopened() {
+    fn should_eventually_reopen_committed_values_when_engine_is_dropped_without_close() {
         // Arrange
         let opts = opts_for_mode("local");
 
         // Act
         {
-            let mut engine = open_with_mode(&opts, "local");
+            let engine = open_with_mode(&opts, "local");
             let cf = engine.create_column_family("test").expect("create cf");
             let mut tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -4252,13 +4434,22 @@ mod smoke {
             tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
                 .expect("put");
             tx.commit(cntryl_midge::WriteOptions::buffered()).unwrap();
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before reopen");
+            drop(engine);
         }
 
         // Reopen and verify state
-        let engine = open_with_mode(&opts, "local");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let engine = loop {
+            match cntryl_midge::Engine::open(opts.to_open_options()) {
+                Ok(engine) => break engine,
+                Err(cntryl_midge::MidgeError::LeaseHeld(_))
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(error) => panic!("dropped engine did not release its lease: {error}"),
+            }
+        };
         let cf = engine.create_column_family("test").expect("create cf");
 
         // Assert
@@ -4270,10 +4461,6 @@ mod smoke {
         assert_eq!(v1, Some(Bytes::from_static(b"value1")));
         assert_eq!(v2, Some(Bytes::from_static(b"value2")));
     }
-
-    // Note: Durability frontier enforcement test removed as it requires
-    // chaos engineering or crash simulation infrastructure that is not yet implemented.
-    // This should be reintroduced when proper crash testing infrastructure is available.
 }
 
 mod edge_cases {
@@ -4330,9 +4517,8 @@ mod edge_cases {
     }
 
     #[test]
-    fn should_retrieve_stored_values_when_hundred_megabytes() {
-        // Arrange: Create 100MB value (or reasonable subset for tests)
-        // Use 10MB for practical test speed; pattern validates for larger
+    fn should_retrieve_exact_stored_value_when_ten_megabytes() {
+        // Arrange
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -4351,11 +4537,10 @@ mod edge_cases {
             let got = tx.get(small_key).expect("get");
 
             // Assert: Verify size and content
-            assert!(got.is_some(), "failed to retrieve 10MB value in {mode}");
             assert_eq!(
-                got.as_ref().map(bytes::Bytes::len),
-                Some(10_000_000),
-                "retrieved value size mismatch in {mode}"
+                got.as_deref(),
+                Some(large_value.as_slice()),
+                "retrieved value mismatch in {mode}"
             );
         });
     }
@@ -4381,15 +4566,21 @@ mod edge_cases {
 
             // Assert: Retrieve all and verify
             let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-            assert_eq!(tx.get(b"tiny").expect("get").map(|b| b.len()), Some(1));
-            assert_eq!(tx.get(b"small").expect("get").map(|b| b.len()), Some(100));
             assert_eq!(
-                tx.get(b"medium").expect("get").map(|b| b.len()),
-                Some(100_000)
+                tx.get(b"tiny").expect("get").as_deref(),
+                Some(b"x".as_slice())
             );
             assert_eq!(
-                tx.get(b"large").expect("get").map(|b| b.len()),
-                Some(1_000_000)
+                tx.get(b"small").expect("get"),
+                Some(Bytes::from(vec![42; 100]))
+            );
+            assert_eq!(
+                tx.get(b"medium").expect("get"),
+                Some(Bytes::from(vec![42; 100_000]))
+            );
+            assert_eq!(
+                tx.get(b"large").expect("get"),
+                Some(Bytes::from(vec![42; 1_000_000]))
             );
         });
     }
@@ -4529,7 +4720,7 @@ mod edge_cases {
     // ============================================================================
 
     #[test]
-    fn should_handle_rapid_operations_when_one_thousand_puts_per_second() {
+    fn should_preserve_all_values_given_one_thousand_puts_in_one_transaction() {
         // Arrange
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             let engine = open_with_mode(&opts, mode);
@@ -4547,10 +4738,10 @@ mod edge_cases {
 
             // Assert: All retrievable
             let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-            for i in (0..1000).step_by(100) {
+            for i in 0..1000 {
                 let key = format!("rapid_{i:05}");
                 let got = tx.get(key.as_bytes()).expect("get");
-                assert!(got.is_some(), "lost rapid write in {mode}");
+                assert_eq!(got, Some(Bytes::from(format!("v_{i}"))), "mode: {mode}");
             }
         });
     }
@@ -4621,12 +4812,10 @@ mod edge_cases {
     }
 
     #[test]
-    fn should_batch_concurrent_puts_when_cloud_async_mode() {
+    fn should_preserve_all_concurrent_cloud_async_puts_given_flush_and_restart() {
         // Arrange
-        // Cloud-upload counters are only populated once telemetry is enabled.
-        cntryl_midge::init_benchmark_telemetry().expect("enable test-visible cloud metrics");
         for_each_storage_mode(&["cloud"], |mode, opts| {
-            let engine = open_with_mode(&opts, mode);
+            let mut engine = open_with_mode(&opts, mode);
             let cf = engine
                 .create_column_family("test")
                 .expect("create cf")
@@ -4637,13 +4826,7 @@ mod edge_cases {
             let puts_per_thread: usize = 200;
             let total_puts: usize = threads * puts_per_thread;
 
-            let before_uploads = engine
-                .metrics()
-                .get_runtime_metrics()
-                .expect("runtime metrics before puts")
-                .cloud_async_wal_uploads_completed;
-
-            // Act: concurrent single puts (each put still blocks on CloudAck)
+            // Act
             std::thread::scope(|s| {
                 let engine_ref = &engine;
                 for t in 0..threads {
@@ -4661,60 +4844,36 @@ mod edge_cases {
                 }
             });
 
-            // Assert: correctness (spot-check)
-            let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+            engine
+                .flush_cf(&cf)
+                .expect("publish concurrent cloud writes");
+            engine
+                .shutdown(std::time::Duration::from_secs(10))
+                .expect("shutdown cloud writer");
+            let reopened = open_with_mode(&opts, mode);
+            let cf = reopened
+                .get_column_family("test")
+                .expect("recover existing family");
+            let tx = reopened
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                .unwrap();
+
+            // Assert
+            assert_eq!(
+                tx.scan(&cntryl_midge::Query::new())
+                    .unwrap()
+                    .try_collect()
+                    .unwrap()
+                    .len(),
+                total_puts
+            );
             for t in 0..threads {
-                for i in [0, puts_per_thread / 2, puts_per_thread - 1] {
+                for i in 0..puts_per_thread {
                     let key = format!("k_{t}_{i}");
                     let got = tx.get(key.as_bytes()).expect("get");
-                    assert!(got.is_some(), "missing key {key}");
+                    assert_eq!(got, Some(Bytes::from_static(b"value")), "key: {key}");
                 }
             }
-
-            // Assert: batching occurred. This is the observable contract of
-            // cloud-async group commit — concurrently-arriving CloudAck writes
-            // share upload requests rather than each paying for its own, so the
-            // number of completed cloud uploads must be well below one per put.
-            // CloudAsync commits return once locally durable; the uploads
-            // themselves finish on a background thread, so wait for that
-            // background work to settle before reading the final count.
-            let upload_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-            let mut after_uploads;
-            loop {
-                after_uploads = engine
-                    .metrics()
-                    .get_runtime_metrics()
-                    .expect("runtime metrics after puts")
-                    .cloud_async_wal_uploads_completed;
-                if after_uploads > before_uploads {
-                    std::thread::sleep(std::time::Duration::from_millis(250));
-                    let settled = engine
-                        .metrics()
-                        .get_runtime_metrics()
-                        .expect("runtime metrics after settling")
-                        .cloud_async_wal_uploads_completed;
-                    if settled == after_uploads {
-                        break;
-                    }
-                }
-                assert!(
-                    std::time::Instant::now() < upload_deadline,
-                    "timed out waiting for background cloud uploads to complete"
-                );
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-            let uploads_for_puts = usize::try_from(after_uploads.saturating_sub(before_uploads))
-                .expect("test upload count fits in usize");
-
-            assert!(
-                uploads_for_puts > 0,
-                "expected at least one cloud upload for {total_puts} durable puts"
-            );
-            assert!(
-                uploads_for_puts < total_puts,
-                "expected group commit to batch concurrent puts into fewer cloud \
-                 uploads: uploads={uploads_for_puts} puts={total_puts}"
-            );
         });
     }
 }
@@ -4801,18 +4960,23 @@ mod consistent_cut_backup {
             .get(b"frontier")
             .expect("read checkpoint value")
             .map(|bytes| u64::from_be_bytes(bytes.as_ref().try_into().expect("frontier bytes")))
-            .unwrap_or_default();
+            .expect("backup must retain its committed checkpoint");
         let events_tx = restored
             .begin_tx(events.id(), TransactionMode::ReadOnly)
             .expect("read events");
 
         // Assert
-        for sequence in 1..=frontier {
-            assert!(
+        assert!(
+            frontier >= 1,
+            "backup began after event 1 and its checkpoint committed"
+        );
+        for sequence in 0..=frontier {
+            assert_eq!(
                 events_tx
                     .get(&sequence.to_be_bytes())
                     .expect("read event")
-                    .is_some(),
+                    .as_deref(),
+                Some(b"event".as_slice()),
                 "restored checkpoint {frontier} points past missing event {sequence}"
             );
         }
@@ -4858,7 +5022,7 @@ mod consistent_cut_backup {
         engine.flush_cf(&default).expect("flush SST");
         let sst = std::fs::read_dir(source.join("sst"))
             .expect("list SST directory")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read SST directory entry"))
             .map(|entry| entry.path())
             .find(|path| path.extension().is_some_and(|extension| extension == "sst"))
             .expect("flushed SST");
@@ -4942,10 +5106,25 @@ mod consistent_cut_backup {
             .objects
             .iter()
             .any(|object| object.path.starts_with("cloud_store/sst/")));
+        let lease_object = "cloud_store/midge_primary_lease.json";
         assert!(inventory
             .objects
             .iter()
-            .all(|object| !object.path.contains("lease")));
+            .any(|object| object.path == lease_object));
+        let lease_document = std::fs::read_to_string(artifact.join("objects").join(lease_object))
+            .expect("backup retains the shared metadata pointer");
+        assert!(
+            lease_document
+                .lines()
+                .any(|line| line == "expires: 1970-01-01T00:00:00Z"),
+            "backup must not transfer the source writer lease: {lease_document}"
+        );
+        assert!(
+            lease_document
+                .lines()
+                .any(|line| line.starts_with("metadata: {")),
+            "backup must retain the committed shared metadata pointer: {lease_document}"
+        );
         drop(engine);
 
         // Act

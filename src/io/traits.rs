@@ -43,6 +43,20 @@ pub enum FsError {
 
 pub type FsResult<T> = Result<T, FsError>;
 
+/// An acquired, non-durable exclusive filesystem lock.
+///
+/// Locks are coordination state, not durable data. Dropping the guard releases
+/// the lock, and the operating system releases host locks when a process exits.
+pub trait FsLock: Send + Sync {
+    /// Verify that this guard still owns the acquired lock. Native guards
+    /// retain ownership until drop; revocable simulation guards must reject
+    /// calls after process crash or ownership replacement.
+    ///
+    /// # Errors
+    /// Returns an error when this guard no longer owns its acquired lock.
+    fn validate_held(&self) -> FsResult<()>;
+}
+
 /// Durability semantics for filesystem operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Durability {
@@ -84,10 +98,22 @@ pub struct OpenOptions {
     pub truncate: bool,   // Truncate if exists
 }
 
+impl OpenOptions {
+    /// Open an existing file for reading only.
+    pub const READ_ONLY: Self = Self {
+        mode: OpenMode::ReadOnly,
+        create: false,
+        create_new: false,
+        truncate: false,
+    };
+}
+
 /// Metadata for a file or directory
 #[derive(Debug, Clone)]
 pub struct Metadata {
     pub len: u64,
+    /// Whether the path names a directory rather than a file.
+    pub is_dir: bool,
 }
 
 /// Directory entry
@@ -109,8 +135,8 @@ pub trait ReadObserver: Send + Sync {
     );
 }
 
-/// Individual file handle with read/write operations
-pub trait File: Send {
+/// The read-only operations of an individual file handle.
+pub trait ReadFile: Send {
     /// Read at specific offset
     ///
     /// # Errors
@@ -119,6 +145,26 @@ pub trait File: Send {
     /// filesystem or storage backend.
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes>;
 
+    /// Get file length.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file length cannot be queried.
+    fn len(&self) -> FsResult<u64>;
+
+    /// Whether the file contains no bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::len`].
+    #[cfg(feature = "internal-testing")]
+    fn is_empty(&self) -> FsResult<bool> {
+        self.len().map(|len| len == 0)
+    }
+}
+
+/// Individual file handle with read/write operations.
+pub trait File: ReadFile {
     /// Write at specific offset
     ///
     /// # Errors
@@ -150,13 +196,6 @@ pub trait File: Send {
     /// filesystem or storage backend.
     fn append(&mut self, data: Bytes) -> FsResult<u64>;
 
-    /// Get file length
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the file length cannot be queried.
-    fn len(&self) -> FsResult<u64>;
-
     /// Sync to storage device according to durability level
     ///
     /// # Errors
@@ -167,20 +206,112 @@ pub trait File: Send {
 
 /// The host path frame used to address a rooted filesystem.
 ///
-/// A host-rooted backend records both the canonical root it serves and the
-/// directory against which callers' relative host paths were originally
-/// resolved. Keeping them in one value makes a wrapper either delegate the
-/// complete frame or expose no host addressing capability at all.
+/// A host-rooted backend records the canonical root it serves and the same
+/// directory as its caller named it. Keeping them in one value makes a
+/// wrapper either delegate the complete frame or expose no host addressing
+/// capability at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostAddressing<'a> {
     /// Canonical host directory the filesystem serves.
     pub root: &'a Path,
-    /// Directory relative host paths are resolved against, if one was recorded.
-    pub anchor: Option<&'a Path>,
+    /// The root as its caller named it, made absolute without resolving
+    /// symlinks (`/var/...` where `root` is `/private/var/...` on macOS).
+    pub named_root: &'a Path,
+}
+
+impl HostAddressing<'_> {
+    /// The part of an absolute host `path` below this root, reached through
+    /// either spelling of the root. This compares paths without touching the
+    /// host, so every component below the root stays exactly as written.
+    #[must_use]
+    pub fn relative<'p>(&self, path: &'p Path) -> Option<&'p Path> {
+        path.strip_prefix(self.root)
+            .or_else(|_| path.strip_prefix(self.named_root))
+            .ok()
+    }
+}
+
+/// The read-only surface of a filesystem: open for reading, check existence,
+/// read metadata and list directories.
+///
+/// A view that only serves reads (WAL replay over authorized sources)
+/// implements this alone, so the type system rather than a runtime error
+/// keeps it from mutating anything. Every [`Fs`] is also a `ReadFs`.
+pub trait ReadFs: Send + Sync + 'static {
+    /// Open an existing file for reading. For an [`Fs`] this is
+    /// [`Fs::open`] with [`OpenOptions::READ_ONLY`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path cannot be opened for reading; a missing
+    /// file is `FsError::NotFound`.
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn ReadFile + '_>>;
+
+    /// Check if file exists
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the existence check cannot be completed.
+    fn exists(&self, path: &FsPath) -> FsResult<bool>;
+
+    /// Get file metadata
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when metadata cannot be read.
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata>;
+
+    /// List directory contents
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the directory cannot be enumerated.
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>>;
+}
+
+/// Optional filesystem capability for handles that must outlive a borrowed
+/// filesystem view.
+pub trait PersistentHandleFs: Send + Sync {
+    /// Open an owned handle whose lifetime is independent of the filesystem
+    /// view used to create it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested file cannot be opened with the
+    /// supplied options.
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>>;
+}
+
+/// Open an owned file handle through the filesystem's advertised capability.
+///
+/// # Errors
+///
+/// Returns `Unsupported` when the view has no owned-handle capability, or the
+/// capability's error when the requested file cannot be opened.
+pub fn open_persistent_handle(
+    fs: &dyn Fs,
+    path: &FsPath,
+    opts: OpenOptions,
+) -> FsResult<Box<dyn File>> {
+    fs.persistent_handle_capability()
+        .ok_or_else(|| {
+            FsError::Unsupported(
+                "persistent file handles are unavailable for this backend".to_string(),
+            )
+        })?
+        .open_persistent(path, opts)
 }
 
 /// Filesystem abstraction - agnostic of domain
-pub trait Fs: Send + Sync + 'static {
+///
+/// Extends [`ReadFs`] with opening for writing, the capability hooks that
+/// views of the same storage share, and every mutator.
+pub trait Fs: ReadFs {
+    /// Expose an owned-handle capability when this backend supports it.
+    fn persistent_handle_capability(&self) -> Option<&dyn PersistentHandleFs> {
+        None
+    }
+
     /// The filesystem that receives writes when this view also reads through
     /// a remote fallback. Fresh SST outputs must be read back from this view
     /// before their remote publication exists.
@@ -228,6 +359,26 @@ pub trait Fs: Send + Sync + 'static {
         0
     }
 
+    /// Try to acquire a non-durable exclusive lock for `path`.
+    ///
+    /// Backends with process-scoped locking should override this. Returning
+    /// `AlreadyExists` means another process currently holds the lock;
+    /// `Unsupported` means the backend cannot provide this exclusion and
+    /// fencing callers must fail closed. The lock must be released when the
+    /// guard is dropped and when its owning process terminates. A simulated
+    /// crash/recovery must invalidate the crashed process's guards too.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AlreadyExists` when another owner holds the lock, `Unsupported`
+    /// when the backend has no native locking support, or another filesystem
+    /// error when lock acquisition fails.
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn FsLock>> {
+        Err(FsError::Unsupported(format!(
+            "exclusive filesystem locks are unavailable for {path}"
+        )))
+    }
+
     // --- Files ---
 
     /// Open a file
@@ -237,43 +388,12 @@ pub trait Fs: Send + Sync + 'static {
     /// Returns an error when the path cannot be opened with the requested options.
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>>;
 
-    /// Optional optimized method: open a persistent append handle with 'static lifetime.
-    /// Implementations that can return a 'static file (e.g., real OS-backed files) may
-    /// provide an implementation. Default: return Unsupported.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the backend cannot create the handle or does not support it.
-    fn open_persistent_handle(
-        &self,
-        _path: &FsPath,
-        _opts: OpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        Err(FsError::Unsupported(
-            "open_persistent_handle not supported by this backend".to_string(),
-        ))
-    }
-
     /// Remove a file
     ///
     /// # Errors
     ///
     /// Returns an error when the file cannot be removed.
     fn remove_file(&self, path: &FsPath) -> FsResult<()>;
-
-    /// Check if file exists
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the existence check cannot be completed.
-    fn exists(&self, path: &FsPath) -> FsResult<bool>;
-
-    /// Get file metadata
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when metadata cannot be read.
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata>;
 
     // --- Directories ---
 
@@ -283,13 +403,6 @@ pub trait Fs: Send + Sync + 'static {
     ///
     /// Returns an error when the directory hierarchy cannot be created.
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()>;
-
-    /// List directory contents
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the directory cannot be enumerated.
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>>;
 
     /// Remove directory and all contents
     ///
@@ -316,6 +429,22 @@ pub trait Fs: Send + Sync + 'static {
 }
 
 impl FsError {
+    /// Carry a filesystem error through a `std::io` interface. The error rides
+    /// along as the payload, so converting back to [`crate::common::MidgeError`]
+    /// classifies it exactly as [`Self::into_midge`] does.
+    pub(crate) fn into_io(self) -> std::io::Error {
+        let kind = match &self {
+            FsError::NotFound(_) => std::io::ErrorKind::NotFound,
+            FsError::AlreadyExists(_) => std::io::ErrorKind::AlreadyExists,
+            FsError::Corruption(_) => std::io::ErrorKind::InvalidData,
+            FsError::NoSpace(_) => std::io::ErrorKind::StorageFull,
+            FsError::Timeout(_) => std::io::ErrorKind::TimedOut,
+            FsError::Unsupported(_) => std::io::ErrorKind::Unsupported,
+            FsError::Io(_) | FsError::Unavailable(_) => std::io::ErrorKind::Other,
+        };
+        std::io::Error::new(kind, self)
+    }
+
     /// Map a filesystem error onto the public error type.
     pub(crate) fn into_midge(self) -> crate::common::MidgeError {
         match self {

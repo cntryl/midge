@@ -17,11 +17,21 @@
 //!
 //! Cloud WAL durability uses epoch-scoped immutable segment objects plus a
 //! lease-fenced publication catalog with a conditionally updated recovery
-//! mirror. Recovery replays only validated catalog entries, so an uploader that
-//! finishes after losing its lease can create only an ignored orphan. Both
-//! catalog copies advance to every newly acquired lease epoch before recovery
-//! and converge before a cloud durability acknowledgement can advance the
-//! runtime frontier.
+//! mirror. The catalog is a chain like the segment ledger (`cloud_catalog`,
+//! #844): an anchor, entries that each link the one before, and a next id
+//! that never falls. Recovery replays only validated catalog entries, so an
+//! uploader that finishes after losing its lease can create only an ignored
+//! orphan. A verified upload only marks its segment uploaded; `publish`
+//! selects the contiguous run of uploads the catalog may publish next, which
+//! must chain onto its head. Both catalog copies advance to every newly
+//! acquired lease epoch before recovery and converge before a cloud
+//! durability acknowledgement can advance the runtime frontier.
+//!
+//! `planner` decides recovery: it places a cache's ledger against the
+//! catalog, admits the probed segments in chain order, and says what replays,
+//! what salvage sets aside and how the local history continues. It and the
+//! format, ledger, sequence, publication and catalog modules are pure; the
+//! runtime adapters do their I/O.
 
 pub(crate) mod cloud_catalog;
 pub(crate) mod cloud_segment;
@@ -30,15 +40,21 @@ mod config;
 // crate's own tests and benches can reach them through `crate::__internal`;
 // `wal` itself is private, so nothing downstream can name them.
 pub mod encoding;
+pub mod format;
 pub mod frame;
 pub(crate) mod fs;
+pub(crate) mod ledger;
+pub(crate) mod ledger_store;
+pub(crate) mod planner;
 pub mod policy;
+pub(crate) mod publish;
 pub(crate) mod recovery;
+pub(crate) mod replay;
+pub(crate) mod sequence;
 pub(crate) mod traits;
 pub mod types;
-
-/// Active WAL filename. This file is mutable and is never uploaded as-is.
-pub const ACTIVE_FILE_NAME: &str = "wal.log";
+pub(crate) mod writer_authority;
+pub(crate) mod writer_effect;
 
 /// Pad sealed WAL segment names to the full `u64` width so filesystem and
 /// object-store listings sort in the same order as segment ids.
@@ -48,6 +64,15 @@ pub const WAL_SEGMENT_ID_WIDTH: usize = 20;
 #[must_use]
 pub fn segment_file_name(segment_id: u64) -> String {
     format!("{segment_id:0WAL_SEGMENT_ID_WIDTH$}.wal")
+}
+
+/// The WAL directory below the database root.
+pub(crate) const WAL_DIR: &str = "wal";
+
+/// Root filesystem key of the sealed WAL segment `segment_id`.
+#[must_use]
+pub(crate) fn segment_key(segment_id: u64) -> crate::io::FsPath {
+    crate::io::FsPath::new(format!("{WAL_DIR}/{}", segment_file_name(segment_id)))
 }
 
 /// Format the full cloud object key for an epoch-scoped sealed WAL segment.
@@ -60,43 +85,33 @@ pub fn segment_object_key(segment_id: u64, writer_epoch: u64) -> String {
     )
 }
 
-/// Alias for callers that operate specifically on cloud WAL objects.
-#[cfg(test)]
+/// The id of the local WAL segment file `name`, which must be exactly
+/// [`segment_file_name`]'s form: twenty digits, then `.wal`. Anything else,
+/// an unpadded id or a path included, is not a segment file.
 #[must_use]
-pub fn cloud_segment_file_name(segment_id: u64) -> String {
-    segment_file_name(segment_id)
+pub fn parse_segment_file_name(name: &str) -> Option<u64> {
+    parse_padded_id(name.strip_suffix(".wal")?)
 }
 
-/// Backward-compatible alias for callers that operate specifically on cloud WAL
-/// objects.
+/// The writer epoch and segment id of the cloud WAL object `key`, which must
+/// be exactly [`segment_object_key`]'s form,
+/// `wal/epochs/{epoch:020}/{id:020}.wal`. A local file name or any other
+/// key is not a segment object.
 #[must_use]
-pub fn cloud_segment_object_key(segment_id: u64, writer_epoch: u64) -> String {
-    segment_object_key(segment_id, writer_epoch)
+pub fn parse_segment_object_key(key: &str) -> Option<(u64, u64)> {
+    let rest = key
+        .strip_prefix(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX)?
+        .strip_prefix("epochs/")?;
+    let (epoch, file_name) = rest.split_once('/')?;
+    Some((parse_padded_id(epoch)?, parse_segment_file_name(file_name)?))
 }
 
-/// Parse a WAL segment id from a cloud key, staged filename, or legacy name.
-#[must_use]
-pub fn parse_segment_id(name: &str) -> Option<u64> {
-    let file_name = name.strip_prefix("wal/").unwrap_or(name);
-
-    if let Some((epoch, segment)) = file_name
-        .strip_prefix("epochs/")
-        .and_then(|rest| rest.split_once('/'))
-    {
-        epoch.parse::<u64>().ok()?;
-        return segment
-            .strip_suffix(".wal")
-            .and_then(|segment_id| segment_id.parse::<u64>().ok());
+/// A `u64` written with exactly [`WAL_SEGMENT_ID_WIDTH`] decimal digits.
+fn parse_padded_id(digits: &str) -> Option<u64> {
+    if digits.len() != WAL_SEGMENT_ID_WIDTH || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
     }
-
-    if let Some(segment_str) = file_name.strip_suffix(".wal") {
-        return segment_str.parse::<u64>().ok();
-    }
-
-    file_name
-        .strip_prefix("wal_")
-        .and_then(|segment_str| segment_str.strip_suffix(".log"))
-        .and_then(|segment_str| segment_str.parse::<u64>().ok())
+    digits.parse().ok()
 }
 
 // Re-export main WAL types
@@ -134,10 +149,7 @@ mod tests {
             object_key,
             "wal/epochs/00000000000000000007/00000000000000000042.wal"
         );
-        assert_eq!(
-            cloud_segment_object_key(segment_id, writer_epoch),
-            object_key
-        );
+        assert_eq!(segment_object_key(segment_id, writer_epoch), object_key);
     }
 
     #[test]
@@ -158,17 +170,31 @@ mod tests {
     }
 
     #[test]
-    fn should_parse_segment_ids_from_supported_wal_names() {
+    fn should_reject_foreign_forms_in_each_segment_parser() {
         // Arrange
+        let file = segment_file_name(42);
+        let object = segment_object_key(42, 7);
+
         // Act
+        let files = [
+            parse_segment_file_name(&file),
+            parse_segment_file_name("42.wal"),
+            parse_segment_file_name(&format!("wal/{file}")),
+            parse_segment_file_name(&object),
+            parse_segment_file_name("99999999999999999999.wal"),
+            parse_segment_file_name("0000000000000000004a.wal"),
+        ];
+        let objects = [
+            parse_segment_object_key(&object),
+            parse_segment_object_key(&file),
+            parse_segment_object_key(&format!("wal/{file}")),
+            parse_segment_object_key("wal/epochs/7/00000000000000000042.wal"),
+            parse_segment_object_key("wal/epochs/00000000000000000007/42.wal"),
+            parse_segment_object_key(&format!("wal/epochs/00000000000000000007/x/{file}")),
+        ];
+
         // Assert
-        assert_eq!(parse_segment_id("1.wal"), Some(1));
-        assert_eq!(parse_segment_id("00000000000000000042.wal"), Some(42));
-        assert_eq!(parse_segment_id("wal/00000000000000000099.wal"), Some(99));
-        assert_eq!(
-            parse_segment_id("wal/epochs/00000000000000000007/00000000000000000099.wal"),
-            Some(99)
-        );
-        assert_eq!(parse_segment_id("wal_000123.log"), Some(123));
+        assert_eq!(files, [Some(42), None, None, None, None, None]);
+        assert_eq!(objects, [Some((7, 42)), None, None, None, None, None]);
     }
 }

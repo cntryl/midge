@@ -6,11 +6,11 @@ mod proxy;
 mod read_fencing;
 
 use super::*;
+use cntryl_midge::__internal::wal::catalog::WalPublicationCatalog;
 use cntryl_midge::{MidgeError, Query};
 use proxy::{Boundary, Proxy};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -53,19 +53,19 @@ impl Drop for Evidence {
 }
 
 #[test]
-#[ignore = "requires Sqrzl; run cloud-integration.yml"]
 fn should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup() {
     // Arrange
     require_sqrzl("composed-authority-publication");
+    // Act
     for boundary in [
         Boundary::BeforePut,
         Boundary::AfterPut,
         Boundary::LostResponse,
     ] {
+        // Assert: native operations preserve the frontier/catalog and exact
+        // acknowledged history through two independent recoveries.
         run_schedule(boundary);
     }
-    // Act / Assert: each schedule exercises actual native Engine operations,
-    // checks the frontier/catalog, and verifies two independent recoveries.
 }
 
 fn options(
@@ -163,72 +163,52 @@ fn expected_state() -> BTreeMap<String, String> {
     .collect()
 }
 
-// Keep the ordered public operations and their assertions together so the
-// happens-before relationship is reviewable without hidden scenario helpers.
-#[allow(clippy::too_many_lines)]
-fn run_schedule(boundary: Boundary) {
-    let directory = tempfile::tempdir().expect("isolated caches");
-    let case = uuid::Uuid::new_v4().to_string();
-    let bucket = format!("midge-authority-{case}");
-    let prefix = "db";
-    ensure_sqrzl_s3_bucket(&bucket).expect("isolated remote namespace");
-    let artifacts = std::env::var_os("MIDGE_QUALIFICATION_ARTIFACT_DIR")
-        .map_or_else(
-            || PathBuf::from("target/authority-publication"),
-            PathBuf::from,
-        )
-        .join(&case);
-    std::fs::create_dir_all(&artifacts).unwrap();
-    let predecessor_proxy = Proxy::start("127.0.0.1:9000".parse().unwrap(), boundary);
-    let successor_proxy = Proxy::start("127.0.0.1:9000".parse().unwrap(), Boundary::BeforePut);
-    let commit = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .unwrap();
-    assert!(commit.status.success());
-    let mut evidence = Evidence {
+fn schedule_evidence(
+    artifacts: &Path,
+    boundary: Boundary,
+    predecessor_proxy: &Proxy,
+    successor_proxy: &Proxy,
+) -> Evidence {
+    Evidence {
         path: artifacts.join("receipt.json"),
         predecessor: Arc::clone(&predecessor_proxy.control),
         successor: Arc::clone(&successor_proxy.control),
         details: json!({
             "schema_version": 1, "boundary": boundary,
-            "git_commit": String::from_utf8(commit.stdout).unwrap().trim(),
             "crate_version": env!("CARGO_PKG_VERSION"),
-            "fixture_sha256": hex::encode(Sha256::digest(concat!(
-                include_str!("authority_publication.rs"),
-                include_str!("authority_publication/proxy.rs"),
-                include_str!("native_startup_proxy.rs"),
-            ))),
-            "test_binary_sha256": hex::encode(Sha256::digest(
-                std::fs::read(std::env::current_exe().unwrap()).unwrap()
-            )),
             "passed": false, "phase": "predecessor_open", "fresh_process_recoveries": 0,
             "expected_recovery_state": expected_state(),
             "acknowledged_transactions": [], "accepted_unacknowledged": [], "rejected": [],
         }),
-    };
-    eprintln!("authority fixture {boundary:?}: {}", artifacts.display());
+    }
+}
+
+fn open_predecessor(
+    cache: &Path,
+    bucket: &str,
+    prefix: &str,
+    proxy: &Proxy,
+) -> (Arc<Engine>, mpsc::Receiver<()>) {
     let (loss_tx, loss_rx) = mpsc::sync_channel(1);
     let predecessor = Arc::new(
         Engine::open(
-            options(
-                &directory.path().join("predecessor"),
-                &bucket,
-                prefix,
-                &predecessor_proxy.endpoint,
-            )
-            .lease_ttl(Duration::from_secs(18))
-            .shutdown_cloud_drain_timeout_for_testing(Duration::from_millis(100))
-            .on_lease_loss(move || {
-                let _ = loss_tx.try_send(());
-            })
-            .build()
-            .unwrap(),
+            options(cache, bucket, prefix, &proxy.endpoint)
+                .lease_ttl(Duration::from_secs(18))
+                .shutdown_cloud_drain_timeout_for_testing(Duration::from_millis(100))
+                .on_lease_loss(move || {
+                    let _ = loss_tx.try_send(());
+                })
+                .build()
+                .unwrap(),
         )
         .expect("predecessor native engine"),
     );
+    (predecessor, loss_rx)
+}
+
+fn write_predecessor_prefix(predecessor: &Engine, evidence: &mut Evidence) -> u64 {
     write_rows(
-        &predecessor,
+        predecessor,
         &[
             ("prefix", Some("durable")),
             ("overwritten", Some("old")),
@@ -245,58 +225,32 @@ fn run_schedule(boundary: Boundary) {
         .unwrap()
         .wal_cloud_durable_seq;
     assert!(prefix_frontier > 0);
-    let initial_catalog: serde_json::Value =
-        serde_json::from_slice(&catalog(&bucket, prefix)).unwrap();
-    predecessor_proxy.control.arm();
-    let writer = Arc::clone(&predecessor);
-    let pending = std::thread::spawn(move || {
-        write_rows(
-            &writer,
-            &[
-                ("uncertain-a", Some("pending")),
-                ("uncertain-b", Some("pending")),
-            ],
-        )
-    });
-    let held = predecessor_proxy.control.reached();
-    evidence.details["accepted_unacknowledged"] = json!(["uncertain-a", "uncertain-b"]);
-    evidence.details["held"] = serde_json::to_value(&held).unwrap();
-    evidence.details["prefix_frontier"] = json!(prefix_frontier);
-    evidence.details["phase"] = json!("takeover");
-    assert_eq!(held.forwarded, !matches!(boundary, Boundary::BeforePut));
-    if held.forwarded {
-        assert_eq!(
-            held.status,
-            Some(200),
-            "post-PUT gates require actual upstream success"
-        );
-    }
-    predecessor_proxy.control.stop_renewals();
+    prefix_frontier
+}
+
+fn assert_predecessor_fenced(
+    predecessor: &Engine,
+    proxy: &Proxy,
+    loss_rx: &mpsc::Receiver<()>,
+    evidence: &mut Evidence,
+) {
+    proxy.control.stop_renewals();
     loss_rx
         .recv_timeout(WAIT)
         .expect("real predecessor authority loss");
-    let rejected = write_rows(&predecessor, &[("rejected", Some("must-not-appear"))]);
+    let rejected = write_rows(predecessor, &[("rejected", Some("must-not-appear"))]);
     assert!(
         matches!(rejected, Err(MidgeError::Fenced(_))),
         "new mutation after authority loss must be rejected: {rejected:?}"
     );
     evidence.details["rejected"] = json!(["rejected"]);
+}
 
-    // Act: acquisition succeeds only after the persisted lease expires. No
-    // fixture rewrites a lease, forces an epoch, or fabricates provider success.
+fn open_successor(options: &cntryl_midge::OpenOptions) -> Engine {
     let deadline = Instant::now() + WAIT;
-    let mut successor = loop {
-        match Engine::open(
-            options(
-                &directory.path().join("successor"),
-                &bucket,
-                prefix,
-                &successor_proxy.endpoint,
-            )
-            .build()
-            .unwrap(),
-        ) {
-            Ok(engine) => break engine,
+    loop {
+        match Engine::open(options.clone()) {
+            Ok(engine) => return engine,
             Err(MidgeError::LeaseHeld(_)) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(25));
             }
@@ -304,7 +258,20 @@ fn run_schedule(boundary: Boundary) {
                 panic!("successor acquisition must succeed after genuine expiry: {error}")
             }
         }
-    };
+    }
+}
+
+fn publish_successor_history(
+    cache: &Path,
+    bucket: &str,
+    prefix: &str,
+    proxy: &Proxy,
+    evidence: &mut Evidence,
+) -> BTreeMap<String, String> {
+    let successor_options = options(cache, bucket, prefix, &proxy.endpoint)
+        .build()
+        .unwrap();
+    let mut successor = open_successor(&successor_options);
     write_rows(
         &successor,
         &[
@@ -337,41 +304,19 @@ fn run_schedule(boundary: Boundary) {
     successor
         .compact_all()
         .expect("complete replacement publication");
-    wait_for_reclamation(&successor_proxy);
+    wait_for_reclamation(proxy);
     let expected = expected_state();
     assert_exact(&successor, &expected);
     successor.shutdown(WAIT).expect("successor owned shutdown");
     drop(successor);
+    expected
+}
 
-    let committed_catalog = catalog(&bucket, prefix);
-    let successor_catalog: serde_json::Value = serde_json::from_slice(&committed_catalog).unwrap();
-    assert!(
-        successor_catalog["fencing_epoch"].as_u64().unwrap()
-            > initial_catalog["fencing_epoch"].as_u64().unwrap()
-    );
-    evidence.details["predecessor_epoch"] = initial_catalog["fencing_epoch"].clone();
-    evidence.details["successor_epoch"] = successor_catalog["fencing_epoch"].clone();
-    std::fs::write(artifacts.join("successor-catalog.json"), &committed_catalog).unwrap();
-    evidence.details["phase"] = json!("late_predecessor_completion");
-    let predecessor_release_index = predecessor_proxy.control.observations().len();
-    predecessor_proxy.control.release();
-    predecessor_proxy.control.wait_finished();
-    assert!(
-        predecessor_proxy
-            .control
-            .observations()
-            .iter()
-            .any(|event| event.path == held.path
-                && event.method == "PUT"
-                && event.status == Some(200)),
-        "held WAL PUT must actually succeed upstream after release"
-    );
-    let result = pending.join().expect("predecessor client thread");
-    evidence.details["predecessor_result"] = json!(format!("{result:?}"));
-    assert!(
-        matches!(result, Err(MidgeError::Fenced(_))),
-        "stale strict waiter must be fenced, got {result:?}"
-    );
+fn assert_stale_frontier_retained(
+    predecessor: Arc<Engine>,
+    prefix_frontier: u64,
+    evidence: &mut Evidence,
+) {
     let deadline = Instant::now() + WAIT;
     let settled = loop {
         let metrics = predecessor.metrics().get_runtime_metrics().unwrap();
@@ -401,6 +346,153 @@ fn run_schedule(boundary: Boundary) {
         "fenced dirty runtime must retain its unpublished obligation: {predecessor_shutdown:?}"
     );
     drop(predecessor);
+}
+
+fn assert_fresh_process_recoveries(
+    directory: &Path,
+    bucket: String,
+    prefix: &str,
+    artifacts: &Path,
+    expected: BTreeMap<String, String>,
+    evidence: &mut Evidence,
+) {
+    let config = RecoveryConfig {
+        bucket,
+        prefix: prefix.into(),
+        cache: directory.join("fresh-recovery"),
+        expected,
+    };
+    let config_path = artifacts.join("recovery-config.json");
+    std::fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    evidence.details["phase"] = json!("fresh_process_recovery");
+    for attempt in 0..2 {
+        if config.cache.exists() {
+            std::fs::remove_dir_all(&config.cache).unwrap();
+        }
+        run_recovery_child(&config_path, artifacts, attempt);
+        evidence.details["fresh_process_recoveries"] = json!(attempt + 1);
+    }
+}
+
+fn hold_predecessor_write(
+    predecessor: &Arc<Engine>,
+    proxy: &Proxy,
+    boundary: Boundary,
+    prefix_frontier: u64,
+    evidence: &mut Evidence,
+) -> (
+    std::thread::JoinHandle<Result<(), MidgeError>>,
+    proxy::Observation,
+) {
+    proxy.control.arm();
+    let writer = Arc::clone(predecessor);
+    let pending = std::thread::spawn(move || {
+        write_rows(
+            &writer,
+            &[
+                ("uncertain-a", Some("pending")),
+                ("uncertain-b", Some("pending")),
+            ],
+        )
+    });
+    let held = proxy.control.reached();
+    evidence.details["accepted_unacknowledged"] = json!(["uncertain-a", "uncertain-b"]);
+    evidence.details["held"] = serde_json::to_value(&held).unwrap();
+    evidence.details["prefix_frontier"] = json!(prefix_frontier);
+    evidence.details["phase"] = json!("takeover");
+    assert_eq!(held.forwarded, !matches!(boundary, Boundary::BeforePut));
+    if held.forwarded {
+        assert_eq!(
+            held.status,
+            Some(200),
+            "post-PUT gates require actual upstream success"
+        );
+    }
+    (pending, held)
+}
+
+fn release_predecessor_write(
+    proxy: &Proxy,
+    held: &proxy::Observation,
+    pending: std::thread::JoinHandle<Result<(), MidgeError>>,
+    evidence: &mut Evidence,
+) -> usize {
+    let release_index = proxy.control.observations().len();
+    proxy.control.release();
+    proxy.control.wait_finished();
+    assert!(
+        proxy
+            .control
+            .observations()
+            .iter()
+            .any(|event| event.path == held.path
+                && event.method == "PUT"
+                && event.status == Some(200)),
+        "held WAL PUT must actually succeed upstream after release"
+    );
+    let result = pending.join().expect("predecessor client thread");
+    evidence.details["predecessor_result"] = json!(format!("{result:?}"));
+    assert!(
+        matches!(&result, Err(MidgeError::OutcomeUnknown(_))),
+        "a stale writer fenced after applying a WAL-backed transaction must report an unknown outcome, got {result:?}"
+    );
+    release_index
+}
+
+fn run_schedule(boundary: Boundary) {
+    // Arrange
+    let directory = tempfile::tempdir().expect("isolated caches");
+    let case = uuid::Uuid::new_v4().to_string();
+    let bucket = format!("midge-authority-{case}");
+    let prefix = "db";
+    ensure_sqrzl_s3_bucket(&bucket).expect("isolated remote namespace");
+    let artifacts = std::env::var_os("MIDGE_QUALIFICATION_ARTIFACT_DIR")
+        .map_or_else(
+            || PathBuf::from("target/authority-publication"),
+            PathBuf::from,
+        )
+        .join(&case);
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let predecessor_proxy = Proxy::start("127.0.0.1:9000".parse().unwrap(), boundary);
+    let successor_proxy = Proxy::start("127.0.0.1:9000".parse().unwrap(), Boundary::BeforePut);
+    let mut evidence =
+        schedule_evidence(&artifacts, boundary, &predecessor_proxy, &successor_proxy);
+    eprintln!("authority fixture {boundary:?}: {}", artifacts.display());
+    let (predecessor, loss_rx) = open_predecessor(
+        &directory.path().join("predecessor"),
+        &bucket,
+        prefix,
+        &predecessor_proxy,
+    );
+    let prefix_frontier = write_predecessor_prefix(&predecessor, &mut evidence);
+    let initial_catalog = WalPublicationCatalog::decode(&catalog(&bucket, prefix)).unwrap();
+    let (pending, held) = hold_predecessor_write(
+        &predecessor,
+        &predecessor_proxy,
+        boundary,
+        prefix_frontier,
+        &mut evidence,
+    );
+    assert_predecessor_fenced(&predecessor, &predecessor_proxy, &loss_rx, &mut evidence);
+
+    // Act: acquire only after persisted lease expiry, then publish replacements.
+    let expected = publish_successor_history(
+        &directory.path().join("successor"),
+        &bucket,
+        prefix,
+        &successor_proxy,
+        &mut evidence,
+    );
+    let committed_catalog = catalog(&bucket, prefix);
+    let successor_catalog = WalPublicationCatalog::decode(&committed_catalog).unwrap();
+    assert!(successor_catalog.fencing_epoch() > initial_catalog.fencing_epoch());
+    evidence.details["predecessor_epoch"] = json!(initial_catalog.fencing_epoch());
+    evidence.details["successor_epoch"] = json!(successor_catalog.fencing_epoch());
+    std::fs::write(artifacts.join("successor-catalog.json"), &committed_catalog).unwrap();
+    evidence.details["phase"] = json!("late_predecessor_completion");
+    let predecessor_release_index =
+        release_predecessor_write(&predecessor_proxy, &held, pending, &mut evidence);
+    assert_stale_frontier_retained(predecessor, prefix_frontier, &mut evidence);
     assert!(predecessor_proxy.control.observations()[predecessor_release_index..]
         .iter().all(|event| !event.forwarded
             || !matches!(event.method.as_str(), "PUT" | "DELETE")
@@ -414,24 +506,15 @@ fn run_schedule(boundary: Boundary) {
         "late completion and predecessor cleanup must preserve successor catalog bytes"
     );
 
-    // Assert: each recovery starts in a new process with an entirely absent
-    // cache. The ledger lives in the parent and contains no provider credentials.
-    let config = RecoveryConfig {
+    // Assert: both recoveries use new processes and absent caches.
+    assert_fresh_process_recoveries(
+        directory.path(),
         bucket,
-        prefix: prefix.into(),
-        cache: directory.path().join("fresh-recovery"),
+        prefix,
+        &artifacts,
         expected,
-    };
-    let config_path = artifacts.join("recovery-config.json");
-    std::fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
-    evidence.details["phase"] = json!("fresh_process_recovery");
-    for attempt in 0..2 {
-        if config.cache.exists() {
-            std::fs::remove_dir_all(&config.cache).unwrap();
-        }
-        run_recovery_child(&config_path, &artifacts, attempt);
-        evidence.details["fresh_process_recoveries"] = json!(attempt + 1);
-    }
+        &mut evidence,
+    );
     let observations = successor_proxy.control.observations();
     assert!(
         observations.iter().any(|event| event.method == "DELETE"
@@ -470,7 +553,7 @@ fn run_recovery_child(config: &Path, artifacts: &Path, attempt: usize) {
     let output_path = artifacts.join(format!("recovery-{attempt}.log"));
     let output = std::fs::File::create(output_path).unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", CHILD_TEST, "--ignored", "--nocapture"])
+        .args(["--exact", CHILD_TEST, "--nocapture"])
         .env(CHILD_ENV, config)
         .env("MIDGE_AUTHORITY_RECOVERY_RECEIPT", &receipt)
         .stdout(Stdio::from(output.try_clone().unwrap()))
@@ -500,7 +583,6 @@ fn run_recovery_child(config: &Path, artifacts: &Path, attempt: usize) {
 }
 
 #[test]
-#[ignore = "child entry point for composed authority qualification"]
 fn should_verify_acknowledged_state_in_fresh_recovery_process() {
     // Arrange
     let Some(path) = std::env::var_os(CHILD_ENV) else {

@@ -123,12 +123,15 @@ midge_db/
 test_db_*/
 
 tools/*
-!tools/finalize_stress_artifacts.py
+!tools/diagnostic_support.rb
+!tools/recovery_attribution.rb
+!tools/finalize_stress_artifacts.rb
+!tools/profile_checkpoint_pair.rb
 !tools/readback-investigation.rb
 !tools/run-stress-with-receipts.sh
 !tools/tests/
 tools/tests/*
-!tools/tests/test_finalize_stress_artifacts.py
+!tools/tests/fixtures/
 tmp/
 .docker/bench/results
 .docker/bench/target

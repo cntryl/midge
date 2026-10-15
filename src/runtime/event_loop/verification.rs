@@ -6,11 +6,11 @@ impl EventLoop {
         &mut self,
         msg: RuntimeMsg,
     ) -> Option<RuntimeMsg> {
-        if !self.publication_gate.is_active() {
+        if !self.publication.publication_gate.is_active() {
             return Some(msg);
         }
         if msg.defers_under_publication_gate() {
-            self.publication_gate.defer(msg);
+            self.publication.publication_gate.defer(msg);
             None
         } else {
             Some(msg)
@@ -21,7 +21,7 @@ impl EventLoop {
         &mut self,
         msg: RuntimeMsg,
     ) -> Option<RuntimeMsg> {
-        if self.verification_barrier.token.is_none() {
+        if self.publication.verification_barrier.token.is_none() {
             return Some(msg);
         }
 
@@ -70,18 +70,21 @@ impl EventLoop {
     pub(super) fn defer_verification_message(&mut self, message: RuntimeMsg) {
         let is_duplicate_maintenance = matches!(message, RuntimeMsg::RetryGc)
             && self
+                .publication
                 .verification_barrier
                 .deferred_messages
                 .iter()
                 .any(|pending| matches!(pending, RuntimeMsg::RetryGc));
         let is_duplicate_drop_shutdown = matches!(message, RuntimeMsg::Shutdown)
             && self
+                .publication
                 .verification_barrier
                 .deferred_messages
                 .iter()
                 .any(|pending| matches!(pending, RuntimeMsg::Shutdown));
         if !is_duplicate_maintenance && !is_duplicate_drop_shutdown {
-            self.verification_barrier
+            self.publication
+                .verification_barrier
                 .deferred_messages
                 .push_back(message);
         }
@@ -92,8 +95,13 @@ impl EventLoop {
     }
 
     pub(super) fn begin_backup_capture(&mut self, request_id: u64) -> HandleOutcome {
-        if self.cloud_coordinator.cloud_wal_prune_worker.is_some()
+        if self
+            .actors
+            .cloud_coordinator
+            .cloud_wal_prune_worker
+            .is_some()
             || self
+                .actors
                 .cloud_coordinator
                 .hybrid_storage
                 .as_ref()
@@ -124,9 +132,9 @@ impl EventLoop {
             .load(std::sync::atomic::Ordering::Acquire);
         let layout_is_changing = active_compactions > 0
             || !self.state.compaction.compacting_ssts.is_empty()
-            || self.flush_actor.is_inflight()
-            || self.publication_gate.is_active();
-        if self.verification_barrier.token.is_some() || layout_is_changing {
+            || self.actors.flush_actor.is_inflight()
+            || self.publication.publication_gate.is_active();
+        if self.publication.verification_barrier.token.is_some() || layout_is_changing {
             self.respond(
                 request_id,
                 RuntimeResponse::Error {
@@ -146,7 +154,7 @@ impl EventLoop {
             }
         }
 
-        let activated = self.verification_barrier.activate(request_id);
+        let activated = self.publication.verification_barrier.activate(request_id);
         debug_assert!(activated);
         crate::failpoints::fail_point!("midge::verification::before_barrier_response");
         self.respond(
@@ -166,7 +174,7 @@ impl EventLoop {
         request_id: u64,
         token: u64,
     ) -> HandleOutcome {
-        if self.verification_barrier.token != Some(token) {
+        if self.publication.verification_barrier.token != Some(token) {
             self.respond(
                 request_id,
                 RuntimeResponse::Error {
@@ -179,27 +187,38 @@ impl EventLoop {
             return HandleOutcome::Continue;
         }
 
-        let deferred = self.verification_barrier.release(token);
-        let retirements = self.verification_barrier.take_deferred_wal_retirements();
+        let deferred = self.publication.verification_barrier.release(token);
+        let retirements = self
+            .publication
+            .verification_barrier
+            .take_deferred_wal_retirements();
         if !retirements.is_empty() {
             self.retire_acked_local_wal_segments(&retirements);
         }
-        for event in self.verification_barrier.take_deferred_storage_events() {
+        for event in self
+            .publication
+            .verification_barrier
+            .take_deferred_storage_events()
+        {
             self.handle_storage_event(event);
         }
-        if self.pending_msg.is_none() {
-            self.pending_msg = deferred;
+        if self.routing.pending_msg.is_none() {
+            self.routing.pending_msg = deferred;
         }
         self.respond(request_id, RuntimeResponse::Ok { request_id });
         HandleOutcome::Continue
     }
 
     pub(super) fn restore_verification_deferred_message(&mut self) {
-        if !self.shutting_down
-            && self.verification_barrier.token.is_none()
-            && self.pending_msg.is_none()
+        if !self.shutdown.shutting_down
+            && self.publication.verification_barrier.token.is_none()
+            && self.routing.pending_msg.is_none()
         {
-            self.pending_msg = self.verification_barrier.deferred_messages.pop_front();
+            self.routing.pending_msg = self
+                .publication
+                .verification_barrier
+                .deferred_messages
+                .pop_front();
         }
     }
 }

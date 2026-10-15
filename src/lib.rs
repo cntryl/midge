@@ -78,6 +78,10 @@ mod wal;
 // Main engine (canonical public API — re-exported below)
 mod engine;
 
+// Simulated storage for crash campaigns; never part of production builds.
+#[cfg(any(test, feature = "internal-testing"))]
+mod simulation;
+
 // ---------------------------------------------------------------------------
 // Internal Test Surface (NOT public API)
 // ---------------------------------------------------------------------------
@@ -114,10 +118,52 @@ pub mod __internal {
         };
     }
     pub mod diagnostics {
+        pub use crate::diagnostics::WriteAdmissionSnapshot;
+
+        /// Capture this engine's transaction admission counters after joining callers.
+        #[must_use]
+        pub fn write_admission_snapshot(engine: &crate::Engine) -> WriteAdmissionSnapshot {
+            engine.write_admission_snapshot()
+        }
+
         pub use crate::diagnostics::{
             disable_transaction_commit_timing_for_benchmarks,
             drain_transaction_commit_timings_for_benchmarks,
             enable_transaction_commit_timing_for_benchmarks, TransactionCommitTimingSample,
+        };
+    }
+    /// Read clients can open and inspect files without receiving mutators.
+    ///
+    /// ```compile_fail,E0599
+    /// use cntryl_midge::__internal::io::{FsPath, ReadFs};
+    ///
+    /// fn truncate_read(fs: &dyn ReadFs, path: &FsPath) {
+    ///     fs.open_read(path).unwrap().truncate(0).unwrap();
+    /// }
+    /// ```
+    ///
+    /// ```
+    /// use bytes::Bytes;
+    /// use cntryl_midge::__internal::io::{Fs, FsPath, MockFs, OpenMode, OpenOptions, ReadFs};
+    ///
+    /// let fs = MockFs::new();
+    /// let path = FsPath::new("read-control");
+    /// let mut writable = fs.open(&path, OpenOptions {
+    ///     mode: OpenMode::ReadWrite, create: true, create_new: false, truncate: false,
+    /// }).unwrap();
+    /// writable.append(Bytes::from_static(b"readable")).unwrap();
+    /// drop(writable);
+    /// let reader: &dyn ReadFs = &fs;
+    /// let file = reader.open_read(&path).unwrap();
+    /// assert_eq!(file.len().unwrap(), 8);
+    /// assert_eq!(file.read_at(0, 8).unwrap(), Bytes::from_static(b"readable"));
+    /// ```
+    pub mod io {
+        pub use crate::io::traits::{DirEntry, Metadata};
+        pub use crate::io::{
+            open_persistent_handle, Durability, File, Fs, FsError, FsPath, FsResult,
+            HostAddressing, MockFs, OpenMode, OpenOptions, PersistentHandleFs, ReadFile, ReadFs,
+            RealFs,
         };
     }
     pub mod memtable {
@@ -144,10 +190,9 @@ pub mod __internal {
             run_journal_recovery_progress_fixture, JournalRecoveryProgressFixtureResult,
         };
         pub use crate::runtime::cloud_startup::recovery_progress_fixture::{
-            run_recovery_progress_fixture, RecoveryProgressFixtureMode,
-            RecoveryProgressFixtureResult,
+            prepare_recovery_progress_fixture, PreparedRecoveryProgressFixture,
+            RecoveryProgressFixtureMode, RecoveryProgressFixtureResult,
         };
-        pub use crate::runtime::cloud_startup::replay_coverage::cost_probe::run_recovery_cost_probe;
     }
     pub mod sst {
         pub mod bloom {
@@ -169,23 +214,63 @@ pub mod __internal {
             pub use crate::sst::types::{decode_range_tombstones, Footer};
         }
     }
-    /// Cloud-boundary types exposed only to this crate's compile-contract
-    /// tests. They remain outside Midge's supported public API.
+    /// Cloud-boundary types exposed only to this crate's compile-contract and
+    /// storage-injection tests. They remain outside Midge's supported public
+    /// API.
     pub mod storage {
         pub mod cloud {
+            /// In-memory object store for injection tests.
+            #[cfg(feature = "cloud-common")]
+            pub use crate::storage::cloud::MockCloudBackend;
             #[doc(inline)]
-            pub use crate::storage::cloud::{CloudBackend, CloudCallback};
+            pub use crate::storage::cloud::{
+                CloudBackend, CloudCallback, CloudDeleteCapability, CloudHeadCapability,
+                CloudListCapability, CloudReadCapability, CloudReadOptions, CloudRequestOptions,
+                CloudWriteCapability,
+            };
         }
+    }
+    /// Simulated storage for crash and fault campaigns.
+    pub mod simulation {
+        pub use crate::simulation::clock::SimulatedClock;
+        pub use crate::simulation::crash_fs::{
+            CrashDevice, Decision, Fault, FaultEffect, FaultError, FaultId, FaultOp, Subject,
+        };
+        #[cfg(feature = "cloud-common")]
+        pub use crate::simulation::object_store::{
+            Failure, Fate, Operation, RequestId, Schedule, SimulatedObjectStore, StoreImage,
+            FAILURE_MESSAGE,
+        };
+        pub use crate::simulation::oracle::{
+            Commit, CommitId, Histories, History, Key, Logging, Mismatch, Recovery, Verdict,
+            Violation,
+        };
     }
     pub mod types {
         pub use crate::types::{EntryType, KeyState};
     }
     pub mod wal {
         pub use crate::wal::{
-            cloud_segment_object_key, parse_segment_id, segment_file_name, WalOpKind, WalRecord,
+            parse_segment_file_name, parse_segment_object_key, segment_file_name,
+            segment_object_key, WalOpKind, WalRecord,
         };
         pub mod encoding {
             pub use crate::wal::encoding::{decode, decode_view, encode, encode_into};
+        }
+        /// WAL segment format v2 (#843), for integration fixtures.
+        pub mod segment {
+            pub use crate::wal::format::link::ChainLink;
+            pub use crate::wal::format::segment::{
+                footer_link, header_epoch, is_footer_payload, records, SegmentBuilder,
+                SegmentHeader, HEADER_LEN,
+            };
+        }
+        /// The cloud WAL publication catalog (v2, #844): the only reader
+        /// and editor of catalog JSON for integration fixtures.
+        pub mod catalog {
+            pub use crate::wal::cloud_catalog::{
+                CatalogDecodeError, CatalogEntry, WalPublicationCatalog,
+            };
         }
         pub mod frame {
             pub use crate::wal::frame::{

@@ -1,6 +1,10 @@
 //! Startup authority checks share one scope; fencing cleanup keeps the original store.
 
-use super::traits::{scope_lease_error, LeaderRecord};
+use super::traits::{
+    acquire_leadership_with_minimum_epoch_within, scope_lease_error, LeaderAcquisition,
+    LeaderRecord,
+};
+use super::{ActiveWriterEffect, WriterEffectGroup, WriterEffectGroupContext, WriterEffectGroups};
 use super::{CloudMetadataGeneration, CloudMetadataHead, LeaderStore, LeaseError};
 use crate::common::DeadlineScope;
 use std::sync::Arc;
@@ -64,6 +68,11 @@ impl StartupLeaderStore {
 }
 
 impl LeaderStore for StartupLeaderStore {
+    fn writer_effect_groups(&self) -> Option<&dyn WriterEffectGroups> {
+        self.inner
+            .writer_effect_groups()
+            .map(|_| self as &dyn WriterEffectGroups)
+    }
     fn acquire_leadership(&self, holder_id: &str) -> Result<LeaderRecord, LeaseError> {
         self.acquire_leadership_with_minimum_epoch(holder_id, 0)
     }
@@ -73,11 +82,15 @@ impl LeaderStore for StartupLeaderStore {
         holder_id: &str,
         minimum_epoch: u64,
     ) -> Result<LeaderRecord, LeaseError> {
-        self.within(self.per_io_timeout, "leader acquisition", |_| {
-            let result = self.inner.acquire_leadership_with_minimum_epoch_within(
+        self.within(self.per_io_timeout, "leader acquisition", |timeout| {
+            let scope = self
+                .scope
+                .with_deadline(crate::common::OperationDeadline::from_budget(timeout));
+            let result = acquire_leadership_with_minimum_epoch_within(
+                self.inner.as_ref(),
                 holder_id,
                 minimum_epoch,
-                &self.scope,
+                &scope,
                 &mut |_| {},
             );
             if result.is_ok() {
@@ -87,21 +100,21 @@ impl LeaderStore for StartupLeaderStore {
         })
     }
 
-    fn acquire_leadership_with_minimum_epoch_within(
+    fn acquire_leadership_with_context(
         &self,
         holder_id: &str,
         minimum_epoch: u64,
-        scope: &DeadlineScope,
-        on_cleanup_epoch: &mut dyn FnMut(u64),
+        acquisition: &mut LeaderAcquisition<'_>,
     ) -> Result<LeaderRecord, LeaseError> {
-        self.within(self.per_io_timeout, "scoped leader acquisition", |_| {
-            self.inner.acquire_leadership_with_minimum_epoch_within(
-                holder_id,
-                minimum_epoch,
-                scope,
-                on_cleanup_epoch,
-            )
-        })
+        self.within(
+            acquisition.remaining(),
+            "scoped leader acquisition",
+            |timeout| {
+                acquisition.restrict_timeout(timeout);
+                self.inner
+                    .acquire_leadership_with_context(holder_id, minimum_epoch, acquisition)
+            },
+        )
     }
 
     fn read_current(&self) -> Result<Option<LeaderRecord>, LeaseError> {
@@ -158,6 +171,43 @@ impl LeaderStore for StartupLeaderStore {
         })
     }
 
+    fn validate_write_admission(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.within(timeout, "writer admission validation", |timeout| {
+            self.inner
+                .validate_write_admission(holder_id, epoch, timeout)
+        })
+    }
+
+    fn validate_epoch_before_sync(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.within(timeout, "WAL sync authority validation", |timeout| {
+            self.inner
+                .validate_epoch_before_sync(holder_id, epoch, timeout)
+        })
+    }
+
+    fn with_writer_epoch(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), LeaseError> {
+        self.within_operation(timeout, "writer storage effect", |timeout| {
+            self.inner
+                .with_writer_epoch(holder_id, epoch, timeout, operation)
+        })
+    }
+
     // Renewal and release are fencing lifecycle operations. The startup
     // owner retains the original store; its cleanup/heartbeat budget survives
     // cancellation even if a caller keeps this private authority view.
@@ -182,9 +232,36 @@ impl LeaderStore for StartupLeaderStore {
     fn write_test_coordination_document(&self, content: &str) -> Result<(), LeaseError> {
         self.inner.write_test_coordination_document(content)
     }
+}
 
-    #[cfg(test)]
-    fn remove_test_coordination_document(&self) -> Result<(), LeaseError> {
-        self.inner.remove_test_coordination_document()
+impl WriterEffectGroups for StartupLeaderStore {
+    fn begin_group_with_context(
+        &self,
+        holder: &str,
+        epoch: u64,
+        timeout: Duration,
+        context: &WriterEffectGroupContext,
+    ) -> Result<WriterEffectGroup, LeaseError> {
+        let capability = self.inner.writer_effect_groups().ok_or_else(|| {
+            LeaseError::Internal("writer effect grouping capability disappeared".into())
+        })?;
+        let context = context.with_scope(self.scope.clone());
+        capability.begin_group_with_context(holder, epoch, timeout, &context)
+    }
+
+    fn run_active(
+        &self,
+        holder: &str,
+        epoch: u64,
+        active: &ActiveWriterEffect,
+        timeout: Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), LeaseError> {
+        let capability = self.inner.writer_effect_groups().ok_or_else(|| {
+            LeaseError::Internal("writer effect grouping capability disappeared".into())
+        })?;
+        self.within_operation(timeout, "grouped writer storage effect", |timeout| {
+            capability.run_active(holder, epoch, active, timeout, operation)
+        })
     }
 }

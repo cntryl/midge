@@ -13,9 +13,8 @@
 use super::super::OpenOptions;
 use super::StartupStoragePath;
 use crate::common::{DeadlineScope, MidgeError, MidgeResult};
-use crate::config::{RecoveryPolicy, Storage};
+use crate::config::Storage;
 use crate::io::FsError;
-use std::path::Path;
 use std::sync::Arc;
 
 pub(super) struct StartupEpochFloor;
@@ -49,14 +48,14 @@ impl StartupEpochFloor {
         if storage_path.memory_mode {
             return Ok(0);
         }
-        let local_wal =
-            Self::local_wal_epoch(&storage_path.db_path, opts.recovery_policy(), scope)?;
+        let local_wal = Self::local_wal_epoch(&storage_path.root, scope)?;
         let catalog = match opts.storage() {
             Storage::Cloud { topology, .. } => {
-                let wal = crate::storage::providers::build_cloud_storage_with_timeout(
+                let wal = crate::storage::providers::build_class_store(
                     topology.wal().provider(),
                     topology.wal().prefix(),
                     opts.storage_io_timeout(),
+                    opts.injected_object_store(),
                 )?;
                 let wal = scope.map_or_else(
                     || wal.clone(),
@@ -69,14 +68,15 @@ impl StartupEpochFloor {
                 )?
             }
             Storage::CloudSimulated { .. } => {
-                let cloud_root =
-                    crate::storage::simulated::simulated_cloud_root(&storage_path.db_path);
-                if cloud_root.exists() {
-                    let backend: Arc<dyn crate::storage::StorageBackend> =
-                        Arc::new(crate::storage::filesystem::FileSystem::new(cloud_root)?);
-                    Self::catalog_epoch(&backend, opts, scope)?
-                } else {
-                    0
+                let existing = crate::storage::simulated::SimulatedCloud::locate(
+                    storage_path.root.as_ref(),
+                    opts.injected_object_store(),
+                    opts.storage_io_timeout(),
+                )?
+                .open_existing()?;
+                match existing {
+                    Some(store) => Self::catalog_epoch(&(store as _), opts, scope)?,
+                    None => 0,
                 }
             }
             Storage::InMemory | Storage::Local { .. } => 0,
@@ -84,34 +84,28 @@ impl StartupEpochFloor {
         Ok(local_wal.max(catalog))
     }
 
-    /// WAL failures surface as `RecoveryFailed`, the same classification
-    /// replay itself would report for them.
+    /// The newest writer epoch the WAL ledger records (#843): every segment
+    /// header names the epoch that wrote it, and epochs never fall along the
+    /// chain, so no segment is read. Failures surface as `RecoveryFailed`,
+    /// the classification recovery reports for them.
     fn local_wal_epoch(
-        db_path: &Path,
-        recovery_policy: RecoveryPolicy,
+        root: &Arc<dyn crate::io::Fs>,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<u64> {
-        let wal_dir = db_path.join("wal");
-        if !wal_dir.exists() {
+        if !root
+            .exists(&crate::io::FsPath::new("wal"))
+            .map_err(FsError::into_midge)?
+        {
             return Ok(0);
         }
-        let replay_policy = match recovery_policy {
-            RecoveryPolicy::Strict => crate::wal::recovery::ReplayPolicy::Strict,
-            RecoveryPolicy::Salvage => crate::wal::recovery::ReplayPolicy::SalvageValidPrefix,
-        };
-        let result = crate::io::RealFs::new(&wal_dir)
-            .map_err(FsError::into_midge)
-            .and_then(|storage| {
-                let mut storage: Arc<dyn crate::io::Fs> = Arc::new(storage);
-                if let Some(scope) = scope {
-                    storage = crate::io::scope_fs(storage, scope.clone());
-                }
-                crate::wal::recovery::max_writer_epoch(
-                    storage.as_ref(),
-                    &crate::io::FsPath::new(""),
-                    replay_policy,
-                )
-            });
+        let mut storage: Arc<dyn crate::io::ReadFs> =
+            crate::io::subdirectory(Arc::clone(root), "wal");
+        if let Some(scope) = scope {
+            storage = crate::io::scope_read_fs(storage, scope.clone());
+        }
+        // Read only: the lease is not held yet, so nothing may change.
+        let result = crate::runtime::wal_history::WalHistory::read(&storage)
+            .map(|ledger| ledger.map_or(0, |ledger| ledger.newest_epoch()));
         if let Some(scope) = scope {
             scope.check("local WAL epoch discovery")?;
         }
@@ -160,9 +154,42 @@ impl StartupEpochFloor {
             if let Ok(catalog) =
                 crate::wal::cloud_catalog::WalPublicationCatalog::decode(object.bytes())
             {
-                floor = floor.max(catalog.fencing_epoch);
+                floor = floor.max(catalog.fencing_epoch());
             }
         }
         Ok(floor)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StartupEpochFloor;
+    use crate::common::MidgeResult;
+    use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
+    use std::sync::Arc;
+
+    #[test]
+    fn should_discover_epoch_floor_from_ledger_without_reading_segments() -> MidgeResult<()> {
+        // Arrange: epoch 7 opened the newest segment the ledger names, and
+        // every open of that segment's file fails.
+        let device = CrashDevice::new();
+        let root: Arc<dyn crate::io::Fs> = Arc::new(device.fs());
+        let wal = crate::io::subdirectory(Arc::clone(&root), crate::wal::WAL_DIR);
+        drop(crate::runtime::wal_history::WalHistory::open(wal, 1, 7)?);
+        let segment_open = device.inject(Fault {
+            op: FaultOp::Open,
+            path: format!("wal/{}", crate::wal::segment_file_name(1)),
+            nth: 1,
+            effect: FaultEffect::Before,
+            error: FaultError::Io,
+        });
+
+        // Act
+        let floor = StartupEpochFloor::local_wal_epoch(&root, None)?;
+
+        // Assert
+        assert_eq!(floor, 7);
+        assert!(!device.fired(segment_open), "discovery read a segment");
+        Ok(())
     }
 }

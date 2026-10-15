@@ -6,9 +6,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Per-request budget for offline object-store reads.
+const OFFLINE_OBJECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Storage-integrity façade for online and offline verification.
 pub struct StorageVerifier {
     runtime_handle: crate::runtime::RuntimeHandle,
+    root: Arc<dyn Fs>,
     db_path: std::path::PathBuf,
     memory_mode: bool,
     cloud_mode: bool,
@@ -17,12 +21,14 @@ pub struct StorageVerifier {
 impl StorageVerifier {
     pub(super) fn new(
         runtime_handle: crate::runtime::RuntimeHandle,
+        root: Arc<dyn Fs>,
         db_path: std::path::PathBuf,
         memory_mode: bool,
         cloud_mode: bool,
     ) -> Self {
         Self {
             runtime_handle,
+            root,
             db_path,
             memory_mode,
             cloud_mode,
@@ -40,6 +46,7 @@ impl StorageVerifier {
 
         verify_storage_online(
             &self.runtime_handle,
+            Arc::clone(&self.root),
             self.db_path.clone(),
             self.cloud_mode,
             timeout,
@@ -64,23 +71,44 @@ impl StorageVerifier {
     pub(super) fn verify_simulated_cloud_path(
         path: &Path,
     ) -> MidgeResult<StorageVerificationReport> {
-        Self::verify_simulated_cloud_wal_catalog(path)?;
-        let cloud_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
-            crate::storage::simulated::simulated_cloud_root(path),
-        )?);
-        let local_backend: Arc<dyn Fs> =
-            Arc::new(crate::io::RealFs::open_existing(path).map_err(FsError::into_midge)?);
-        let cloud_backend: Arc<dyn crate::storage::StorageBackend> = cloud_backend;
+        let root = super::startup::existing_host_root(path)?;
+        let store = crate::storage::simulated::SimulatedCloud::locate(
+            root.as_ref(),
+            None,
+            OFFLINE_OBJECT_TIMEOUT,
+        )?
+        .open_existing()?
+        .ok_or_else(|| {
+            MidgeError::Corruption("simulated cloud WAL publication catalog is missing".into())
+        })?;
+        let store: Arc<dyn crate::storage::StorageBackend> = store;
+        Self::verify_simulated_cloud_wal_catalog(&store)?;
         let sst_fs: Arc<dyn Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-            local_backend,
-            cloud_backend,
-            Duration::from_secs(30),
+            Arc::clone(&root),
+            store,
+            OFFLINE_OBJECT_TIMEOUT,
         ));
-        verify_storage_path_with_sst_fs(path, None, Some(&sst_fs), None)
+        verify_storage_root(&root, path, None, Some(&sst_fs), None)
     }
 
-    fn verify_simulated_cloud_wal_catalog(path: &Path) -> MidgeResult<()> {
-        let cloud_root = crate::storage::simulated::simulated_cloud_root(path);
+    /// Read one whole object from an offline store; `None` when absent.
+    fn read_offline_object(
+        store: &Arc<dyn crate::storage::StorageBackend>,
+        key: &str,
+    ) -> MidgeResult<Option<Vec<u8>>> {
+        let object = crate::storage::HybridStorage::read_control_from_backend(
+            store,
+            key,
+            &crate::common::resource_budget::ResourceBudget::new(usize::MAX),
+            OFFLINE_OBJECT_TIMEOUT,
+            &crate::common::OperationDeadline::unbounded(),
+        )?;
+        Ok(object.map(|object| object.bytes().to_vec()))
+    }
+
+    fn verify_simulated_cloud_wal_catalog(
+        store: &Arc<dyn crate::storage::StorageBackend>,
+    ) -> MidgeResult<()> {
         let candidates = [
             crate::wal::cloud_catalog::OBJECT_KEY,
             crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
@@ -88,19 +116,14 @@ impl StorageVerifier {
         let mut decoded_catalog = None;
         let mut saw_catalog = false;
         for key in candidates {
-            let catalog_path = cloud_root.join(key);
-            match std::fs::read(&catalog_path) {
-                Ok(bytes) => {
-                    saw_catalog = true;
-                    if let Ok(catalog) =
-                        crate::wal::cloud_catalog::WalPublicationCatalog::decode(&bytes)
-                    {
-                        decoded_catalog = Some(catalog);
-                        break;
-                    }
+            if let Some(bytes) = Self::read_offline_object(store, key)? {
+                saw_catalog = true;
+                if let Ok(catalog) =
+                    crate::wal::cloud_catalog::WalPublicationCatalog::decode(&bytes)
+                {
+                    decoded_catalog = Some(catalog);
+                    break;
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(MidgeError::Io(error)),
             }
         }
         let catalog = decoded_catalog.ok_or_else(|| {
@@ -111,14 +134,14 @@ impl StorageVerifier {
             };
             MidgeError::Corruption(detail.to_string())
         })?;
-        for segment in catalog.segments.values() {
-            let bytes = std::fs::read(cloud_root.join(&segment.object_key)).map_err(|error| {
-                MidgeError::RecoveryFailed(format!(
-                    "simulated cloud WAL object '{}' is missing: {error}",
-                    segment.object_key
-                ))
+        // Decoding checked the catalog's chain; each object must be the
+        // segment its entry names, at its place in that chain.
+        for entry in catalog.entries() {
+            let key = entry.object_key();
+            let bytes = Self::read_offline_object(store, &key)?.ok_or_else(|| {
+                MidgeError::RecoveryFailed(format!("simulated cloud WAL object '{key}' is missing"))
             })?;
-            segment
+            entry
                 .validate_bytes(&bytes)
                 .map_err(MidgeError::Corruption)?;
         }
@@ -243,48 +266,63 @@ pub(super) fn verify_storage_path(
     db_path: &Path,
     runtime_health: Option<EngineHealth>,
 ) -> MidgeResult<StorageVerificationReport> {
-    verify_storage_path_with_sst_fs(db_path, runtime_health, None, None)
+    let root = super::startup::existing_host_root(db_path)?;
+    verify_storage_root(&root, db_path, runtime_health, None, None)
 }
 
-fn verify_storage_path_with_sst_fs(
+/// Verify the database served by `fs`; `db_path` names it in errors.
+fn verify_storage_root(
+    fs: &Arc<dyn Fs>,
     db_path: &Path,
     runtime_health: Option<EngineHealth>,
     sst_fs: Option<&Arc<dyn Fs>>,
     deadline: Option<&crate::common::OperationDeadline>,
 ) -> MidgeResult<StorageVerificationReport> {
-    crate::metadata::validate_format_marker(db_path)?;
-
-    let fs: Arc<dyn Fs> =
-        Arc::new(crate::io::RealFs::open_existing(db_path).map_err(FsError::into_midge)?);
+    crate::metadata::validate_format_marker(fs.as_ref(), db_path)?;
     let manifest =
-        crate::metadata::ManifestPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)
+        crate::metadata::ManifestPersistence::load_with_fs_and_policy(fs, RecoveryPolicy::Strict)
             .map_err(MidgeError::RecoveryFailed)?;
     let intents =
-        crate::runtime::IntentPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)
+        crate::runtime::IntentPersistence::load_with_fs_and_policy(fs, RecoveryPolicy::Strict)
             .map_err(MidgeError::RecoveryFailed)?;
 
     let mut sst_bytes_verified = 0u64;
     let mut data_blocks_verified = 0u64;
     for file_meta in &manifest.files {
         let (sst_bytes, data_blocks) =
-            verify_manifest_sst(sst_fs.unwrap_or(&fs), file_meta, deadline)?;
+            verify_manifest_sst(sst_fs.unwrap_or(fs), file_meta, deadline)?;
         sst_bytes_verified = sst_bytes_verified.saturating_add(sst_bytes);
         data_blocks_verified = data_blocks_verified.saturating_add(data_blocks);
     }
 
-    let wal_stats = crate::wal::recovery::validate_wal_with_policy(
-        fs.as_ref(),
-        &FsPath::new("wal"),
-        crate::wal::recovery::ReplayPolicy::Strict,
-        deadline,
-    )
-    .map_err(|error| verification_stage_error("WAL verification failed", error))?;
-    let manifest_epoch = crate::metadata::journal::highest_edit_id_with_fs(&fs)
+    let wal: Arc<dyn crate::io::ReadFs> =
+        crate::io::subdirectory(Arc::clone(fs), crate::wal::WAL_DIR);
+    let wal_stats = crate::runtime::wal_history::WalHistory::read(&wal)
+        .and_then(|ledger| {
+            let segments =
+                ledger.map_or_else(crate::wal::recovery::ReplaySegments::default, |ledger| {
+                    crate::wal::recovery::ReplaySegments::from_ledger(&ledger, |id| {
+                        crate::wal::segment_key(id)
+                    })
+                });
+            crate::wal::recovery::validate_wal_with_policy(
+                fs.as_ref(),
+                &segments,
+                crate::wal::recovery::ReplayPolicy::Strict,
+                deadline,
+            )
+        })
+        .map_err(|error| verification_stage_error("WAL verification failed", error))?;
+    let manifest_epoch = crate::metadata::journal::highest_edit_id_with_fs(fs)
         .map_err(|error| verification_stage_error("manifest epoch failed", error))?
         .max(manifest.edit_checkpoint_id);
 
-    let residue =
-        crate::runtime::storage_residue::StorageResidueAssessment::scan_sst_dir(db_path, &manifest);
+    let residue = crate::runtime::storage_residue::StorageResidueAssessment::scan(
+        fs.as_ref(),
+        &manifest,
+        |_| Ok(()),
+    )
+    .unwrap_or_default();
     let health = match runtime_health {
         Some(EngineHealth::Healthy) | None => {
             crate::runtime::storage_residue::classify_engine_health(
@@ -459,6 +497,7 @@ impl Drop for VerificationBarrierGuard {
 
 pub(super) fn verify_storage_online(
     runtime_handle: &crate::runtime::RuntimeHandle,
+    root: Arc<dyn Fs>,
     db_path: std::path::PathBuf,
     cloud_mode: bool,
     timeout: Duration,
@@ -481,7 +520,8 @@ pub(super) fn verify_storage_online(
         .name("midge-storage-verification".to_string())
         .spawn(move || {
             crate::failpoints::fail_point!("midge::verification::after_barrier_acquired");
-            let mut result = verify_storage_path_with_sst_fs(
+            let mut result = verify_storage_root(
+                &root,
                 &db_path,
                 Some(runtime_health),
                 sst_fs.as_ref(),
@@ -524,6 +564,85 @@ mod tests {
     use bytes::Bytes;
     use std::sync::{Arc, Mutex};
 
+    /// Write segments `segments`, in order, and a catalog that chains each
+    /// onto the one before whatever its object's header links, as both
+    /// catalog copies of the simulated cloud `store`.
+    fn write_catalog_listing(store: &std::path::Path, segments: &[(u64, Vec<u8>)]) {
+        let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(7).unwrap();
+        for (segment_id, bytes) in segments {
+            let link = crate::wal::format::segment::footer_link(bytes)
+                .unwrap()
+                .expect("a sealed segment");
+            assert_eq!(link.id, *segment_id);
+            let entry = crate::wal::cloud_catalog::CatalogEntry::describing(
+                &crate::wal::cloud_segment::SegmentValidation {
+                    writer_epoch: 7,
+                    prev: catalog.head(),
+                    facts: crate::wal::format::segment::sealed_footer(bytes)
+                        .unwrap()
+                        .unwrap()
+                        .sealed_facts(),
+                },
+                bytes,
+            );
+            let path = store.join(entry.object_key());
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+            catalog.append_run(7, &[entry]).unwrap();
+        }
+        let encoded = catalog.encode().unwrap();
+        for key in [
+            crate::wal::cloud_catalog::OBJECT_KEY,
+            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+        ] {
+            let path = store.join(key);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &encoded).unwrap();
+        }
+    }
+
+    #[test]
+    fn should_fail_simulated_cloud_verification_when_cataloged_segments_do_not_chain() {
+        // Arrange: the catalog lists segments 1 and 2, but segment 2's header
+        // links another segment 1.
+        let directory = tempfile::tempdir().unwrap();
+        let put = |seq| {
+            crate::wal::WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                Bytes::from_static(b"key"),
+                Some(Bytes::from_static(b"value")),
+                seq,
+            )
+        };
+        let (first, _) = crate::wal::format::segment::SegmentBuilder::new(
+            1,
+            7,
+            crate::wal::format::ChainLink::GENESIS,
+        )
+        .record(&put(1))
+        .seal();
+        let stranger = crate::wal::format::ChainLink {
+            id: 1,
+            last_seq: 1,
+            digest: [0x5a; 16],
+        };
+        let (second, _) = crate::wal::format::segment::SegmentBuilder::new(2, 7, stranger)
+            .record(&put(2))
+            .seal();
+        write_catalog_listing(directory.path(), &[(1, first), (2, second)]);
+        let store: Arc<dyn crate::storage::StorageBackend> =
+            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
+
+        // Act
+        let result = StorageVerifier::verify_simulated_cloud_wal_catalog(&store);
+
+        // Assert
+        assert!(
+            matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+            "{result:?}"
+        );
+    }
+
     #[test]
     fn should_reject_memory_mode_without_constructing_engine() {
         // Arrange
@@ -553,7 +672,7 @@ mod tests {
         }
     }
 
-    impl File for RecordingFile {
+    impl crate::io::ReadFile for RecordingFile {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             self.read_lengths
                 .lock()
@@ -570,16 +689,18 @@ mod tests {
             Ok(Bytes::copy_from_slice(&self.bytes[start..end]))
         }
 
+        fn len(&self) -> FsResult<u64> {
+            Ok(u64::try_from(self.bytes.len()).unwrap_or(u64::MAX))
+        }
+    }
+
+    impl File for RecordingFile {
         fn write_at(&mut self, _offset: u64, _data: Bytes) -> FsResult<()> {
             unreachable!("verification test file is read-only")
         }
 
         fn append(&mut self, _data: Bytes) -> FsResult<u64> {
             unreachable!("verification test file is read-only")
-        }
-
-        fn len(&self) -> FsResult<u64> {
-            Ok(u64::try_from(self.bytes.len()).unwrap_or(u64::MAX))
         }
 
         fn sync(&mut self, _durability: Durability) -> FsResult<()> {
@@ -602,7 +723,11 @@ mod tests {
     ) -> VerificationFixture {
         let temp_dir = tempfile::tempdir().expect("create verification directory");
         let db_path = temp_dir.path().to_path_buf();
-        crate::metadata::ensure_or_create_format_marker(&db_path).expect("create format marker");
+        crate::metadata::ensure_or_create_format_marker(
+            &crate::io::real::test_root(&db_path),
+            &db_path,
+        )
+        .expect("create format marker");
         std::fs::create_dir_all(db_path.join("sst")).expect("create SST directory");
 
         let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 96)
@@ -626,19 +751,17 @@ mod tests {
         let sst_path = db_path.join("sst").join(&sst_name);
         std::fs::write(&sst_path, &bytes).expect("write SST fixture");
 
-        let manifest = Manifest {
-            edit_checkpoint_id: 7,
-            files: vec![FileMeta {
-                name: sst_name,
-                level: 0,
-                size_bytes: u64::try_from(bytes.len()).expect("fixture size fits in u64"),
-                content_crc32c: Some(crc32c::crc32c(&bytes)),
-                cf_id: 0,
-                sst_seq: 1,
-                ..FileMeta::default()
-            }],
-            ..Manifest::default()
-        };
+        let mut manifest = Manifest::default();
+        manifest.edit_checkpoint_id = 7;
+        manifest.files = vec![FileMeta {
+            name: sst_name,
+            level: 0,
+            size_bytes: u64::try_from(bytes.len()).expect("fixture size fits in u64"),
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            sst_seq: 1,
+            ..FileMeta::default()
+        }];
         ManifestPersistence::save(&db_path, &manifest).expect("save manifest fixture");
 
         VerificationFixture {
@@ -682,7 +805,11 @@ mod tests {
         // Arrange: no SSTs, so only the WAL scan can observe the deadline.
         let temp_dir = tempfile::tempdir().expect("create verification directory");
         let db_path = temp_dir.path().to_path_buf();
-        crate::metadata::ensure_or_create_format_marker(&db_path).expect("create format marker");
+        crate::metadata::ensure_or_create_format_marker(
+            &crate::io::real::test_root(&db_path),
+            &db_path,
+        )
+        .expect("create format marker");
         ManifestPersistence::save(&db_path, &Manifest::default()).expect("save empty manifest");
         std::fs::create_dir_all(db_path.join("wal")).expect("create WAL directory");
         let mut wal = Vec::new();
@@ -692,17 +819,22 @@ mod tests {
                 bytes::Bytes::from(format!("key-{sequence}")),
                 Some(bytes::Bytes::from_static(b"value")),
                 sequence,
-                1,
             );
             let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
             crate::wal::frame::append_frame(&mut wal, &payload).expect("frame WAL record");
         }
-        std::fs::write(db_path.join("wal").join(crate::wal::ACTIVE_FILE_NAME), wal)
-            .expect("write WAL");
+        std::fs::write(
+            db_path.join("wal").join(crate::wal::segment_file_name(1)),
+            wal,
+        )
+        .expect("write WAL");
+        crate::runtime::wal_history::fixture::record_at(&db_path, &[], 1)
+            .expect("record WAL history");
         let expired = crate::common::OperationDeadline::from_budget(std::time::Duration::ZERO);
 
         // Act
-        let result = super::verify_storage_path_with_sst_fs(&db_path, None, None, Some(&expired));
+        let root = super::super::startup::existing_host_root(&db_path).expect("host root");
+        let result = super::verify_storage_root(&root, &db_path, None, None, Some(&expired));
 
         // Assert
         assert!(
@@ -752,9 +884,9 @@ mod tests {
             std::time::Duration::from_secs(5),
         ));
         // Act
-        let report =
-            super::verify_storage_path_with_sst_fs(&fixture.db_path, None, Some(&fs), None)
-                .expect("verify cloud SST");
+        let root = super::super::startup::existing_host_root(&fixture.db_path).expect("host root");
+        let report = super::verify_storage_root(&root, &fixture.db_path, None, Some(&fs), None)
+            .expect("verify cloud SST");
         // Assert
         assert_eq!(report.sst_files_verified, 1);
         assert!(report.data_blocks_verified > 0);

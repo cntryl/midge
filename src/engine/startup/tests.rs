@@ -8,14 +8,11 @@ fn should_make_new_database_root_chain_durable_before_startup_writes() -> MidgeR
     let temp = tempfile::tempdir()?;
     let parent = std::fs::canonicalize(temp.path())?;
     let db_path = parent.join("nested/database");
-    let storage_path = StartupStoragePath {
-        db_path: db_path.clone(),
-        memory_mode: false,
-    };
+    let opts = OpenOptions::local(&db_path).build()?;
     crate::io::durable_dir::take_synced_dirs();
 
     // Act
-    storage_path.prepare()?;
+    StartupStoragePath::resolve(&opts)?;
 
     // Assert: the parent entry for each newly created directory is synced
     // before startup proceeds to lease, WAL, metadata, or SST writes.
@@ -210,9 +207,8 @@ fn should_apply_open_options_block_cache_policy_to_runtime_config() -> MidgeResu
     let opts = OpenOptions::in_memory()
         .block_cache_policy(crate::engine::BlockCachePolicy::ClockPro)
         .build()?;
-    let storage_path = StartupStoragePath::resolve(opts.storage());
-    storage_path.prepare()?;
-    let startup_lease = StartupLease::acquire(&opts, 0)?;
+    let storage_path = StartupStoragePath::resolve(&opts)?;
+    let startup_lease = StartupLease::acquire(&opts, &storage_path, 0)?;
 
     // Act
     let materialized =
@@ -222,6 +218,29 @@ fn should_apply_open_options_block_cache_policy_to_runtime_config() -> MidgeResu
     assert_eq!(
         materialized.runtime_config.block_cache_policy,
         crate::sst::cache::CachePolicyType::ClockPro
+    );
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_apply_open_options_retry_policy_to_local_runtime_config() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let opts = OpenOptions::local(directory.path())
+        .fast_cloud_retries_for_testing()
+        .build()?;
+    let storage_path = StartupStoragePath::resolve(&opts)?;
+    let startup_lease = StartupLease::acquire(&opts, &storage_path, 0)?;
+
+    // Act
+    let materialized =
+        RuntimeStorageMaterialization::materialize(&opts, &storage_path, &startup_lease)?;
+
+    // Assert
+    assert_eq!(
+        materialized.runtime_config.retry_policy,
+        opts.retry_policy()
     );
     Ok(())
 }
@@ -340,18 +359,10 @@ fn should_grant_epoch_above_wal_writer_epoch_when_leader_record_is_deleted() -> 
         let fs: std::sync::Arc<dyn crate::io::Fs> = std::sync::Arc::new(
             crate::io::RealFs::new(dir.path().join("wal")).map_err(FsError::into_midge)?,
         );
-        let writer = crate::wal::fs::FsWalWriterIo::new(&crate::wal::segment_file_name(1_000), fs)?;
-        crate::wal::WalWriter::append_record(
-            &writer,
-            &crate::wal::WalRecord::new(
-                crate::wal::WalOpKind::Put,
-                bytes::Bytes::from_static(b"written-at-epoch-7"),
-                Some(bytes::Bytes::from_static(b"value")),
-                1_000,
-                wal_epoch,
-            ),
-        )?;
-        crate::wal::WalWriter::sync(&writer)?;
+        // A writer under lease epoch 7 opened the newest segment the ledger
+        // names; segment headers carry the epoch (#843).
+        let mut history = crate::runtime::wal_history::WalHistory::open(fs, 1, wal_epoch)?;
+        history.start_epoch(wal_epoch, 1)?;
     }
     remove_if_present(&dir.path().join(".midge_leader"));
 
@@ -369,46 +380,53 @@ fn should_grant_epoch_above_wal_writer_epoch_when_leader_record_is_deleted() -> 
 }
 
 #[test]
-fn should_grant_epoch_above_catalog_fencing_epoch_when_cloud_lease_object_is_deleted(
-) -> MidgeResult<()> {
-    // Arrange
-    let dir = tempfile::tempdir().expect("database directory");
-    let options = crate::OpenOptions::cloud_simulated(dir.path(), "bucket", "epoch-floor")
-        .background_compaction(false)
-        .build()?;
-    let mut engine = crate::Engine::open(options.clone())?;
-    engine.shutdown(std::time::Duration::from_secs(10))?;
-    drop(engine);
-    let catalog_epoch = 9;
-    let catalog_path = dir
-        .path()
-        .join("cloud_store/wal/publication-catalog.v1.json");
-    let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
-        &std::fs::read(&catalog_path).expect("read catalog"),
-    )
-    .expect("decode catalog");
-    catalog.fencing_epoch = catalog_epoch;
-    let encoded = catalog.encode().expect("encode catalog");
-    std::fs::write(&catalog_path, &encoded).expect("write catalog");
-    std::fs::write(
-        dir.path()
-            .join("cloud_store/wal/publication-catalog.v1.mirror.json"),
-        &encoded,
-    )
-    .expect("write catalog mirror");
-    remove_if_present(&dir.path().join("midge_primary_lease.json"));
-    remove_if_present(&dir.path().join(".midge_leader"));
+fn should_fail_closed_when_shared_lease_authority_is_deleted() -> MidgeResult<()> {
+    for policy in [
+        crate::RecoveryPolicy::Strict,
+        crate::RecoveryPolicy::Salvage,
+    ] {
+        // Arrange: catalog and local durable metadata survive, but the sole
+        // committed metadata pointer in the shared lease is gone.
+        let dir = tempfile::tempdir().expect("database directory");
+        let options = crate::OpenOptions::cloud_simulated(dir.path(), "bucket", "epoch-floor")
+            .background_compaction(false)
+            .recovery_policy(policy)
+            .build()?;
+        let mut engine = crate::Engine::open(options.clone())?;
+        engine.shutdown(std::time::Duration::from_secs(10))?;
+        drop(engine);
+        let retained_paths = [
+            "cloud_store/wal/publication-catalog.v1.json",
+            "cloud_store/wal/publication-catalog.v1.mirror.json",
+            crate::metadata::files::MANIFEST_SNAPSHOT,
+            crate::metadata::files::FORMAT,
+        ];
+        let retained: Vec<_> = retained_paths
+            .iter()
+            .map(|path| {
+                (
+                    dir.path().join(path),
+                    std::fs::read(dir.path().join(path)).unwrap(),
+                )
+            })
+            .collect();
+        let lease_path = dir.path().join("cloud_store/midge_primary_lease.json");
+        assert!(lease_path.is_file());
+        std::fs::remove_file(&lease_path)?;
 
-    // Act
-    let mut reopened = crate::Engine::open(options)?;
+        // Act
+        let result = crate::Engine::open(options);
 
-    // Assert
-    let granted_epoch = leader_record_epoch(dir.path());
-    assert!(
-        granted_epoch > catalog_epoch,
-        "granted epoch {granted_epoch} must exceed catalog fencing epoch {catalog_epoch}"
-    );
-    reopened.shutdown(std::time::Duration::from_secs(10))?;
+        // Assert: neither recovery policy reconstructs the missing pointer.
+        assert!(
+            result.is_err(),
+            "missing shared authority admitted under {policy:?}"
+        );
+        assert!(!lease_path.exists());
+        for (path, bytes) in retained {
+            assert_eq!(std::fs::read(&path)?, bytes, "changed {}", path.display());
+        }
+    }
     Ok(())
 }
 
@@ -456,16 +474,12 @@ impl ProviderMetadataBootstrapFixture {
         let leader_store = lease
             .get_leader_store()
             .expect("provider-backed lease has a leader store");
-        let local_backend: std::sync::Arc<dyn crate::storage::StorageBackend> = std::sync::Arc::new(
-            crate::storage::filesystem::FileSystem::new(local_cache.path().join("hybrid_local"))?,
-        );
         let wal_backend: std::sync::Arc<dyn crate::storage::StorageBackend> = cloud.clone();
         let sst_backend: std::sync::Arc<dyn crate::storage::StorageBackend> = sst_cloud.clone();
         let control_backend: std::sync::Arc<dyn crate::storage::StorageBackend> = cloud.clone();
         let (event_tx, events) = crossbeam::channel::unbounded();
         let hybrid = std::sync::Arc::new(
             crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
-                local_backend,
                 wal_backend,
                 sst_backend,
                 control_backend,
@@ -597,9 +611,11 @@ struct LoseMetadataCommitCallbackBackend {
     fired: std::sync::atomic::AtomicBool,
 }
 
-impl crate::storage::cloud::CloudBackend for LoseMetadataCommitCallbackBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
+impl crate::storage::cloud::CloudReadCapability for LoseMetadataCommitCallbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
 
+impl crate::storage::cloud::CloudWriteCapability for LoseMetadataCommitCallbackBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -640,9 +656,25 @@ impl crate::storage::cloud::CloudBackend for LoseMetadataCommitCallbackBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for FailOnceGenerationPutBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
+impl crate::storage::cloud::CloudDeleteCapability for LoseMetadataCommitCallbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
 
+impl crate::storage::cloud::CloudListCapability for LoseMetadataCommitCallbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for LoseMetadataCommitCallbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for LoseMetadataCommitCallbackBackend {}
+
+impl crate::storage::cloud::CloudReadCapability for FailOnceGenerationPutBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for FailOnceGenerationPutBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -668,6 +700,20 @@ impl crate::storage::cloud::CloudBackend for FailOnceGenerationPutBackend {
         self.inner.submit_put(key, data, headers, callback);
     }
 }
+
+impl crate::storage::cloud::CloudDeleteCapability for FailOnceGenerationPutBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for FailOnceGenerationPutBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for FailOnceGenerationPutBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for FailOnceGenerationPutBackend {}
 
 #[test]
 fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -> MidgeResult<()> {
@@ -698,6 +744,7 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
     crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
         &fixture.cloud,
         fixture.leader_store.as_ref(),
+        &crate::io::real::test_root(fresh_cache.path()),
         fresh_cache.path(),
         crate::config::RecoveryPolicy::Strict,
     )?;
@@ -707,7 +754,12 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
             .join(crate::metadata::files::MANIFEST_SNAPSHOT),
     )?)
     .expect("decode committed manifest snapshot");
-    assert_eq!(restored.last_persisted_sequence, 0);
+    assert_eq!(
+        restored.flush_frontiers().get(0).unwrap(),
+        crate::metadata::FamilyFrontier::Live {
+            through_sequence: 0
+        }
+    );
     assert!(restored.files.is_empty());
     assert!(restored.column_families.is_empty());
     Ok(())
@@ -845,9 +897,16 @@ fn should_reject_provider_bootstrap_when_cloud_wal_catalog_has_a_sequence_floor(
     let persistence = crate::runtime::hybrid_persistence::CloudPersistence::new(
         std::sync::Arc::clone(&fixture.hybrid),
     );
-    persistence.raise_wal_sequence_floor(fixture.lease.epoch(), 7)?;
+    persistence.set_aside_catalog_suffix_with_authority_within(
+        fixture.lease.epoch(),
+        None,
+        &[],
+        7,
+        &|| Ok(()),
+        &crate::common::OperationDeadline::unbounded(),
+    )?;
     let catalog = persistence.fence_cloud_wal_catalog(fixture.lease.epoch())?;
-    assert_eq!(catalog.sequence_floor, 7);
+    assert_eq!(catalog.seq_floor(), 7);
 
     // Act
     let result = fixture.bootstrap_with_catalog(&catalog);
@@ -860,6 +919,55 @@ fn should_reject_provider_bootstrap_when_cloud_wal_catalog_has_a_sequence_floor(
         .path()
         .join(crate::metadata::files::MANIFEST_SNAPSHOT)
         .exists());
+    Ok(())
+}
+
+#[test]
+fn should_refuse_metadata_bootstrap_over_a_fully_retired_wal_catalog() -> MidgeResult<()> {
+    use crate::lease::PrimaryLease as _;
+
+    // Arrange: a writer published segment 1, then retired it once SSTs
+    // covered it, so the catalog lists nothing but still holds history.
+    let fixture = ProviderMetadataBootstrapFixture::new(std::sync::Arc::new(
+        crate::storage::cloud::MockCloudBackend::new(),
+    ))?;
+    let epoch = fixture.lease.epoch();
+    let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        epoch,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        bytes::Bytes::from_static(b"key"),
+        Some(bytes::Bytes::from_static(b"value")),
+        1,
+    ))
+    .seal();
+    let entry = crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
+        .map_err(MidgeError::Corruption)?;
+    let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(epoch)
+        .map_err(MidgeError::Internal)?;
+    catalog
+        .append_run(epoch, std::slice::from_ref(&entry))
+        .map_err(MidgeError::from)?;
+    catalog
+        .retire_prefix(
+            epoch,
+            std::slice::from_ref(&entry),
+            crate::lease::SharedGenerationId::FIRST,
+        )
+        .map_err(crate::runtime::hybrid_persistence::refusal_error)?;
+
+    // Act
+    let result = fixture.bootstrap_with_catalog(&catalog);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::RecoveryFailed(_))),
+        "{result:?}"
+    );
+    fixture.assert_uncommitted();
     Ok(())
 }
 
@@ -906,7 +1014,7 @@ fn should_reject_provider_bootstrap_when_current_epoch_ddl_registry_has_history(
     ))?;
     let state_dir = tempfile::tempdir()?;
     let mut state = crate::runtime::RuntimeState::try_new(
-        state_dir.path().to_path_buf(),
+        state_dir.path(),
         false,
         crate::config::RecoveryPolicy::Strict,
     )?;

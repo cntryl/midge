@@ -1,3 +1,4 @@
+use super::error::cloud_outcome_from_result;
 use super::*;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -82,9 +83,28 @@ struct DelayedMissingGetBackend;
 
 struct DroppedHeadCallbackBackend;
 
-impl CloudBackend for ConditionalPutOnlyBackend {
+impl crate::storage::cloud::CloudReadCapability for ConditionalPutOnlyBackend {
     crate::storage::cloud::unsupported_cloud_backend!(submit_get_with_metadata);
 
+    fn submit_get(&self, key: &str, callback: CloudCallback) {
+        self.gets.fetch_add(1, Ordering::SeqCst);
+        let _ = callback.send(CloudEvent::Get {
+            key: key.to_string(),
+            result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+        });
+    }
+
+    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
+        let _ = callback.send(CloudEvent::GetRange {
+            key: key.to_string(),
+            start,
+            end,
+            result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+        });
+    }
+}
+
+impl crate::storage::cloud::CloudWriteCapability for ConditionalPutOnlyBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -108,15 +128,9 @@ impl CloudBackend for ConditionalPutOnlyBackend {
             result,
         });
     }
+}
 
-    fn submit_get(&self, key: &str, callback: CloudCallback) {
-        self.gets.fetch_add(1, Ordering::SeqCst);
-        let _ = callback.send(CloudEvent::Get {
-            key: key.to_string(),
-            result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
-        });
-    }
-
+impl crate::storage::cloud::CloudDeleteCapability for ConditionalPutOnlyBackend {
     fn submit_delete(&self, key: &str, _headers: Vec<(String, String)>, callback: CloudCallback) {
         self.deletes.fetch_add(1, Ordering::SeqCst);
         let _ = callback.send(CloudEvent::Delete {
@@ -124,7 +138,9 @@ impl CloudBackend for ConditionalPutOnlyBackend {
             result: CloudOutcome::Ok(()),
         });
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for ConditionalPutOnlyBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.lists.fetch_add(1, Ordering::SeqCst);
         let _ = callback.send(CloudEvent::List {
@@ -132,16 +148,9 @@ impl CloudBackend for ConditionalPutOnlyBackend {
             result: CloudOutcome::Ok(Vec::new()),
         });
     }
+}
 
-    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
-        let _ = callback.send(CloudEvent::GetRange {
-            key: key.to_string(),
-            start,
-            end,
-            result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
-        });
-    }
-
+impl crate::storage::cloud::CloudHeadCapability for ConditionalPutOnlyBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.heads.fetch_add(1, Ordering::SeqCst);
         let _ = callback.send(CloudEvent::Head {
@@ -153,26 +162,9 @@ impl CloudBackend for ConditionalPutOnlyBackend {
     }
 }
 
-impl CloudBackend for DelayedMissingGetBackend {
-    crate::storage::cloud::unsupported_cloud_backend!(submit_delete, submit_list);
+impl CloudBackend for ConditionalPutOnlyBackend {}
 
-    fn submit_put(
-        &self,
-        key: &str,
-        _data: Vec<u8>,
-        _headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
-        let key = key.to_string();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let _ = callback.send(CloudEvent::Put {
-                key,
-                result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
-            });
-        });
-    }
-
+impl crate::storage::cloud::CloudReadCapability for DelayedMissingGetBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         let key = key.to_string();
         std::thread::spawn(move || {
@@ -203,7 +195,36 @@ impl CloudBackend for DelayedMissingGetBackend {
             result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
         });
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for DelayedMissingGetBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        _data: Vec<u8>,
+        _headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        let key = key.to_string();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let _ = callback.send(CloudEvent::Put {
+                key,
+                result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            });
+        });
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for DelayedMissingGetBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for DelayedMissingGetBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for DelayedMissingGetBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         let key = key.to_string();
         std::thread::spawn(move || {
@@ -216,14 +237,22 @@ impl CloudBackend for DelayedMissingGetBackend {
     }
 }
 
-impl CloudBackend for DroppedHeadCallbackBackend {
-    crate::storage::cloud::unsupported_cloud_backend!(
-        submit_get,
-        submit_get_with_metadata,
-        submit_delete,
-        submit_list,
-    );
+impl CloudBackend for DelayedMissingGetBackend {}
 
+impl crate::storage::cloud::CloudReadCapability for DroppedHeadCallbackBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_get, submit_get_with_metadata);
+
+    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
+        let _ = callback.send(CloudEvent::GetRange {
+            key: key.to_string(),
+            start,
+            end,
+            result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+        });
+    }
+}
+
+impl crate::storage::cloud::CloudWriteCapability for DroppedHeadCallbackBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -236,20 +265,23 @@ impl CloudBackend for DroppedHeadCallbackBackend {
             result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
         });
     }
+}
 
-    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
-        let _ = callback.send(CloudEvent::GetRange {
-            key: key.to_string(),
-            start,
-            end,
-            result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
-        });
-    }
+impl crate::storage::cloud::CloudDeleteCapability for DroppedHeadCallbackBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_delete);
+}
 
+impl crate::storage::cloud::CloudListCapability for DroppedHeadCallbackBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for DroppedHeadCallbackBackend {
     fn submit_head(&self, _key: &str, callback: CloudCallback) {
         drop(callback);
     }
 }
+
+impl CloudBackend for DroppedHeadCallbackBackend {}
 
 // =========== CloudOutcome Tests ===========
 
@@ -549,11 +581,7 @@ struct ReplacingGetBackend {
     inner: MockCloudBackend,
 }
 
-impl CloudBackend for ReplacingGetBackend {
-    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
-
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
-
+impl crate::storage::cloud::CloudReadCapability for ReplacingGetBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_get(key, callback);
         let (tx, _rx) = mpsc::channel();
@@ -566,8 +594,26 @@ impl CloudBackend for ReplacingGetBackend {
         self.inner.submit_put(key, b"new".to_vec(), Vec::new(), tx);
     }
 
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_head, submit_get_range, submit_get_range_with_identity, submit_delete);
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity);
 }
+
+impl crate::storage::cloud::CloudWriteCapability for ReplacingGetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for ReplacingGetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for ReplacingGetBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for ReplacingGetBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl CloudBackend for ReplacingGetBackend {}
 
 fn replacing_get_storage() -> CloudStorage {
     let backend = Arc::new(ReplacingGetBackend {
@@ -1542,13 +1588,27 @@ impl HeaderRecordingBackend {
     }
 }
 
-impl CloudBackend for HeaderRecordingBackend {
-    crate::storage::cloud::unsupported_cloud_backend!(
-        submit_get_with_metadata,
-        submit_list,
-        submit_head,
-    );
+impl crate::storage::cloud::CloudReadCapability for HeaderRecordingBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_get_with_metadata);
 
+    fn submit_get(&self, key: &str, callback: CloudCallback) {
+        let _ = callback.send(CloudEvent::Get {
+            key: key.to_string(),
+            result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+        });
+    }
+
+    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
+        let _ = callback.send(CloudEvent::GetRange {
+            key: key.to_string(),
+            start,
+            end,
+            result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+        });
+    }
+}
+
+impl crate::storage::cloud::CloudWriteCapability for HeaderRecordingBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -1562,14 +1622,9 @@ impl CloudBackend for HeaderRecordingBackend {
             result: CloudOutcome::Ok(()),
         });
     }
+}
 
-    fn submit_get(&self, key: &str, callback: CloudCallback) {
-        let _ = callback.send(CloudEvent::Get {
-            key: key.to_string(),
-            result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
-        });
-    }
-
+impl crate::storage::cloud::CloudDeleteCapability for HeaderRecordingBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.deletes.lock().push(headers);
         let _ = callback.send(CloudEvent::Delete {
@@ -1577,19 +1632,10 @@ impl CloudBackend for HeaderRecordingBackend {
             result: CloudOutcome::Ok(()),
         });
     }
+}
 
-    fn submit_head_with_headers(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: CloudCallback,
-    ) {
-        self.heads.lock().push(headers);
-        let _ = callback.send(CloudEvent::Head {
-            key: key.to_string(),
-            result: CloudOutcome::Ok(ObjectMetadata::new(7, "etag".to_string())),
-        });
-    }
+impl crate::storage::cloud::CloudListCapability for HeaderRecordingBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_list);
 
     fn submit_list_with_headers(
         &self,
@@ -1603,16 +1649,26 @@ impl CloudBackend for HeaderRecordingBackend {
             result: CloudOutcome::Ok(Vec::new()),
         });
     }
+}
 
-    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
-        let _ = callback.send(CloudEvent::GetRange {
+impl crate::storage::cloud::CloudHeadCapability for HeaderRecordingBackend {
+    crate::storage::cloud::unsupported_cloud_backend!(submit_head);
+
+    fn submit_head_with_headers(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        self.heads.lock().push(headers);
+        let _ = callback.send(CloudEvent::Head {
             key: key.to_string(),
-            start,
-            end,
-            result: CloudOutcome::Err(CloudError::Protocol("unsupported".to_string())),
+            result: CloudOutcome::Ok(ObjectMetadata::new(7, "etag".to_string())),
         });
     }
 }
+
+impl CloudBackend for HeaderRecordingBackend {}
 
 #[test]
 fn should_bound_provider_put_by_caller_timeout_when_write_is_unreserved() {

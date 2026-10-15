@@ -1,10 +1,10 @@
 //! Remote object identity proofs and guarded deletion.
 
-use super::thread;
 use super::RemoteCasFailure;
 use super::{
     mpsc, Arc, Duration, HybridStorage, JoinHandle, StorageBackend, StorageEvent, StorageOutcome,
 };
+use super::{thread, Instant, VecDeque};
 use crate::common::OperationDeadline;
 use crate::storage::StorageObjectMetadata;
 
@@ -15,34 +15,11 @@ use crate::storage::StorageObjectMetadata;
 /// the metadata-bearing GET. Subsequent HEAD checks reject observed changes.
 #[derive(Clone, Debug)]
 pub(crate) struct RemoteObjectProof {
-    pub(super) key: String,
     pub(super) bytes: Vec<u8>,
     pub(super) metadata: StorageObjectMetadata,
-    pub(super) range_identity: bool,
 }
 
 impl RemoteObjectProof {
-    /// The caller has validated content through reads pinned to this identity.
-    pub(crate) fn from_validated_ranges(key: String, metadata: StorageObjectMetadata) -> Self {
-        Self {
-            key,
-            bytes: Vec::new(),
-            metadata,
-            range_identity: true,
-        }
-    }
-
-    /// Whole-object identity captured by a caller that already holds the bytes.
-    #[cfg(test)]
-    pub(crate) fn exact(key: String, bytes: Vec<u8>, metadata: StorageObjectMetadata) -> Self {
-        Self {
-            key,
-            bytes,
-            metadata,
-            range_identity: false,
-        }
-    }
-
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -58,49 +35,10 @@ impl RemoteObjectProof {
 pub(crate) struct GuardedObjectProof {
     pub(super) backend: Arc<dyn StorageBackend>,
     key: String,
-    pub(super) expected_bytes: Option<Vec<u8>>,
     metadata: StorageObjectMetadata,
-    range_identity: bool,
 }
 
 impl GuardedObjectProof {
-    pub(crate) fn same_identity(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.backend, &other.backend)
-            && self.key == other.key
-            && self.range_identity == other.range_identity
-            && self.metadata.same_version(&other.metadata)
-    }
-
-    pub(crate) fn metadata_only(
-        backend: Arc<dyn StorageBackend>,
-        key: String,
-        metadata: StorageObjectMetadata,
-    ) -> Self {
-        Self {
-            backend,
-            key,
-            expected_bytes: None,
-            metadata,
-            range_identity: false,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn exact(
-        backend: Arc<dyn StorageBackend>,
-        key: String,
-        expected_bytes: Vec<u8>,
-        metadata: StorageObjectMetadata,
-    ) -> Self {
-        Self {
-            backend,
-            key,
-            expected_bytes: Some(expected_bytes),
-            metadata,
-            range_identity: false,
-        }
-    }
-
     pub(crate) fn range_identity(
         backend: Arc<dyn StorageBackend>,
         key: String,
@@ -109,9 +47,7 @@ impl GuardedObjectProof {
         Self {
             backend,
             key,
-            expected_bytes: None,
             metadata,
-            range_identity: true,
         }
     }
 }
@@ -121,6 +57,8 @@ pub(super) struct PruneWorkerRegistry {
     handles: Vec<PruneWorker>,
     max_workers: usize,
     max_requests: usize,
+    reserved_requests: usize,
+    pending: VecDeque<PendingDelete>,
 }
 
 struct PruneWorker {
@@ -128,12 +66,49 @@ struct PruneWorker {
     requests: usize,
 }
 
-struct PreparedGuardedDelete {
+#[derive(Clone)]
+struct PreparedConditionalDelete {
     request_id: u64,
     cloud: Arc<dyn StorageBackend>,
-    target_guard: GuardedObjectProof,
     target_key: String,
     delete_identity: StorageObjectMetadata,
+}
+
+struct PendingDelete {
+    target: PreparedConditionalDelete,
+    retry_at: Instant,
+}
+
+/// Bounded cleanup ownership is reserved before the caller retires authority.
+/// Dropping an uncommitted admission releases its capacity without deleting.
+pub(crate) struct AdmittedObjectDeletes<'a> {
+    storage: &'a HybridStorage,
+    targets: Option<Vec<PreparedConditionalDelete>>,
+}
+
+impl AdmittedObjectDeletes<'_> {
+    pub(crate) fn schedule(mut self) {
+        let targets = self.targets.take().expect("admission is consumed once");
+        {
+            let mut workers = self.storage.prune_workers.lock();
+            workers.reserved_requests -= targets.len();
+            workers
+                .pending
+                .extend(targets.into_iter().map(|target| PendingDelete {
+                    target,
+                    retry_at: Instant::now(),
+                }));
+        }
+        self.storage.process_pending_remote_deletes();
+    }
+}
+
+impl Drop for AdmittedObjectDeletes<'_> {
+    fn drop(&mut self) {
+        if let Some(targets) = self.targets.as_ref() {
+            self.storage.prune_workers.lock().reserved_requests -= targets.len();
+        }
+    }
 }
 
 impl PruneWorkerRegistry {
@@ -143,15 +118,13 @@ impl PruneWorkerRegistry {
             handles: Vec::new(),
             max_workers: max_workers.max(1),
             max_requests: max_requests.max(1),
+            reserved_requests: 0,
+            pending: VecDeque::new(),
         }
     }
 }
 
 impl HybridStorage {
-    pub(crate) fn remote_wal_backend(&self) -> Arc<dyn StorageBackend> {
-        Arc::clone(&self.stores.wal)
-    }
-
     pub(crate) fn remote_sst_backend(&self) -> Arc<dyn StorageBackend> {
         Arc::clone(&self.stores.sst)
     }
@@ -163,18 +136,6 @@ impl HybridStorage {
     pub(crate) fn ephemeral_sst_cache_enabled(&self) -> bool {
         self.ephemeral_sst_cache
             .load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    pub(crate) fn remote_range_metadata_within(
-        &self,
-        key: &str,
-        deadline: &OperationDeadline,
-    ) -> crate::common::MidgeResult<StorageObjectMetadata> {
-        let timeout =
-            Self::deadline_timeout(key, "range object HEAD", self.callback_timeout, deadline)?;
-        Self::head_range_object_from_backend(self.cloud_backend_for_key(key), key, timeout).map_err(
-            |error| Self::proof_round_trip_error(key, "range object HEAD", &error, deadline),
-        )
     }
 
     pub(crate) fn remote_range_metadata_optional_within(
@@ -302,12 +263,7 @@ impl HybridStorage {
                 "object '{key}' identity changed during read: before {before:?}, GET {metadata:?}, after {after:?}"
             )));
         }
-        Ok(RemoteObjectProof {
-            key: key.to_string(),
-            bytes,
-            metadata,
-            range_identity: false,
-        })
+        Ok(RemoteObjectProof { bytes, metadata })
     }
 
     /// Read one cloud object together with a stable provider identity. The
@@ -571,63 +527,22 @@ impl HybridStorage {
         Ok(proof)
     }
 
-    /// Convert a validated cloud read into a metadata-only dependency for a
-    /// guarded delete. The delete worker rechecks this identity immediately
-    /// before issuing the conditional delete.
-    pub(crate) fn remote_identity_guard(&self, proof: &RemoteObjectProof) -> GuardedObjectProof {
-        let constructor = if proof.range_identity {
-            GuardedObjectProof::range_identity
-        } else {
-            GuardedObjectProof::metadata_only
-        };
-        constructor(
-            Arc::clone(self.cloud_backend_for_key(&proof.key)),
-            proof.key.clone(),
-            proof.metadata.clone(),
-        )
-    }
-
+    /// Recheck the identity of an immutable publication before its authority commit.
     fn verify_guarded_object_proof_within(
         proof: &GuardedObjectProof,
         callback_timeout: Duration,
         deadline: &OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
-        if let Some(expected_bytes) = proof.expected_bytes.as_ref() {
-            let actual = Self::stable_object_proof_from_backend_within(
-                &proof.backend,
-                &proof.key,
-                callback_timeout,
-                deadline,
-            )?;
-            if actual.bytes != *expected_bytes {
-                return Err(crate::common::MidgeError::Internal(format!(
-                    "guarded object '{}' changed before conditional delete",
-                    proof.key
-                )));
-            }
-            if !actual.metadata.same_version(&proof.metadata) {
-                return Err(crate::common::MidgeError::Internal(format!(
-                    "guarded object '{}' identity changed before conditional delete: expected {:?}, actual {:?}",
-                    proof.key, proof.metadata, actual.metadata
-                )));
-            }
-            return Ok(());
-        }
-
         let timeout = Self::deadline_timeout(
             &proof.key,
             "guarded object HEAD",
             callback_timeout,
             deadline,
         )?;
-        let actual = if proof.range_identity {
-            Self::head_range_object_from_backend(&proof.backend, &proof.key, timeout)
-        } else {
-            Self::head_object_from_backend_blocking(&proof.backend, &proof.key, timeout)
-        }
-        .map_err(|error| {
-            Self::proof_round_trip_error(&proof.key, "guarded object HEAD", &error, deadline)
-        })?;
+        let actual = Self::head_range_object_from_backend(&proof.backend, &proof.key, timeout)
+            .map_err(|error| {
+                Self::proof_round_trip_error(&proof.key, "guarded object HEAD", &error, deadline)
+            })?;
         if actual.same_version(&proof.metadata) {
             return Ok(());
         }
@@ -637,59 +552,7 @@ impl HybridStorage {
         )))
     }
 
-    /// Revalidate every delete target and shared semantic dependency once.
-    /// The runtime can then retire a bounded set of catalog entries with one
-    /// compare-exchange without multiplying the same SST/metadata proofs by
-    /// the number of WAL segments in that set.
-    pub(crate) fn verify_remote_delete_batch_guards_within(
-        &self,
-        targets: &[RemoteObjectProof],
-        dependencies: &[GuardedObjectProof],
-        deadline: &OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
-        for target in targets {
-            let target_guard = self.remote_identity_guard(target);
-            Self::verify_guarded_object_proof_within(
-                &target_guard,
-                self.callback_timeout,
-                deadline,
-            )?;
-        }
-        for dependency in dependencies {
-            Self::verify_guarded_object_proof_within(dependency, self.callback_timeout, deadline)?;
-        }
-        Ok(())
-    }
-
-    fn prepare_guarded_deletes(
-        &self,
-        targets: Vec<(u64, RemoteObjectProof)>,
-    ) -> Result<Vec<PreparedGuardedDelete>, crate::storage::StorageError> {
-        targets
-            .into_iter()
-            .map(|(request_id, target)| {
-                crate::storage::conditional_object_identity(
-                    &target.metadata.etag,
-                    target.metadata.generation.as_deref(),
-                )
-                .ok_or_else(|| {
-                    format!(
-                        "cannot conditionally delete remote object '{}' without an identity token",
-                        target.key
-                    )
-                })?;
-                Ok(PreparedGuardedDelete {
-                    request_id,
-                    cloud: Arc::clone(self.cloud_backend_for_key(&target.key)),
-                    target_guard: self.remote_identity_guard(&target),
-                    target_key: target.key,
-                    delete_identity: target.metadata,
-                })
-            })
-            .collect()
-    }
-
-    fn ensure_guarded_delete_capacity(
+    fn ensure_conditional_delete_capacity(
         &self,
         workers: &PruneWorkerRegistry,
         request_count: usize,
@@ -715,6 +578,8 @@ impl HybridStorage {
             .sum::<usize>();
         if active_requests
             .saturating_add(pending_completions)
+            .saturating_add(workers.pending.len())
+            .saturating_add(workers.reserved_requests)
             .saturating_add(request_count)
             > workers.max_requests
         {
@@ -727,29 +592,139 @@ impl HybridStorage {
         Ok(())
     }
 
-    /// Schedule physical cleanup after the runtime has verified every semantic
-    /// dependency and retired the object's catalog authority. Dependency proofs
-    /// make that ordering explicit but are not re-read after the authority
-    /// switch; only the target's conditional identity still matters then.
-    #[cfg(test)]
-    pub(crate) fn delete_remote_object_guarded(
+    /// Reserve bounded cleanup ownership before the caller retires authority.
+    /// The original observed identity survives worker admission and transport
+    /// failures; each later attempt rechecks it before conditional deletion.
+    pub(crate) fn admit_remote_deletes_by_identity(
         &self,
-        request_id: u64,
-        target: RemoteObjectProof,
-    ) -> Result<(), crate::storage::StorageError> {
-        self.delete_remote_objects_guarded(vec![(request_id, target)])
+        targets: Vec<(u64, String, StorageObjectMetadata)>,
+    ) -> Result<AdmittedObjectDeletes<'_>, crate::storage::StorageError> {
+        let prepared = targets
+            .into_iter()
+            .map(|(request_id, key, metadata)| {
+                crate::storage::conditional_object_identity(
+                    &metadata.etag,
+                    metadata.generation.as_deref(),
+                )
+                .ok_or_else(|| {
+                    crate::storage::StorageError::protocol(format!(
+                    "cannot conditionally delete remote object '{key}' without an identity token"))
+                })?;
+                let cloud = Arc::clone(self.cloud_backend_for_key(&key));
+                Ok(PreparedConditionalDelete {
+                    request_id,
+                    cloud,
+                    target_key: key,
+                    delete_identity: metadata,
+                })
+            })
+            .collect::<Result<Vec<_>, crate::storage::StorageError>>()?;
+        self.reap_finished_prune_workers();
+        let mut workers = self.prune_workers.lock();
+        if workers.shutting_down {
+            return Err(crate::storage::StorageError::io("storage is shutting down"));
+        }
+        let outstanding = workers
+            .handles
+            .iter()
+            .map(|worker| worker.requests)
+            .sum::<usize>()
+            .saturating_add(workers.pending.len())
+            .saturating_add(workers.reserved_requests)
+            .saturating_add(self.event_queue.lock().pending_prune_completions());
+        if outstanding.saturating_add(prepared.len()) > workers.max_requests {
+            return Err(crate::storage::StorageError::new(
+                crate::storage::StorageErrorKind::ResourceLimit,
+                "conditional delete target queue is full",
+            ));
+        }
+        workers.reserved_requests += prepared.len();
+        Ok(AdmittedObjectDeletes {
+            storage: self,
+            targets: Some(prepared),
+        })
     }
 
-    pub(crate) fn delete_remote_objects_guarded(
+    #[cfg(test)]
+    pub(crate) fn delete_remote_objects_by_identity(
         &self,
-        targets: Vec<(u64, RemoteObjectProof)>,
+        targets: Vec<(u64, String, StorageObjectMetadata)>,
     ) -> Result<(), crate::storage::StorageError> {
-        if targets.is_empty() {
+        self.admit_remote_deletes_by_identity(targets)?.schedule();
+        Ok(())
+    }
+
+    pub(super) fn next_remote_delete_turn(&self, poll: Duration) -> Option<Duration> {
+        let workers = self.prune_workers.lock();
+        if workers.shutting_down {
+            return None;
+        }
+        let retry = workers
+            .pending
+            .iter()
+            .map(|pending| {
+                pending
+                    .retry_at
+                    .saturating_duration_since(Instant::now())
+                    .max(poll)
+            })
+            .min();
+        if workers.handles.is_empty() {
+            retry
+        } else {
+            Some(retry.map_or(poll, |retry| retry.min(poll)))
+        }
+    }
+
+    /// The normal storage tick retries retained identities without a caller or
+    /// another metadata/catalog publication. Shutdown admits no fresh cleanup.
+    pub(super) fn process_pending_remote_deletes(&self) {
+        self.reap_finished_prune_workers();
+        let prepared = {
+            let mut workers = self.prune_workers.lock();
+            if workers.shutting_down || workers.handles.len() >= workers.max_workers {
+                return;
+            }
+            let now = Instant::now();
+            let count = workers.pending.len();
+            let mut due = Vec::new();
+            for _ in 0..count {
+                let pending = workers.pending.pop_front().expect("counted pending target");
+                if pending.retry_at <= now && due.len() < 32 {
+                    due.push(pending.target);
+                } else {
+                    workers.pending.push_back(pending);
+                }
+            }
+            workers.reserved_requests += due.len();
+            due
+        };
+        if prepared.is_empty() {
+            return;
+        }
+        if let Err(error) = self.spawn_conditional_deletes(prepared.clone()) {
+            tracing::debug!(%error, "retired object cleanup remains queued");
+            let retry_at = Instant::now() + Duration::from_millis(200);
+            let mut workers = self.prune_workers.lock();
+            workers.reserved_requests -= prepared.len();
+            if !workers.shutting_down {
+                workers.pending.extend(
+                    prepared
+                        .into_iter()
+                        .map(|target| PendingDelete { target, retry_at }),
+                );
+            }
+        }
+    }
+
+    fn spawn_conditional_deletes(
+        &self,
+        prepared: Vec<PreparedConditionalDelete>,
+    ) -> Result<(), crate::storage::StorageError> {
+        if prepared.is_empty() {
             return Ok(());
         }
         self.reap_finished_prune_workers();
-
-        let prepared = self.prepare_guarded_deletes(targets)?;
         let request_count = prepared.len();
         let first_request_id = prepared.first().map_or(0, |entry| entry.request_id);
         let last_request_id = prepared.last().map_or(0, |entry| entry.request_id);
@@ -757,9 +732,14 @@ impl HybridStorage {
         let external_event_tx = self.external_event_tx.clone();
         let callback_timeout = self.callback_timeout;
         let write_authority = self.write_authority.get().cloned();
+        let registry = Arc::clone(&self.prune_workers);
 
         let mut workers = self.prune_workers.lock();
-        self.ensure_guarded_delete_capacity(&workers, request_count)?;
+        workers.reserved_requests -= request_count;
+        if let Err(error) = self.ensure_conditional_delete_capacity(&workers, request_count) {
+            workers.reserved_requests += request_count;
+            return Err(error);
+        }
 
         let worker = thread::Builder::new()
             .name(format!(
@@ -773,63 +753,42 @@ impl HybridStorage {
                 // needs the retired target's conditional provider identity.
                 let deadline = OperationDeadline::from_budget(callback_timeout);
 
-                for PreparedGuardedDelete {
-                    request_id,
-                    cloud,
-                    target_guard,
-                    target_key,
-                    delete_identity,
-                } in prepared
-                {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        Self::verify_guarded_object_proof_within(
-                            &target_guard,
+                for target in prepared {
+                    let request_id = target.request_id;
+                    let target_key = &target.target_key;
+                    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Self::delete_conditional_target(
+                            &target,
                             callback_timeout,
                             &deadline,
+                            write_authority.as_ref(),
                         )
-                        .map_err(|error| error.to_string())?;
-
-                        let timeout = Self::deadline_timeout(
-                            &target_key,
-                            "conditional DELETE",
-                            callback_timeout,
-                            &deadline,
-                        )
-                        .map_err(|error| error.to_string())?;
-
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        let request =
-                            crate::storage::StorageRequest::new(&target_key, deadline, timeout)
-                                .with_precondition(crate::storage::StoragePrecondition::IfMatch(
-                                    delete_identity,
-                                ));
-                        // A successor can republish a retained local seal with
-                        // this same remote identity. Check the predecessor's
-                        // authority again after the blocking target proof.
-                        if let Some(validate) = &write_authority {
-                            validate().map_err(|error| error.to_string())?;
-                        }
-                        cloud.submit_delete_request(request, tx);
-                        match rx.recv_timeout(timeout) {
-                            Ok(StorageEvent::DeleteComplete { result, .. }) => match result {
-                                StorageOutcome::Ok(()) => Ok(()),
-                                StorageOutcome::Err(error) => Err(error),
-                            },
-                            Ok(other) => Err(crate::storage::StorageError::protocol(format!(
-                                "unexpected guarded delete response for '{target_key}': {other:?}"
-                            ))),
-                            Err(error) => Err(crate::storage::StorageError::timeout(format!(
-                                "guarded delete timed out for '{target_key}': {error}"
-                            ))),
-                        }
                     }));
-
-                    let result = match result {
-                        Ok(Ok(())) => StorageOutcome::Ok(()),
-                        Ok(Err(error)) => StorageOutcome::Err(error),
-                        Err(_) => StorageOutcome::Err(
-                            format!("guarded delete worker panicked for '{target_key}'").into(),
-                        ),
+                    let outcome = match attempt {
+                        Ok(result) => result,
+                        Err(_) => Err(crate::storage::StorageError::io(format!(
+                            "conditional delete worker panicked for '{target_key}'"
+                        ))),
+                    };
+                    if outcome.as_ref().is_err_and(|error| {
+                        !matches!(
+                            error.kind(),
+                            crate::storage::StorageErrorKind::PreconditionFailed
+                                | crate::storage::StorageErrorKind::Unauthorized
+                                | crate::storage::StorageErrorKind::Corruption
+                        )
+                    }) {
+                        let mut workers = registry.lock();
+                        if !workers.shutting_down {
+                            workers.pending.push_back(PendingDelete {
+                                target: target.clone(),
+                                retry_at: Instant::now() + Duration::from_millis(200),
+                            });
+                        }
+                    }
+                    let result = match outcome {
+                        Ok(()) => StorageOutcome::Ok(()),
+                        Err(error) => StorageOutcome::Err(error),
                     };
                     let event = StorageEvent::CloudWalPruneComplete {
                         segment_id: request_id,
@@ -838,7 +797,12 @@ impl HybridStorage {
                     Self::queue_storage_event(&event_queue, external_event_tx.as_ref(), event);
                 }
             })
-            .map_err(|error| format!("failed to spawn guarded delete worker: {error}"))?;
+            .map_err(|error| {
+                workers.reserved_requests += request_count;
+                crate::storage::StorageError::io(format!(
+                    "failed to spawn conditional delete worker: {error}"
+                ))
+            })?;
         workers.handles.push(PruneWorker {
             handle: worker,
             requests: request_count,
@@ -846,25 +810,82 @@ impl HybridStorage {
         Ok(())
     }
 
-    /// Conditionally delete exactly the remote object represented by a stable
-    /// proof. Startup recovery uses this blocking form before the runtime
-    /// event loop exists; a provider precondition failure is returned so the
-    /// caller can retain the replacement object and fail closed.
-    #[cfg(test)]
-    pub(crate) fn delete_remote_object_guarded_blocking_within(
-        &self,
-        target: &RemoteObjectProof,
+    fn delete_conditional_target(
+        target: &PreparedConditionalDelete,
+        callback_timeout: Duration,
         deadline: &OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
-        self.delete_remote_object_by_identity_blocking_within(
-            &target.key,
-            &target.metadata,
+        write_authority: Option<&super::StorageWriteAuthority>,
+    ) -> Result<(), crate::storage::StorageError> {
+        let timeout = Self::deadline_timeout(
+            &target.target_key,
+            "conditional target HEAD",
+            callback_timeout,
             deadline,
         )
+        .map_err(crate::storage::StorageError::timeout)?;
+        let observed =
+            Self::head_range_object_from_backend(&target.cloud, &target.target_key, timeout);
+        match observed {
+            Err(error) if error.is_not_found() => return Ok(()),
+            Err(error) => return Err(error),
+            Ok(metadata) if !metadata.same_version(&target.delete_identity) => {
+                return Err(crate::storage::StorageError::precondition_failed(
+                    "retired target identity changed",
+                ));
+            }
+            Ok(_) => {}
+        }
+        if let Some(validate) = write_authority {
+            validate().map_err(|error| {
+                let kind = match &error {
+                    crate::common::MidgeError::Fenced(_) => {
+                        crate::storage::StorageErrorKind::Unauthorized
+                    }
+                    crate::common::MidgeError::Timeout(_) => {
+                        crate::storage::StorageErrorKind::Timeout
+                    }
+                    _ => crate::storage::StorageErrorKind::Io,
+                };
+                crate::storage::StorageError::new(kind, error)
+            })?;
+        }
+        let timeout = Self::deadline_timeout(
+            &target.target_key,
+            "conditional DELETE",
+            callback_timeout,
+            deadline,
+        )
+        .map_err(crate::storage::StorageError::timeout)?;
+        let (tx, rx) = mpsc::channel();
+        target.cloud.submit_delete_request(
+            crate::storage::StorageRequest::new(&target.target_key, *deadline, timeout)
+                .with_precondition(crate::storage::StoragePrecondition::IfMatch(
+                    target.delete_identity.clone(),
+                )),
+            tx,
+        );
+        match rx.recv_timeout(timeout) {
+            Ok(StorageEvent::DeleteComplete {
+                result: StorageOutcome::Ok(()),
+                ..
+            }) => Ok(()),
+            Ok(StorageEvent::DeleteComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) if error.is_not_found() => Ok(()),
+            Ok(StorageEvent::DeleteComplete {
+                result: StorageOutcome::Err(error),
+                ..
+            }) => Err(error),
+            Ok(other) => Err(crate::storage::StorageError::protocol(format!(
+                "unexpected conditional delete response: {other:?}"
+            ))),
+            Err(error) => Err(crate::storage::StorageError::timeout(error)),
+        }
     }
 
-    /// Delete an object whose content has been validated through a pinned
-    /// range view. The provider precondition closes the read/delete race.
+    /// Delete only the observed object version. The provider precondition
+    /// closes the identity/delete race after the caller retires authority.
     pub(crate) fn delete_remote_object_by_identity_blocking_within(
         &self,
         key: &str,

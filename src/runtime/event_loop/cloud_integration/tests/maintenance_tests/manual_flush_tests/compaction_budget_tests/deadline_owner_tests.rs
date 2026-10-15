@@ -47,13 +47,14 @@ impl GenerationReceipt {
         };
         let generation = fixture
             .el
+            .actors
             .compaction_actor
             .accepted_output_generation(cf_id, target_level)?;
-        let accepted_origin = fixture.el.compaction_actor.manual_deadline_for_generation(
-            cf_id,
-            target_level,
-            generation,
-        )?;
+        let accepted_origin = fixture
+            .el
+            .actors
+            .compaction_actor
+            .manual_deadline_for_generation(cf_id, target_level, generation)?;
         Ok(Self {
             message: Some(message),
             cf_id,
@@ -66,11 +67,11 @@ impl GenerationReceipt {
     }
 
     fn current_origin(&self, fixture: &BudgetFixture) -> MidgeResult<Option<OperationDeadline>> {
-        fixture.el.compaction_actor.manual_deadline_for_generation(
-            self.cf_id,
-            self.target_level,
-            self.generation,
-        )
+        fixture
+            .el
+            .actors
+            .compaction_actor
+            .manual_deadline_for_generation(self.cf_id, self.target_level, self.generation)
     }
 }
 
@@ -90,7 +91,7 @@ fn receive_generation(fixture: &mut BudgetFixture) -> MidgeResult<GenerationRece
             }
             Err(crossbeam::channel::TryRecvError::Empty) => {}
         }
-        if let Some(message) = fixture.el.pending_msg.take() {
+        if let Some(message) = fixture.el.routing.pending_msg.take() {
             fixture.el.process_restored_one(message, &messages);
         }
         // Preserve genuine retirement/flush fairness and accepted handle reaping
@@ -126,11 +127,12 @@ fn join_manual(
 ) {
     let started = Instant::now();
     let deadline = OperationDeadline::from_start(started, budget);
-    let response =
-        fixture
-            .el
-            .router
-            .register_with_deadline(request_id, "CompactAll", started, deadline);
+    let response = fixture.el.routing.router.register_with_deadline(
+        request_id,
+        "CompactAll",
+        started,
+        deadline,
+    );
     let (_, messages) = crossbeam::channel::unbounded();
     fixture
         .el
@@ -152,6 +154,7 @@ fn rows_for_generation(
     for output in &receipt.outputs {
         let reader = fixture
             .el
+            .actors
             .compaction_actor
             .open_sst_reader(&Path::new("sst").join(output))?;
         rows.extend(reader.scan_range_raw_state(None, None)?);
@@ -253,7 +256,7 @@ fn should_preserve_background_owner_when_later_manual_waiter_expires() -> MidgeR
         // Arrange: launch through the actual background fair turn, without a route.
         let mut fixture = BudgetFixture::new()?;
         fixture.el.state.set_compaction_enabled(true);
-        fixture.el.cloud_coordinator.cloud_maintenance.next =
+        fixture.el.actors.cloud_coordinator.cloud_maintenance.next =
             crate::runtime::event_loop::cloud_maintenance::MaintenanceTask::Compaction;
         let launch = fixture.el.schedule_cloud_maintenance();
         let mut receipt = receive_generation(&mut fixture)?;
@@ -277,7 +280,7 @@ fn should_preserve_background_owner_when_later_manual_waiter_expires() -> MidgeR
         let outcome = fixture.drive_manual_response(&response);
         let rows = rows_for_generation(&fixture, &receipt);
         let committed = fixture.committed_manifest();
-        fixture.el.gc_actor.shutdown_workers();
+        fixture.el.actors.gc_actor.shutdown_workers();
         let retired = retired_inputs(&fixture, &receipt);
         let has_intent = fixture
             .el
@@ -351,7 +354,7 @@ fn should_keep_manual_origin_when_later_shorter_waiter_expires() -> MidgeResult<
         let long_outcome = fixture.drive_manual_response(&long_response);
         let rows = rows_for_generation(&fixture, &receipt);
         let committed = fixture.committed_manifest();
-        fixture.el.gc_actor.shutdown_workers();
+        fixture.el.actors.gc_actor.shutdown_workers();
         let retired = retired_inputs(&fixture, &receipt);
         let healthy = fixture.el.check_lease_health();
         fixture.stop()?;
@@ -417,8 +420,12 @@ fn should_refuse_budget_extension_when_longer_waiter_joins_accepted_manual_work(
             .outputs
             .iter()
             .all(|name| fixture.el.state.manifest_has_file(name));
-        let no_third_phase = fixture.el.compaction_publish_result_rx.is_empty()
-            && !fixture.el.compaction_publish_actor.is_inflight();
+        let no_third_phase = fixture
+            .el
+            .publication
+            .compaction_publish_result_rx
+            .is_empty()
+            && !fixture.el.actors.compaction_publish_actor.is_inflight();
         let reads = fixture.backend.reads.lock().unwrap().clone();
         let healthy = fixture.el.check_lease_health();
         fixture.stop()?;
@@ -470,7 +477,7 @@ fn should_inherit_original_clock_when_actual_manual_work_reaches_second_family()
         let first_rows = rows_for_generation(&fixture, &first);
         let second_rows = rows_for_generation(&fixture, &second);
         let committed = fixture.committed_manifest();
-        fixture.el.gc_actor.shutdown_workers();
+        fixture.el.actors.gc_actor.shutdown_workers();
         let retired = [
             retired_inputs(&fixture, &first),
             retired_inputs(&fixture, &second),
@@ -541,7 +548,6 @@ fn should_retain_input_authority_when_second_family_compute_arrives_after_manual
 }
 
 // Keep both real completion dispositions beside their shared authority ledger.
-#[allow(clippy::too_many_lines)]
 fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
     crate::failpoints::with_read_gate(|| {
         // Arrange: one real caller owns both CF generations; no late route refresh.
@@ -573,8 +579,12 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
         let second_budget_bound = original.remaining();
         dispatch_generation(&mut fixture, &mut second);
         let rejected_before_publication = original.is_expired()
-            && !fixture.el.compaction_publish_actor.is_inflight()
-            && fixture.el.compaction_publish_result_rx.is_empty();
+            && !fixture.el.actors.compaction_publish_actor.is_inflight()
+            && fixture
+                .el
+                .publication
+                .compaction_publish_result_rx
+                .is_empty();
         let second_phase = if rejected_before_publication {
             None
         } else {
@@ -584,12 +594,16 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
             // A persisted publication intent retains the output generation.
             second_rows = rows_for_generation(&fixture, &second);
         }
-        let no_later_phase = fixture.el.compaction_publish_result_rx.is_empty()
-            && !fixture.el.compaction_publish_actor.is_inflight();
+        let no_later_phase = fixture
+            .el
+            .publication
+            .compaction_publish_result_rx
+            .is_empty()
+            && !fixture.el.actors.compaction_publish_actor.is_inflight();
         let outcome = fixture.drive_manual_response(&response);
         let first_rows = rows_for_generation(&fixture, &first);
         let committed = fixture.committed_manifest();
-        fixture.el.gc_actor.shutdown_workers();
+        fixture.el.actors.gc_actor.shutdown_workers();
         let first_retired = retired_inputs(&fixture, &first);
         let second_retained = retained_inputs(&fixture, &second);
         let second_intent = fixture
@@ -614,28 +628,15 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
         assert!(first_phases
             .iter()
             .all(|phase| phase.completed_at < started + CALLER_BUDGET));
-        if let Some(second_phase) = &second_phase {
-            assert_eq!(second_phase.phase, CompactionPublishPhase::OutputDurable);
-            assert!(
-                matches!(second_phase.error, Some(MidgeError::Timeout(_))),
-                "{second_phase:?}"
-            );
-            assert!(second_intent);
-            assert_genuine_holds(&reads, 1);
-            assert_eq!(reads[0].phase, CompactionPublishPhase::OutputDurable);
-            assert!(reads[0].forwarded_at >= started + CALLER_BUDGET);
-            assert!(second_budget_bound < CALLER_BUDGET);
-            assert!(reads[0]
-                .provider_budget
-                .is_some_and(|budget| budget <= second_budget_bound));
-        } else {
-            assert!(rejected_before_publication && original.is_expired());
-            assert!(
-                !second_intent,
-                "no phase or intent was accepted after expiry"
-            );
-            assert_genuine_holds(&reads, 0);
-        }
+        assert_second_family_expiry_phase(
+            second_phase.as_ref(),
+            second_intent,
+            &reads,
+            started,
+            second_budget_bound,
+            original,
+            rejected_before_publication,
+        );
         if queue_past_deadline {
             assert!(
                 second_phase.is_none(),
@@ -658,4 +659,37 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
         healthy.expect("expiry of one caller does not invalidate actual lease ownership");
         Ok(())
     })
+}
+
+fn assert_second_family_expiry_phase(
+    second_phase: Option<&PhaseEvidence>,
+    second_intent: bool,
+    reads: &[ReadEvidence],
+    started: Instant,
+    second_budget_bound: Duration,
+    original: OperationDeadline,
+    rejected_before_publication: bool,
+) {
+    if let Some(second_phase) = second_phase {
+        assert_eq!(second_phase.phase, CompactionPublishPhase::OutputDurable);
+        assert!(
+            matches!(second_phase.error, Some(MidgeError::Timeout(_))),
+            "{second_phase:?}"
+        );
+        assert!(second_intent);
+        assert_genuine_holds(reads, 1);
+        assert_eq!(reads[0].phase, CompactionPublishPhase::OutputDurable);
+        assert!(reads[0].forwarded_at >= started + CALLER_BUDGET);
+        assert!(second_budget_bound < CALLER_BUDGET);
+        assert!(reads[0]
+            .provider_budget
+            .is_some_and(|budget| budget <= second_budget_bound));
+    } else {
+        assert!(rejected_before_publication && original.is_expired());
+        assert!(
+            !second_intent,
+            "no phase or intent was accepted after expiry"
+        );
+        assert_genuine_holds(reads, 0);
+    }
 }

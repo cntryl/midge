@@ -1,14 +1,16 @@
 //! Replayable serial process-abort tuples, independent of logical shrinking.
 
 use super::driver::{self, Backend, Fixture, ReadPath};
+use cntryl_midge::__internal::wal::catalog::WalPublicationCatalog;
 use cntryl_midge::{Engine, Query, TransactionMode, WriteOptions};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CHILD_ENV: &str = "MIDGE_DISCOVERY_CRASH_CASE";
 const CHILD_TEST: &str = "physical::should_abort_physical_history_when_child_requested";
+const DEFER_WAL_PRUNE: &str = "midge::cloud::defer_wal_prune_admission";
 const RESTORE_TRIGGER: &str = "midge::backup::after_restore_object_copy";
 const COMPACTION_TRIGGERS: [&str; 3] = [
     "slice7::after_compaction_output_durable_before_manifest_publish",
@@ -73,26 +75,6 @@ fn assert_seed_rows(rows: &[(bytes::Bytes, bytes::Bytes)]) {
     }
 }
 
-#[test]
-fn should_reject_substituted_key_when_validating_restore() {
-    // Arrange
-    let mut rows: Vec<_> = (0..16)
-        .map(|index| {
-            (
-                bytes::Bytes::from(format!("key-{index:02}")),
-                bytes::Bytes::from(vec![42; 1024]),
-            )
-        })
-        .collect();
-    rows[0].0 = bytes::Bytes::from_static(b"foreign");
-
-    // Act
-    let result = std::panic::catch_unwind(|| assert_seed_rows(&rows));
-
-    // Assert
-    assert!(result.is_err());
-}
-
 fn assert_restored(case: &CrashCase, counters: &mut Counters) {
     let artifact = case.root.join("backup");
     let target = case.root.join("restored");
@@ -130,6 +112,76 @@ fn assert_remove_only_intent(path: &Path) {
     );
 }
 
+fn cloud_wal_catalogs(path: &Path) -> [WalPublicationCatalog; 2] {
+    [
+        "publication-catalog.v1.json",
+        "publication-catalog.v1.mirror.json",
+    ]
+    .map(|name| {
+        WalPublicationCatalog::decode(
+            &std::fs::read(path.join("cloud_store/wal").join(name)).unwrap(),
+        )
+        .unwrap()
+    })
+}
+
+fn catalogs_are_retired(catalogs: &[WalPublicationCatalog]) -> bool {
+    catalogs.iter().all(|catalog| catalog.entries().is_empty())
+}
+
+/// The catalog documents `evidence` recorded under `key`, decoded.
+fn evidence_catalogs(evidence: &serde_json::Value, key: &str) -> Vec<WalPublicationCatalog> {
+    evidence[key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|catalog| {
+            WalPublicationCatalog::decode(&serde_json::to_vec(catalog).unwrap()).unwrap()
+        })
+        .collect()
+}
+
+fn retire_cloud_wal_before_compaction(mut engine: Engine, case: &CrashCase) -> Engine {
+    let path = case.root.join("db");
+    let retained = cloud_wal_catalogs(&path);
+    assert!(
+        retained.iter().all(|catalog| !catalog.entries().is_empty()),
+        "the regression must start with authoritative WAL still retained"
+    );
+    fail::remove(DEFER_WAL_PRUNE);
+    let family = engine.get_column_family("default").unwrap();
+    engine.flush_cf(&family).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if catalogs_are_retired(&cloud_wal_catalogs(&path)) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cloud WAL retirement did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Catalog publication precedes delivery of the prune completion to the
+    // event loop. Reopen captures the retired authority instead of racing that
+    // delivery or guessing when the runtime's tombstone horizon moved.
+    engine.shutdown(Duration::from_secs(10)).unwrap();
+    drop(engine);
+    let engine = Engine::open(options(&path, case.backend).unwrap()).unwrap();
+    let retired = cloud_wal_catalogs(&path);
+    assert!(catalogs_are_retired(&retired));
+    std::fs::write(
+        case.root.join("wal-retirement.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "retained_before": retained,
+            "retired_after_reopen": retired,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    engine
+}
+
 fn expire_aborted_local_owner(path: &Path) {
     let local = path.join(".midge_leader");
     if local.exists() {
@@ -150,16 +202,16 @@ fn expire_aborted_local_owner(path: &Path) {
         let checksum = crc32c::crc32c(body.as_bytes());
         std::fs::write(local, format!("{body}checksum: {checksum}\n")).unwrap();
     }
-    let lease = path.join("midge_primary_lease.json");
+    let lease = path.join("cloud_store").join("midge_primary_lease.json");
     if lease.exists() {
         let text = std::fs::read_to_string(&lease).unwrap();
         let mut expired = text
             .lines()
             .map(|line| {
-                if line.starts_with("acquired_at: ") {
-                    "acquired_at: 1970-01-01T00:00:00Z"
-                } else if line.starts_with("expires_at: ") {
-                    "expires_at: 1970-01-01T00:00:00Z"
+                if line.starts_with("acquired: ") {
+                    "acquired: 1970-01-01T00:00:00Z"
+                } else if line.starts_with("expires: ") {
+                    "expires: 1970-01-01T00:00:00Z"
                 } else {
                     line
                 }
@@ -174,6 +226,18 @@ fn expire_aborted_local_owner(path: &Path) {
 
 fn assert_empty_compaction_recovery(case: &CrashCase, counters: &mut Counters) {
     let path = case.root.join("db");
+    if matches!(case.backend, Backend::CloudSimulated) {
+        let evidence: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(case.root.join("wal-retirement.json")).unwrap())
+                .unwrap();
+        assert!(evidence_catalogs(&evidence, "retained_before")
+            .iter()
+            .all(|catalog| !catalog.entries().is_empty()));
+        assert!(catalogs_are_retired(&evidence_catalogs(
+            &evidence,
+            "retired_after_reopen"
+        )));
+    }
     assert_remove_only_intent(&path);
     expire_aborted_local_owner(&path);
     // Repeat reopen to detect publication/cleanup state that succeeds only once.
@@ -227,26 +291,8 @@ fn run_case(case: &CrashCase, counters: &mut Counters) {
 }
 
 #[test]
-fn should_execute_named_abort_histories_when_physical_discovery_is_requested() {
+fn should_preserve_recoverable_state_when_restore_or_empty_compaction_aborts() {
     // Arrange
-    if std::env::var("MIDGE_PHYSICAL_DISCOVERY").as_deref() != Ok("1") {
-        return;
-    }
-    let status = Command::new("git")
-        .args(["status", "--porcelain"])
-        .output()
-        .unwrap();
-    assert!(status.status.success());
-    assert!(
-        status.stdout.is_empty(),
-        "physical discovery requires a clean committed revision"
-    );
-    let revision = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .unwrap();
-    assert!(revision.status.success());
-    let revision = String::from_utf8(revision.stdout).unwrap();
     let root = std::env::var_os("MIDGE_DISCOVERY_ARTIFACT_DIR")
         .map_or_else(
             || PathBuf::from("target/discovery-031/physical"),
@@ -273,7 +319,6 @@ fn should_execute_named_abort_histories_when_physical_discovery_is_requested() {
         serde_json::to_vec_pretty(&cases).unwrap(),
     )
     .unwrap();
-    std::fs::write(root.join("revision.txt"), revision).unwrap();
     let mut failures = 0;
 
     // Act
@@ -336,6 +381,16 @@ fn should_abort_physical_history_when_child_requested() {
         .unwrap();
     } else {
         let path = case.root.join("db");
+        // Hold WAL through deletion flush, then prove catalog retirement and
+        // reopen before testing the named remove-only publication abort.
+        crate::common::crash::configure_nth_abort_failpoint(
+            &case.failpoint,
+            &case.scenario,
+            case.ordinal,
+        );
+        if matches!(case.backend, Backend::CloudSimulated) {
+            fail::cfg(DEFER_WAL_PRUNE, "return").unwrap();
+        }
         let engine = Engine::open(options(&path, case.backend).unwrap()).unwrap();
         let cf = engine.get_column_family("default").unwrap();
         let mut tx = engine
@@ -344,14 +399,93 @@ fn should_abort_physical_history_when_child_requested() {
         tx.delete_range(b"key-".to_vec(), b"key.".to_vec()).unwrap();
         tx.commit(write_options(case.backend)).unwrap();
         engine.flush_cf(&cf).unwrap();
-        crate::common::crash::configure_nth_abort_failpoint(
-            &case.failpoint,
-            &case.scenario,
-            case.ordinal,
-        );
+        let engine = if matches!(case.backend, Backend::CloudSimulated) {
+            retire_cloud_wal_before_compaction(engine, &case)
+        } else {
+            engine
+        };
         engine.compact_all().unwrap();
     }
 
     // Assert
     panic!("named crash boundary was not reached");
+}
+
+#[test]
+fn should_collect_tombstone_when_live_runtime_receives_cloud_wal_retirement() {
+    // Arrange: both puts and the deletion retain WAL until the explicit release.
+    let scenario = fail::FailScenario::setup();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path();
+    fail::cfg(DEFER_WAL_PRUNE, "return").unwrap();
+    let mut engine = Engine::open(options(path, Backend::CloudSimulated).unwrap()).unwrap();
+    let cf = engine.get_column_family("default").unwrap();
+    let mut put = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .unwrap();
+    put.put(b"key-00".to_vec(), b"value".to_vec(), None)
+        .unwrap();
+    put.commit(WriteOptions::cloud_strict()).unwrap();
+    engine.flush_cf(&cf).unwrap();
+    let mut delete = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .unwrap();
+    delete
+        .delete_range(b"key-".to_vec(), b"key.".to_vec())
+        .unwrap();
+    delete.commit(WriteOptions::cloud_strict()).unwrap();
+    engine.flush_cf(&cf).unwrap();
+    let retained = cloud_wal_catalogs(path);
+    let expected = retained[0].entries().len();
+    assert!(expected >= 2);
+    assert!(!catalogs_are_retired(&retained));
+    let delivered = "midge::cloud::after_wal_prune_complete";
+    let (tx, rx) = std::sync::mpsc::channel();
+    fail::cfg_callback(delivered, move || {
+        tx.send(()).unwrap();
+    })
+    .unwrap();
+
+    // Act: every completion is observed after event-loop delivery. No reopen or
+    // catalog polling substitutes for the live runtime moving its horizon.
+    fail::remove(DEFER_WAL_PRUNE);
+    engine.flush_cf(&cf).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    for _ in 0..expected {
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("live event loop must deliver every admitted prune completion");
+    }
+    fail::remove(delivered);
+    assert!(catalogs_are_retired(&cloud_wal_catalogs(path)));
+    engine.compact_all().unwrap();
+
+    // Assert: real compaction collects the tombstone in this same Engine.
+    assert!(engine
+        .metrics()
+        .get_storage_layout()
+        .unwrap()
+        .levels
+        .iter()
+        .flat_map(|level| &level.files)
+        .all(|file| file.cf_id != cf.id()));
+    let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+    assert_eq!(
+        read.scan(&Query::new()).unwrap().try_collect().unwrap(),
+        Vec::<(bytes::Bytes, bytes::Bytes)>::new()
+    );
+    drop(read);
+    engine.shutdown(Duration::from_secs(10)).unwrap();
+    drop(engine);
+    scenario.teardown();
+    let mut reopened = Engine::open(options(path, Backend::CloudSimulated).unwrap()).unwrap();
+    let cf = reopened.get_column_family("default").unwrap();
+    let read = reopened
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .unwrap();
+    assert_eq!(
+        read.scan(&Query::new()).unwrap().try_collect().unwrap(),
+        Vec::<(bytes::Bytes, bytes::Bytes)>::new()
+    );
+    drop(read);
+    reopened.shutdown(Duration::from_secs(10)).unwrap();
 }

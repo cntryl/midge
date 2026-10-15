@@ -1,8 +1,10 @@
 use cntryl_midge::{
-    Clock, Engine, MemoryBudget, MidgeError, OpenOptions, Query, TransactionMode, WriteOptions,
+    Clock, ColumnFamilyHandle, Engine, MemoryBudget, MidgeError, OpenOptions, Query, Transaction,
+    TransactionMode, WriteOptions,
 };
 use std::{
     collections::BTreeMap,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -16,11 +18,12 @@ impl Clock for ControlledClock {
     }
 }
 fn inventory(tx: &cntryl_midge::Transaction) -> BTreeMap<Vec<u8>, Vec<u8>> {
-    tx.scan(&Query::new())
-        .unwrap()
-        .try_collect()
-        .unwrap()
-        .into_iter()
+    let rows = tx.scan(&Query::new()).unwrap().try_collect().unwrap();
+    assert!(
+        rows.windows(2).all(|pair| pair[0].0 < pair[1].0),
+        "scan keys must be unique and ordered"
+    );
+    rows.into_iter()
         .map(|(k, v)| (k.to_vec(), v.to_vec()))
         .collect()
 }
@@ -54,27 +57,7 @@ fn assert_exact(tx: &cntryl_midge::Transaction, expected: &BTreeMap<Vec<u8>, Vec
         expected.get(b"released".as_slice()).cloned()
     );
 }
-// Keep the pressure/release order visible beside its exact-state assertions.
-#[allow(clippy::too_many_lines)]
-#[test]
-fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
-    // Arrange
-    let directory = tempfile::tempdir().unwrap();
-    let clock = Arc::new(ControlledClock(AtomicU64::new(10_000)));
-    let options = OpenOptions::cloud_simulated(directory.path(), "bucket", "snapshot-pressure")
-        .memory_budget(MemoryBudget::Bytes(16 * 1024 * 1024))
-        .local_storage_budget(2 * 1024 * 1024)
-        .with_memtable_size_limit(256 * 1024)
-        .with_memtable_flush_threshold(256 * 1024)
-        .transaction_memory_pool_size(128 * 1024)
-        .ttl_clock(clock.clone())
-        .background_compaction(false)
-        .storage_io_timeout(Duration::from_secs(2))
-        .runtime_response_timeout(Duration::from_secs(10))
-        .build()
-        .unwrap();
-    let mut engine = Engine::open(options.clone()).unwrap();
-    let cf = engine.create_column_family("data").unwrap();
+fn seed_rows(engine: &Engine, cf: &ColumnFamilyHandle) -> BTreeMap<Vec<u8>, Vec<u8>> {
     let mut initial = BTreeMap::new();
     for i in 0..32 {
         let key = format!("row-{i:03}").into_bytes();
@@ -91,8 +74,12 @@ fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
         tx.commit(WriteOptions::cloud_strict()).unwrap();
         initial.insert(key, value);
     }
-    engine.flush_cf(&cf).unwrap();
-    let original_files: Vec<_> = engine
+    engine.flush_cf(cf).unwrap();
+    initial
+}
+
+fn sst_files(engine: &Engine) -> Vec<String> {
+    engine
         .metrics()
         .get_storage_layout()
         .unwrap()
@@ -100,24 +87,16 @@ fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
         .into_iter()
         .flat_map(|level| level.files)
         .map(|file| file.name)
-        .collect();
-    assert!(
-        !original_files.is_empty(),
-        "the frozen snapshot must pin actual persisted SSTs"
-    );
-    let old = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
-    assert_exact(&old, &initial);
-    clock.0.store(12_000, Ordering::Release);
-    let mut expected = initial
-        .iter()
-        .filter(|(key, _)| key.as_slice() >= b"row-008".as_slice())
-        .map(|(key, value)| (key.clone(), value.clone()))
-        .collect::<BTreeMap<_, _>>();
-    let expired = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
-    assert_exact(&expired, &expected);
-    drop(expired);
-    // Act
+        .collect()
+}
 
+fn rewrite_rows_under_snapshot(
+    engine: &Engine,
+    cf: &ColumnFamilyHandle,
+    old: &Transaction,
+    initial: &BTreeMap<Vec<u8>, Vec<u8>>,
+) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    let mut expected = BTreeMap::new();
     for round in 0..16 {
         let mut candidate = BTreeMap::new();
         let mut tx = engine
@@ -137,13 +116,20 @@ fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
         tx.commit(WriteOptions::cloud_strict())
             .expect("bounded mixed transaction fits the cloud staging window");
         expected = candidate;
-        engine.flush_cf(&cf).unwrap();
+        engine.flush_cf(cf).unwrap();
         engine.compact_all().unwrap();
-        assert_exact(&old, &initial);
+        assert_exact(old, initial);
         let current = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         assert_exact(&current, &expected);
     }
-    // Act: consume real caller-owned spill capacity while the old snapshot lives.
+    expected
+}
+
+fn exhaust_spill_capacity(
+    engine: &Engine,
+    cf: &ColumnFamilyHandle,
+    directory: &Path,
+) -> Transaction {
     let mut hog = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
         .unwrap();
@@ -164,7 +150,7 @@ fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
         }
     }
     assert!(spill_boundary, "must exhaust actual spill capacity");
-    let spill_bytes = std::fs::read_dir(directory.path().join("txn"))
+    let spill_bytes = std::fs::read_dir(directory.join("txn"))
         .unwrap()
         .map(|entry| entry.unwrap().metadata().unwrap().len())
         .sum::<u64>();
@@ -172,6 +158,10 @@ fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
         spill_bytes > 1536 * 1024,
         "actual caller-owned spill files must consume most of the 2 MiB local budget"
     );
+    hog
+}
+
+fn assert_rejects_write_under_pressure(engine: &Engine, cf: &ColumnFamilyHandle) {
     let mut blocked = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
         .unwrap();
@@ -189,6 +179,115 @@ fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
         ),
         "capacity exhaustion must reject before acceptance: {blocked_result:?}"
     );
+}
+
+fn retained_snapshot_inputs(
+    engine: &Engine,
+    directory: &Path,
+    original_files: Vec<String>,
+) -> Vec<PathBuf> {
+    let live_files = sst_files(engine);
+    let retired: Vec<_> = original_files
+        .into_iter()
+        .filter(|file| !live_files.contains(file))
+        .map(|file| directory.join("cloud_store/sst").join(file))
+        .collect();
+    assert!(
+        !retired.is_empty(),
+        "actual compaction must retire pinned input files"
+    );
+    assert!(
+        retired.iter().all(|file| file.exists()),
+        "snapshot inputs must remain physically retained"
+    );
+    retired
+}
+
+fn assert_reclaims_snapshot_inputs(retired: &[PathBuf]) {
+    let reclaim_deadline = Instant::now() + Duration::from_secs(10);
+    while retired.iter().any(|file| file.exists()) {
+        assert!(
+            Instant::now() < reclaim_deadline,
+            "all released snapshot inputs must be physically reclaimed"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn assert_resumes_compaction(engine: &Engine, cf: &ColumnFamilyHandle) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    engine.compact_all().unwrap();
+    assert!(
+        Instant::now() < deadline,
+        "compaction must resume after releasing the pin"
+    );
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"released".to_vec(), b"progress".to_vec(), None)
+        .unwrap();
+    tx.commit(WriteOptions::cloud_strict()).unwrap();
+    engine.flush_cf(cf).unwrap();
+}
+
+fn assert_exact_after_reopen(
+    mut engine: Engine,
+    options: OpenOptions,
+    expected: &BTreeMap<Vec<u8>, Vec<u8>>,
+) {
+    engine.shutdown(Duration::from_secs(15)).unwrap();
+    drop(engine);
+    let mut reopened = Engine::open(options).unwrap();
+    let cf = reopened.get_column_family("data").unwrap();
+    let read = reopened
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .unwrap();
+    assert_exact(&read, expected);
+    drop(read);
+    reopened.shutdown(Duration::from_secs(15)).unwrap();
+}
+
+#[test]
+fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
+    // Arrange
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ControlledClock(AtomicU64::new(10_000)));
+    let options = OpenOptions::cloud_simulated(directory.path(), "bucket", "snapshot-pressure")
+        .memory_budget(MemoryBudget::Bytes(16 * 1024 * 1024))
+        .local_storage_budget(2 * 1024 * 1024)
+        .with_memtable_size_limit(256 * 1024)
+        .with_memtable_flush_threshold(256 * 1024)
+        .transaction_memory_pool_size(128 * 1024)
+        .ttl_clock(clock.clone())
+        .background_compaction(false)
+        .storage_io_timeout(Duration::from_secs(2))
+        .runtime_response_timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let engine = Engine::open(options.clone()).unwrap();
+    let cf = engine.create_column_family("data").unwrap();
+    let initial = seed_rows(&engine, &cf);
+    let original_files = sst_files(&engine);
+    assert!(
+        !original_files.is_empty(),
+        "the frozen snapshot must pin actual persisted SSTs"
+    );
+    let old = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+    assert_exact(&old, &initial);
+    clock.0.store(12_000, Ordering::Release);
+    let expired_expected = initial
+        .iter()
+        .filter(|(key, _)| key.as_slice() >= b"row-008".as_slice())
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let expired = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+    assert_exact(&expired, &expired_expected);
+    drop(expired);
+
+    // Act: consume real caller-owned spill capacity while the old snapshot lives.
+    let mut expected = rewrite_rows_under_snapshot(&engine, &cf, &old, &initial);
+    let hog = exhaust_spill_capacity(&engine, &cf, directory.path());
+    assert_rejects_write_under_pressure(&engine, &cf);
     assert_exact(&old, &initial);
     let current = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
     assert_exact(&current, &expected);
@@ -207,65 +306,16 @@ fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
         initial,
         "releasing spill pressure must preserve the older snapshot"
     );
-    // Assert
 
+    // Assert
     assert_exact(&old, &initial);
     let current = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
     assert_exact(&current, &expected);
     drop(current);
-    let live_files: Vec<_> = engine
-        .metrics()
-        .get_storage_layout()
-        .unwrap()
-        .levels
-        .into_iter()
-        .flat_map(|level| level.files)
-        .map(|file| file.name)
-        .collect();
-    let retired: Vec<_> = original_files
-        .into_iter()
-        .filter(|file| !live_files.contains(file))
-        .map(|file| directory.path().join("cloud_store/sst").join(file))
-        .collect();
-    assert!(
-        !retired.is_empty(),
-        "actual compaction must retire pinned input files"
-    );
-    assert!(
-        retired.iter().all(|file| file.exists()),
-        "snapshot inputs must remain physically retained"
-    );
+    let retired = retained_snapshot_inputs(&engine, directory.path(), original_files);
     drop(old);
-    let reclaim_deadline = Instant::now() + Duration::from_secs(10);
-    while retired.iter().any(|file| file.exists()) {
-        assert!(
-            Instant::now() < reclaim_deadline,
-            "all released snapshot inputs must be physically reclaimed"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    engine.compact_all().unwrap();
-    assert!(
-        Instant::now() < deadline,
-        "compaction must resume after releasing the pin"
-    );
-    let mut tx = engine
-        .begin_tx(cf.id(), TransactionMode::ReadWrite)
-        .unwrap();
-    tx.put(b"released".to_vec(), b"progress".to_vec(), None)
-        .unwrap();
-    tx.commit(WriteOptions::cloud_strict()).unwrap();
+    assert_reclaims_snapshot_inputs(&retired);
+    assert_resumes_compaction(&engine, &cf);
     expected.insert(b"released".to_vec(), b"progress".to_vec());
-    engine.flush_cf(&cf).unwrap();
-    engine.shutdown(Duration::from_secs(15)).unwrap();
-    drop(engine);
-    let mut reopened = Engine::open(options).unwrap();
-    let cf = reopened.get_column_family("data").unwrap();
-    let read = reopened
-        .begin_tx(cf.id(), TransactionMode::ReadOnly)
-        .unwrap();
-    assert_exact(&read, &expected);
-    drop(read);
-    reopened.shutdown(Duration::from_secs(15)).unwrap();
+    assert_exact_after_reopen(engine, options, &expected);
 }

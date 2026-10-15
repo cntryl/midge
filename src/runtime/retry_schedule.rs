@@ -44,11 +44,6 @@ impl RetrySchedule {
         self.defer();
     }
 
-    pub(crate) fn defer_from(&mut self, now: Instant, delay: Duration) {
-        self.delay = delay;
-        self.at = Some(now + delay);
-    }
-
     pub(crate) fn mark_due(&mut self) {
         self.at = Some(self.clock.now());
     }
@@ -72,6 +67,11 @@ impl RetrySchedule {
     pub(crate) fn remaining(&self) -> Option<Duration> {
         self.at
             .map(|at| at.saturating_duration_since(self.clock.now()))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configured_delay(&self) -> Duration {
+        self.delay
     }
 }
 

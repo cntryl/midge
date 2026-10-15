@@ -26,10 +26,11 @@ fn should_preserve_fenced_kind_when_wal_sync_detects_stale_writer() -> crate::co
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
     event_loop
+        .pipeline
         .wal_transition
         .fence("writer lease lost", None, true);
     let request_id = 9_001;
-    let response = event_loop.router.register(request_id, "WalSync");
+    let response = event_loop.routing.router.register(request_id, "WalSync");
 
     // Act
     super::wal::WalCoordinator::sync(&mut event_loop, request_id);
@@ -57,6 +58,7 @@ fn should_preserve_resource_limit_when_compaction_launch_is_refused(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop
+        .actors
         .cloud_coordinator
         .hybrid_storage
         .as_ref()
@@ -80,10 +82,11 @@ fn should_wait_for_active_compaction_before_declaring_debt_clear() -> crate::com
     // Arrange
     let mut event_loop = create_test_event_loop()?;
     event_loop
+        .actors
         .compaction_actor
         .prepare_for_completion_test(&mut event_loop.state, &["active-input.sst".to_string()])?;
     let request_id = 93;
-    let response = event_loop.router.register(request_id, "CompactAll");
+    let response = event_loop.routing.router.register(request_id, "CompactAll");
 
     // Act
     super::compaction::CompactionCoordinator::compact_all(&mut event_loop, request_id);
@@ -111,14 +114,14 @@ fn should_drain_flush_completion_after_non_mutating_request() -> crate::common::
     event_loop.freeze_active_memtable(0)?;
     event_loop.schedule_next_flush_worker();
     let completion_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while event_loop.flush_worker_result_rx.is_empty()
+    while event_loop.pipeline.flush_worker_result_rx.is_empty()
         && std::time::Instant::now() < completion_deadline
     {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert!(!event_loop.flush_worker_result_rx.is_empty());
+    assert!(!event_loop.pipeline.flush_worker_result_rx.is_empty());
     let request_id = 92;
-    let response = event_loop.router.register(request_id, "Noop");
+    let response = event_loop.routing.router.register(request_id, "Noop");
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -183,6 +186,26 @@ fn unique_test_db_path(prefix: &str) -> std::path::PathBuf {
     ))
 }
 
+/// Replace the WAL history recovery opened for `state` with one recording
+/// `sealed`, then `open`, for segment files a test wrote by hand under
+/// `db_path`. A member the test did not write is created empty.
+pub(in crate::runtime::event_loop) fn record_wal_history(
+    state: &mut RuntimeState,
+    db_path: &std::path::Path,
+    sealed: &[u64],
+    open: u64,
+) {
+    // Release the ledger recovery opened before the fixture replaces it.
+    state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
+    let wal: Arc<dyn crate::io::Fs> = Arc::new(
+        crate::io::RealFs::new(db_path.join(crate::wal::WAL_DIR)).expect("open the WAL directory"),
+    );
+    crate::runtime::wal_history::fixture::replace(&wal, sealed, open)
+        .expect("record the WAL history");
+    state.wal.history =
+        crate::runtime::wal_history::WalHistory::open(wal, open, 0).expect("open the WAL ledger");
+}
+
 // Helper to create a minimal runtime state for testing
 pub(in crate::runtime::event_loop) fn create_test_state() -> RuntimeState {
     RuntimeState::new("/tmp/test_event_loop".into(), true) // Memory mode
@@ -197,7 +220,10 @@ pub(in crate::runtime::event_loop) fn create_test_event_loop(
         state,
         false,
         router,
-        crate::runtime::RuntimeConfig::default(),
+        crate::runtime::RuntimeConfig {
+            retry_policy: crate::runtime::RuntimeRetryPolicy::fast_for_testing(),
+            ..crate::runtime::RuntimeConfig::default()
+        },
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
 }
@@ -208,26 +234,66 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
     let db_path = unique_test_db_path("midge_event_loop_cloud");
     std::fs::create_dir_all(&db_path).expect("create temp cloud event loop dir");
 
-    let state = RuntimeState::new(db_path.clone(), false);
+    // The history starts under the event loop's lease, so its first segment
+    // stays open.
+    let state = RuntimeState::new_in_epoch(&db_path, false, 1);
     let router = Arc::new(ResponseRouter::new());
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("hybrid_local"))
-            .expect("create local backend"),
-    );
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
             .expect("create cloud backend"),
     );
+    let shared_metadata = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+        cloud.clone(),
+        Duration::from_secs(5),
+    ));
     let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud,
         storage_policy,
     ));
+    let store: Arc<dyn crate::lease::LeaderStore> =
+        Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+            crate::io::real::test_root(db_path.join("cloud_store")),
+            crate::lease::LeaseClock::default(),
+        ));
+    store.acquire_leadership("test-writer")?;
+    crate::metadata::ensure_or_create_format_marker(&state.fs, &db_path)?;
+    crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
+        .map_err(crate::common::MidgeError::Internal)?;
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+    crate::runtime::ddl::fence_remote_registry_on_startup(
+        &hybrid_storage,
+        &crate::runtime::ddl::DdlLeaseAuthority {
+            store: Arc::clone(&store),
+            holder_id: "test-writer".into(),
+            writer_epoch: 1,
+        },
+        &deadline,
+    )?;
+    crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+        crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+            cloud: &shared_metadata,
+            fs: state.fs.as_ref(),
+            publication_lock: &crate::runtime::MetadataPublicationLock::default(),
+            lock_wait_budget: Duration::from_secs(5),
+            deadline: &deadline,
+            authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                store: store.as_ref(),
+                holder_id: "test-writer",
+                writer_epoch: 1,
+            },
+        },
+        |_| Ok(()),
+    )?;
     CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&hybrid_storage)),
+        cloud_metadata_storage: Some(shared_metadata),
+        provider_ddl_fencing: true,
+        leader_store: Some(store),
+        leader_holder_id: Some("test-writer".into()),
         writer_epoch: 1,
+        retry_policy: crate::runtime::RuntimeRetryPolicy::fast_for_testing(),
         ..crate::runtime::RuntimeConfig::default()
     };
     EventLoop::new(
@@ -250,9 +316,55 @@ pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
         state,
         false,
         router,
-        crate::runtime::RuntimeConfig::default(),
+        crate::runtime::RuntimeConfig {
+            retry_policy: crate::runtime::RuntimeRetryPolicy::fast_for_testing(),
+            ..crate::runtime::RuntimeConfig::default()
+        },
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )
+}
+
+#[test]
+fn should_use_injected_retry_policy_for_each_cloud_schedule() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let policy = crate::runtime::RuntimeRetryPolicy {
+        cloud_seal: Duration::from_millis(11),
+        cloud_wal: Duration::from_millis(13),
+        cloud_delete: Duration::from_millis(17),
+        manifest_reclamation: Duration::from_millis(19),
+    };
+    let config = crate::runtime::RuntimeConfig {
+        retry_policy: policy,
+        ..crate::runtime::RuntimeConfig::default()
+    };
+
+    // Act
+    let event_loop = EventLoop::new(
+        create_test_state(),
+        false,
+        Arc::new(ResponseRouter::new()),
+        config,
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
+
+    // Assert
+    assert_eq!(
+        event_loop.pipeline.durability.cloud_seal_retry_delay(),
+        policy.cloud_seal
+    );
+    assert_eq!(
+        event_loop.actors.cloud_coordinator.cloud_wal_retry_delay(),
+        policy.cloud_wal
+    );
+    assert_eq!(
+        event_loop.actors.gc_actor.retry_delays(),
+        (
+            policy.cloud_delete,
+            policy.manifest_reclamation,
+            policy.cloud_delete
+        )
+    );
+    Ok(())
 }
 
 #[test]
@@ -263,7 +375,7 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
     // Arrange
     let directory = tempfile::tempdir()?;
     let state = RuntimeState::try_new(
-        directory.path().to_path_buf(),
+        directory.path(),
         false,
         crate::config::RecoveryPolicy::Salvage,
     )?;
@@ -282,11 +394,7 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
     let _lease_guard = Arc::clone(&lease)
         .try_acquire()
         .expect("acquire cloud metadata lease");
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        directory.path().join("hybrid_local"),
-    )?);
     let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
@@ -305,8 +413,8 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
         config,
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
-    let publication_lock = event_loop.metadata_publication_lock.clone();
-    event_loop.runtime_response_timeout = std::time::Duration::from_millis(10);
+    let publication_lock = event_loop.publication.metadata_publication_lock.clone();
+    event_loop.routing.runtime_response_timeout = std::time::Duration::from_millis(10);
     let _publication = publication_lock
         .try_lock()
         .expect("hold metadata publication");
@@ -335,15 +443,19 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
         .map(|request_id| {
             (
                 request_id,
-                event_loop.router.register(request_id, "TestRequest"),
+                event_loop
+                    .routing
+                    .router
+                    .register(request_id, "TestRequest"),
             )
         })
         .collect::<Vec<_>>();
-    event_loop.pending_msg = Some(RuntimeMsg::ManifestCreateColumnFamily {
+    event_loop.routing.pending_msg = Some(RuntimeMsg::ManifestCreateColumnFamily {
         request_id: 8101,
         name: "restored-during-drain".to_string(),
     });
     event_loop
+        .publication
         .publication_gate
         .defer(RuntimeMsg::ManifestDropColumnFamily {
             request_id: 8102,
@@ -351,13 +463,14 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
             discard_unflushed: false,
         });
     event_loop
+        .publication
         .verification_barrier
         .deferred_messages
         .push_back(RuntimeMsg::ManifestPersist {
             request_id: 8103,
             origin: crate::metadata::accounting::Origin::Unclassified,
         });
-    event_loop.flush_barrier_waiters.insert(
+    event_loop.publication.flush_barrier_waiters.insert(
         0,
         vec![super::flush::FlushBarrierWaiter {
             request_id: 8104,
@@ -367,19 +480,20 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
     event_loop.state.pending_compaction_waits.insert(
         8105,
         event_loop
+            .routing
             .router
-            .request_deadline(8105, event_loop.runtime_response_timeout)
+            .request_deadline(8105, event_loop.routing.runtime_response_timeout)
             .unwrap(),
     );
-    event_loop.write_stall_waiters.register(8106, 0);
-    event_loop.durability.queue_waiter_for_key(
+    event_loop.pipeline.write_stall_waiters.register(8106, 0);
+    event_loop.pipeline.durability.queue_waiter_for_key(
         0,
         crate::runtime::durability::DurabilityWaiter::CloudDurability { request_id: 8107 },
     );
-    event_loop.durability.queue_waiter(
+    event_loop.pipeline.durability.queue_waiter(
         crate::runtime::durability::DurabilityWaiter::CloudDurability { request_id: 8108 },
     );
-    event_loop.shutting_down = true;
+    event_loop.shutdown.shutting_down = true;
 
     // Act
     event_loop.restore_verification_deferred_message();
@@ -402,13 +516,20 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
             "request {request_id} received the wrong shutdown response"
         );
     }
-    assert!(event_loop.pending_msg.is_none());
-    assert!(event_loop.publication_gate.deferred_messages_is_empty());
-    assert!(event_loop.verification_barrier.deferred_messages.is_empty());
-    assert!(event_loop.flush_barrier_waiters.is_empty());
+    assert!(event_loop.routing.pending_msg.is_none());
+    assert!(event_loop
+        .publication
+        .publication_gate
+        .deferred_messages_is_empty());
+    assert!(event_loop
+        .publication
+        .verification_barrier
+        .deferred_messages
+        .is_empty());
+    assert!(event_loop.publication.flush_barrier_waiters.is_empty());
     assert!(event_loop.state.pending_compaction_waits.is_empty());
-    assert!(event_loop.write_stall_waiters.is_empty());
-    assert!(!event_loop.durability.has_pending_waiters());
+    assert!(event_loop.pipeline.write_stall_waiters.is_empty());
+    assert!(!event_loop.pipeline.durability.has_pending_waiters());
 }
 
 #[test]
@@ -450,43 +571,45 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     let wal_dir = db_path.join("wal");
     let initialized = RuntimeState::new(db_path.clone(), false);
     drop(initialized);
+    let (remote_bytes, remote_link, remote_entry) =
+        sealed_cloud_recovery_segment_for_test(1, 1, crate::wal::format::ChainLink::GENESIS, &[1]);
+    let (local_bytes, _, _) = sealed_cloud_recovery_segment_for_test(2, 1, remote_link, &[2, 3]);
     let local_segment = wal_dir.join(crate::wal::segment_file_name(2));
-    let record = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
-        bytes::Bytes::from_static(b"recovered-gap"),
-        Some(bytes::Bytes::from_static(b"value")),
-        2,
-        0,
-    );
-    let payload = crate::wal::encoding::encode(&record).expect("encode recovered WAL record");
-    let mut segment_bytes = Vec::new();
-    crate::wal::frame::append_frame(&mut segment_bytes, &payload)
-        .expect("frame recovered WAL record");
-    std::fs::write(&local_segment, &segment_bytes).expect("write recovered local WAL segment");
+    std::fs::write(&local_segment, &local_bytes).expect("write recovered local WAL segment");
+    let wal: Arc<dyn crate::io::Fs> =
+        Arc::new(crate::io::RealFs::new(&wal_dir).expect("open the WAL directory"));
+    crate::runtime::wal_history::fixture::replace(&wal, &[2], 3).expect("record the WAL history");
 
     let mut state = RuntimeState::new(db_path.clone(), false);
     state.sequence = 3;
     state.wal.frontiers.set_local_durable_for_test(3);
-    state.reset_cloud_durable_sequence_for_recovery();
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("hybrid_local"))
-            .expect("create local backend"),
-    );
+    state.reset_cloud_durable_sequence_for_recovery(0);
+    let cloud_root = db_path.join("cloud_store");
     let cloud = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
-            .expect("create cloud backend"),
+        crate::storage::filesystem::FileSystem::new(&cloud_root).expect("create cloud backend"),
     );
     let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
-    CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
+    let cloud_persistence = CloudPersistence::new(Arc::clone(&hybrid_storage));
+    cloud_persistence.fence_cloud_wal_catalog(1)?;
+    write_recovered_cloud_segment_for_test(&cloud_root, &remote_entry, &remote_bytes);
+    cloud_persistence
+        .publish_wal_segments(
+            std::slice::from_ref(&remote_entry),
+            1,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+        .map_err(crate::common::MidgeError::from)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&hybrid_storage)),
-        recovered_cloud_wal_segments: [(1, 1), (3, 3)].into_iter().collect(),
-        recovered_local_wal_segments: [(2, 2)].into_iter().collect(),
+        recovered_cloud_wal_entries: [(1, remote_entry)].into_iter().collect(),
+        recovered_cloud_wal_segments: [(1, 1)].into_iter().collect(),
+        recovered_cloud_wal_segment_epochs: [(1, 1)].into_iter().collect(),
+        recovered_local_wal_segments: [(2, 3)].into_iter().collect(),
+        recovered_local_wal_segment_epochs: [(2, 1)].into_iter().collect(),
         writer_epoch: 1,
         ..crate::runtime::RuntimeConfig::default()
     };
@@ -505,28 +628,37 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 1);
     assert_eq!(
         event_loop
+            .actors
             .cloud_coordinator
             .cloud_wal
-            .upload_backlog
-            .get(&2),
-        Some(&2)
+            .backlog()
+            .get(2),
+        Some(3)
     );
     event_loop.drain_cloud_wal_upload_backlog();
     assert_eq!(hybrid_storage.pending_upload_count(), 1);
     assert_eq!(
-        event_loop.durability.inflight_segment_for_sequence(2),
+        event_loop
+            .pipeline
+            .durability
+            .inflight_segment_for_sequence(2),
         Some(2)
     );
 
     let remote_segment = db_path
         .join("cloud_store")
-        .join(crate::wal::cloud_segment_object_key(2, 0));
+        .join(crate::wal::segment_object_key(2, 1));
     std::fs::create_dir_all(remote_segment.parent().expect("remote WAL parent"))
         .expect("create remote WAL directory");
-    std::fs::write(remote_segment, segment_bytes).expect("publish resumed WAL segment");
+    // The upload publishes the sealed local segment's bytes.
+    std::fs::write(
+        remote_segment,
+        std::fs::read(&local_segment).expect("read the sealed local segment"),
+    )
+    .expect("publish resumed WAL segment");
     event_loop.handle_storage_event(crate::storage::StorageEvent::CloudAck {
         segment_id: 2,
-        max_sequence: 2,
+        max_sequence: 3,
     });
     assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 3);
     Ok(())
@@ -537,13 +669,20 @@ fn should_leave_later_write_queued_when_destructively_dropping_column_family() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create event loop");
     let cf_id = event_loop
+        .actors
         .manifest_actor
         .create_column_family(&mut event_loop.state, "ordered-drop")
         .expect("create column family");
     let drop_request_id = 903;
     let write_request_id = 904;
-    let drop_response = event_loop.router.register(drop_request_id, "TestRequest");
-    let write_response = event_loop.router.register(write_request_id, "TestRequest");
+    let drop_response = event_loop
+        .routing
+        .router
+        .register(drop_request_id, "TestRequest");
+    let write_response = event_loop
+        .routing
+        .router
+        .register(write_request_id, "TestRequest");
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
     msg_tx
         .send(RuntimeMsg::ApplyTransaction {
@@ -600,16 +739,26 @@ fn should_cancel_column_family_waiters_after_drop_commits() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create event loop");
     let cf_id = event_loop
+        .actors
         .manifest_actor
         .create_column_family(&mut event_loop.state, "drop-waiters")
         .expect("create column family");
     let flush_request_id = 905;
     let stall_request_id = 906;
     let drop_request_id = 907;
-    let flush_response = event_loop.router.register(flush_request_id, "TestRequest");
-    let stall_response = event_loop.router.register(stall_request_id, "TestRequest");
-    let drop_response = event_loop.router.register(drop_request_id, "TestRequest");
-    event_loop.flush_barrier_waiters.insert(
+    let flush_response = event_loop
+        .routing
+        .router
+        .register(flush_request_id, "TestRequest");
+    let stall_response = event_loop
+        .routing
+        .router
+        .register(stall_request_id, "TestRequest");
+    let drop_response = event_loop
+        .routing
+        .router
+        .register(drop_request_id, "TestRequest");
+    event_loop.publication.flush_barrier_waiters.insert(
         cf_id,
         vec![super::flush::FlushBarrierWaiter {
             request_id: flush_request_id,
@@ -617,6 +766,7 @@ fn should_cancel_column_family_waiters_after_drop_commits() {
         }],
     );
     event_loop
+        .pipeline
         .write_stall_waiters
         .register(stall_request_id, cf_id);
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -648,9 +798,16 @@ fn should_cancel_column_family_waiters_after_drop_commits() {
             } if message.contains("was dropped")
         ));
     }
-    assert!(!event_loop.flush_barrier_waiters.contains_key(&cf_id));
-    assert!(!event_loop.write_stall_waiters.contains(stall_request_id));
+    assert!(!event_loop
+        .publication
+        .flush_barrier_waiters
+        .contains_key(&cf_id));
+    assert!(!event_loop
+        .pipeline
+        .write_stall_waiters
+        .contains(stall_request_id));
     assert!(event_loop
+        .pipeline
         .write_stall_waiters
         .column_family_queue(cf_id)
         .is_none());
@@ -681,8 +838,12 @@ fn should_apply_runtime_config_block_cache_policy_to_read_resources_when_initial
     )?;
 
     // Assert
-    assert_eq!(event_loop.compaction_actor.l0_file_count_threshold(), 7);
+    assert_eq!(
+        event_loop.actors.compaction_actor.l0_file_count_threshold(),
+        7
+    );
     let read_resources = event_loop
+        .authority
         .read_resources
         .as_ref()
         .expect("local runtime should construct read resources");
@@ -726,8 +887,8 @@ fn write_runtime_l0_sst_for_test(
 ) -> crate::runtime::FileMeta {
     let key = format!("key-{largest_seq:04}");
     let bytes = valid_sst_bytes_for_event_loop_test(key.as_bytes(), b"value", largest_seq);
-    std::fs::create_dir_all(&event_loop.state.sst_dir).expect("create test sst dir");
-    std::fs::write(event_loop.state.sst_dir.join(name), &bytes).expect("write test SST");
+    std::fs::create_dir_all(event_loop.state.host_sst_dir()).expect("create test sst dir");
+    std::fs::write(event_loop.state.host_sst_dir().join(name), &bytes).expect("write test SST");
     crate::runtime::FileMeta {
         name: name.to_string(),
         level: 0,
@@ -780,6 +941,7 @@ fn should_not_treat_blocked_auto_flush_candidate_as_standalone_actionable_work()
     )
     .expect("create cloud event loop");
     let hybrid = event_loop
+        .actors
         .cloud_coordinator
         .hybrid_storage
         .as_ref()
@@ -831,7 +993,7 @@ fn should_schedule_compaction_after_l0_flush_when_threshold_reached(
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
-    event_loop.worker_msg_tx = Some(worker_tx);
+    event_loop.pipeline.worker_msg_tx = Some(worker_tx);
     event_loop.state.set_compaction_enabled(true);
     event_loop
         .state
@@ -876,7 +1038,7 @@ fn should_schedule_compaction_from_existing_l0_files_during_startup_maintenance(
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
-    event_loop.worker_msg_tx = Some(worker_tx);
+    event_loop.pipeline.worker_msg_tx = Some(worker_tx);
     event_loop.state.set_compaction_enabled(true);
     for sequence in 1..=4 {
         let name = format!("recovered-{sequence}.sst");
@@ -909,11 +1071,14 @@ fn should_schedule_recovery_compaction_above_hard_l0_ceiling_when_background_dis
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
-    event_loop.worker_msg_tx = Some(worker_tx);
+    event_loop.pipeline.worker_msg_tx = Some(worker_tx);
     event_loop.state.set_compaction_enabled(false);
     event_loop.state.limits.l0_compaction_trigger = 2;
     event_loop.state.limits.max_immutable_memtables = 0;
-    event_loop.compaction_actor.set_l0_file_count_threshold(2);
+    event_loop
+        .actors
+        .compaction_actor
+        .set_l0_file_count_threshold(2);
     assert_eq!(event_loop.state.l0_hard_ceiling(), 3);
     for sequence in 1..=4 {
         let name = format!("over-ceiling-{sequence}.sst");
@@ -946,11 +1111,14 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
-    event_loop.worker_msg_tx = Some(worker_tx);
+    event_loop.pipeline.worker_msg_tx = Some(worker_tx);
     event_loop.state.set_compaction_enabled(false);
     event_loop.state.limits.l0_compaction_trigger = 2;
     event_loop.state.limits.max_immutable_memtables = 0;
-    event_loop.compaction_actor.set_l0_file_count_threshold(2);
+    event_loop
+        .actors
+        .compaction_actor
+        .set_l0_file_count_threshold(2);
     for sequence in 1..=3 {
         let name = format!("live-ceiling-{sequence}.sst");
         let _ = write_runtime_l0_sst_for_test(&event_loop, &name, sequence);
@@ -962,7 +1130,10 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
             .push(test_manifest_l0_file_meta(&name, sequence));
     }
     assert!(event_loop.state.l0_write_slot_unavailable(0));
-    event_loop.background_compaction_schedule.mark_due();
+    event_loop
+        .pipeline
+        .background_compaction_schedule
+        .mark_due();
     // Act
     event_loop.run_background_compaction_maintenance_if_due();
     for _ in 0..16 {
@@ -1026,7 +1197,10 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
         event_loop.state.set_compaction_enabled(false);
         event_loop.state.limits.l0_compaction_trigger = 2;
         event_loop.state.limits.max_immutable_memtables = 0;
-        event_loop.compaction_actor.set_l0_file_count_threshold(2);
+        event_loop
+            .actors
+            .compaction_actor
+            .set_l0_file_count_threshold(2);
         event_loop
             .state
             .manifest
@@ -1036,13 +1210,13 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
                 test_manifest_l0_file_meta(&format!("gated-{sequence}.sst"), sequence)
             }));
         match gate {
-            "ddl" => event_loop.fencing.ddl_authority_ambiguous = true,
+            "ddl" => event_loop.authority.fencing.ddl_authority_ambiguous = true,
             "publication" => {
-                event_loop.publication_gate.try_acquire(
+                event_loop.publication.publication_gate.try_acquire(
                     crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune,
                 );
             }
-            _ => event_loop.compaction_fence.degrade(),
+            _ => event_loop.authority.compaction_fence.degrade(),
         }
         // Act
         let result =
@@ -1075,7 +1249,7 @@ fn should_not_schedule_auto_compaction_when_compaction_disabled() -> crate::comm
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
-    event_loop.worker_msg_tx = Some(worker_tx);
+    event_loop.pipeline.worker_msg_tx = Some(worker_tx);
     event_loop.state.set_compaction_enabled(false);
     event_loop
         .state
@@ -1110,7 +1284,10 @@ fn should_apply_l0_compaction_trigger_from_runtime_config() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let request_id = 99;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let response_rx = event_loop
+        .routing
+        .router
+        .register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
 
     event_loop.handle_runtime_msg(
@@ -1135,7 +1312,7 @@ fn should_apply_l0_compaction_trigger_from_runtime_config() {
         RuntimeResponse::Ok { .. }
     ));
     assert_eq!(
-        event_loop.compaction_actor.l0_file_count_threshold(),
+        event_loop.actors.compaction_actor.l0_file_count_threshold(),
         2,
         "runtime config should update the compaction actor L0 file-count trigger"
     );
@@ -1150,14 +1327,17 @@ fn should_reject_runtime_config_atomically_given_invalid_memtable_candidate() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let request_id = 100;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let response_rx = event_loop
+        .routing
+        .router
+        .register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
     let original_size = event_loop.state.limits.memtable_size_limit;
     let original_threshold = event_loop.state.limits.memtable_flush_threshold;
     let original_compaction = event_loop.state.compaction_enabled();
-    let original_trigger = event_loop.compaction_actor.l0_file_count_threshold();
-    let original_wal_policy = event_loop.wal_actor.durability_policy();
-    let original_batch_config = event_loop.wal_actor.batch_config();
+    let original_trigger = event_loop.actors.compaction_actor.l0_file_count_threshold();
+    let original_wal_policy = event_loop.actors.wal_actor.durability_policy();
+    let original_batch_config = event_loop.actors.wal_actor.batch_config();
 
     // Act
     event_loop.handle_runtime_msg(
@@ -1193,19 +1373,19 @@ fn should_reject_runtime_config_atomically_given_invalid_memtable_candidate() {
     );
     assert_eq!(event_loop.state.compaction_enabled(), original_compaction);
     assert_eq!(
-        event_loop.compaction_actor.l0_file_count_threshold(),
+        event_loop.actors.compaction_actor.l0_file_count_threshold(),
         original_trigger
     );
     assert_eq!(
-        event_loop.wal_actor.durability_policy(),
+        event_loop.actors.wal_actor.durability_policy(),
         original_wal_policy
     );
     assert_eq!(
-        event_loop.wal_actor.batch_config().max_delay_ms,
+        event_loop.actors.wal_actor.batch_config().max_delay_ms,
         original_batch_config.max_delay_ms
     );
     assert_eq!(
-        event_loop.wal_actor.batch_config().max_bytes,
+        event_loop.actors.wal_actor.batch_config().max_bytes,
         original_batch_config.max_bytes
     );
 }
@@ -1215,15 +1395,18 @@ fn should_reject_runtime_config_atomically_given_cross_mode_wal_policy() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let request_id = 101;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let response_rx = event_loop
+        .routing
+        .router
+        .register(request_id, "TestRequest");
     let (_tx, msg_rx) = crossbeam::channel::unbounded();
     let original_size = event_loop.state.limits.memtable_size_limit;
     let original_threshold = event_loop.state.limits.memtable_flush_threshold;
     let original_compaction = event_loop.state.compaction_enabled();
     let original_state_trigger = event_loop.state.limits.l0_compaction_trigger;
-    let original_actor_trigger = event_loop.compaction_actor.l0_file_count_threshold();
-    let original_wal_policy = event_loop.wal_actor.durability_policy();
-    let original_batch_config = event_loop.wal_actor.batch_config();
+    let original_actor_trigger = event_loop.actors.compaction_actor.l0_file_count_threshold();
+    let original_wal_policy = event_loop.actors.wal_actor.durability_policy();
+    let original_batch_config = event_loop.actors.wal_actor.batch_config();
     let candidate_size = original_size.saturating_add(1024);
     let candidate_threshold = original_threshold.saturating_add(1).min(candidate_size);
 
@@ -1265,19 +1448,19 @@ fn should_reject_runtime_config_atomically_given_cross_mode_wal_policy() {
         original_state_trigger
     );
     assert_eq!(
-        event_loop.compaction_actor.l0_file_count_threshold(),
+        event_loop.actors.compaction_actor.l0_file_count_threshold(),
         original_actor_trigger
     );
     assert_eq!(
-        event_loop.wal_actor.durability_policy(),
+        event_loop.actors.wal_actor.durability_policy(),
         original_wal_policy
     );
     assert_eq!(
-        event_loop.wal_actor.batch_config().max_delay_ms,
+        event_loop.actors.wal_actor.batch_config().max_delay_ms,
         original_batch_config.max_delay_ms
     );
     assert_eq!(
-        event_loop.wal_actor.batch_config().max_bytes,
+        event_loop.actors.wal_actor.batch_config().max_bytes,
         original_batch_config.max_bytes
     );
 }
@@ -1317,6 +1500,7 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
     let mut event_loop = create_test_event_loop().expect("create memory event loop");
     let barrier_request_id = 100;
     let barrier_rx = event_loop
+        .routing
         .router
         .register(barrier_request_id, "TestRequest");
     event_loop.begin_storage_verification(barrier_request_id);
@@ -1329,6 +1513,7 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
 
     let mutation_request_id = 101;
     let mutation_rx = event_loop
+        .routing
         .router
         .register(mutation_request_id, "TestRequest");
     let completion = RuntimeMsg::CompactionComplete {
@@ -1352,6 +1537,7 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
 
     let release_request_id = 103;
     let release_rx = event_loop
+        .routing
         .router
         .register(release_request_id, "TestRequest");
     event_loop.end_storage_verification(release_request_id, barrier_request_id);
@@ -1377,18 +1563,26 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
         RuntimeResponse::Ok { .. }
     ));
     assert!(matches!(
-        event_loop.pending_msg,
+        event_loop.routing.pending_msg,
         Some(RuntimeMsg::CompactionComplete {
             request_id: 102,
             ..
         })
     ));
     assert!(matches!(
-        event_loop.verification_barrier.deferred_messages.front(),
+        event_loop
+            .publication
+            .verification_barrier
+            .deferred_messages
+            .front(),
         Some(RuntimeMsg::RetryGc)
     ));
     assert_eq!(
-        event_loop.verification_barrier.deferred_messages.len(),
+        event_loop
+            .publication
+            .verification_barrier
+            .deferred_messages
+            .len(),
         1,
         "duplicate maintenance retries must be coalesced while verification is active"
     );
@@ -1400,7 +1594,10 @@ fn should_capture_runtime_health_at_verification_barrier_acquisition() {
     let mut event_loop = create_test_event_loop().expect("create memory event loop");
     event_loop.state.mark_persistence_anomaly();
     let request_id = 104;
-    let response = event_loop.router.register(request_id, "TestRequest");
+    let response = event_loop
+        .routing
+        .router
+        .register(request_id, "TestRequest");
 
     // Act
     event_loop.begin_storage_verification(request_id);
@@ -1419,11 +1616,19 @@ fn should_capture_runtime_health_at_verification_barrier_acquisition() {
 fn should_reject_storage_verification_while_flush_publication_is_active() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    event_loop
+    assert!(event_loop
+        .publication
         .publication_gate
-        .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
+        .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune));
+    event_loop
+        .pipeline
+        .background_compaction_schedule
+        .defer_for(Duration::from_secs(60));
     let request_id = 104;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let response_rx = event_loop
+        .routing
+        .router
+        .register(request_id, "TestRequest");
 
     // Act
     event_loop.begin_storage_verification(request_id);
@@ -1438,7 +1643,7 @@ fn should_reject_storage_verification_while_flush_publication_is_active() {
             ..
         }
     ));
-    assert!(event_loop.verification_barrier.token.is_none());
+    assert!(event_loop.publication.verification_barrier.token.is_none());
 }
 
 #[test]
@@ -1447,12 +1652,16 @@ fn should_block_for_messages_when_manifest_retry_is_due_during_verification() {
     // verification deliberately freezes publication progress.
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     event_loop
+        .actors
         .gc_actor
         .queue_manifest_reclamation(["retained-during-verification.sst".to_string()]);
-    event_loop.gc_actor.defer_manifest_reclamation_retry();
+    event_loop
+        .actors
+        .gc_actor
+        .defer_manifest_reclamation_retry();
     std::thread::sleep(Duration::from_millis(15));
-    assert!(event_loop.gc_actor.manifest_reclamation_retry_due());
-    assert!(event_loop.verification_barrier.activate(105));
+    assert!(event_loop.actors.gc_actor.manifest_reclamation_retry_due());
+    assert!(event_loop.publication.verification_barrier.activate(105));
 
     // Act
     let idle_timeout = event_loop.idle_progress_timeout();
@@ -1513,6 +1722,7 @@ fn should_drain_all_current_flush_candidates_in_single_auto_flush_pass() {
         .state
         .create_cf("second".to_string())
         .expect("create second cf");
+    event_loop.state.sequence = 2;
 
     {
         let cf = event_loop.state.get_cf(0).expect("default cf");
@@ -1683,7 +1893,12 @@ fn should_advance_compaction_output_sequence_past_recovered_manifest_name() {
             ..Default::default()
         });
     event_loop.state.restore_sequence_floor_from_manifest();
-    assert_eq!(event_loop.state.manifest.last_persisted_sequence, 0);
+    assert_eq!(
+        event_loop.state.manifest.flush_frontiers().get(0).unwrap(),
+        crate::metadata::FamilyFrontier::Live {
+            through_sequence: 0
+        },
+    );
     let plan = crate::compaction::CompactionPlan::new(0, 0, 1);
 
     // Act
@@ -1761,7 +1976,7 @@ mod compaction_scheduling {
         // Arrange
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
-        event_loop.worker_msg_tx = Some(worker_tx);
+        event_loop.pipeline.worker_msg_tx = Some(worker_tx);
         event_loop.state.set_compaction_enabled(true);
         event_loop.state.sequence = 100;
         for seq in 1..=4 {
@@ -1831,8 +2046,8 @@ fn should_respect_trace_enabled_flag() {
     .expect("Should create");
 
     // Assert
-    assert!(!event_loop1.trace_enabled);
-    assert!(event_loop2.trace_enabled);
+    assert!(!event_loop1.diagnostics.trace_enabled);
+    assert!(event_loop2.diagnostics.trace_enabled);
 }
 
 // =========== Actor Initialization Tests ===========
@@ -1848,30 +2063,30 @@ fn should_initialize_actors_with_expected_starting_state() {
     // re-read of a field the test just set itself). ManifestActor has no such
     // accessor and is only implicitly covered here via successful construction.
     assert!(
-        !event_loop.flush_actor.is_inflight(),
+        !event_loop.actors.flush_actor.is_inflight(),
         "FlushActor must start with no in-flight flush"
     );
     assert_eq!(
-        event_loop.wal_actor.pending_sync_count(),
+        event_loop.actors.wal_actor.pending_sync_count(),
         0,
         "WalActor must start with no pending syncs"
     );
     assert_eq!(
-        event_loop.wal_actor.sync_calls(),
+        event_loop.actors.wal_actor.sync_calls(),
         0,
         "WalActor must start with no recorded sync calls"
     );
     assert_eq!(
-        event_loop.compaction_actor.l0_file_count_threshold(),
+        event_loop.actors.compaction_actor.l0_file_count_threshold(),
         4,
         "CompactionActor must start with the default L0 file-count threshold"
     );
     assert!(
-        event_loop.gc_actor.last_gc_run().is_none(),
+        event_loop.actors.gc_actor.last_gc_run().is_none(),
         "GcActor must start with no recorded GC run"
     );
     assert!(
-        event_loop.cloud_coordinator.hybrid_storage.is_none(),
+        event_loop.actors.cloud_coordinator.hybrid_storage.is_none(),
         "hybrid storage is optional and unset by default"
     );
 }
@@ -1894,7 +2109,7 @@ fn should_maintain_router_reference() {
 
     // Assert - the event loop must retain the exact same router instance the
     // caller passed in, not a copy, so responses actually reach callers
-    assert!(Arc::ptr_eq(&event_loop.router, &router));
+    assert!(Arc::ptr_eq(&event_loop.routing.router, &router));
 }
 
 #[test]
@@ -1913,8 +2128,9 @@ fn should_sleep_until_cloud_seal_deadline_without_spinning_given_subthreshold_wa
         },
         ..crate::runtime::CloudRuntimePolicy::default()
     };
-    event_loop.durability = crate::runtime::durability::DurabilityCoordinator::new(0, true, policy);
-    let (_, deferred) = event_loop.wal_actor.append_single_op(
+    event_loop.pipeline.durability =
+        crate::runtime::durability::DurabilityCoordinator::new(0, true, policy);
+    let (_, deferred) = event_loop.actors.wal_actor.append_single_op(
         &mut event_loop.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: 901,
@@ -1946,12 +2162,48 @@ fn cloud_recovery_wal_bytes(sequence: u64) -> Vec<u8> {
         bytes::Bytes::from(format!("key-{sequence}")),
         Some(bytes::Bytes::from_static(b"value")),
         sequence,
-        0,
     );
     let payload = crate::wal::encoding::encode(&record).expect("encode recovery WAL record");
     let mut framed = Vec::new();
     crate::wal::frame::append_frame(&mut framed, &payload).expect("frame recovery WAL record");
     framed
+}
+
+fn sealed_cloud_recovery_segment_for_test(
+    segment_id: u64,
+    writer_epoch: u64,
+    prev: crate::wal::format::ChainLink,
+    sequences: &[u64],
+) -> (
+    Vec<u8>,
+    crate::wal::format::ChainLink,
+    crate::wal::cloud_catalog::CatalogEntry,
+) {
+    let mut builder =
+        crate::wal::format::segment::SegmentBuilder::new(segment_id, writer_epoch, prev);
+    for sequence in sequences {
+        builder = builder.record(&crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from(format!("key-{sequence}")),
+            Some(bytes::Bytes::from_static(b"value")),
+            *sequence,
+        ));
+    }
+    let (bytes, link) = builder.seal();
+    let entry = crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
+        .expect("test WAL segment is sealed and catalogable");
+    (bytes, link, entry)
+}
+
+fn write_recovered_cloud_segment_for_test(
+    cloud_root: &std::path::Path,
+    entry: &crate::wal::cloud_catalog::CatalogEntry,
+    bytes: &[u8],
+) {
+    let object = cloud_root.join(entry.object_key());
+    std::fs::create_dir_all(object.parent().expect("WAL object parent"))
+        .expect("create remote WAL directory");
+    std::fs::write(object, bytes).expect("write remote WAL object");
 }
 
 #[test]
@@ -1972,25 +2224,25 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         &second_bytes,
     )
     .expect("write second recovered WAL");
-    std::fs::write(wal_dir.join(crate::wal::ACTIVE_FILE_NAME), &active_bytes)
-        .expect("write recovered active WAL");
+    std::fs::write(
+        wal_dir.join(crate::wal::segment_file_name(3)),
+        &active_bytes,
+    )
+    .expect("write recovered active WAL");
+    record_wal_history(&mut state, &db_path, &[1, 2], 3);
 
     state.sequence = 3;
-    state.wal.current_segment_id = 3;
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("hybrid-local"))
-            .expect("create local storage"),
-    );
     let cloud = Arc::new(
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud-store"))
             .expect("create cloud storage"),
     );
+    // Each sealed segment adds its header and footer to the record.
     let max_segment_bytes = first_bytes
         .len()
         .max(second_bytes.len())
-        .max(active_bytes.len()) as u64;
+        .max(active_bytes.len()) as u64
+        + 256;
     let storage = Arc::new(crate::storage::HybridStorage::with_test_upload_limits(
-        local,
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         1,
@@ -2000,13 +2252,9 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&storage)),
+        // The recovered open segment 3 is sealed when the event loop opens
+        // and owed to the cloud with segments 1 and 2.
         recovered_local_wal_segments: std::collections::BTreeMap::from([(1, 1), (2, 2)]),
-        recovered_cloud_active_wal: Some(crate::runtime::RecoveredCloudActiveWal {
-            max_sequence: 3,
-            writer_epoch: 0,
-            record_count: 1,
-            valid_bytes: active_bytes.len(),
-        }),
         writer_epoch: 1,
         ..crate::runtime::RuntimeConfig::default()
     };
@@ -2020,14 +2268,20 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         config,
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
-    let backlog_after_open = event_loop.cloud_coordinator.cloud_wal.upload_backlog.len();
+    let backlog_after_open = event_loop
+        .actors
+        .cloud_coordinator
+        .cloud_wal
+        .backlog()
+        .len();
     let queued_after_open = storage.pending_upload_count();
     let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline
         && (!event_loop
+            .actors
             .cloud_coordinator
             .cloud_wal
-            .upload_backlog
+            .backlog()
             .is_empty()
             || storage.pending_upload_count() > 0)
     {
@@ -2046,9 +2300,10 @@ fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
         "remaining sealed and active WAL obligations must stay recoverable"
     );
     assert!(event_loop
+        .actors
         .cloud_coordinator
         .cloud_wal
-        .upload_backlog
+        .backlog()
         .is_empty());
     assert_eq!(storage.pending_upload_count(), 0);
     assert_eq!(event_loop.state.wal.frontiers.cloud_durable(), 3);
@@ -2061,28 +2316,39 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
     // Arrange
     let db_path = unique_test_db_path("midge_remote_wal_local_cleanup");
     let mut state = RuntimeState::new(db_path.clone(), false);
+    let (remote_bytes, _, remote_entry) =
+        sealed_cloud_recovery_segment_for_test(1, 1, crate::wal::format::ChainLink::GENESIS, &[1]);
     let wal_dir = db_path.join("wal");
     std::fs::create_dir_all(&wal_dir).expect("create WAL directory");
     let local_path = wal_dir.join(crate::wal::segment_file_name(1));
-    std::fs::write(&local_path, cloud_recovery_wal_bytes(1)).expect("write validated local copy");
+    std::fs::write(&local_path, &remote_bytes).expect("write validated local copy");
+    record_wal_history(&mut state, &db_path, &[1], 2);
     state.sequence = 1;
-    state.wal.current_segment_id = 2;
-    let local = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("hybrid-local"))
-            .expect("create local storage"),
-    );
+    let cloud_root = db_path.join("cloud-store");
     let cloud = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("cloud-store"))
-            .expect("create cloud storage"),
+        crate::storage::filesystem::FileSystem::new(&cloud_root).expect("create cloud storage"),
     );
+    let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    let cloud_persistence = CloudPersistence::new(Arc::clone(&hybrid_storage));
+    cloud_persistence.fence_cloud_wal_catalog(1)?;
+    write_recovered_cloud_segment_for_test(&cloud_root, &remote_entry, &remote_bytes);
+    cloud_persistence
+        .publish_wal_segments(
+            std::slice::from_ref(&remote_entry),
+            1,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+        .map_err(crate::common::MidgeError::from)?;
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
-        hybrid_storage: Some(Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
-            cloud,
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-        ))),
+        hybrid_storage: Some(hybrid_storage),
+        recovered_cloud_wal_entries: [(1, remote_entry)].into_iter().collect(),
         recovered_cloud_wal_segments: std::collections::BTreeMap::from([(1, 1)]),
+        recovered_cloud_wal_segment_epochs: [(1, 1)].into_iter().collect(),
+        writer_epoch: 1,
         ..crate::runtime::RuntimeConfig::default()
     };
 
@@ -2101,43 +2367,111 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
     Ok(())
 }
 
-#[test]
-fn should_defer_column_family_drop_until_compaction_publication_finishes() {
-    // Arrange
-    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    let cf_id = event_loop
+fn create_event_loop_test_column_family(event_loop: &mut EventLoop, name: &str) -> u32 {
+    event_loop
+        .actors
         .manifest_actor
-        .create_column_family(&mut event_loop.state, "compacting")
-        .expect("create compacting column family");
-    let input_name = crate::cloud_layout::file_name(cf_id, 0, 1);
-    let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
-    let input_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"old", 1);
-    let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"new", 2);
-    std::fs::write(event_loop.state.sst_dir.join(&input_name), &input_bytes)
-        .expect("write compaction input");
+        .create_column_family(&mut event_loop.state, name)
+        .expect("create test column family")
+}
+
+fn add_event_loop_test_sst_metadata(
+    event_loop: &mut EventLoop,
+    name: String,
+    level: u32,
+    cf_id: u32,
+    bytes: &[u8],
+    key_bounds: (&[u8], &[u8]),
+    sequence: u64,
+) {
     event_loop
         .state
         .manifest
         .test_mut()
         .files
         .push(crate::metadata::FileMeta {
-            name: input_name.clone(),
-            level: 0,
-            size_bytes: u64::try_from(input_bytes.len()).expect("input length"),
-            content_crc32c: Some(crc32c::crc32c(&input_bytes)),
+            name,
+            level,
+            size_bytes: u64::try_from(bytes.len()).expect("test SST length"),
+            content_crc32c: Some(crc32c::crc32c(bytes)),
             cf_id,
-            smallest_key: Some(b"key".to_vec()),
-            largest_key: Some(b"key".to_vec()),
-            smallest_seq: Some(1),
-            largest_seq: Some(1),
+            smallest_key: Some(key_bounds.0.to_vec()),
+            largest_key: Some(key_bounds.1.to_vec()),
+            smallest_seq: Some(sequence),
+            largest_seq: Some(sequence),
             ..Default::default()
         });
+}
+
+fn prepare_event_loop_test_compaction(
+    event_loop: &mut EventLoop,
+    input_ssts: &[String],
+) -> crate::common::MidgeResult<()> {
     event_loop
+        .actors
         .compaction_actor
-        .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))
+        .prepare_for_completion_test(&mut event_loop.state, input_ssts)
+}
+
+fn register_event_loop_test_response(
+    event_loop: &EventLoop,
+    request_id: u64,
+    operation: &'static str,
+) -> crossbeam::channel::Receiver<RuntimeResponse> {
+    event_loop.routing.router.register(request_id, operation)
+}
+
+fn register_event_loop_compaction_waiter(
+    event_loop: &mut EventLoop,
+    request_id: u64,
+) -> crossbeam::channel::Receiver<RuntimeResponse> {
+    let response = event_loop.routing.router.register(request_id, "CompactAll");
+    let deadline = event_loop
+        .routing
+        .router
+        .request_deadline(request_id, event_loop.routing.runtime_response_timeout)
+        .expect("manual compaction caller deadline");
+    event_loop
+        .state
+        .pending_compaction_waits
+        .insert(request_id, deadline);
+    response
+}
+
+fn assert_one_deferred_publication_message(event_loop: &EventLoop) {
+    assert_eq!(
+        event_loop
+            .publication
+            .publication_gate
+            .deferred_messages_len(),
+        1
+    );
+}
+
+#[test]
+fn should_defer_column_family_drop_until_compaction_publication_finishes() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let sst_dir = event_loop.state.host_sst_dir();
+    let cf_id = create_event_loop_test_column_family(&mut event_loop, "compacting");
+    let input_name = crate::cloud_layout::file_name(cf_id, 0, 1);
+    let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
+    let input_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"old", 1);
+    let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"new", 2);
+    std::fs::write(sst_dir.join(&input_name), &input_bytes).expect("write compaction input");
+    add_event_loop_test_sst_metadata(
+        &mut event_loop,
+        input_name.clone(),
+        0,
+        cf_id,
+        &input_bytes,
+        (b"key", b"key"),
+        1,
+    );
+    prepare_event_loop_test_compaction(&mut event_loop, std::slice::from_ref(&input_name))
         .expect("prepare active compaction fixture");
     let request_id = 8_155;
-    let response_rx = event_loop.router.register(request_id, "TestRequest");
+    let response_rx = register_event_loop_test_response(&event_loop, request_id, "TestRequest");
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act: the DDL arrives while the worker still owns its input set.
@@ -2153,36 +2487,27 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
     // Assert: publication must win the authority race before drop snapshots files.
     assert_eq!(outcome, HandleOutcome::Continue);
     assert!(response_rx.try_recv().is_err());
-    assert_eq!(event_loop.publication_gate.deferred_messages_len(), 1);
+    assert_one_deferred_publication_message(&event_loop);
     assert!(event_loop.state.get_cf(cf_id).is_some());
 
     // Arrange: simulate the serialized compaction authority switch.
-    std::fs::write(event_loop.state.sst_dir.join(&output_name), &output_bytes)
-        .expect("write compaction output");
+    std::fs::write(sst_dir.join(&output_name), &output_bytes).expect("write compaction output");
     event_loop
         .state
         .manifest
         .test_mut()
         .files
         .retain(|file| file.name != input_name);
-    event_loop
-        .state
-        .manifest
-        .test_mut()
-        .files
-        .push(crate::metadata::FileMeta {
-            name: output_name.clone(),
-            level: 1,
-            size_bytes: u64::try_from(output_bytes.len()).expect("output length"),
-            content_crc32c: Some(crc32c::crc32c(&output_bytes)),
-            cf_id,
-            smallest_key: Some(b"key".to_vec()),
-            largest_key: Some(b"key".to_vec()),
-            smallest_seq: Some(2),
-            largest_seq: Some(2),
-            ..Default::default()
-        });
-    event_loop.compaction_actor.handle_complete(
+    add_event_loop_test_sst_metadata(
+        &mut event_loop,
+        output_name.clone(),
+        1,
+        cf_id,
+        &output_bytes,
+        (b"key", b"key"),
+        2,
+    );
+    event_loop.actors.compaction_actor.handle_complete(
         &mut event_loop.state,
         std::slice::from_ref(&input_name),
         std::slice::from_ref(&output_name),
@@ -2191,6 +2516,7 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
     // Act: once publication is complete, process the deferred drop.
     event_loop.restore_publication_deferred_message();
     let deferred = event_loop
+        .routing
         .pending_msg
         .take()
         .expect("restored deferred drop");
@@ -2210,17 +2536,14 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
         .files
         .iter()
         .all(|file| file.cf_id != cf_id));
-    assert!(!event_loop.state.sst_dir.join(output_name).exists());
+    assert!(!sst_dir.join(output_name).exists());
 }
 
 #[test]
 fn should_restore_deferred_column_family_drop_before_emergent_compaction_followup() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    let cf_id = event_loop
-        .manifest_actor
-        .create_column_family(&mut event_loop.state, "drop-before-followup")
-        .expect("create column family");
+    let cf_id = create_event_loop_test_column_family(&mut event_loop, "drop-before-followup");
     let current_input = crate::cloud_layout::file_name(cf_id, 0, 1);
     let current_output = crate::cloud_layout::file_name(cf_id, 1, 10);
     for (name, key, sequence) in
@@ -2233,37 +2556,29 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
         }))
     {
         let bytes = valid_sst_bytes_for_event_loop_test(&[key], b"input", sequence);
-        std::fs::write(event_loop.state.sst_dir.join(&name), &bytes).expect("write input SST");
-        event_loop
-            .state
-            .manifest
-            .test_mut()
-            .files
-            .push(crate::metadata::FileMeta {
-                name,
-                level: 0,
-                size_bytes: u64::try_from(bytes.len()).expect("input length"),
-                content_crc32c: Some(crc32c::crc32c(&bytes)),
-                cf_id,
-                smallest_key: Some(vec![key]),
-                largest_key: Some(vec![key]),
-                smallest_seq: Some(sequence),
-                largest_seq: Some(sequence),
-                ..Default::default()
-            });
+        std::fs::write(event_loop.state.host_sst_dir().join(&name), &bytes)
+            .expect("write input SST");
+        add_event_loop_test_sst_metadata(
+            &mut event_loop,
+            name,
+            0,
+            cf_id,
+            &bytes,
+            (&[key], &[key]),
+            sequence,
+        );
     }
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"a", b"output", 10);
     std::fs::write(
-        event_loop.state.sst_dir.join(&current_output),
+        event_loop.state.host_sst_dir().join(&current_output),
         &output_bytes,
     )
     .expect("write completed output");
-    event_loop
-        .compaction_actor
-        .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&current_input))
+    prepare_event_loop_test_compaction(&mut event_loop, std::slice::from_ref(&current_input))
         .expect("prepare active compaction fixture");
     let drop_request_id = 8_157;
-    let drop_response = event_loop.router.register(drop_request_id, "TestRequest");
+    let drop_response =
+        register_event_loop_test_response(&event_loop, drop_request_id, "TestRequest");
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
     event_loop.handle_runtime_msg(
         RuntimeMsg::ManifestDropColumnFamily {
@@ -2273,7 +2588,7 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
         },
         &msg_rx,
     );
-    assert_eq!(event_loop.publication_gate.deferred_messages_len(), 1);
+    assert_one_deferred_publication_message(&event_loop);
 
     // Act
     event_loop.handle_runtime_msg(
@@ -2297,9 +2612,16 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
             .load(std::sync::atomic::Ordering::SeqCst),
         0
     );
-    assert_eq!(event_loop.publication_gate.deferred_messages_len(), 1);
+    assert_eq!(
+        event_loop
+            .publication
+            .publication_gate
+            .deferred_messages_len(),
+        1
+    );
     event_loop.restore_publication_deferred_message();
     let deferred = event_loop
+        .routing
         .pending_msg
         .take()
         .expect("drop should be restored before compaction followup");
@@ -2318,10 +2640,12 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let cf_id = event_loop
+        .actors
         .manifest_actor
         .create_column_family(&mut event_loop.state, "already-dropped")
         .expect("create column family");
     event_loop
+        .actors
         .manifest_actor
         .drop_column_family(&mut event_loop.state, cf_id)
         .expect("drop column family");
@@ -2329,20 +2653,31 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
     let input_name = crate::cloud_layout::file_name(cf_id, 0, 1);
     let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"value", 2);
-    std::fs::write(event_loop.state.sst_dir.join(&output_name), output_bytes)
-        .expect("write late compaction output");
+    std::fs::write(
+        event_loop.state.host_sst_dir().join(&output_name),
+        output_bytes,
+    )
+    .expect("write late compaction output");
     event_loop
+        .actors
         .compaction_actor
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))
         .expect("prepare active compaction fixture");
     let request_id = 8_156;
     let waiter_request_id = 8_161;
-    let response_rx = event_loop.router.register(waiter_request_id, "CompactAll");
+    let response_rx = event_loop
+        .routing
+        .router
+        .register(waiter_request_id, "CompactAll");
     event_loop.state.pending_compaction_waits.insert(
         waiter_request_id,
         event_loop
+            .routing
             .router
-            .request_deadline(waiter_request_id, event_loop.runtime_response_timeout)
+            .request_deadline(
+                waiter_request_id,
+                event_loop.routing.runtime_response_timeout,
+            )
             .expect("manual compaction caller deadline"),
     );
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -2367,7 +2702,7 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
             .expect("late completion response"),
         RuntimeResponse::Error { .. }
     ));
-    assert!(!event_loop.state.sst_dir.join(&output_name).exists());
+    assert!(!event_loop.state.host_sst_dir().join(&output_name).exists());
     assert!(event_loop
         .state
         .manifest
@@ -2383,7 +2718,10 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
     let mut event_loop = create_test_local_event_loop()?;
     let input_name = crate::cloud_layout::file_name(0, 0, 1);
     let input_bytes = valid_sst_bytes_for_event_loop_test(b"input", b"value", 1);
-    std::fs::write(event_loop.state.sst_dir.join(&input_name), &input_bytes)?;
+    std::fs::write(
+        event_loop.state.host_sst_dir().join(&input_name),
+        &input_bytes,
+    )?;
     event_loop
         .state
         .manifest
@@ -2405,19 +2743,33 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
     let second_name = crate::cloud_layout::compaction_file_name(0, 1, 2, 1);
     let first_bytes = valid_sst_bytes_for_event_loop_test(b"a", b"first", 2);
     let second_bytes = valid_sst_bytes_for_event_loop_test(b"z", b"second", 2);
-    std::fs::write(event_loop.state.sst_dir.join(&first_name), first_bytes)?;
-    std::fs::write(event_loop.state.sst_dir.join(&second_name), second_bytes)?;
+    std::fs::write(
+        event_loop.state.host_sst_dir().join(&first_name),
+        first_bytes,
+    )?;
+    std::fs::write(
+        event_loop.state.host_sst_dir().join(&second_name),
+        second_bytes,
+    )?;
     event_loop
+        .actors
         .compaction_actor
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))?;
     let request_id = 8_159;
     let waiter_request_id = 8_162;
-    let response_rx = event_loop.router.register(waiter_request_id, "CompactAll");
+    let response_rx = event_loop
+        .routing
+        .router
+        .register(waiter_request_id, "CompactAll");
     event_loop.state.pending_compaction_waits.insert(
         waiter_request_id,
         event_loop
+            .routing
             .router
-            .request_deadline(waiter_request_id, event_loop.runtime_response_timeout)
+            .request_deadline(
+                waiter_request_id,
+                event_loop.routing.runtime_response_timeout,
+            )
             .expect("manual compaction caller deadline"),
     );
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -2451,15 +2803,15 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
     assert!(!event_loop.state.manifest_has_file(&second_name));
     assert!(event_loop.state.intent_log.is_empty());
     for _ in 0..100 {
-        if !event_loop.state.sst_dir.join(&first_name).exists()
-            && !event_loop.state.sst_dir.join(&second_name).exists()
+        if !event_loop.state.host_sst_dir().join(&first_name).exists()
+            && !event_loop.state.host_sst_dir().join(&second_name).exists()
         {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert!(!event_loop.state.sst_dir.join(first_name).exists());
-    assert!(!event_loop.state.sst_dir.join(second_name).exists());
+    assert!(!event_loop.state.host_sst_dir().join(first_name).exists());
+    assert!(!event_loop.state.host_sst_dir().join(second_name).exists());
     Ok(())
 }
 
@@ -2468,6 +2820,7 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
+    let sst_dir = event_loop.state.host_sst_dir();
     let source_name = crate::cloud_layout::file_name(0, 0, 1);
     let selected_target = crate::cloud_layout::file_name(0, 1, 2);
     let concurrent_target = crate::cloud_layout::file_name(0, 1, 3);
@@ -2477,58 +2830,29 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
         (&concurrent_target, 1, b'y', b'n', b'z', 3_u64),
     ] {
         let bytes = valid_sst_bytes_for_event_loop_test(&[key], b"value", sequence);
-        std::fs::write(event_loop.state.sst_dir.join(name), &bytes)?;
-        event_loop
-            .state
-            .manifest
-            .test_mut()
-            .files
-            .push(crate::metadata::FileMeta {
-                name: name.clone(),
-                level,
-                size_bytes: u64::try_from(bytes.len()).expect("input length fits u64"),
-                content_crc32c: Some(crc32c::crc32c(&bytes)),
-                cf_id: 0,
-                smallest_key: Some(vec![smallest]),
-                largest_key: Some(vec![largest]),
-                smallest_seq: Some(sequence),
-                largest_seq: Some(sequence),
-                ..Default::default()
-            });
+        std::fs::write(sst_dir.join(name), &bytes)?;
+        add_event_loop_test_sst_metadata(
+            &mut event_loop,
+            name.clone(),
+            level,
+            0,
+            &bytes,
+            (&[smallest], &[largest]),
+            sequence,
+        );
     }
     let output_name = crate::cloud_layout::compaction_file_name(0, 1, 4, 0);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"m", b"replacement", 4);
-    std::fs::write(event_loop.state.sst_dir.join(&output_name), output_bytes)?;
+    std::fs::write(sst_dir.join(&output_name), output_bytes)?;
     let captured_inputs = vec![source_name.clone(), selected_target.clone()];
-    event_loop
-        .compaction_actor
-        .prepare_for_completion_test(&mut event_loop.state, &captured_inputs)?;
+    prepare_event_loop_test_compaction(&mut event_loop, &captured_inputs)?;
     let request_id = 8_160;
     let second_waiter_request_id = 8_164;
-    let response_rx = event_loop
-        .router
-        .register(second_waiter_request_id, "CompactAll");
-    event_loop.state.pending_compaction_waits.insert(
-        second_waiter_request_id,
-        event_loop
-            .router
-            .request_deadline(
-                second_waiter_request_id,
-                event_loop.runtime_response_timeout,
-            )
-            .expect("second manual compaction caller deadline"),
-    );
+    let response_rx =
+        register_event_loop_compaction_waiter(&mut event_loop, second_waiter_request_id);
     let compact_all_request_id = 8_163;
-    let compact_all_rx = event_loop
-        .router
-        .register(compact_all_request_id, "CompactAll");
-    event_loop.state.pending_compaction_waits.insert(
-        compact_all_request_id,
-        event_loop
-            .router
-            .request_deadline(compact_all_request_id, event_loop.runtime_response_timeout)
-            .unwrap(),
-    );
+    let compact_all_rx =
+        register_event_loop_compaction_waiter(&mut event_loop, compact_all_request_id);
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -2592,22 +2916,31 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
             ..Default::default()
         });
     event_loop
+        .actors
         .compaction_actor
         .prepare_for_completion_test(&mut event_loop.state, std::slice::from_ref(&input_name))?;
     let compact_all_request_id = 8_161;
     let response_rx = event_loop
+        .routing
         .router
         .register(compact_all_request_id, "CompactAll");
     event_loop.state.pending_compaction_waits.insert(
         compact_all_request_id,
         event_loop
+            .routing
             .router
-            .request_deadline(compact_all_request_id, event_loop.runtime_response_timeout)
+            .request_deadline(
+                compact_all_request_id,
+                event_loop.routing.runtime_response_timeout,
+            )
             .unwrap(),
     );
-    event_loop.compaction_actor.set_worker_error_for_test(
-        crate::common::MidgeError::ResourceLimit("compaction pool exhausted".to_string()),
-    );
+    event_loop
+        .actors
+        .compaction_actor
+        .set_worker_error_for_test(crate::common::MidgeError::ResourceLimit(
+            "compaction pool exhausted".to_string(),
+        ));
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
@@ -2655,17 +2988,24 @@ fn should_reject_cloud_partition_read_before_exceeding_compaction_pool(
 
     let hybrid = crate::storage::HybridStorage::with_policy(
         Arc::new(crate::storage::filesystem::FileSystem::new(
-            temp_dir.path().join("local"),
-        )?),
-        Arc::new(crate::storage::filesystem::FileSystem::new(
             temp_dir.path().join("cloud"),
         )?),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
 
+    let source = crate::io::RealFs::new(temp_dir.path()).map_err(crate::io::FsError::into_midge)?;
+
     // Act
-    let result =
-        hybrid.publish_immutable_file("sst/oversized-partition.sst", &path, 128, 0, &budget);
+    let result = hybrid.publish_immutable_file(
+        crate::storage::hybrid::backend::ImmutableFileSource {
+            key: "sst/oversized-partition.sst",
+            fs: &source,
+            path: &crate::io::FsPath::new("oversized-partition.sst"),
+            size: 128,
+            checksum: 0,
+        },
+        &budget,
+    );
 
     // Assert
     assert!(matches!(
@@ -2683,12 +3023,15 @@ fn should_reject_sst_checksum_buffer_before_exceeding_compaction_pool(
     let temp_dir = tempfile::tempdir()?;
     let path = temp_dir.path().join("checksum-input.sst");
     std::fs::write(&path, [1u8; 128])?;
+    let fs = crate::io::real::test_root(temp_dir.path());
     let budget = crate::common::resource_budget::ResourceBudget::new(64);
 
     // Act
     let result =
         crate::runtime::actors::compaction::publication::checksummed_file_crc_for_publication_test(
-            &path, &budget,
+            &fs,
+            std::path::Path::new("checksum-input.sst"),
+            &budget,
         );
 
     // Assert
@@ -2715,7 +3058,7 @@ fn should_count_late_response_given_inline_route_when_caller_already_gave_up() {
 
     // Assert
     assert_eq!(
-        event_loop.router.late_responses_total(),
+        event_loop.routing.router.late_responses_total(),
         1,
         "a discarded inline response must still be visible to operators"
     );
@@ -2737,7 +3080,7 @@ fn should_not_count_late_response_given_inline_route_when_caller_is_still_waitin
         response_rx.try_recv(),
         Ok(RuntimeResponse::Ok { .. })
     ));
-    assert_eq!(event_loop.router.late_responses_total(), 0);
+    assert_eq!(event_loop.routing.router.late_responses_total(), 0);
 }
 
 #[test]
@@ -2768,9 +3111,10 @@ fn should_restore_compaction_completion_deferred_behind_waiting_cf_drop() {
             succeeded: false,
         },
     ] {
-        event_loop.publication_gate.defer(message);
+        event_loop.publication.publication_gate.defer(message);
     }
     event_loop
+        .publication
         .publication_gate
         .release(&crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
 
@@ -2780,7 +3124,7 @@ fn should_restore_compaction_completion_deferred_behind_waiting_cf_drop() {
     // Assert
     assert!(
         matches!(
-            event_loop.pending_msg,
+            event_loop.routing.pending_msg,
             Some(RuntimeMsg::CompactionComplete {
                 request_id: 3453,
                 ..
@@ -2788,7 +3132,10 @@ fn should_restore_compaction_completion_deferred_behind_waiting_cf_drop() {
         ),
         "the completion that drains the pipeline must not wait behind the drop"
     );
-    let remaining = event_loop.publication_gate.deferred_request_ids();
+    let remaining = event_loop
+        .publication
+        .publication_gate
+        .deferred_request_ids();
     assert_eq!(
         remaining,
         vec![Some(3451), Some(3452)],
@@ -2812,6 +3159,7 @@ fn should_wait_in_select_when_queued_flush_cannot_start() -> crate::common::Midg
     event_loop.freeze_active_memtable(0)?;
     assert!(event_loop.state.has_due_immutable_flush());
     event_loop
+        .publication
         .publication_gate
         .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
 
@@ -2835,7 +3183,7 @@ fn should_fsync_batched_wal_while_verification_barrier_is_held() -> crate::commo
     // still run once the batch window elapses, or a crash during a long
     // verification loses writes that should already be durable.
     let mut event_loop = create_test_local_event_loop()?;
-    event_loop.wal_actor.append_single_op(
+    event_loop.actors.wal_actor.append_single_op(
         &mut event_loop.state,
         crate::runtime::actors::wal::AppendParams {
             request_id: 1,
@@ -2846,9 +3194,10 @@ fn should_fsync_batched_wal_while_verification_barrier_is_held() -> crate::commo
             ttl_seconds: None,
         },
     )?;
-    assert!(event_loop.wal_actor.has_pending_data());
-    assert!(event_loop.verification_barrier.activate(7));
+    assert!(event_loop.actors.wal_actor.has_pending_data());
+    assert!(event_loop.publication.verification_barrier.activate(7));
     let window = event_loop
+        .actors
         .wal_actor
         .sync_deadline_timeout()
         .unwrap_or_default();
@@ -2865,10 +3214,10 @@ fn should_fsync_batched_wal_while_verification_barrier_is_held() -> crate::commo
         "a due batched sync is actionable under the barrier"
     );
     assert!(
-        !event_loop.wal_actor.has_pending_data(),
+        !event_loop.actors.wal_actor.has_pending_data(),
         "the batched WAL must be synced while verification holds the barrier"
     );
-    assert!(event_loop.verification_barrier.is_active());
+    assert!(event_loop.publication.verification_barrier.is_active());
     Ok(())
 }
 
@@ -2880,6 +3229,7 @@ fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
         crate::runtime::snapshot_cache::SnapshotCache::new(),
     ));
     let read_resources = event_loop
+        .authority
         .read_resources
         .clone()
         .expect("local runtime should construct read resources");

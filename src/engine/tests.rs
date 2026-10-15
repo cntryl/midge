@@ -36,6 +36,7 @@ fn install_underfull_overlap_fixture(
     ];
     let mut manifest = crate::metadata::ManifestPersistence::load(directory)
         .map_err(crate::common::MidgeError::Internal)?;
+    let mut flush_edits = Vec::new();
     for (name, rows) in entries {
         let mut writer = factory.create()?;
         for &(key, value, sequence) in &rows {
@@ -46,25 +47,31 @@ fn install_underfull_overlap_fixture(
         }
         writer.finish_to_path(&sst_dir.join(name))?;
         let bytes = std::fs::read(sst_dir.join(name))?;
-        manifest.add_file(crate::metadata::FileMeta {
-            name: name.clone(),
-            level: 1,
-            size_bytes: u64::try_from(bytes.len()).expect("fixture SST size fits u64"),
-            content_crc32c: Some(crc32c::crc32c(&bytes)),
-            cf_id: 0,
-            smallest_key: Some(rows.first().expect("fixture row").0.to_vec()),
-            largest_key: Some(rows.last().expect("fixture row").0.to_vec()),
-            smallest_seq: rows.iter().map(|row| row.2).min(),
-            largest_seq: rows
-                .iter()
-                .map(|row| row.2)
-                .chain((name == &names[0]).then_some(2))
-                .max(),
-            key_bounds_complete: true,
-            ..Default::default()
-        });
+        flush_edits.push(crate::metadata::ManifestEdit::AddSst(
+            crate::metadata::FileMeta {
+                name: name.clone(),
+                level: 1,
+                size_bytes: u64::try_from(bytes.len()).expect("fixture SST size fits u64"),
+                content_crc32c: Some(crc32c::crc32c(&bytes)),
+                cf_id: 0,
+                smallest_key: Some(rows.first().expect("fixture row").0.to_vec()),
+                largest_key: Some(rows.last().expect("fixture row").0.to_vec()),
+                smallest_seq: rows.iter().map(|row| row.2).min(),
+                largest_seq: rows
+                    .iter()
+                    .map(|row| row.2)
+                    .chain((name == &names[0]).then_some(2))
+                    .max(),
+                key_bounds_complete: true,
+                ..Default::default()
+            },
+        ));
     }
-    manifest.last_persisted_sequence = 3;
+    flush_edits.push(crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+        cf_id: 0,
+        freeze_sequence: 3,
+    });
+    manifest.apply_edit(&crate::metadata::ManifestEdit::Batch(flush_edits))?;
     manifest.next_sst_seqs.insert(0, 4);
     crate::metadata::ManifestPersistence::save(directory, &manifest)
         .map_err(crate::common::MidgeError::Internal)?;
@@ -392,10 +399,13 @@ fn install_blocking_renewal_lease(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let healthy = heartbeat.healthy_flag();
     heartbeat.stop();
-    if let Some(original_lease) = engine.lease_state.lease.take() {
-        original_lease.release()?;
+    // Keep the filesystem writer record current while replacing only the
+    // heartbeat used by this test. Releasing it would correctly fence every
+    // later WAL effect through the runtime's still-installed leader store.
+    drop(engine.lease_state.lease.take());
+    if let Some(guard) = engine.lease_state.guard.take() {
+        guard.disarm_for_test();
     }
-    engine.lease_state.guard.take();
 
     let lease_guard = Arc::clone(lease).try_acquire()?;
     let engine_lease: Arc<dyn crate::lease::PrimaryLease> = lease.clone();
@@ -418,7 +428,19 @@ fn should_bound_shutdown_when_primary_lease_release_blocks() -> MidgeResult<()> 
     let lease_heartbeat = engine.lease_state.heartbeat.take();
     let lease = engine.lease_state.lease.take();
     let lease_guard = engine.lease_state.guard.take();
-    super::LeaseState::release_fencing_parts(lease_heartbeat, lease, lease_guard, None)?;
+    if let Some(heartbeat) = lease_heartbeat {
+        let mut heartbeat = heartbeat
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        heartbeat.stop();
+    }
+    // This fixture replaces the PrimaryLease implementation while the WAL
+    // actor keeps using the engine's filesystem LeaderStore. Retain its
+    // current epoch for the later shutdown retry; the temp directory owns it.
+    drop(lease);
+    if let Some(lease_guard) = lease_guard {
+        lease_guard.disarm_for_test();
+    }
 
     let blocking_lease = Arc::new(BlockingReleaseLease::default());
     let lease_guard = Arc::clone(&blocking_lease).try_acquire()?;
@@ -874,29 +896,35 @@ fn should_preserve_partitioned_compaction_across_simulated_cloud_reopen() -> Mid
 }
 
 #[test]
-fn should_sweep_legacy_local_sst_before_retiring_local_backend() -> MidgeResult<()> {
+fn should_evict_resident_sst_copy_when_remote_publication_is_proven() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir().map_err(MidgeError::Io)?;
-    let options = || OpenOptions::cloud_simulated(directory.path(), "legacy", "sweep").build();
+    let options = || OpenOptions::cloud_simulated(directory.path(), "resident", "evict").build();
     let mut engine = Engine::open(options()?)?;
     let cf = engine.get_column_family("default").expect("default CF");
     let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
-    tx.put(b"legacy-key".to_vec(), b"value".to_vec(), None)?;
+    tx.put(b"resident-key".to_vec(), b"value".to_vec(), None)?;
     tx.commit(WriteOptions::cloud_strict())?;
     engine.flush_cf(&cf)?;
     engine.shutdown(Duration::from_secs(5))?;
     let manifest =
         crate::metadata::ManifestPersistence::load(directory.path()).expect("read checkpoint");
     let name = &manifest.files.first().expect("flushed SST").name;
-    let legacy = directory.path().join("hybrid_local/sst").join(name);
-    std::fs::create_dir_all(legacy.parent().expect("legacy SST directory"))?;
-    std::fs::copy(directory.path().join("cloud_store/sst").join(name), &legacy)?;
+    let resident = directory.path().join("sst").join(name);
+    std::fs::create_dir_all(resident.parent().expect("resident SST directory"))?;
+    std::fs::copy(
+        directory.path().join("cloud_store/sst").join(name),
+        &resident,
+    )?;
 
     // Act
     let mut reopened = Engine::open(options()?)?;
 
     // Assert
-    assert!(!legacy.exists(), "startup must sweep the legacy local copy");
+    assert!(
+        !resident.exists(),
+        "startup must evict a resident copy whose remote publication is proven"
+    );
     reopened.shutdown(Duration::from_secs(5))
 }
 
@@ -906,55 +934,15 @@ fn cloud_wal_test_bytes(sequence: u64, writer_epoch: u64, key: &'static [u8]) ->
         bytes::Bytes::from_static(key),
         Some(bytes::Bytes::from_static(b"value")),
         sequence,
-        writer_epoch,
     );
-    let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
-    let mut bytes = Vec::new();
-    crate::wal::frame::append_frame(&mut bytes, &payload).expect("frame WAL record");
-    bytes
-}
-
-#[test]
-fn should_reject_legacy_segment_only_cloud_wal_without_catalog() {
-    // Arrange
-    let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-    let cloud = crate::storage::cloud::CloudStorage::new(backend, "midge".to_string());
-    Engine::blocking_cloud_put(&cloud, "wal/1.wal", cloud_wal_test_bytes(1, 1, b"legacy"))
-        .expect("upload legacy WAL alias");
-
-    // Act
-    let result =
-        crate::runtime::cloud_startup::CloudStartupRecovery::reject_cloud_wal_without_catalog(
-            &cloud,
-        );
-
-    // Assert
-    assert!(matches!(
-        result,
-        Err(crate::common::MidgeError::RecoveryFailed(message))
-            if message.contains("publication catalog format v1")
-    ));
-}
-
-#[test]
-fn should_reject_legacy_segment_only_simulated_cloud_wal_without_catalog() {
-    // Arrange
-    let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let cloud_wal_dir = temp_dir.path().join("cloud_store").join("wal");
-    std::fs::create_dir_all(&cloud_wal_dir).expect("create simulated cloud WAL directory");
-    std::fs::write(cloud_wal_dir.join("wal_000001.log"), b"legacy")
-        .expect("write legacy WAL alias");
-
-    // Act
-    let result =
-        crate::runtime::cloud_startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
-
-    // Assert
-    assert!(matches!(
-        result,
-        Err(crate::common::MidgeError::RecoveryFailed(message))
-            if message.contains("publication catalog format v1")
-    ));
+    crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        writer_epoch,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&record)
+    .seal()
+    .0
 }
 
 #[test]
@@ -965,15 +953,19 @@ fn should_reject_epoch_scoped_simulated_cloud_wal_without_catalog() {
     let orphan_path = cloud_wal_dir
         .join("epochs")
         .join("00000000000000000007")
-        .join(crate::wal::cloud_segment_file_name(1));
+        .join(crate::wal::segment_file_name(1));
     std::fs::create_dir_all(orphan_path.parent().expect("epoch WAL parent"))
         .expect("create epoch WAL directory");
     std::fs::write(orphan_path, cloud_wal_test_bytes(1, 7, b"untracked"))
         .expect("write untracked epoch WAL object");
+    let store = crate::storage::filesystem::FileSystem::new(temp_dir.path().join("cloud_store"))
+        .expect("simulated cloud store");
 
     // Act
     let result =
-        crate::runtime::cloud_startup::CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(&cloud_wal_dir);
+        crate::runtime::cloud_startup::CloudStartupRecovery::reject_cloud_wal_without_catalog(
+            &store, None,
+        );
 
     // Assert
     assert!(matches!(
@@ -1004,6 +996,12 @@ fn provider_metadata_test_lease(
     lease
 }
 
+fn manifest_at_horizon(horizon: u64) -> crate::metadata::Manifest {
+    let mut manifest = crate::metadata::Manifest::default();
+    manifest.edit_checkpoint_id = horizon;
+    manifest
+}
+
 fn publish_test_metadata_generation(
     cloud: &crate::storage::cloud::CloudStorage,
     lease: &crate::lease::CloudStorageLease,
@@ -1013,7 +1011,7 @@ fn publish_test_metadata_generation(
     publish_test_metadata_bodies(
         cloud,
         lease,
-        manifest.last_persisted_sequence,
+        manifest.edit_checkpoint_id,
         format_marker,
         serde_json::to_vec_pretty(manifest).expect("serialize test manifest"),
     )
@@ -1022,7 +1020,7 @@ fn publish_test_metadata_generation(
 fn publish_test_metadata_bodies(
     cloud: &crate::storage::cloud::CloudStorage,
     lease: &crate::lease::CloudStorageLease,
-    manifest_sequence: u64,
+    manifest_horizon: u64,
     format_marker: Vec<u8>,
     snapshot: Vec<u8>,
 ) -> crate::lease::CloudMetadataGeneration {
@@ -1046,7 +1044,8 @@ fn publish_test_metadata_bodies(
         })
         .collect();
     let generation = crate::lease::CloudMetadataGeneration {
-        manifest_sequence,
+        id: crate::lease::SharedGenerationId::FIRST,
+        manifest_horizon,
         objects,
     };
     lease
@@ -1078,18 +1077,15 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let local_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 20,
-        ..Default::default()
-    };
-    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
-        .expect("write local format marker");
+    let local_manifest = manifest_at_horizon(20);
+    crate::metadata::ensure_or_create_format_marker(
+        &crate::io::real::test_root(temp_dir.path()),
+        temp_dir.path(),
+    )
+    .expect("write local format marker");
     crate::metadata::ManifestPersistence::save(temp_dir.path(), &local_manifest)
         .expect("save local manifest");
-    let remote_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 21,
-        ..Default::default()
-    };
+    let remote_manifest = manifest_at_horizon(21);
     let generation = publish_test_metadata_generation(
         &cloud,
         &lease,
@@ -1115,7 +1111,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
     )
     .expect("parse retained remote manifest");
     assert_eq!(
-        retained.last_persisted_sequence, 21,
+        retained.edit_checkpoint_id, 21,
         "engine metadata mirror must not overwrite newer remote manifest"
     );
 }
@@ -1127,8 +1123,11 @@ fn should_not_rewrite_unchanged_cloud_metadata_during_engine_mirror() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend.clone());
-    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
-        .expect("write local format marker");
+    crate::metadata::ensure_or_create_format_marker(
+        &crate::io::real::test_root(temp_dir.path()),
+        temp_dir.path(),
+    )
+    .expect("write local format marker");
     crate::metadata::ManifestPersistence::save(
         temp_dir.path(),
         &crate::metadata::Manifest::default(),
@@ -1151,10 +1150,14 @@ fn should_not_rewrite_unchanged_cloud_metadata_during_engine_mirror() {
 
 #[test]
 fn should_not_commit_manifest_when_format_marker_upload_fails_under_salvage() {
-    // Arrange: a local FORMAT 4 upgrade must reach cloud before its manifest.
+    // Arrange: a local FORMAT marker newer than the cloud copy must reach
+    // cloud before its manifest.
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
-        .expect("create FORMAT 4 marker");
+    crate::metadata::ensure_or_create_format_marker(
+        &crate::io::real::test_root(temp_dir.path()),
+        temp_dir.path(),
+    )
+    .expect("create the current FORMAT marker");
     crate::metadata::ManifestPersistence::save(
         temp_dir.path(),
         &crate::metadata::Manifest::default(),
@@ -1207,9 +1210,11 @@ struct FormatPutFailBackend {
     inner: Arc<crate::storage::cloud::MockCloudBackend>,
 }
 
-impl crate::storage::cloud::CloudBackend for FormatPutFailBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list, submit_head);
+impl crate::storage::cloud::CloudReadCapability for FormatPutFailBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
 
+impl crate::storage::cloud::CloudWriteCapability for FormatPutFailBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -1232,6 +1237,20 @@ impl crate::storage::cloud::CloudBackend for FormatPutFailBackend {
     }
 }
 
+impl crate::storage::cloud::CloudDeleteCapability for FormatPutFailBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for FormatPutFailBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for FormatPutFailBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for FormatPutFailBackend {}
+
 #[test]
 fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() {
     // Arrange
@@ -1243,10 +1262,7 @@ fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() 
     ));
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let remote_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 42,
-        ..Default::default()
-    };
+    let remote_manifest = manifest_at_horizon(42);
     publish_test_metadata_generation(
         &cloud,
         &lease,
@@ -1262,7 +1278,7 @@ fn should_hydrate_cloud_metadata_when_listing_is_stale_but_object_is_readable() 
     // Act
     // Assert
     assert_eq!(
-        hydrated.last_persisted_sequence, 42,
+        hydrated.edit_checkpoint_id, 42,
         "metadata hydration must probe known metadata keys directly"
     );
 }
@@ -1274,14 +1290,8 @@ fn should_ignore_stale_manifest_json_during_strict_cloud_recovery() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let snapshot_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 10,
-        ..Default::default()
-    };
-    let current_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 11,
-        ..Default::default()
-    };
+    let snapshot_manifest = manifest_at_horizon(10);
+    let current_manifest = manifest_at_horizon(11);
     publish_test_metadata_generation(
         &cloud,
         &lease,
@@ -1302,7 +1312,7 @@ fn should_ignore_stale_manifest_json_during_strict_cloud_recovery() {
 
     // Act
     // Assert
-    assert_eq!(recovered.last_persisted_sequence, 10);
+    assert_eq!(recovered.edit_checkpoint_id, 10);
     assert!(!temp_dir.path().join("manifest.json").exists());
 }
 
@@ -1313,14 +1323,8 @@ fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let snapshot_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 10,
-        ..Default::default()
-    };
-    let current_manifest = crate::metadata::Manifest {
-        last_persisted_sequence: 11,
-        ..Default::default()
-    };
+    let snapshot_manifest = manifest_at_horizon(10);
+    let current_manifest = manifest_at_horizon(11);
     publish_test_metadata_generation(
         &cloud,
         &lease,
@@ -1342,7 +1346,7 @@ fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
     // Act
     // Assert
     assert_eq!(
-        hydrated.last_persisted_sequence, 10,
+        hydrated.edit_checkpoint_id, 10,
         "legacy manifest mirror must not override the snapshot"
     );
 }
@@ -1354,10 +1358,7 @@ fn should_recover_cloud_database_when_manifest_json_is_absent() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let snapshot = crate::metadata::Manifest {
-        last_persisted_sequence: 42,
-        ..Default::default()
-    };
+    let snapshot = manifest_at_horizon(42);
     publish_test_metadata_generation(&cloud, &lease, &snapshot, current_test_format_marker());
 
     // Act
@@ -1367,7 +1368,7 @@ fn should_recover_cloud_database_when_manifest_json_is_absent() {
         .expect("recover hydrated snapshot");
 
     // Assert
-    assert_eq!(recovered.last_persisted_sequence, 42);
+    assert_eq!(recovered.edit_checkpoint_id, 42);
     assert!(!temp_dir.path().join("manifest.json").exists());
 }
 
@@ -1410,10 +1411,7 @@ fn should_reject_missing_or_corrupt_committed_cloud_metadata_in_every_recovery_p
             let cloud =
                 crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
             let lease = provider_metadata_test_lease(backend);
-            let manifest = crate::metadata::Manifest {
-                last_persisted_sequence: 42,
-                ..Default::default()
-            };
+            let manifest = manifest_at_horizon(42);
             let generation = publish_test_metadata_generation(
                 &cloud,
                 &lease,
@@ -1449,7 +1447,10 @@ fn should_reject_missing_or_corrupt_committed_cloud_metadata_in_every_recovery_p
             let result = Engine::hydrate_cloud_metadata(&cloud, &lease, temp_dir.path(), policy);
 
             // Assert
-            assert!(matches!(result, Err(MidgeError::RecoveryFailed(_))));
+            assert!(
+                matches!(result, Err(MidgeError::Corruption(_))),
+                "committed metadata damage must fail closed: {result:?}"
+            );
             assert!(
                 !temp_dir.path().join("manifest.snapshot.json").exists(),
                 "a rejected generation must not install metadata locally"
@@ -1494,10 +1495,7 @@ fn should_reject_legacy_cloud_mirror_when_authoritative_snapshot_is_missing() {
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
-    let legacy = crate::metadata::Manifest {
-        last_persisted_sequence: 42,
-        ..Default::default()
-    };
+    let legacy = manifest_at_horizon(42);
     Engine::blocking_cloud_put(
         &cloud,
         "metadata/manifest.json",
@@ -1521,8 +1519,11 @@ fn should_reject_legacy_cloud_mirror_when_authoritative_snapshot_is_missing() {
 fn should_reject_reused_local_metadata_cache_without_committed_cloud_generation() {
     // Arrange: an uncommitted pointer is only valid for an empty database.
     let temp_dir = tempfile::tempdir().expect("create cache directory");
-    crate::metadata::ensure_or_create_format_marker(temp_dir.path())
-        .expect("write stale local format marker");
+    crate::metadata::ensure_or_create_format_marker(
+        &crate::io::real::test_root(temp_dir.path()),
+        temp_dir.path(),
+    )
+    .expect("write stale local format marker");
     let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
     let cloud = crate::storage::cloud::CloudStorage::new(backend.clone(), "midge".to_string());
     let lease = provider_metadata_test_lease(backend);
@@ -1554,8 +1555,8 @@ impl ListOmittingCloudBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_put, submit_get_range, submit_get_range_with_identity, submit_delete);
+impl crate::storage::cloud::CloudReadCapability for ListOmittingCloudBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range, submit_get_range_with_identity);
 
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         self.full_reads
@@ -1568,7 +1569,17 @@ impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner.submit_get_with_metadata(key, callback);
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for ListOmittingCloudBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for ListOmittingCloudBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for ListOmittingCloudBackend {
     fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
         if prefix.ends_with(&self.omitted_prefix) {
             let _ = callback.send(crate::storage::cloud::CloudEvent::List {
@@ -1579,9 +1590,13 @@ impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {
         }
         self.inner.submit_list(prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for ListOmittingCloudBackend {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
 }
+
+impl crate::storage::cloud::CloudBackend for ListOmittingCloudBackend {}
 
 fn test_sst_bytes_with_key_value(key: &[u8], value: &[u8]) -> Vec<u8> {
     use crate::sst::traits::SstFactory;
@@ -1613,7 +1628,7 @@ fn same_size_sst_with_different_crc(bytes: &[u8]) -> Vec<u8> {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let path = temp_dir.path().join("changed.sst");
     std::fs::write(&path, &changed).expect("write changed SST");
-    crate::sst::fs::SstFileIo::open_with_real_fs(&path)
+    crate::sst::fs::SstFileIo::open("changed.sst", crate::io::real::test_root(temp_dir.path()))
         .expect("changed same-size SST should remain structurally readable");
 
     changed
@@ -1629,12 +1644,9 @@ fn cloud_with_stale_sst_listing() -> crate::storage::cloud::CloudStorage {
 fn should_leave_manifest_sst_remote_when_recovery_only_checks_cloud_metadata() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 42);
     let sst_bytes = test_sst_bytes();
     state
@@ -1661,13 +1673,13 @@ fn should_leave_manifest_sst_remote_when_recovery_only_checks_cloud_metadata() {
     .expect("upload test sst");
 
     // Act
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("validate cloud SST inventory");
     let intent_proofs = Engine::cloud_recovery_sst_proofs_for_intent_replay(&state);
 
     // Assert
     assert!(
-        !state.sst_dir.join(&sst_name).exists(),
+        !state.host_sst_dir().join(&sst_name).exists(),
         "startup must leave ordinary manifest SSTs in object storage"
     );
     assert!(
@@ -1682,12 +1694,9 @@ fn should_leave_manifest_sst_remote_when_recovery_only_checks_cloud_metadata() {
 fn should_exclude_unrelated_manifest_inventory_when_staging_interrupted_publications() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     state
         .manifest
         .test_mut()
@@ -1732,12 +1741,9 @@ fn should_exclude_unrelated_manifest_inventory_when_staging_interrupted_publicat
 fn should_validate_remote_only_manifest_sst_when_cloud_listing_is_stale() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 1);
     let sst_bytes = test_sst_bytes();
     state
@@ -1764,13 +1770,13 @@ fn should_validate_remote_only_manifest_sst_when_cloud_listing_is_stale() {
     )
     .expect("upload test sst");
 
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("stale list should not make readable manifest SST unrecoverable");
 
     // Act
     // Assert
     assert!(
-        !state.sst_dir.join(&sst_name).exists(),
+        !state.host_sst_dir().join(&sst_name).exists(),
         "readable cloud SST must stay remote despite stale LIST"
     );
 }
@@ -1779,12 +1785,9 @@ fn should_validate_remote_only_manifest_sst_when_cloud_listing_is_stale() {
 fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 3);
     let committed_sst_bytes = test_sst_bytes_with_value(b"manifest-sized-value");
     let wrong_sst_bytes = test_sst_bytes_with_value(b"different-cloud-object-bytes");
@@ -1819,7 +1822,7 @@ fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
     )
     .expect("upload wrong-sized but structurally valid test sst");
 
-    let error = Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    let error = Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect_err("strict recovery must reject wrong-sized authoritative cloud SST");
 
     assert!(
@@ -1827,7 +1830,7 @@ fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
         "unexpected wrong-sized cloud SST recovery error: {error}"
     );
     assert!(
-        !state.sst_dir.join(&sst_name).exists(),
+        !state.host_sst_dir().join(&sst_name).exists(),
         "wrong-sized cloud SST must not be installed into the local cache"
     );
 }
@@ -1836,12 +1839,9 @@ fn should_reject_manifest_sst_when_cloud_object_size_differs_from_manifest() {
 fn should_defer_manifest_sst_body_checksum_until_blocks_are_read() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 4);
     let wrong_sst_bytes = test_sst_bytes();
     let expected_crc = crc32c::crc32c(&wrong_sst_bytes) ^ 0xffff_ffff;
@@ -1870,13 +1870,13 @@ fn should_defer_manifest_sst_body_checksum_until_blocks_are_read() {
     )
     .expect("upload same-sized but wrong-content test sst");
 
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("startup validates object metadata without scanning the SST body");
 
     // Act
     // Assert
     assert!(
-        !state.sst_dir.join(&sst_name).exists(),
+        !state.host_sst_dir().join(&sst_name).exists(),
         "startup must not install a full SST in the local cache"
     );
 }
@@ -1885,12 +1885,9 @@ fn should_defer_manifest_sst_body_checksum_until_blocks_are_read() {
 fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 5);
     let committed_sst_bytes = test_sst_bytes_with_value(b"manifest-sized-value");
     let stale_local_sst_bytes = test_sst_bytes_with_value(b"different-local-cache-bytes");
@@ -1917,7 +1914,7 @@ fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
             largest_seq: Some(1),
             ..Default::default()
         });
-    std::fs::write(state.sst_dir.join(&sst_name), &stale_local_sst_bytes)
+    std::fs::write(state.host_sst_dir().join(&sst_name), &stale_local_sst_bytes)
         .expect("write stale local SST cache");
     let cloud = cloud_with_stale_sst_listing();
     Engine::blocking_cloud_put(
@@ -1927,11 +1924,11 @@ fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
     )
     .expect("upload authoritative manifest-sized test sst");
 
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("valid cloud metadata should permit opening without local cache restoration");
 
     assert_eq!(
-        std::fs::read(state.sst_dir.join(&sst_name)).expect("read retained local SST"),
+        std::fs::read(state.host_sst_dir().join(&sst_name)).expect("read retained local SST"),
         stale_local_sst_bytes,
         "startup leaves disposable local bytes untouched; readers use authoritative cloud objects"
     );
@@ -1941,12 +1938,9 @@ fn should_leave_stale_local_sst_cache_untouched_when_cloud_metadata_is_valid() {
 fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 6);
     let committed_sst_bytes = test_sst_bytes();
     let stale_local_sst_bytes = same_size_sst_with_different_crc(&committed_sst_bytes);
@@ -1967,7 +1961,7 @@ fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid()
             largest_seq: Some(1),
             ..Default::default()
         });
-    std::fs::write(state.sst_dir.join(&sst_name), &stale_local_sst_bytes)
+    std::fs::write(state.host_sst_dir().join(&sst_name), &stale_local_sst_bytes)
         .expect("write stale same-size local SST cache");
     let cloud = cloud_with_stale_sst_listing();
     Engine::blocking_cloud_put(
@@ -1977,13 +1971,13 @@ fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid()
     )
     .expect("upload authoritative manifest-crc test sst");
 
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("cloud metadata permits opening without scanning stale local cache bytes");
 
     // Act
     // Assert
     assert_eq!(
-        std::fs::read(state.sst_dir.join(&sst_name)).expect("read retained local SST"),
+        std::fs::read(state.host_sst_dir().join(&sst_name)).expect("read retained local SST"),
         stale_local_sst_bytes,
         "ordinary startup does not scan or replace disposable local SST bytes"
     );
@@ -1993,12 +1987,9 @@ fn should_avoid_reading_same_size_local_sst_cache_when_cloud_metadata_is_valid()
 fn should_salvage_retain_verified_local_sst_when_cloud_object_is_missing() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Salvage,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Salvage)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 7);
     let committed_sst_bytes = test_sst_bytes();
     state
@@ -2018,10 +2009,10 @@ fn should_salvage_retain_verified_local_sst_when_cloud_object_is_missing() {
             largest_seq: Some(1),
             ..Default::default()
         });
-    std::fs::write(state.sst_dir.join(&sst_name), &committed_sst_bytes)
+    std::fs::write(state.host_sst_dir().join(&sst_name), &committed_sst_bytes)
         .expect("write valid local SST cache");
     let cloud = cloud_with_stale_sst_listing();
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("salvage should keep a manifest SST when the local cache is valid");
 
     // Act
@@ -2035,7 +2026,7 @@ fn should_salvage_retain_verified_local_sst_when_cloud_object_is_missing() {
         "salvage must not drop a manifest SST that still has a valid local recoverable copy"
     );
     assert_eq!(
-        std::fs::read(state.sst_dir.join(&sst_name)).expect("read retained local SST"),
+        std::fs::read(state.host_sst_dir().join(&sst_name)).expect("read retained local SST"),
         committed_sst_bytes,
         "valid local SST cache must remain intact"
     );
@@ -2050,12 +2041,9 @@ fn should_salvage_retain_verified_local_sst_when_cloud_object_is_missing() {
 fn should_reject_legacy_local_sst_with_corrupt_data_blocks_when_cloud_object_is_missing() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create recovery directory");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Salvage,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Salvage)
+            .expect("create runtime state");
     let name = crate::cloud_layout::file_name(0, 0, 8);
     let corrupt_bytes = same_size_sst_with_different_crc(&test_sst_bytes());
     state
@@ -2068,11 +2056,12 @@ fn should_reject_legacy_local_sst_with_corrupt_data_blocks_when_cloud_object_is_
             content_crc32c: None,
             ..Default::default()
         });
-    std::fs::write(state.sst_dir.join(&name), corrupt_bytes).expect("persist damaged local SST");
+    std::fs::write(state.host_sst_dir().join(&name), corrupt_bytes)
+        .expect("persist damaged local SST");
     let cloud = cloud_with_stale_sst_listing();
 
     // Act
-    Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+    Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
         .expect("salvage missing cloud object");
 
     // Assert
@@ -2080,7 +2069,7 @@ fn should_reject_legacy_local_sst_with_corrupt_data_blocks_when_cloud_object_is_
     assert!(state.manifest.files.is_empty());
     assert!(state.persistence_anomaly_detected());
     assert!(
-        state.sst_dir.join(name).exists(),
+        state.host_sst_dir().join(name).exists(),
         "unverified bytes remain available for inspection"
     );
 }
@@ -2089,12 +2078,9 @@ fn should_reject_legacy_local_sst_with_corrupt_data_blocks_when_cloud_object_is_
 fn should_stage_intent_replay_sst_when_cloud_listing_is_stale_but_object_is_readable() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 2);
     let sst_bytes = test_sst_bytes();
     let cloud = cloud_with_stale_sst_listing();
@@ -2115,7 +2101,7 @@ fn should_stage_intent_replay_sst_when_cloud_listing_is_stale_but_object_is_read
     // Act
     // Assert
     assert!(
-        state.sst_dir.join(&sst_name).exists(),
+        state.host_sst_dir().join(&sst_name).exists(),
         "readable cloud SST should be staged despite stale LIST"
     );
 }
@@ -2124,12 +2110,9 @@ fn should_stage_intent_replay_sst_when_cloud_listing_is_stale_but_object_is_read
 fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
     // Arrange
     let temp_dir = tempfile::tempdir().expect("create temp dir");
-    let mut state = crate::runtime::RuntimeState::try_new(
-        temp_dir.path().to_path_buf(),
-        false,
-        RecoveryPolicy::Strict,
-    )
-    .expect("create runtime state");
+    let mut state =
+        crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Strict)
+            .expect("create runtime state");
     let sst_name = crate::cloud_layout::file_name(0, 0, 7);
     let sst_bytes = test_sst_bytes();
     let expected_crc = crc32c::crc32c(&sst_bytes) ^ 0xffff_ffff;
@@ -2168,7 +2151,7 @@ fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
         "unexpected intent SST proof error: {error}"
     );
     assert!(
-        !state.sst_dir.join(&sst_name).exists(),
+        !state.host_sst_dir().join(&sst_name).exists(),
         "intent SST with mismatched proof must not be staged"
     );
 }
@@ -2247,12 +2230,9 @@ mod salvage_removes_definitively_lost_ssts {
         size_bytes: u64,
     ) -> (tempfile::TempDir, crate::runtime::RuntimeState, String) {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let mut state = crate::runtime::RuntimeState::try_new(
-            temp_dir.path().to_path_buf(),
-            false,
-            RecoveryPolicy::Salvage,
-        )
-        .expect("create runtime state");
+        let mut state =
+            crate::runtime::RuntimeState::try_new(temp_dir.path(), false, RecoveryPolicy::Salvage)
+                .expect("create runtime state");
         let sst_name = crate::cloud_layout::file_name(0, 0, sst_seq);
         state
             .manifest
@@ -2290,7 +2270,7 @@ mod salvage_removes_definitively_lost_ssts {
         let cloud = cloud_with_stale_sst_listing();
 
         // Act
-        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+        Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
             .expect("salvage tolerates a missing authoritative SST");
 
         // Assert
@@ -2316,7 +2296,7 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("upload wrongly sized SST");
 
         // Act
-        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+        Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
             .expect("salvage tolerates a wrongly sized authoritative SST");
 
         // Assert
@@ -2339,9 +2319,9 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("create a file where the SST directory should be");
 
         // Act
-        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
+        crate::runtime::cloud_startup::CloudStartupRecovery::validate_manifest_ssts_in_store(
             &mut state,
-            cloud_root.path(),
+            &crate::storage::filesystem::FileSystem::new(cloud_root.path()).expect("host store"),
         )
         .expect("salvage tolerates an unverifiable authoritative SST");
 
@@ -2391,9 +2371,9 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("create indeterminate SST metadata path");
 
         // Act
-        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud(
+        crate::runtime::cloud_startup::CloudStartupRecovery::validate_manifest_ssts_in_store(
             &mut state,
-            cloud_root.path(),
+            &crate::storage::filesystem::FileSystem::new(cloud_root.path()).expect("host store"),
         )
         .expect("salvage tolerates mixed definitive and indeterminate losses");
         crate::metadata::ManifestPersistence::save(&state.db_path, &state.manifest)
@@ -2414,9 +2394,23 @@ mod salvage_removes_definitively_lost_ssts {
         inner: Arc<crate::storage::cloud::MockCloudBackend>,
     }
 
-    impl crate::storage::cloud::CloudBackend for HeadRefusingCloudBackend {
-        crate::storage::cloud::forward_cloud_backend!(inner; submit_put, submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity, submit_delete, submit_list);
+    impl crate::storage::cloud::CloudReadCapability for HeadRefusingCloudBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+    }
 
+    impl crate::storage::cloud::CloudWriteCapability for HeadRefusingCloudBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+    }
+
+    impl crate::storage::cloud::CloudDeleteCapability for HeadRefusingCloudBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+    }
+
+    impl crate::storage::cloud::CloudListCapability for HeadRefusingCloudBackend {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+    }
+
+    impl crate::storage::cloud::CloudHeadCapability for HeadRefusingCloudBackend {
         fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
             let _ = callback.send(crate::storage::cloud::CloudEvent::Head {
                 key: key.to_string(),
@@ -2426,6 +2420,8 @@ mod salvage_removes_definitively_lost_ssts {
             });
         }
     }
+
+    impl crate::storage::cloud::CloudBackend for HeadRefusingCloudBackend {}
 
     #[test]
     fn should_keep_the_manifest_entry_when_the_cloud_head_request_fails() {
@@ -2440,7 +2436,7 @@ mod salvage_removes_definitively_lost_ssts {
         );
 
         // Act
-        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+        Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
             .expect("salvage tolerates an unverifiable authoritative SST");
 
         // Assert
@@ -2465,7 +2461,7 @@ mod salvage_removes_definitively_lost_ssts {
             .expect("upload SST");
 
         // Act
-        Engine::ensure_local_sst_cache_from_cloud_storage(&mut state, &cloud)
+        Engine::validate_manifest_ssts_in_store(&mut state, &cloud)
             .expect("a valid SST is retained");
 
         // Assert
@@ -2591,7 +2587,19 @@ fn should_reject_predecessor_writes_when_successor_maintains_and_restarts() -> M
         drop(heartbeat);
         // Act
         eprintln!("takeover cloud={cloud}: open healthy successor after real expiry");
-        let mut successor = Engine::open(options.clone())?;
+        // The filesystem lease checks persisted UTC age, while the watchdog
+        // expires against a monotonic clock. Allow bounded clock settling;
+        // never bypass ownership checks or retry an indeterminate failure.
+        let takeover_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut successor = loop {
+            match Engine::open(options.clone()) {
+                Ok(engine) => break engine,
+                Err(MidgeError::LeaseHeld(_)) if std::time::Instant::now() < takeover_deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => return Err(error),
+            }
+        };
         assert!(successor.lease_state.lease.as_ref().unwrap().epoch() > old_epoch);
         let first = before_gc.commit(WriteOptions::best_effort());
         let successor_cf = successor.get_column_family("default").unwrap();

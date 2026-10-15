@@ -228,7 +228,7 @@ impl RuntimeDispatcher {
             unreachable!("non-drop message routed to drop_column_family");
         };
         if event_loop.column_family_publication_pipeline_active(cf_id) {
-            event_loop.publication_gate.defer(msg);
+            event_loop.publication.publication_gate.defer(msg);
             return HandleOutcome::Continue;
         }
         ManifestCoordinator::drop_column_family(

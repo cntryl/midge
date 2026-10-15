@@ -5,10 +5,9 @@
 //! reconstructing its complete write set in memory.
 use super::TransactionOp;
 use crate::common::{MidgeError, MidgeResult};
+use crate::io::{Fs, FsError, FsPath};
 use bytes::Bytes;
 use std::collections::VecDeque;
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -34,6 +33,8 @@ use resident_index::ResidentIndex;
 #[cfg(test)]
 use scan::RunKeyCursor;
 pub(crate) use scan::{IntentEntry, IntentKeyScan};
+/// Spill runs live in this directory below the database root.
+const SPILL_DIR: &str = "txn";
 const RUN_MAGIC: &[u8; 8] = b"MDGTXN01";
 const RUN_VERSION: u32 = 2;
 const RUN_HEADER_LEN: usize = 48;
@@ -121,9 +122,32 @@ impl OrdinalOp {
     }
 }
 
+/// Root key of the spill file named `name`.
+fn spill_path(name: &str) -> FsPath {
+    FsPath::new(format!("{SPILL_DIR}/{name}"))
+}
+
+/// The database root a write set spills into, below [`SPILL_DIR`].
+#[derive(Clone)]
+pub(super) struct SpillRoot(Arc<dyn Fs>);
+
+impl std::ops::Deref for SpillRoot {
+    type Target = dyn Fs;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl std::fmt::Debug for SpillRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpillRoot").finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Default)]
 struct SpillReaderCache {
-    readers: Mutex<VecDeque<(PathBuf, RunReader)>>,
+    readers: Mutex<VecDeque<(FsPath, RunReader)>>,
 }
 
 impl SpillReaderCache {
@@ -150,7 +174,7 @@ impl SpillReaderCache {
         result
     }
 
-    fn remove(&self, path: &Path) {
+    fn remove(&self, path: &FsPath) {
         self.readers
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -160,8 +184,9 @@ impl SpillReaderCache {
 
 #[derive(Debug)]
 struct SpillRun {
-    path: PathBuf,
-    range_path: PathBuf,
+    root: SpillRoot,
+    path: FsPath,
+    range_path: FsPath,
     record_count: usize,
     /// Smallest and largest primary key in the run; point probes outside the
     /// bounds cannot hit and skip the run.
@@ -219,27 +244,51 @@ impl std::fmt::Debug for SpillDiskBudget {
     }
 }
 
+#[derive(Debug, Default)]
+pub(super) struct OwnedSpillPaths(parking_lot::Mutex<Vec<FsPath>>);
+
+impl OwnedSpillPaths {
+    pub(super) fn track(&self, path: &FsPath) {
+        let mut paths = self.0.lock();
+        if !paths.contains(path) {
+            paths.push(path.clone());
+        }
+    }
+
+    pub(super) fn forget(&self, path: &FsPath) {
+        self.0.lock().retain(|owned| owned != path);
+    }
+
+    fn remove_all(&self, root: &dyn Fs) -> bool {
+        let mut paths = self.0.lock();
+        let owned = std::mem::take(&mut *paths);
+        let mut failed = Vec::new();
+        for path in owned {
+            match root.remove_file(&path) {
+                Ok(()) | Err(FsError::NotFound(_)) => {}
+                Err(error) => {
+                    tracing::warn!(path = %path.0.as_str(), %error, "failed to remove owned transaction spill file");
+                    failed.push(path);
+                }
+            }
+        }
+        let removed = failed.is_empty();
+        *paths = failed;
+        removed
+    }
+}
+
 #[derive(Debug)]
 struct SpillDiskCharge {
     budget: SpillDiskBudget,
     bytes: u64,
-    paths: [PathBuf; 4],
+    root: SpillRoot,
+    owned_paths: Arc<OwnedSpillPaths>,
 }
 
 impl Drop for SpillDiskCharge {
     fn drop(&mut self) {
-        let mut removed = true;
-        for path in &self.paths {
-            match fs::remove_file(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    removed = false;
-                    tracing::warn!(path = %path.display(), %error, "retaining transaction spill disk charge after cleanup failure");
-                }
-            }
-        }
-        if removed {
+        if self.owned_paths.remove_all(&*self.root) {
             self.budget.0.release_local_scratch_bytes(self.bytes);
         }
     }
@@ -256,7 +305,7 @@ pub(crate) enum IntentLookup {
 pub(crate) struct TransactionWriteSet {
     pool: Arc<TransactionMemoryPool>,
     reader_cache: Arc<SpillReaderCache>,
-    spill_dir: Option<PathBuf>,
+    spill_root: Option<SpillRoot>,
     txn_id: u64,
     resident: Vec<OrdinalOp>,
     resident_index: ResidentIndex,
@@ -269,16 +318,18 @@ pub(crate) struct TransactionWriteSet {
 
 impl TransactionWriteSet {
     #[must_use]
+    /// A write set that spills to `root` when the pool is full, or holds
+    /// every intent in memory for an in-memory database.
     pub(crate) fn new(
         pool: Arc<TransactionMemoryPool>,
-        db_path: &Path,
+        root: &Arc<dyn Fs>,
         memory_mode: bool,
         txn_id: u64,
     ) -> Self {
         Self {
             pool,
             reader_cache: Arc::new(SpillReaderCache::default()),
-            spill_dir: (!memory_mode).then(|| db_path.join("txn")),
+            spill_root: (!memory_mode).then(|| SpillRoot(Arc::clone(root))),
             txn_id,
             resident: Vec::new(),
             resident_index: ResidentIndex::default(),
@@ -334,14 +385,14 @@ impl TransactionWriteSet {
             return Ok(());
         }
 
-        let Some(spill_dir) = self.spill_dir.clone() else {
+        let Some(spill_root) = self.spill_root.clone() else {
             return Err(MidgeError::ResourceLimit(format!(
                 "transaction memory pool cannot admit {bytes} additional bytes"
             )));
         };
         // Freezing this write set's pool-charged intents is what frees pool
         // space, so try admission again afterwards.
-        self.spill_resident(&spill_dir)?;
+        self.spill_resident(&spill_root)?;
         if self.pool.try_reserve(bytes) {
             self.admit_resident(ordinal_op, bytes);
             return Ok(());
@@ -354,7 +405,7 @@ impl TransactionWriteSet {
         // own run instead.
         let mut direct = vec![ordinal_op];
         let run = write_run_with_reader_cache(
-            &spill_dir,
+            &spill_root,
             self.txn_id,
             self.runs.len(),
             direct.as_mut_slice(),
@@ -374,12 +425,12 @@ impl TransactionWriteSet {
         self.next_ordinal = self.next_ordinal.saturating_add(1);
     }
 
-    fn spill_resident(&mut self, spill_dir: &Path) -> MidgeResult<()> {
+    fn spill_resident(&mut self, spill_root: &SpillRoot) -> MidgeResult<()> {
         if self.resident.is_empty() {
             return Ok(());
         }
         let run = write_run_with_reader_cache(
-            spill_dir,
+            spill_root,
             self.txn_id,
             self.runs.len(),
             self.resident.as_mut_slice(),
@@ -463,8 +514,8 @@ impl TransactionWriteSet {
         self.resident_index.clear();
         for run in self.runs.drain(..) {
             run.close_reader();
-            remove_run(&run.path);
-            remove_run(&run.range_path);
+            remove_run(&*run.root, &run.path);
+            remove_run(&*run.root, &run.range_path);
         }
         self.next_ordinal = 0;
     }
@@ -548,18 +599,18 @@ impl Drop for TransactionOpSource {
         self.resident_bytes = 0;
         for run in self.runs.drain(..) {
             run.close_reader();
-            remove_run(&run.path);
-            remove_run(&run.range_path);
+            remove_run(&*run.root, &run.path);
+            remove_run(&*run.root, &run.range_path);
         }
     }
 }
 
-pub(crate) fn cleanup_orphaned_runs(db_path: &Path) -> MidgeResult<()> {
-    let txn_dir = db_path.join("txn");
-    match fs::remove_dir_all(txn_dir) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(MidgeError::Io(error)),
+/// Remove every spill run a previous process left behind. Runs are private
+/// pre-commit scratch, so none of them can be authoritative after a restart.
+pub(crate) fn cleanup_orphaned_runs(root: &dyn Fs) -> MidgeResult<()> {
+    match root.remove_dir_all(&FsPath::new(SPILL_DIR)) {
+        Ok(()) | Err(FsError::NotFound(_)) => Ok(()),
+        Err(error) => Err(error.into_midge()),
     }
 }
 

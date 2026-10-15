@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::common::resource_budget::ResourceBudget;
+use crate::storage::cloud::CloudReadCapability;
 use crate::storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
@@ -25,7 +26,7 @@ impl HeldHeadBackend {
     }
 }
 
-impl CloudBackend for HeldHeadBackend {
+impl crate::storage::cloud::CloudReadCapability for HeldHeadBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_get(key, callback);
     }
@@ -50,7 +51,9 @@ impl CloudBackend for HeldHeadBackend {
         self.inner
             .submit_get_range_with_identity(key, start, end, expected, timeout, callback);
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for HeldHeadBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -60,15 +63,21 @@ impl CloudBackend for HeldHeadBackend {
     ) {
         self.inner.submit_put(key, data, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for HeldHeadBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for HeldHeadBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for HeldHeadBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         let hold = {
             let mut hold = self.hold.lock();
@@ -99,6 +108,8 @@ impl CloudBackend for HeldHeadBackend {
     }
 }
 
+impl CloudBackend for HeldHeadBackend {}
+
 struct PublicationFixture {
     _directory: tempfile::TempDir,
     directory: PathBuf,
@@ -121,9 +132,6 @@ impl PublicationFixture {
         let (tx, _rx) = crossbeam::channel::unbounded();
         let hybrid = Arc::new(
             crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
-                Arc::new(crate::storage::filesystem::FileSystem::new(
-                    directory.path().join("local"),
-                )?),
                 cloud.clone(),
                 cloud.clone(),
                 cloud,
@@ -132,13 +140,12 @@ impl PublicationFixture {
             ),
         );
         hybrid.enable_ephemeral_sst_cache(1024 * 1024);
-        hybrid.retire_legacy_local_store();
         let budget = ResourceBudget::new(2 * 1024 * 1024);
         let mut outputs = Vec::new();
         let mut originals = Vec::new();
         for ordinal in 0..count {
             let name = crate::cloud_layout::compaction_file_name(0, 1, 3, ordinal);
-            let path = directory.path().join(&name);
+            let path = directory.path().join(crate::sst::fs::sst_location(&name));
             let mut writer = factory.create()?;
             writer.add_with_meta(b"key", Some(b"exact value"), 9, EntryType::Put, None)?;
             crate::sst::fs::finish_writer_to_path(writer, &path)?;
@@ -156,7 +163,7 @@ impl PublicationFixture {
             )?);
         }
         Ok(Self {
-            directory: directory.path().to_path_buf(),
+            directory: directory.path().join(crate::sst::fs::SST_DIR),
             _directory: directory,
             fs,
             backend,
@@ -199,7 +206,6 @@ impl PublicationFixture {
             },
             phase: publication::CompactionPublishPhase::OutputDurable,
             outputs: self.outputs.clone(),
-            sst_dir: self.directory.clone(),
             fs: self.fs.clone(),
             hybrid_storage: Some(self.hybrid.clone()),
             cloud_metadata_storage: None,
@@ -208,7 +214,6 @@ impl PublicationFixture {
             lease_validity: Some(validity),
             leader_store: None,
             leader_holder_id: None,
-            metadata_sequence: 1,
             publication_memory_limit: 2 * 1024 * 1024,
             runtime_response_timeout: IO_CAP,
             manual_deadline,

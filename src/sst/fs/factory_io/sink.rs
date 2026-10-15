@@ -4,7 +4,6 @@
 //! there. They deliberately do not know about blocks, compression, indexes,
 //! or footer layout; that policy lives in `pipeline`.
 
-use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -113,12 +112,12 @@ pub(super) struct ScratchFlushReservation {
 impl ScratchBlockSink {
     pub(super) fn new(
         budget: Option<ResourceBudget>,
+        fs: Arc<dyn crate::io::Fs>,
         outstanding: Arc<std::sync::atomic::AtomicUsize>,
         directory: Option<&Path>,
     ) -> MidgeResult<Self> {
         Ok(Self {
-            scratch: super::super::scratch::TrackedScratch::new(outstanding, directory)
-                .map_err(MidgeError::Io)?,
+            scratch: super::super::scratch::TrackedScratch::new(fs, outstanding, directory)?,
             offset: 0,
             budget,
             current_reservations: Vec::new(),
@@ -147,10 +146,7 @@ impl BlockSink for ScratchBlockSink {
     }
 
     fn append(&mut self, bytes: &[u8]) -> MidgeResult<()> {
-        self.scratch
-            .as_file_mut()
-            .write_all(bytes)
-            .map_err(MidgeError::Io)
+        self.scratch.append(bytes)
     }
 
     fn advance_after_append(&mut self, bytes: u64) -> MidgeResult<()> {

@@ -346,11 +346,17 @@ impl Compactor {
 
         // Always include the oldest file so read-heat skew cannot starve cold
         // data. Fill the rest of the configured batch with the hottest files.
-        let mut l0_sorted = levels[0].clone();
-        l0_sorted.sort_by(|left, right| {
-            right
-                .get_read_count()
-                .cmp(&left.get_read_count())
+        // Reads share atomic counters with these metadata references. Sample
+        // each counter once so every comparison in this decision sees fixed keys.
+        let mut l0_sorted: Vec<_> = levels[0]
+            .iter()
+            .map(|&file| (file, file.get_read_count()))
+            .collect();
+        #[cfg(test)]
+        tests::after_l0_candidate_capture();
+        l0_sorted.sort_by(|(left, left_heat), (right, right_heat)| {
+            right_heat
+                .cmp(left_heat)
                 .then_with(|| file_age_key(left).cmp(&file_age_key(right)))
         });
         let oldest = levels[0]
@@ -358,14 +364,19 @@ impl Compactor {
             .copied()
             .min_by_key(|file| file_age_key(file))
             .expect("non-empty L0 has an oldest file");
-        l0_sorted.retain(|file| file.name != oldest.name);
+        l0_sorted.retain(|(file, _)| file.name != oldest.name);
 
         let batch_size = levels[0]
             .len()
             .min(self.config.l0_file_count_threshold.max(1));
         let mut l0_batch = Vec::with_capacity(batch_size);
         l0_batch.push(oldest);
-        l0_batch.extend(l0_sorted.into_iter().take(batch_size.saturating_sub(1)));
+        l0_batch.extend(
+            l0_sorted
+                .into_iter()
+                .map(|(file, _)| file)
+                .take(batch_size.saturating_sub(1)),
+        );
 
         let (source_files, target_files) =
             self.complete_overlap_span(&l0_batch, &levels[1], cf_id, 0, 1)?;
@@ -667,6 +678,18 @@ impl Default for Compactor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static L0_CANDIDATE_CAPTURE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn after_l0_candidate_capture() {
+        let hook = L0_CANDIDATE_CAPTURE_HOOK.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 
     fn make_file(
         name: &str,
@@ -1806,6 +1829,76 @@ mod tests {
         assert_eq!(plan.source_files.len(), 1);
         assert_eq!(plan.target_files.len(), 10_000);
         assert_eq!(plan.input_files.len(), 10_001);
+    }
+
+    #[test]
+    fn should_keep_sampled_l0_heat_order_when_reads_change_before_sorting() {
+        // Arrange: the batch must contain the oldest file and one heat winner.
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l0_file_count_threshold: 2,
+            ..LeveledCompactionConfig::default()
+        });
+        let files: Vec<_> = (1..=5_u64)
+            .map(|sequence| {
+                let key = vec![u8::try_from(sequence).expect("fixture sequence")];
+                make_file(
+                    &crate::cloud_layout::file_name(0, 0, sequence),
+                    0,
+                    0,
+                    1,
+                    Some(key.clone()),
+                    Some(key),
+                )
+            })
+            .collect();
+        for _ in 0..10 {
+            files[1].record_read();
+        }
+        let newly_hot_counter = files[2].read_count.clone();
+        let (captured_tx, captured_rx) = std::sync::mpsc::channel();
+        let (updated_tx, updated_rx) = std::sync::mpsc::channel();
+        let wait_bound = std::time::Duration::from_secs(10);
+
+        // Act: a real concurrent reader changes heat after candidate capture.
+        let first = std::thread::scope(|scope| {
+            let reader = scope.spawn(move || {
+                captured_rx
+                    .recv_timeout(wait_bound)
+                    .expect("planner reached candidate capture");
+                newly_hot_counter.fetch_add(1_000, std::sync::atomic::Ordering::Relaxed);
+                updated_tx.send(()).expect("planner awaiting updated heat");
+            });
+            L0_CANDIDATE_CAPTURE_HOOK.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    captured_tx.send(()).expect("reader awaiting capture");
+                    updated_rx
+                        .recv_timeout(wait_bound)
+                        .expect("reader updated heat before sorting");
+                }));
+            });
+            let plan = compactor
+                .pick_l0_compaction(&files, 0, false)
+                .expect("first compaction planning")
+                .expect("L0 threshold should produce a compaction plan");
+            reader.join().expect("reader completed its bounded update");
+            plan
+        });
+        let next = compactor
+            .pick_l0_compaction(&files, 0, false)
+            .expect("next compaction planning")
+            .expect("L0 threshold should produce a compaction plan");
+
+        // Assert: this decision keeps captured heat; the next samples it anew.
+        assert_eq!(
+            first.source_files,
+            vec![files[0].name.clone(), files[1].name.clone()]
+        );
+        assert_eq!(
+            next.source_files,
+            vec![files[0].name.clone(), files[2].name.clone()]
+        );
+        assert_eq!(first.target_files, Vec::<String>::new());
+        assert_eq!(next.target_files, Vec::<String>::new());
     }
 
     #[test]

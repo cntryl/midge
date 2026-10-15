@@ -1,22 +1,21 @@
 //! Admitted immutable-file publication with identity-pinned, bounded readback.
 
-use super::{
-    Arc, HybridStorage, StorageBackend, StorageEvent, StorageObjectMetadata, StorageOutcome,
-};
+use super::{Arc, HybridStorage, StorageEvent, StorageObjectMetadata, StorageOutcome};
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use std::io::Read;
-use std::path::Path;
+use crate::io::{Fs, FsError, FsPath, OpenMode, OpenOptions};
 use std::sync::mpsc;
 
 const READBACK_BYTES: usize = 64 * 1024;
 const COPY_FACTOR: usize = 4;
 const FIXED_WORKSPACE: usize = 256 * 1024;
 
+/// A finished immutable file, read through the filesystem that wrote it.
 #[derive(Clone, Copy)]
 pub(crate) struct ImmutableFileSource<'a> {
     pub(crate) key: &'a str,
-    pub(crate) path: &'a Path,
+    pub(crate) fs: &'a dyn Fs,
+    pub(crate) path: &'a FsPath,
     pub(crate) size: u64,
     pub(crate) checksum: u32,
 }
@@ -50,22 +49,10 @@ impl HybridStorage {
 
     pub(crate) fn publish_immutable_file(
         &self,
-        key: &str,
-        path: &Path,
-        size: u64,
-        checksum: u32,
+        source: ImmutableFileSource<'_>,
         budget: &ResourceBudget,
     ) -> MidgeResult<super::GuardedObjectProof> {
-        self.publish_immutable_file_within(
-            ImmutableFileSource {
-                key,
-                path,
-                size,
-                checksum,
-            },
-            budget,
-            &OperationDeadline::unbounded(),
-        )
+        self.publish_immutable_file_within(source, budget, &OperationDeadline::unbounded())
     }
 
     pub(crate) fn publish_immutable_file_within(
@@ -76,6 +63,7 @@ impl HybridStorage {
     ) -> MidgeResult<super::GuardedObjectProof> {
         let ImmutableFileSource {
             key,
+            fs,
             path,
             size,
             checksum,
@@ -107,40 +95,38 @@ impl HybridStorage {
                 )?,
             ),
         };
-        let mut source = std::fs::File::open(path)?;
-        if source.metadata()?.len() != size {
+        let source = fs
+            .open(
+                path,
+                OpenOptions {
+                    mode: OpenMode::ReadOnly,
+                    create: false,
+                    create_new: false,
+                    truncate: false,
+                },
+            )
+            .map_err(crate::sst::fs::engine_sst_error)?;
+        if source.len().map_err(FsError::into_midge)? != size {
             return Err(MidgeError::Corruption(
                 "immutable upload file size changed".into(),
             ));
         }
-        let mut bytes = vec![0; length];
-        source.read_exact(&mut bytes)?;
-        if source.read(&mut [0])? != 0 || crc32c::crc32c(&bytes) != checksum {
+        let bytes = source.read_at(0, size).map_err(FsError::into_midge)?;
+        // Re-read the length so a file that grew under the read is rejected.
+        if bytes.len() != length
+            || source.len().map_err(FsError::into_midge)? != size
+            || crc32c::crc32c(&bytes) != checksum
+        {
             return Err(MidgeError::Corruption(
                 "immutable upload file identity changed".into(),
             ));
         }
         drop(source);
         admission.timeout(self, key)?;
-        let local_store = self.local_store_if_active();
-        let local = if let Some(backend) = &local_store {
-            let local = self.file_publication_head(backend, key, &admission)?;
-            if let Some(metadata) = &local {
-                self.verify_publication_ranges(backend, key, &bytes, metadata, &admission)?;
-            }
-            local
-        } else {
-            None
-        };
         crate::failpoints::fail_point!("midge::cloud::inject_fail_sst_upload", |_| Err(
             MidgeError::Internal("failpoint: cloud SST upload failed".into())
         ));
-        let metadata = self.publish_file_bytes(&self.stores.sst, key, &bytes, &admission)?;
-        if local.is_none() && !self.ephemeral_sst_cache_enabled() {
-            if let Some(backend) = &local_store {
-                self.publish_file_bytes(backend, key, &bytes, &admission)?;
-            }
-        }
+        let metadata = self.publish_file_bytes(key, &bytes, &admission)?;
         Ok(super::GuardedObjectProof::range_identity(
             Arc::clone(&self.stores.sst),
             key.into(),
@@ -150,18 +136,17 @@ impl HybridStorage {
 
     fn publish_file_bytes(
         &self,
-        backend: &Arc<dyn StorageBackend>,
         key: &str,
         bytes: &[u8],
         admission: &PublicationAdmission,
     ) -> MidgeResult<StorageObjectMetadata> {
-        if let Some(metadata) = self.file_publication_head(backend, key, admission)? {
-            self.verify_publication_ranges(backend, key, bytes, &metadata, admission)?;
+        if let Some(metadata) = self.file_publication_head(key, admission)? {
+            self.verify_publication_ranges(key, bytes, &metadata, admission)?;
             return Ok(metadata);
         }
         admission.timeout(self, key)?;
         let (tx, rx) = mpsc::channel();
-        backend.submit_write_request(
+        self.stores.sst.submit_write_request(
             crate::storage::StorageRequest::new(key, admission.deadline, self.callback_timeout)
                 .with_precondition(crate::storage::StoragePrecondition::IfAbsent)
                 .with_reservation(Arc::clone(&admission.memory)),
@@ -199,21 +184,20 @@ impl HybridStorage {
             }
         }
         let metadata = self
-            .file_publication_head(backend, key, admission)?
+            .file_publication_head(key, admission)?
             .ok_or_else(|| MidgeError::Corruption("uploaded immutable object is absent".into()))?;
-        self.verify_publication_ranges(backend, key, bytes, &metadata, admission)?;
+        self.verify_publication_ranges(key, bytes, &metadata, admission)?;
         Ok(metadata)
     }
 
     fn file_publication_head(
         &self,
-        backend: &Arc<dyn StorageBackend>,
         key: &str,
         admission: &PublicationAdmission,
     ) -> MidgeResult<Option<StorageObjectMetadata>> {
         admission.timeout(self, key)?;
         let (tx, rx) = mpsc::channel();
-        backend.submit_range_head_request(
+        self.stores.sst.submit_range_head_request(
             crate::storage::StorageRequest::new(key, admission.deadline, self.callback_timeout),
             tx,
         );
@@ -250,7 +234,6 @@ impl HybridStorage {
 
     fn verify_publication_ranges(
         &self,
-        backend: &Arc<dyn StorageBackend>,
         key: &str,
         bytes: &[u8],
         metadata: &StorageObjectMetadata,
@@ -266,7 +249,7 @@ impl HybridStorage {
             let end = start + expected.len() as u64;
             admission.timeout(self, key)?;
             let (tx, rx) = mpsc::channel();
-            backend.submit_range_read_request(
+            self.stores.sst.submit_range_read_request(
                 crate::storage::StorageRequest::new(key, admission.deadline, self.callback_timeout)
                     .with_precondition(crate::storage::StoragePrecondition::IfMatch(
                         metadata.clone(),
@@ -293,11 +276,9 @@ impl HybridStorage {
                 ));
             }
         }
-        let current = self
-            .file_publication_head(backend, key, admission)?
-            .ok_or_else(|| {
-                MidgeError::Corruption("immutable object disappeared during readback".into())
-            })?;
+        let current = self.file_publication_head(key, admission)?.ok_or_else(|| {
+            MidgeError::Corruption("immutable object disappeared during readback".into())
+        })?;
         if !metadata.same_version(&current) {
             return Err(MidgeError::Corruption(
                 "immutable object changed during readback".into(),

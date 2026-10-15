@@ -2,17 +2,14 @@
 //! files replay, which manifest SSTs survive, what salvage cuts or sets aside,
 //! and which remote objects startup may delete.
 //!
-//! `engine::startup` wires these decisions into engine startup; the coverage
-//! rule they rely on is the shared one in `runtime::hybrid_persistence`.
-
-use crate::io::FsError;
+//! `engine::startup` wires these decisions into engine startup. Persisted
+//! family frontiers govern replay; committed shared generations govern retirement.
 
 pub(crate) mod cloud_io;
 mod cloud_recovery;
 #[cfg(feature = "internal-testing")]
 #[doc(hidden)]
 pub(crate) mod recovery_progress_fixture;
-pub(crate) mod replay_coverage;
 pub(crate) mod streaming_wal_fs;
 pub(crate) mod streaming_wal_plan;
 
@@ -61,191 +58,141 @@ impl CloudSstRecoveryProof {
 
 pub(crate) struct CloudStartupRecovery;
 
-pub(crate) struct CloudWalRecoveryPlan {
-    pub(crate) remote_segments:
-        std::collections::BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,
-    pub(crate) local_segments:
-        std::collections::BTreeMap<u64, crate::runtime::RecoveredCloudWalSegment>,
-    pub(crate) active_wal: Option<crate::runtime::RecoveredCloudActiveWal>,
-    pub(crate) opened_in_salvage_mode: bool,
-    /// Cataloged segments at and after the first hole that salvage stopped
-    /// at. They are not replayed; startup retires them from the catalog and
-    /// keeps their objects.
-    pub(crate) unreplayed_segments: Vec<crate::wal::cloud_catalog::PublishedWalSegment>,
-    /// Highest sequence held by WAL salvage set aside, now or on an earlier
-    /// open (the catalog's persisted floor), so new writes never reuse one.
-    /// Zero when nothing was ever set aside.
-    pub(crate) max_unreplayed_sequence: u64,
-    /// Local WAL files at or past the hole, including `wal.log`. Salvage
-    /// renames them aside only after the floor covering them is durable.
-    pub(crate) set_aside_local_paths: Vec<std::path::PathBuf>,
+/// The local WAL history a cloud cache holds when recovery plans.
+pub(crate) enum CacheHistory {
+    /// No ledger yet: a new cache, or one whose genesis did not finish. The
+    /// WAL directory it will start in.
+    Fresh(std::sync::Arc<dyn crate::io::Fs>),
+    /// The ledger the cache already has.
+    Existing(crate::runtime::wal_history::WalHistory),
 }
 
-impl CloudWalRecoveryPlan {
-    /// Makes a salvage set-aside durable, in the one order that survives a
-    /// crash between any two steps:
-    ///
-    /// 1. Persist the sequence floor. Until the local files are renamed, the
-    ///    next open finds the same hole and recomputes it anyway.
-    /// 2. Rename the local files aside. After this they no longer parse as
-    ///    segments, so only the persisted floor remembers their sequences.
-    /// 3. Retire the cataloged segments. Retiring before step 2 would let the
-    ///    next open replay local copies past the hole.
-    #[cfg(all(test, feature = "failpoints"))]
-    pub(crate) fn commit_set_aside(
-        &self,
-        persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
-        writer_epoch: u64,
-        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        db_path: &std::path::Path,
-    ) -> crate::common::MidgeResult<()> {
-        self.commit_set_aside_with_authority(
-            persistence,
-            writer_epoch,
-            catalog,
-            db_path,
-            &|| Ok(()),
-        )
-    }
-
-    pub(crate) fn commit_set_aside_with_authority(
-        &self,
-        persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
-        writer_epoch: u64,
-        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        db_path: &std::path::Path,
-        validate: &dyn Fn() -> crate::common::MidgeResult<()>,
-    ) -> crate::common::MidgeResult<()> {
-        self.commit_set_aside_with_authority_within(
-            persistence,
-            writer_epoch,
-            catalog,
-            db_path,
-            validate,
-            &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
-        )
-    }
-
-    pub(crate) fn commit_set_aside_with_authority_within(
-        &self,
-        persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
-        writer_epoch: u64,
-        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        db_path: &std::path::Path,
-        validate: &dyn Fn() -> crate::common::MidgeResult<()>,
-        scope: &crate::common::DeadlineScope,
-    ) -> crate::common::MidgeResult<()> {
-        let deadline = scope.deadline();
-        let validate = &|| {
-            scope.check("cloud WAL salvage authority")?;
-            validate()
-        };
-        validate()?;
-        if self.max_unreplayed_sequence > catalog.sequence_floor {
-            persistence.raise_wal_sequence_floor_with_authority_within(
-                writer_epoch,
-                self.max_unreplayed_sequence,
-                validate,
-                &deadline,
-            )?;
-        }
-        crate::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
-        validate()?;
-        self.set_aside_local_wal_with_authority_within(db_path, validate, scope)?;
-        crate::failpoints::fail_point!("midge::recovery::before_salvage_catalog_retirement");
-        validate()?;
-        if !self.unreplayed_segments.is_empty() {
-            persistence.retire_unreplayed_wal_segments_with_authority_within(
-                writer_epoch,
-                &self.unreplayed_segments,
-                validate,
-                &deadline,
-            )?;
-        }
+/// Makes a cloud recovery `plan` durable in the one order that survives a
+/// crash between any two steps (#844), and returns the history the writer
+/// continues:
+///
+/// 1. One catalog compare-and-swap sets aside the cataloged segments
+///    salvage stops short of and raises the sequence floor over everything
+///    set aside, when it does either. A crash after it leaves a ledger that
+///    still names members the catalog no longer chains to: the next open
+///    finds the same hole, or a catalog behind the ledger whose floor covers
+///    it, and completes the set-aside either way.
+/// 2. The ledger carries out the plan's history action: a new history after
+///    the catalog's head, the catalog-retired members retired locally, the
+///    members from the hole set aside, or every member set aside and the
+///    history rebased onto the catalog.
+///
+/// `validate` is the writer's authority check, run before every step.
+///
+/// # Errors
+///
+/// The authority, catalog or ledger error; the plan may be partly durable,
+/// and the next open re-plans from what landed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn commit_recovery_plan_within(
+    plan: &crate::wal::planner::RecoveryPlan,
+    persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
+    writer_epoch: u64,
+    catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    mut history: CacheHistory,
+    wal_fence: Option<&crate::runtime::wal_history::WalHistoryFence>,
+    validate: &dyn Fn() -> crate::common::MidgeResult<()>,
+    scope: &crate::common::DeadlineScope,
+) -> crate::common::MidgeResult<crate::runtime::wal_history::WalHistory> {
+    use crate::wal::planner::HistoryAction;
+    let deadline = scope.deadline();
+    let validate = &|| {
+        scope.check("cloud WAL salvage authority")?;
         validate()
-    }
-
-    /// Renames the local WAL files salvage stopped short of and syncs `wal/`.
-    #[cfg(test)]
-    pub(crate) fn set_aside_local_wal(
-        &self,
-        db_path: &std::path::Path,
-    ) -> crate::common::MidgeResult<()> {
-        self.set_aside_local_wal_with_authority(db_path, &|| Ok(()))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_aside_local_wal_with_authority(
-        &self,
-        db_path: &std::path::Path,
-        validate: &dyn Fn() -> crate::common::MidgeResult<()>,
-    ) -> crate::common::MidgeResult<()> {
-        self.set_aside_local_wal_with_authority_within(
-            db_path,
+    };
+    validate()?;
+    if plan.changes_catalog(catalog) {
+        persistence.set_aside_catalog_suffix_with_authority_within(
+            writer_epoch,
+            plan.retire_catalog_from,
+            &plan.set_aside_entries,
+            plan.catalog_floor,
             validate,
-            &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
-        )
+            &deadline,
+        )?;
     }
-
-    pub(crate) fn set_aside_local_wal_with_authority_within(
-        &self,
-        db_path: &std::path::Path,
-        validate: &dyn Fn() -> crate::common::MidgeResult<()>,
-        scope: &crate::common::DeadlineScope,
-    ) -> crate::common::MidgeResult<()> {
-        scope.check("local WAL salvage set-aside")?;
-        let fs = crate::io::RealFs::open_existing(db_path).map_err(FsError::into_midge)?;
-        let fs = crate::io::scope_fs(std::sync::Arc::new(fs), scope.clone());
-        let mut renamed = false;
-        for path in &self.set_aside_local_paths {
-            scope.check("local WAL salvage rename")?;
-            let path = streaming_wal_plan::local_path(path)?;
-            if fs.exists(&path).map_err(FsError::into_midge)? {
-                CloudStartupRecovery::quarantine_local_wal_alias_with_authority(
-                    fs.as_ref(),
-                    &path,
-                    validate,
-                )?;
-                renamed = true;
-                crate::failpoints::fail_point!("midge::recovery::after_salvage_quarantine_rename");
+    crate::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
+    validate()?;
+    if let Some(cut) = plan.open_cut {
+        let CacheHistory::Existing(history) = &mut history else {
+            return Err(crate::common::MidgeError::Internal(
+                "open WAL cut without local history".into(),
+            ));
+        };
+        let wal = history.segment_files().ok_or_else(|| {
+            crate::common::MidgeError::Internal("open WAL cut without segment files".into())
+        })?;
+        let wal = crate::io::scope_fs(wal, scope.clone());
+        history.prepare_open_cut(cut, plan.max_unreplayed_sequence)?;
+        let truncate = || streaming_wal_plan::apply_open_cut(wal.as_ref(), cut);
+        match wal_fence {
+            Some(fence) => fence.with_writer_effect(truncate)?,
+            None => truncate()?,
+        }
+    }
+    scope.check("local WAL history")?;
+    let history = match (plan.history, history) {
+        (
+            HistoryAction::Genesis {
+                anchor,
+                open_at_least,
+            },
+            CacheHistory::Fresh(wal),
+        ) => match wal_fence {
+            Some(fence) => crate::runtime::wal_history::WalHistory::genesis_with_fence(
+                wal,
+                writer_epoch,
+                anchor,
+                open_at_least,
+                fence,
+            ),
+            None => crate::runtime::wal_history::WalHistory::genesis(
+                wal,
+                writer_epoch,
+                anchor,
+                open_at_least,
+            ),
+        }?,
+        (HistoryAction::Keep { retire_local_below }, CacheHistory::Existing(mut history)) => {
+            if let Some(to) = retire_local_below {
+                history.retire_below(to)?;
             }
+            history
         }
-        if renamed {
-            validate()?;
-            fs.sync_dir(
-                &crate::io::FsPath::new("wal"),
-                crate::io::Durability::Durable,
-            )
-            .map_err(FsError::into_midge)?;
+        (
+            HistoryAction::SetAside {
+                from,
+                open_at_least,
+            },
+            CacheHistory::Existing(mut history),
+        ) => {
+            history.set_aside(
+                crate::runtime::wal_history::SetAside::From(from),
+                open_at_least,
+            )?;
+            history
         }
-        Ok(())
-    }
-
-    pub(crate) fn remote_max_sequences(&self) -> std::collections::BTreeMap<u64, u64> {
-        self.remote_segments
-            .iter()
-            .map(|(segment_id, segment)| (*segment_id, segment.max_sequence))
-            .collect()
-    }
-
-    pub(crate) fn remote_writer_epochs(&self) -> std::collections::BTreeMap<u64, u64> {
-        self.remote_segments
-            .iter()
-            .map(|(segment_id, segment)| (*segment_id, segment.writer_epoch))
-            .collect()
-    }
-
-    pub(crate) fn local_max_sequences(&self) -> std::collections::BTreeMap<u64, u64> {
-        self.local_segments
-            .iter()
-            .map(|(segment_id, segment)| (*segment_id, segment.max_sequence))
-            .collect()
-    }
-
-    pub(crate) fn local_writer_epochs(&self) -> std::collections::BTreeMap<u64, u64> {
-        self.local_segments
-            .iter()
-            .map(|(segment_id, segment)| (*segment_id, segment.writer_epoch))
-            .collect()
-    }
+        (
+            HistoryAction::Rebase {
+                anchor,
+                open_at_least,
+            },
+            CacheHistory::Existing(mut history),
+        ) => {
+            history.rebase(anchor, open_at_least)?;
+            history
+        }
+        (action, _) => {
+            return Err(crate::common::MidgeError::Internal(format!(
+                "the cloud WAL recovery plan's {action:?} does not fit the cache's history"
+            )))
+        }
+    };
+    validate()?;
+    Ok(history)
 }

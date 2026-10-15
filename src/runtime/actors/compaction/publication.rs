@@ -6,7 +6,6 @@
 
 use super::PreparedCompactionOutput;
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -40,7 +39,7 @@ pub(crate) struct CompactionPublishTask {
     pub token: CompactionPublicationToken,
     pub phase: CompactionPublishPhase,
     pub outputs: Vec<PreparedCompactionOutput>,
-    pub sst_dir: PathBuf,
+    /// The database root; outputs are read back at root-relative `sst/` keys.
     pub fs: Arc<dyn crate::io::Fs>,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
@@ -49,7 +48,6 @@ pub(crate) struct CompactionPublishTask {
     pub lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
-    pub metadata_sequence: u64,
     pub publication_memory_limit: usize,
     pub runtime_response_timeout: std::time::Duration,
     pub manual_deadline: Option<OperationDeadline>,
@@ -316,26 +314,18 @@ fn verify_or_stage_outputs(
         })?;
         validate_task_lease(task, deadline)?;
         let key = crate::cloud_layout::object_key(&output.metadata.name);
-        let path = task.sst_dir.join(&output.metadata.name);
+        let path = crate::sst::fs::sst_key(&output.metadata.name);
+        let source = crate::storage::hybrid::backend::ImmutableFileSource {
+            key: &key,
+            fs: task.fs.as_ref(),
+            path: &path,
+            size: output.metadata.size_bytes,
+            checksum,
+        };
         if task.manual_deadline.is_some() {
-            hybrid.publish_immutable_file_within(
-                crate::storage::hybrid::backend::ImmutableFileSource {
-                    key: &key,
-                    path: &path,
-                    size: output.metadata.size_bytes,
-                    checksum,
-                },
-                &budget,
-                deadline,
-            )?;
+            hybrid.publish_immutable_file_within(source, &budget, deadline)?;
         } else {
-            hybrid.publish_immutable_file(
-                &key,
-                &path,
-                output.metadata.size_bytes,
-                checksum,
-                &budget,
-            )?;
+            hybrid.publish_immutable_file(source, &budget)?;
         }
     }
     if !proofs.is_empty() {
@@ -360,7 +350,6 @@ fn mirror_control_metadata(
             fs: task.fs.as_ref(),
             publication_lock: &task.metadata_publication_lock,
             lock_wait_budget: cloud.callback_timeout(),
-            local_manifest_sequence: task.metadata_sequence,
             deadline,
             authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
                 store: leader_store,
@@ -385,12 +374,13 @@ fn mirror_control_metadata(
 
 #[cfg(test)]
 pub(crate) fn checksummed_file_crc_for_publication_test(
+    fs: &Arc<dyn crate::io::Fs>,
     path: &std::path::Path,
     budget: &crate::common::resource_budget::ResourceBudget,
 ) -> MidgeResult<u32> {
     const CRC_BUFFER_SIZE: usize = 64 * 1024;
     let _reservation = budget.reserve(CRC_BUFFER_SIZE, "SST checksum buffer")?;
-    Ok(crate::sst::identity::SstIdentity::of_path(path)?.crc32c)
+    Ok(crate::sst::fs::file_identity_with_fs(fs, path)?.1)
 }
 
 #[cfg(test)]
@@ -419,7 +409,6 @@ mod tests {
             },
             phase: CompactionPublishPhase::OutputDurable,
             outputs: Vec::new(),
-            sst_dir: PathBuf::from("sst"),
             fs: Arc::new(crate::io::MockFs::new()),
             hybrid_storage: None,
             cloud_metadata_storage: None,
@@ -428,7 +417,6 @@ mod tests {
             lease_validity: Some(Arc::clone(&validity)),
             leader_store: None,
             leader_holder_id: None,
-            metadata_sequence: 1,
             publication_memory_limit: 4096,
             runtime_response_timeout: std::time::Duration::from_secs(5),
             manual_deadline: None,

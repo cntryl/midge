@@ -85,13 +85,14 @@ The WAL is the first durable landing zone for writes in local durable modes.
 
 ### Dependency boundary
 
-- WAL replay depends on the base `io::Fs` and `io::File` abstractions, not `storage`.
+- WAL replay depends on the read-only `io::ReadFs` and the `io::File` abstractions, not `storage`; a replay view cannot mutate what it reads.
 - Byte-level WAL segment interpretation, including cloud WAL object-key formatting and transaction-batch expansion, lives in `src/wal/cloud_segment.rs`.
 - `runtime::hybrid_persistence` owns cloud WAL/SST interpretation, manifest coverage decisions, and guarded-prune orchestration.
 - `HybridStorage` exposes only bounded keyed object I/O, byte-identity readback, provider identities, immutable publication, and conditional deletion. It does not import WAL, SST, or manifest formats.
 - `runtime::hybrid_persistence::CloudPersistence` orchestrates cloud WAL/SST proof, manifest coverage, and guarded pruning. WAL byte interpretation also lives in `wal/cloud_segment.rs`, and startup recovery verifies cloud authority. `CloudPersistence` wraps an `Arc<HybridStorage>` and derefs to it so raw object I/O remains available. Its tests live next to it in `runtime/hybrid_persistence/tests/`; `src/storage` holds format-neutral tests.
 - A guarded prune is authorized in the runtime, then rechecks format-neutral object identities in the storage worker immediately before the provider conditional delete.
-- `runtime::cloud_startup` owns startup-time cloud authority: the cloud WAL replay plan and salvage (retain, truncate, set aside), which manifest SSTs survive startup, and conditional deletion of non-authoritative compaction outputs. `engine::startup` only wires these into engine startup.
+- `wal::planner` decides WAL recovery without I/O: where a cache's ledger stands against the cloud catalog, which segments replay in which order, what salvage sets aside, and how the ledger continues.
+- `runtime::cloud_startup` owns startup-time cloud authority: it probes the segments the planner names, cuts the open segment, assembles the replay sources and commits the plan (the catalog first, then the ledger). It also decides which manifest SSTs survive startup and conditionally deletes non-authoritative compaction outputs. `engine::startup` only wires these into engine startup.
 - One exact-coverage rule (`hybrid_persistence::ExactCoverageState`) decides whether a WAL record is already held by manifest SSTs, for cloud and local pruning, local recovery and cloud startup replay. It compares raw SST versions without a TTL clock.
 
 For cloud WAL, the storage worker emits `CloudAck` only after an immutable

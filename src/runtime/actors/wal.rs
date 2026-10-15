@@ -45,13 +45,11 @@
 
 use super::super::state::RuntimeState;
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::FsError;
-use crate::io::{Fs, RealFs};
+use crate::io::Fs;
 use crate::runtime::wal_transition::WalSealTicket;
 use crate::wal::policy::BatchConfig;
 use crate::wal::{DurabilityPolicy, FsWalFactoryIo, WalRecord, WalWriter};
 use apply_op::TransactionApplyOp;
-use std::path::PathBuf;
 #[cfg(all(test, feature = "failpoints"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -65,9 +63,27 @@ static TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_REQUEST_ID: AtomicU64 =
 
 struct TxnSequencePlan {
     txn_id: u64,
+    /// The one column family the transaction writes; its WAL frames carry it.
+    cf_id: crate::types::ColumnFamilyId,
     begin_seq: u64,
     first_op_seq: u64,
     commit_seq: u64,
+}
+
+impl TxnSequencePlan {
+    /// Every sequence the transaction took.
+    fn range(&self) -> std::ops::RangeInclusive<u64> {
+        self.begin_seq..=self.commit_seq
+    }
+}
+
+/// What reached the WAL and the memtables of units that failed to apply.
+#[derive(Clone, Copy)]
+struct UnappliedOutcome {
+    /// The units' records are appended to the WAL.
+    logged: bool,
+    /// Some, but not all, of a unit's ops reached the memtables.
+    partly_applied: bool,
 }
 
 struct TxnWalBatch {
@@ -112,6 +128,13 @@ pub(crate) struct TransactionAppendResult {
     pub last_sequence: u64,
     pub op_count: usize,
     pub deferred: bool,
+}
+
+/// Outcome of a prepared group: the units applied, in order, and the error
+/// that stopped the remaining units, if any.
+pub(crate) struct PreparedGroupOutcome {
+    pub applied: Vec<TransactionAppendResult>,
+    pub failure: Option<MidgeError>,
 }
 
 enum TransactionIntent<'a> {
@@ -229,8 +252,6 @@ pub struct WalActor {
     durability_policy: DurabilityPolicy,
     /// Bytes written since last sync (for batched mode)
     bytes_since_sync: usize,
-    /// Highest sequence actually appended to the current WAL segment.
-    segment_max_sequence: u64,
     /// Batch configuration governing `max_delay_ms` and `max_bytes`
     batch_config: BatchConfig,
     /// Last wall-clock time we performed a WAL fsync
@@ -243,12 +264,16 @@ pub struct WalActor {
     current_epoch: u64,
     lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
 
-    /// Optional leader store for epoch validation at sync boundaries.
-    /// When set, each fsync checks that our epoch is still current.
+    /// Optional leader store for writer ownership validation. Provider stores
+    /// validate once per logical write group and at ungrouped sync boundaries;
+    /// filesystem stores validate under the physical effect lock.
     leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     /// This writer's own lease holder identity, checked alongside epoch at
     /// each fencing validation.
     leader_holder_id: String,
+    /// A strict transaction group was remotely validated immediately before
+    /// its WAL effects, so its following fsync does not repeat that request.
+    sync_authority_prevalidated: bool,
     /// Largest transaction WAL footprint recovery can replay, when bounded.
     max_replayable_txn_bytes: Option<usize>,
 
@@ -262,6 +287,7 @@ pub struct WalActor {
 }
 
 mod apply_op;
+mod authority;
 mod durability;
 mod rotation;
 mod spill;
@@ -589,28 +615,25 @@ impl WalActor {
         });
     }
 
-    fn record_segment_sequence(&mut self, sequence: u64) {
-        self.segment_max_sequence = self.segment_max_sequence.max(sequence);
-    }
-
-    pub fn new(
-        wal_dir: PathBuf,
+    /// Open the WAL actor over `state`'s segment ledger: a file-backed WAL
+    /// appends to the ledger's open segment, a memory-mode one nowhere.
+    pub(crate) fn open(
+        state: &RuntimeState,
         durability_policy: DurabilityPolicy,
         batch_config: BatchConfig,
-        memory_mode: bool,
         writer_epoch: u64,
         storage_io_timeout: Duration,
     ) -> MidgeResult<Self> {
         let counters = crate::telemetry::CounterSink::default();
-        let io = if memory_mode {
-            WalIoState::Memory
-        } else {
-            let fs: Arc<dyn Fs> = Arc::new(RealFs::new(wal_dir).map_err(FsError::into_midge)?);
-            let factory = FsWalFactoryIo::new(Arc::clone(&fs))
-                .with_io_timeout(storage_io_timeout)
-                .with_counters(counters.clone());
-            let writer = factory.create_writer(crate::wal::ACTIVE_FILE_NAME)?;
-            WalIoState::Open { fs, writer }
+        let io = match state.wal.history.segment_files() {
+            None => WalIoState::Memory,
+            Some(fs) => {
+                let factory = FsWalFactoryIo::new(Arc::clone(&fs))
+                    .with_io_timeout(storage_io_timeout)
+                    .with_counters(counters.clone());
+                let writer = factory.open_segment(state.wal.open_segment())?;
+                WalIoState::Open { fs, writer }
+            }
         };
 
         let actor = Self {
@@ -621,7 +644,6 @@ impl WalActor {
             pending_sync_count: 0,
             durability_policy,
             bytes_since_sync: 0,
-            segment_max_sequence: 0,
             sync_calls: 0,
             sync_total: Duration::from_secs(0),
             append_calls: 0,
@@ -633,6 +655,7 @@ impl WalActor {
             lease_validity: None,
             leader_store: None,
             leader_holder_id: String::new(),
+            sync_authority_prevalidated: false,
             max_replayable_txn_bytes: None,
         };
 
@@ -748,6 +771,10 @@ impl WalActor {
     ) {
         self.leader_store = Some(store);
         self.leader_holder_id = holder_id;
+        self.sync_authority_prevalidated = false;
+        if let Some(writer) = self.writer() {
+            writer.set_write_authority(self.write_authority());
+        }
     }
 
     #[cfg(test)]
@@ -790,6 +817,118 @@ impl WalActor {
         self.ensure_filesystem_wal_available(state)
     }
 
+    /// Refuse a write, under any durability policy, to a family whose active
+    /// memtable holds a partly applied unit. That memtable cannot freeze
+    /// until restart, so the family could never persist the write it would
+    /// acknowledge; refusing it before it reaches the memtable keeps the
+    /// write unacknowledged instead of acknowledged and unflushable.
+    fn ensure_family_accepts_writes(
+        state: &RuntimeState,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> MidgeResult<()> {
+        match state
+            .get_cf(cf_id)
+            .and_then(crate::runtime::state::ColumnFamilyState::partially_applied_commit)
+        {
+            Some(commit_seq) => Err(MidgeError::RecoveryFailed(format!(
+                "column family {cf_id} holds a partly applied transaction committed at \
+                 sequence {commit_seq}; restart before writing to it"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Stop a writer whose units in `plans`, with sequences allocated and WAL
+    /// records (if `outcome.logged`) appended, did not reach the memtables
+    /// whole.
+    ///
+    /// Replay keeps a unit iff its commit is above the family's flush
+    /// frontier, so a unit none of whose ops reached the memtables is kept or
+    /// dropped whole whatever frontier a later flush publishes: the WAL is
+    /// only fenced. A partly applied unit would reach a flushed SST in part,
+    /// so its family is marked and refuses to freeze, and to take writes,
+    /// until restart. Restart then replays a logged unit whole (#537) and
+    /// discards an unlogged `BestEffort` one whole.
+    ///
+    /// The caller learns `OutcomeUnknown` for a logged unit,
+    /// which replay may apply; `Fenced` only when nothing was logged or
+    /// applied; and `RecoveryFailed` otherwise.
+    fn fail_unapplied_transactions(
+        &mut self,
+        state: &mut RuntimeState,
+        plans: &[&TxnSequencePlan],
+        outcome: UnappliedOutcome,
+        error: MidgeError,
+    ) -> MidgeError {
+        if outcome.partly_applied {
+            for plan in plans {
+                if let Some(cf) = state.get_cf_mut(plan.cf_id) {
+                    cf.mark_partially_applied(plan.commit_seq);
+                }
+            }
+        }
+        let txn_ids = plans
+            .iter()
+            .map(|plan| plan.txn_id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let message = match (outcome.logged, outcome.partly_applied) {
+            (true, true) => format!(
+                "transaction {txn_ids} is logged in the WAL but only part of it reached the \
+                 memtables; it may be applied on restart, and then whole: {error}"
+            ),
+            (false, true) => format!(
+                "transaction {txn_ids} has no WAL record and only part of it reached the \
+                 memtables; restart discards all of it: {error}"
+            ),
+            (true, false) => format!(
+                "transaction {txn_ids} is logged in the WAL but none of it reached the \
+                 memtables; it may be applied on restart: {error}"
+            ),
+            (false, false) => format!(
+                "transaction {txn_ids} has no WAL record and none of it reached the \
+                 memtables; it is not applied: {error}"
+            ),
+        };
+        self.fence_with_cause(state, message.clone(), Self::is_authority_failure(&error));
+        state.mark_persistence_anomaly();
+        if outcome.logged {
+            // Replay may apply a logged unit, so its outcome is unknown.
+            MidgeError::OutcomeUnknown(message)
+        } else if !outcome.partly_applied && matches!(error, MidgeError::Fenced(_)) {
+            // Nothing logged and nothing applied: definitely not applied.
+            error
+        } else {
+            MidgeError::RecoveryFailed(message)
+        }
+    }
+
+    fn is_authority_failure(error: &MidgeError) -> bool {
+        matches!(
+            error,
+            MidgeError::Fenced(_)
+                | MidgeError::LeaseHeld(_)
+                | MidgeError::LeaseUnavailable(_)
+                | MidgeError::LeaseIndeterminate(_)
+                | MidgeError::LeaseEpochExhausted
+        )
+    }
+
+    /// The caller's error for units whose WAL frames may be in the file when
+    /// a later step fails before any of them is applied. Replay may still
+    /// apply them. A lease or authority error reads as "not applied" or
+    /// "retry", either of which could apply the unit twice, so it becomes
+    /// `OutcomeUnknown`, including a failed fsync or an ambiguous append.
+    fn appended_unit_error(error: MidgeError) -> MidgeError {
+        match error {
+            MidgeError::OutcomeUnknown(_) => error,
+            other => MidgeError::OutcomeUnknown(format!(
+                "the transaction is in the WAL but not applied; it may be applied on \
+                 restart: {other}"
+            )),
+        }
+    }
+
     pub(crate) fn can_coalesce_transaction_append(
         &self,
         durability_policy: Option<DurabilityPolicy>,
@@ -815,8 +954,38 @@ impl WalActor {
         self.bytes_since_sync
     }
 
-    pub(crate) fn current_segment_max_sequence(&self) -> u64 {
-        self.segment_max_sequence
+    /// The records the open segment holds: what sealing it would cover.
+    /// Memory mode holds none.
+    pub(crate) fn open_tail(&self) -> crate::wal::format::SegmentTail {
+        self.writer()
+            .map(crate::wal::WalWriter::tail)
+            .unwrap_or_default()
+    }
+
+    /// The highest sequence the open segment holds, or zero when it holds
+    /// none: what a seal ticket names.
+    pub(crate) fn open_segment_max_sequence(&self) -> u64 {
+        self.open_tail().last_seq.unwrap_or(0)
+    }
+
+    /// Retire every WAL segment below `to` through `state`'s ledger. Memory
+    /// mode keeps no segment files, so only the ledger moves.
+    ///
+    /// # Errors
+    ///
+    /// Refuses while the actor is fenced: a fenced writer changes no
+    /// history. Otherwise returns the ledger's error, having removed nothing.
+    pub(crate) fn retire_wal_below(
+        &self,
+        state: &mut RuntimeState,
+        to: crate::wal::ledger::SegmentId,
+    ) -> MidgeResult<crate::runtime::wal_history::RetiredWal> {
+        if self.is_fenced() {
+            return Err(self
+                .io_error()
+                .unwrap_or_else(|| MidgeError::RecoveryFailed("the WAL is fenced".to_string())));
+        }
+        state.wal.history.retire_below(to)
     }
 
     #[cfg(test)]
@@ -837,19 +1006,21 @@ impl WalActor {
     }
 }
 
-impl Default for WalActor {
-    fn default() -> Self {
-        // INTENTIONAL: Cannot create with default since we need a WAL directory.
-        // WalActor must be created via WalActor::new(wal_dir) to ensure proper initialization.
-        // This prevents misuse while maintaining the Default trait for generic contexts.
-        panic!("WalActor::default() is not supported. Use WalActor::new(wal_dir) instead.")
-    }
-}
-
 #[cfg(test)]
 mod tests;
 
 impl WalActor {
+    /// Replace the open writer's authority check, as a lease would.
+    #[cfg(all(test, feature = "failpoints"))]
+    pub(crate) fn set_write_authority_for_test(
+        &self,
+        authority: crate::wal::traits::WriteAuthority,
+    ) {
+        if let Some(writer) = self.writer() {
+            writer.set_write_authority(Some(authority));
+        }
+    }
+
     pub(crate) fn set_lease_validity(
         &mut self,
         validity: Option<Arc<crate::lease::LeaseValidity>>,
@@ -861,13 +1032,45 @@ impl WalActor {
     }
 
     fn write_authority(&self) -> Option<crate::wal::traits::WriteAuthority> {
-        let validity = Arc::clone(self.lease_validity.as_ref()?);
+        let validity = self.lease_validity.clone();
+        let leader_store = self.leader_store.clone();
+        if validity.is_none() && leader_store.is_none() {
+            return None;
+        }
+        let holder_id = self.leader_holder_id.clone();
         let epoch = self.current_epoch;
-        Some(Arc::new(move || {
-            validity.remaining(epoch).map(|_| ()).map_err(|error| {
-                error.into_validation_error("monotonic writer lease validity lost")
-            })
+        let timeout = self.storage_io_timeout;
+        Some(Arc::new(authority::LeaseWriterAuthority {
+            validity,
+            leader_store,
+            holder_id,
+            epoch,
+            timeout,
         }))
+    }
+
+    fn validate_writer_admission(&mut self, state: &mut RuntimeState) -> MidgeResult<bool> {
+        let Some(store) = &self.leader_store else {
+            return Ok(false);
+        };
+        match store.validate_write_admission(
+            &self.leader_holder_id,
+            self.current_epoch,
+            self.storage_io_timeout,
+        ) {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                let error = error.into_validation_error("WAL writer admission validation");
+                if Self::is_authority_failure(&error) {
+                    self.fence_with_cause(
+                        state,
+                        format!("WAL writer admission authority validation failed: {error}"),
+                        true,
+                    );
+                }
+                Err(error)
+            }
+        }
     }
 
     fn ensure_lease_validity(&self) -> MidgeResult<()> {

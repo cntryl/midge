@@ -1,8 +1,8 @@
 //! Deadline adapters that preserve asynchronous buffer ownership.
 
 use super::{
-    cloud_to_storage_outcome, Arc, CloudEvent, CloudStorage, StorageCallback, StorageEvent,
-    StorageObjectMetadata, StorageOutcome,
+    cloud_to_storage_outcome, Arc, CloudEvent, CloudReadOptions, CloudRequestOptions, CloudStorage,
+    StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome,
 };
 
 impl CloudStorage {
@@ -31,12 +31,14 @@ impl CloudStorage {
         }
         let full_key = self.full_path(key);
         let (tx, rx) = std::sync::mpsc::channel();
-        self.backend.submit_get_range_with_reservation(
+        let request = CloudRequestOptions::default()
+            .with_deadline(deadline)
+            .with_reservation(reservation);
+        self.reads.read(
             &full_key,
-            start..end,
-            expected,
-            timeout,
-            reservation,
+            CloudReadOptions::default()
+                .with_request_options(request)
+                .with_range(start..end, expected),
             tx,
         );
         let result = match super::adapter::await_cloud_event(self, &rx, &deadline, "range GET") {
@@ -67,7 +69,7 @@ impl CloudStorage {
         &self,
         key: &str,
         data: Vec<u8>,
-        mut headers: Vec<(String, String)>,
+        headers: Vec<(String, String)>,
         timeout: std::time::Duration,
         reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
         callback: &StorageCallback,
@@ -84,12 +86,13 @@ impl CloudStorage {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
-        super::set_request_timeout_header(&mut headers, timeout);
-        self.backend.submit_put_with_reservation(
+        self.writes.write(
             &self.full_path(key),
             data,
-            headers,
-            reservation,
+            CloudRequestOptions::default()
+                .with_deadline(deadline)
+                .with_headers(headers)
+                .with_reservation(reservation),
             tx,
         );
         let event = match super::adapter::await_cloud_event(self, &rx, &deadline, "PUT") {

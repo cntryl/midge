@@ -1,0 +1,92 @@
+name: Integration S3
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "47 2 * * *"
+  push:
+    branches: [develop, main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'rust-toolchain*'
+      - '.cargo/**'
+      - 'compose.yml'
+      - '.github/workflows/integration-s3.yml'
+      - '!src/storage/providers/azure.rs'
+      - '!src/storage/providers/azure_resolver.rs'
+      - '!src/storage/providers/gcs.rs'
+      - '!src/storage/providers/gcs_resolver.rs'
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'rust-toolchain*'
+      - '.cargo/**'
+      - 'compose.yml'
+      - '.github/workflows/integration-s3.yml'
+      - '!src/storage/providers/azure.rs'
+      - '!src/storage/providers/azure_resolver.rs'
+      - '!src/storage/providers/gcs.rs'
+      - '!src/storage/providers/gcs_resolver.rs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: integration-s3-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: S3 provider and engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    services:
+      sqrzl:
+        image: ghcr.io/sqrzl/sqrzl-emulator:latest
+        ports:
+          - 9000:9000
+          - 9001:9001
+        env:
+          SQRZL_BLOBS_PATH: /app/blobs
+          SQRZL_ACCESS_KEY_ID: admin
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
+
+    env:
+      CARGO_INCREMENTAL: "0"
+      SQRZL_SECRET_ACCESS_KEY: easy-peasy
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration-s3
+
+      - name: Provider contracts (S3, Azure, GCS XML and JSON, OCI)
+        run: cargo test --locked --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1
+
+      - name: Engine recovery against Sqrzl providers
+        run: cargo test --locked --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --test-threads=1
+
+      - name: Cloud WAL takeover
+        run: cargo test --locked --test fault_injection --features sqrzl-tests,failpoints wal_authority_regressions::should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache -- --exact
+
+      - name: Logical histories against Sqrzl providers
+        env:
+          MIDGE_DISCOVERY_PROFILE: sqrzl
+        run: cargo test --locked --test discovery_model --features sqrzl-tests

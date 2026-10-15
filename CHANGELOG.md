@@ -5,9 +5,87 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) formatting.
 
-Midge is currently in the 0.3 release line. Compatibility expectations for pre-1.0 releases are defined in [docs/development/stability-policy.md](docs/development/stability-policy.md).
+Midge is currently in the 0.4 release line. Compatibility expectations for pre-1.0 releases are defined in [docs/development/stability-policy.md](docs/development/stability-policy.md).
 
 ## [Unreleased]
+
+## [0.4.0] - 2026-10-14
+
+### Changed
+
+- **Breaking on-disk format: database FORMAT 8 (#843–#866).** FORMAT 8
+  requires SST V4 and durable per-family flush frontiers. WAL segments are
+  linked and named in `wal/LEDGER`; the ledger records segment facts and
+  durable sequence reservations. Manifest journal records require their edit
+  envelope, key bounds use the canonical hex encoding, and legacy WAL
+  checkpoint fields are removed. Current binaries reject database formats
+  1 through 7 with `CompatibilityError`; there is no in-place upgrade.
+- **Breaking cloud metadata formats (#844, #866).** Cloud WAL publication
+  catalog v3 is a chained history whose sealed-segment summaries include
+  record counts and per-family maximum sequences. Retirement is authorized by
+  a committed shared manifest generation. Cloud lease metadata advances to
+  version 3. These formats have no migration path; move cloud databases by
+  logical export and import into a new prefix.
+- **Breaking Rust integration API (#868).** Public storage integration
+  capabilities changed: custom `CloudBackend`, `LeaderStore`, and filesystem
+  implementations must adopt the focused capability interfaces and scoped
+  acquisition/lock contracts. The public metrics fields used for WAL
+  checkpoints were also replaced by the per-family flush-frontier view (#844,
+  #866), and `MidgeError::OutcomeUnknown` distinguishes commits whose outcome
+  cannot be confirmed (#866).
+- **Breaking backup contents (#844).** A backup captures `wal/LEDGER` and the
+  segments the ledger names, read inside the capture barrier, instead of
+  everything under `wal/`. Orphaned segment files, `wal/salvaged-*/`
+  directories and `.salvage-retained` copies are no longer captured, and a
+  ledger that cannot be read fails the backup.
+- **WAL writer fencing (#872).** Related same-epoch append, sync, and ledger
+  effects share counted fencing ownership, reducing repeated lock admission
+  and authority reads while preserving lease-transition exclusion.
+- Empty range deletes are rejected with `InvalidArgument` (#866).
+
+### Fixed
+
+- Honor metrics-only telemetry configuration so benchmark and qualification
+  callers can install their own tracing subscribers (#882).
+- Preserve coherent, version-pinned control reads when a concurrent writer
+  replaces the object afterward, avoiding spurious corruption during cold-cache
+  takeover. Stale compare-and-swap attempts remain rejected (#880).
+- Recovery seals and syncs the WAL tail it replayed before serving any read,
+  so a power loss after a process crash no longer loses values recovery
+  already returned (#843).
+- A sequence number returned for a commit whose unsynced WAL record a power
+  loss dropped is never handed out again (#843).
+- Replay follows the WAL ledger's linked chain, so segments an older writer
+  epoch wrote are no longer skipped as stale behind a regressed segment id
+  (#843).
+- A transaction that spans column families is refused before any sequence
+  is allocated (#843).
+- A predecessor that reopens its old cache after a successor took over no
+  longer replays its unpublished WAL tail over the successor's
+  `cloud_strict()` commits, even after the successor's catalog entries
+  retire (#844).
+- A crash during cloud salvage no longer lets the next open replay cataloged
+  segments past the hole: one catalog compare-and-swap sets the suffix aside
+  and raises the sequence floor before the WAL ledger changes (#844).
+- Point and bounded-prefix reads remain correct when duplicate SST successor
+  boundaries span many retained versions; unverified trie hints fall back to
+  the complete sparse-index search (#775).
+- Cancellation remains attached to cloud lease acquisition, filesystem writer
+  locks recover safely after process death, and cloud conditional-read headers
+  are preserved through provider requests (#868).
+
+### Upgrade and rollback
+
+- Upgrading from `0.3.2` to `0.4.0` requires a logical export and import into
+  a new local database or cloud prefix. FORMAT 8 rejects older database
+  formats, and cloud catalog v3 rejects other catalog versions; there is no
+  in-place migration.
+- Preserve the original database directory and cloud prefix for rollback.
+  Rollback requires restoring that copy and running `0.3.2`; older binaries
+  must not open data written by `0.4.0`.
+- Applications implementing custom storage backends must update their
+  implementations for the source-breaking integration interfaces. Applications
+  with exhaustive `MidgeError` matches must handle `OutcomeUnknown`.
 
 ## [0.3.2] - 2026-10-07
 

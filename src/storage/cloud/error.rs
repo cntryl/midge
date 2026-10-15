@@ -1,6 +1,6 @@
 //! The structured cloud error taxonomy and outcome type.
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
 use crate::common::MidgeError;
 
 /// Structured cloud provider failure, classified at the point the HTTP
@@ -20,7 +20,6 @@ use crate::common::MidgeError;
 pub enum CloudError {
     /// The object does not exist (404 / `NoSuchKey` / `NotFound` /
     /// `BlobNotFound`).
-    #[cfg(any(test, feature = "cloud-common"))]
     NotFound(String),
     /// A conditional request (`If-Match` / `If-None-Match`) lost a genuine
     /// race with a concurrent writer.
@@ -66,15 +65,7 @@ impl CloudError {
     /// True when the object is confirmed absent.
     #[must_use]
     pub fn is_not_found(&self) -> bool {
-        #[cfg(any(test, feature = "cloud-common"))]
-        {
-            matches!(self, Self::NotFound(_))
-        }
-        #[cfg(not(any(test, feature = "cloud-common")))]
-        {
-            let _ = std::mem::discriminant(self);
-            false
-        }
+        matches!(self, Self::NotFound(_))
     }
 
     /// True when a conditional write/delete genuinely lost a race to a
@@ -149,7 +140,6 @@ impl CloudError {
 impl std::fmt::Display for CloudError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            #[cfg(any(test, feature = "cloud-common"))]
             Self::NotFound(msg) => write!(f, "not found: {msg}"),
             Self::PreconditionFailed(msg) => write!(f, "precondition failed: {msg}"),
             Self::ConditionalConflict(msg) => write!(f, "conditional conflict: {msg}"),
@@ -184,7 +174,7 @@ pub(crate) fn contextualize_operation_error(
 /// Cloud operation outcome sent across the callback boundary.
 pub type CloudOutcome<T> = Result<T, CloudError>;
 
-#[cfg(test)]
+#[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
 pub(super) fn cloud_outcome_from_result<T>(result: Result<T, MidgeError>) -> CloudOutcome<T> {
     result.map_err(|error| match error {
         MidgeError::NotFound => CloudError::NotFound(format!("{error:?}")),

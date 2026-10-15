@@ -1,6 +1,6 @@
 # Composed authority and publication fixture
 
-The ignored native regression in
+The native regression in
 [`authority_publication.rs`](../../tests/cloud_provider_engine_qualification/authority_publication.rs)
 composes writer authority, immutable WAL upload, catalog publication, SST
 replacement, remote reclamation and cache-loss recovery. It addresses #757.
@@ -12,11 +12,11 @@ docker compose up -d sqrzl
 SQRZL_SECRET_ACCESS_KEY=easy-peasy cargo test \
   --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints \
   authority_publication::should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeover_and_cleanup \
-  -- --ignored --exact --nocapture
+  -- --exact --nocapture
 ```
 
-The existing cloud integration workflow includes it through the ignored provider
-suite. `MIDGE_QUALIFICATION_ARTIFACT_DIR` overrides the default
+The `integration-s3.yml` workflow includes it in the provider-engine suite.
+`MIDGE_QUALIFICATION_ARTIFACT_DIR` overrides the default
 `target/authority-publication` receipt directory. Each case retains sanitized
 provider request observations, actual epochs/frontiers, the successor catalog,
 the independent expected recovery map and two child logs/completion receipts.

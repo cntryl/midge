@@ -1,26 +1,32 @@
 //! Filesystem-based primary lease using CAS-via-rename leader records.
 //!
-//! Previous implementation used OS file locks (flock / `LockFileEx`).
-//! This version uses a persistent leader record (`.midge_leader`) that
+//! This implementation uses a persistent leader record (`.midge_leader`) that
 //! contains a monotonically increasing epoch, holder identity, and a
 //! timestamp.  Leadership is acquired via atomic rename (CAS-via-rename)
-//! which works correctly on local filesystems, NFS, and shared mounts.
+//! on filesystems providing atomic rename and process-owned exclusive locks.
 //!
 //! ## Safety guarantees
 //!
 //! - **Fencing token**: Every leader gets a strictly increasing epoch
 //! - **CAS semantics**: Two simultaneous acquirers — exactly one wins
-//! - **Works on NFS/EFS**: rename is atomic on POSIX, including NFS v3+
-//! - **No flock dependency**: avoids advisory-lock pitfalls
+//! - **Writer effect fencing**: exclusive filesystem locks serialize physical
+//!   writes with lease transitions and release automatically on process exit
 //!
 //! ## Limitations
 //!
 //! - Requires a writable filesystem (not suitable for read-only media)
+//! - Requires shared exclusive locks that are released when their owner exits
 //! - Leader record is a small file; no built-in expiry without heartbeat
 
+use super::clock::LeaseClock;
 use super::fs_leader_store::FsLeaderStore;
-use super::traits::{LeaderStore, LeaseError, LeaseGuard, LeaseValidity, PrimaryLease};
-use crate::io::{Fs, MockFs, RealFs};
+use super::traits::{
+    LeaderRecord, LeaderStore, LeaseError, LeaseGuard, LeaseValidity, PrimaryLease,
+};
+use crate::io::Fs;
+#[cfg(test)]
+use crate::io::{MockFs, RealFs};
+#[cfg(test)]
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -43,6 +49,8 @@ pub struct FileSystemLease {
     validity: Arc<LeaseValidity>,
     ttl: Duration,
     clock_skew_tolerance: Duration,
+    /// Judges whether another holder's record is stale.
+    clock: LeaseClock,
 }
 
 impl FileSystemLease {
@@ -61,6 +69,7 @@ impl FileSystemLease {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_ttl_and_clock_skew_tolerance(
         db_path: &Path,
         use_mock_fs: bool,
@@ -73,10 +82,41 @@ impl FileSystemLease {
             let realfs = RealFs::new(db_path).map_err(|e| LeaseError::IoError(e.to_string()))?;
             Arc::new(realfs)
         };
-        Ok(Self::with_fs(fs, ttl, clock_skew_tolerance))
+        Ok(Self::with_root(
+            fs,
+            ttl,
+            clock_skew_tolerance,
+            LeaseClock::default(),
+        ))
     }
 
-    fn with_fs(fs: Arc<dyn Fs>, ttl: Duration, clock_skew_tolerance: Duration) -> Self {
+    /// A lease whose coordination files live in the database `root`, timed
+    /// by `clock`.
+    #[cfg(test)]
+    pub(crate) fn with_root(
+        root: Arc<dyn Fs>,
+        ttl: Duration,
+        clock_skew_tolerance: Duration,
+        clock: LeaseClock,
+    ) -> Self {
+        Self::with_root_and_timeout(
+            root,
+            ttl,
+            clock_skew_tolerance,
+            clock,
+            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        )
+    }
+
+    /// Construct a lease with the configured storage budget for transitions.
+    pub(crate) fn with_root_and_timeout(
+        root: Arc<dyn Fs>,
+        ttl: Duration,
+        clock_skew_tolerance: Duration,
+        clock: LeaseClock,
+        storage_io_timeout: Duration,
+    ) -> Self {
+        let fs = root;
         let instance = LEASE_INSTANCE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let holder_id = format!(
             "{}.{}@{}",
@@ -87,7 +127,11 @@ impl FileSystemLease {
                 .to_string_lossy()
         );
 
-        let leader_store = Arc::new(FsLeaderStore::new(fs));
+        let leader_store = Arc::new(FsLeaderStore::with_timeout(
+            fs,
+            clock.clone(),
+            storage_io_timeout,
+        ));
 
         Self {
             leader_store,
@@ -97,16 +141,186 @@ impl FileSystemLease {
             validity: Arc::new(LeaseValidity::new()),
             ttl,
             clock_skew_tolerance,
+            clock,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn new_with_fs_for_test(fs: Arc<dyn Fs>, ttl: Duration) -> Self {
-        Self::with_fs(fs, ttl, ttl / 2)
+        Self::with_root(fs, ttl, ttl / 2, LeaseClock::default())
+    }
+
+    fn validate_takeover_record(
+        &self,
+        existing: Option<&LeaderRecord>,
+        report_takeover: bool,
+    ) -> Result<(), LeaseError> {
+        let Some(existing) = existing else {
+            return Ok(());
+        };
+        if existing.holder_id == self.holder_id {
+            return Ok(());
+        }
+
+        let acquired_at =
+            chrono::DateTime::parse_from_rfc3339(&existing.acquired_at).map_err(|_| {
+                LeaseError::Indeterminate(format!(
+                    "leader timestamp is invalid; ownership is ambiguous (holder: {}, epoch: {})",
+                    existing.holder_id, existing.epoch
+                ))
+            })?;
+        let signed_age = self.clock.now().signed_duration_since(acquired_at);
+        if signed_age < chrono::Duration::zero() {
+            return Err(LeaseError::Indeterminate(format!(
+                "leader timestamp is in the future; ownership is ambiguous (holder: {}, epoch: {})",
+                existing.holder_id, existing.epoch
+            )));
+        }
+        let age = signed_age.to_std().map_err(|_| {
+            LeaseError::Indeterminate(format!(
+                "leader age is ambiguous (holder: {}, epoch: {})",
+                existing.holder_id, existing.epoch
+            ))
+        })?;
+        let stale_after = self.ttl.saturating_add(self.clock_skew_tolerance);
+        if age < stale_after {
+            return Err(LeaseError::AcquisitionFailed(format!(
+                "another Midge instance is already running against this storage \
+                 (holder: {}, epoch: {}, acquired {}s ago)",
+                existing.holder_id,
+                existing.epoch,
+                age.as_secs()
+            )));
+        }
+        if report_takeover && existing.acquired_at != super::fs_leader_store::RELEASED_TIMESTAMP {
+            tracing::warn!(
+                old_holder = %existing.holder_id,
+                old_epoch = existing.epoch,
+                age_secs = age.as_secs(),
+                "taking over stale leader record (previous holder likely crashed)"
+            );
+        }
+        Ok(())
     }
 
     pub(crate) fn lease_validity(&self) -> Arc<LeaseValidity> {
         Arc::clone(&self.validity)
+    }
+
+    fn acquire_in_scope(
+        self: Arc<Self>,
+        minimum_epoch: u64,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> Result<LeaseGuard, LeaseError> {
+        if let Some(scope) = scope {
+            scope
+                .check("filesystem primary lease acquisition")
+                .map_err(super::traits::scope_lease_error)?;
+        }
+        if self.acquired.load(Ordering::Acquire) {
+            return Err(LeaseError::AlreadyAcquired(
+                "lease already acquired by this instance".to_string(),
+            ));
+        }
+
+        // Reject an ordinary second open before it takes the writer-effect
+        // lock. The locked check below closes the race with a concurrent
+        // acquisition; the early read keeps a failed open from delaying the
+        // live writer's next WAL effect.
+        let observed = match scope {
+            Some(scope) => self
+                .leader_store
+                .read_current_with_timeout(scope.deadline().remaining())?,
+            None => self.leader_store.read_current()?,
+        };
+        self.validate_takeover_record(observed.as_ref(), false)?;
+
+        // The validation closure's own error variant (Indeterminate for an
+        // unparseable/ambiguous record, AcquisitionFailed for confirmed
+        // contention) propagates verbatim — it must not be collapsed into a
+        // single blanket variant here, or every distinction made below would
+        // be silently discarded.
+        // Other nodes time takeover from the wall-clock stamp the store takes
+        // before its write, so local validity is anchored before it too;
+        // counting a slow fsync or rename here would outlive the record.
+        let validity_anchor = std::time::Instant::now();
+        let record = self.acquire_record(minimum_epoch, scope)?;
+
+        let epoch = record.epoch;
+        if let Err(error) = self.validity.activate(epoch, validity_anchor + self.ttl()) {
+            return Err(self.cleanup_failed_acquisition(epoch, scope, error));
+        }
+        self.acquired_epoch.store(epoch, Ordering::Release);
+        self.acquired.store(true, Ordering::Release);
+
+        tracing::info!(
+            holder_id = %self.holder_id,
+            epoch = epoch,
+            "primary lease acquired via leader store"
+        );
+
+        let guard = LeaseGuard::for_lease(self);
+        if let Some(scope) = scope {
+            scope.resolve_ambiguous_mutation();
+            scope
+                .check("confirmed filesystem primary lease acquisition")
+                .map_err(super::traits::scope_lease_error)?;
+        }
+        Ok(guard)
+    }
+
+    fn acquire_record(
+        &self,
+        minimum_epoch: u64,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> Result<LeaderRecord, LeaseError> {
+        let Some(scope) = scope else {
+            return self
+                .leader_store
+                .acquire_leadership_after_validation_and_publish(
+                    &self.holder_id,
+                    |existing| self.validate_takeover_record(existing, true),
+                    |_| Ok(()),
+                    minimum_epoch,
+                );
+        };
+        let mut cleanup_epoch = None;
+        let result = {
+            let mut observe = |epoch| cleanup_epoch = Some(epoch);
+            let mut acquisition = super::traits::LeaderAcquisition::within(scope, &mut observe);
+            let result = self
+                .leader_store
+                .acquire_leadership_after_validation_with_context(
+                    &self.holder_id,
+                    minimum_epoch,
+                    &mut acquisition,
+                    |existing| self.validate_takeover_record(existing, true),
+                );
+            acquisition.finish(result)
+        };
+        result.map_err(|error| match cleanup_epoch {
+            Some(epoch) => self.cleanup_failed_acquisition(epoch, Some(scope), error),
+            None => error,
+        })
+    }
+
+    fn cleanup_failed_acquisition(
+        &self,
+        epoch: u64,
+        scope: Option<&crate::common::DeadlineScope>,
+        error: LeaseError,
+    ) -> LeaseError {
+        match self.leader_store.release_if_owner(&self.holder_id, epoch) {
+            Ok(_) => {
+                if let Some(scope) = scope {
+                    scope.resolve_ambiguous_mutation();
+                }
+                error
+            }
+            Err(cleanup_error) => LeaseError::Indeterminate(format!(
+                "filesystem acquisition failed ({error}) and exact-owner cleanup failed: {cleanup_error}"
+            )),
+        }
     }
 }
 
@@ -119,98 +333,15 @@ impl PrimaryLease for FileSystemLease {
         self: Arc<Self>,
         minimum_epoch: u64,
     ) -> Result<LeaseGuard, LeaseError> {
-        if self.acquired.load(Ordering::Acquire) {
-            return Err(LeaseError::AlreadyAcquired(
-                "lease already acquired by this instance".to_string(),
-            ));
-        }
+        self.acquire_in_scope(minimum_epoch, None)
+    }
 
-        // Check freshness while holding the acquisition lock so a concurrent
-        // winner cannot publish a live record between validation and CAS.
-        // The validation closure's own error variant (Indeterminate for an
-        // unparseable/ambiguous record, AcquisitionFailed for confirmed
-        // contention) propagates verbatim — it must not be collapsed into a
-        // single blanket variant here, or every distinction made below would
-        // be silently discarded.
-        // Other nodes time takeover from the wall-clock stamp the store takes
-        // before its write, so local validity is anchored before it too;
-        // counting a slow fsync or rename here would outlive the record.
-        let validity_anchor = std::time::Instant::now();
-        let record = self
-            .leader_store
-            .acquire_leadership_after_validation_and_publish(
-                &self.holder_id,
-                |existing| {
-                    let Some(existing) = existing else {
-                        return Ok(());
-                    };
-                    if existing.holder_id == self.holder_id {
-                        return Ok(());
-                    }
-
-                    let acquired_at = chrono::DateTime::parse_from_rfc3339(&existing.acquired_at)
-                        .map_err(|_| {
-                        LeaseError::Indeterminate(format!(
-                            "leader timestamp is invalid; ownership is ambiguous (holder: {}, \
-                             epoch: {})",
-                            existing.holder_id, existing.epoch
-                        ))
-                    })?;
-                    let signed_age = chrono::Utc::now().signed_duration_since(acquired_at);
-                    if signed_age < chrono::Duration::zero() {
-                        return Err(LeaseError::Indeterminate(format!(
-                        "leader timestamp is in the future; ownership is ambiguous (holder: {}, \
-                         epoch: {})",
-                        existing.holder_id, existing.epoch
-                    )));
-                    }
-                    let age = signed_age.to_std().map_err(|_| {
-                        LeaseError::Indeterminate(format!(
-                            "leader age is ambiguous (holder: {}, epoch: {})",
-                            existing.holder_id, existing.epoch
-                        ))
-                    })?;
-                    // A takeover is delayed by a bounded skew allowance. This
-                    // trades failover latency for protection against a holder
-                    // whose wall clock stepped backwards while its monotonic
-                    // watchdog still considers the lease live.
-                    let stale_after = self.ttl.saturating_add(self.clock_skew_tolerance);
-                    if age < stale_after {
-                        return Err(LeaseError::AcquisitionFailed(format!(
-                            "another Midge instance is already running against this storage \
-                         (holder: {}, epoch: {}, acquired {}s ago)",
-                            existing.holder_id,
-                            existing.epoch,
-                            age.as_secs()
-                        )));
-                    }
-                    if existing.acquired_at != super::fs_leader_store::RELEASED_TIMESTAMP {
-                        tracing::warn!(
-                        old_holder = %existing.holder_id,
-                        old_epoch = existing.epoch,
-                        age_secs = age.as_secs(),
-                        "taking over stale leader record (previous holder likely crashed)"
-                        );
-                    }
-                    Ok(())
-                },
-                |_| Ok(()),
-                minimum_epoch,
-            )?;
-
-        let epoch = record.epoch;
-        self.validity
-            .activate(epoch, validity_anchor + self.ttl())?;
-        self.acquired_epoch.store(epoch, Ordering::Release);
-        self.acquired.store(true, Ordering::Release);
-
-        tracing::info!(
-            holder_id = %self.holder_id,
-            epoch = epoch,
-            "primary lease acquired via leader store"
-        );
-
-        Ok(LeaseGuard::for_lease(self))
+    fn try_acquire_with_minimum_epoch_within(
+        self: Arc<Self>,
+        minimum_epoch: u64,
+        scope: &crate::common::DeadlineScope,
+    ) -> Result<LeaseGuard, LeaseError> {
+        self.acquire_in_scope(minimum_epoch, Some(scope))
     }
 
     fn renew(&self) -> Result<(), LeaseError> {
@@ -384,19 +515,17 @@ mod tests {
     struct FlakyRenameFs {
         inner: crate::io::MockFs,
         fail_next_rename: AtomicBool,
+        effect_attempted: Option<std::sync::mpsc::SyncSender<()>>,
+        cancel_after_leader_rename: Option<crate::common::DeadlineScope>,
     }
 
-    impl crate::io::Fs for FlakyRenameFs {
-        fn open(
+    impl crate::io::ReadFs for FlakyRenameFs {
+        fn open_read(
             &self,
             path: &crate::io::FsPath,
-            options: crate::io::OpenOptions,
-        ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
-            self.inner.open(path, options)
-        }
-
-        fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
-            self.inner.remove_file(path)
+        ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
@@ -410,15 +539,41 @@ mod tests {
             self.inner.metadata(path)
         }
 
-        fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
-            self.inner.create_dir_all(path)
-        }
-
         fn list_dir(
             &self,
             path: &crate::io::FsPath,
         ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
             self.inner.list_dir(path)
+        }
+    }
+
+    impl crate::io::Fs for FlakyRenameFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            if path.0 == ".midge_writer_effect.v2.lock" {
+                if let Some(attempted) = &self.effect_attempted {
+                    let _ = attempted.try_send(());
+                }
+            }
+            self.inner.try_lock_exclusive(path)
+        }
+
+        fn open(
+            &self,
+            path: &crate::io::FsPath,
+            options: crate::io::OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+            self.inner.open(path, options)
+        }
+
+        fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+            self.inner.create_dir_all(path)
         }
 
         fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
@@ -443,8 +598,138 @@ mod tests {
                     "injected transient rename failure".to_string(),
                 ));
             }
-            self.inner.rename_atomic(from, to)
+            self.inner.rename_atomic(from, to)?;
+            if to.0 == ".midge_leader" {
+                if let Some(scope) = &self.cancel_after_leader_rename {
+                    scope.cancel();
+                }
+            }
+            Ok(())
         }
+    }
+
+    #[test]
+    fn should_leave_filesystem_authority_unchanged_when_open_is_cancelled_waiting_for_effect_lock()
+    {
+        // Arrange
+        let (attempted_tx, attempted_rx) = std::sync::mpsc::sync_channel(1);
+        let fs = Arc::new(FlakyRenameFs {
+            inner: crate::io::MockFs::new(),
+            fail_next_rename: AtomicBool::new(false),
+            effect_attempted: Some(attempted_tx),
+            cancel_after_leader_rename: None,
+        });
+        let lease = Arc::new(FileSystemLease::new_with_fs_for_test(
+            fs.clone() as Arc<dyn Fs>,
+            Duration::from_secs(30),
+        ));
+        let held = fs
+            .inner
+            .try_lock_exclusive(&crate::io::FsPath::new(".midge_writer_effect.v2.lock"))
+            .expect("hold predecessor effect");
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(2)),
+        );
+        let worker_scope = scope.clone();
+        let worker_lease = Arc::clone(&lease);
+        let open = std::thread::spawn(move || {
+            worker_lease.try_acquire_with_minimum_epoch_within(0, &worker_scope)
+        });
+        attempted_rx.recv().expect("open reached effect lock wait");
+
+        // Act
+        let ambiguous = scope.cancel();
+        drop(held);
+        let result = open.join().expect("open completes");
+
+        // Assert
+        assert!(result.is_err());
+        assert!(
+            lease.leader_store.read_current().unwrap().is_none(),
+            "cancelled open must not publish or release a new epoch"
+        );
+        assert!(
+            !ambiguous,
+            "waiting for another effect has not admitted a lease mutation"
+        );
+        assert!(!crate::io::ReadFs::exists(
+            fs.as_ref(),
+            &crate::io::FsPath::new(".midge_leader.lock")
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn should_preserve_filesystem_authority_when_open_deadline_expires_waiting_for_effect_lock() {
+        // Arrange
+        let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+        let lease = Arc::new(FileSystemLease::new_with_fs_for_test(
+            Arc::clone(&fs),
+            Duration::from_secs(30),
+        ));
+        let held = fs
+            .try_lock_exclusive(&crate::io::FsPath::new(".midge_writer_effect.v2.lock"))
+            .expect("hold predecessor effect");
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(Duration::from_millis(10)),
+        );
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(held);
+        });
+
+        // Act
+        let result = Arc::clone(&lease).try_acquire_with_minimum_epoch_within(0, &scope);
+        release.join().expect("release predecessor effect");
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::Timeout(_))));
+        assert!(
+            lease.leader_store.read_current().unwrap().is_none(),
+            "expired open must not publish or release a new epoch"
+        );
+        assert!(
+            !scope.cancel(),
+            "lock wait must not introduce lease uncertainty"
+        );
+    }
+
+    #[test]
+    fn should_release_exact_filesystem_owner_when_scope_cancels_after_leader_rename() {
+        // Arrange
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+        );
+        let fs = Arc::new(FlakyRenameFs {
+            inner: MockFs::new(),
+            fail_next_rename: AtomicBool::new(false),
+            effect_attempted: None,
+            cancel_after_leader_rename: Some(scope.clone()),
+        });
+        let lease = Arc::new(FileSystemLease::new_with_fs_for_test(
+            fs as Arc<dyn Fs>,
+            Duration::from_secs(30),
+        ));
+
+        // Act: the filesystem applies the rename before the scoped wrapper
+        // rejects its completion. No acquired guard is returned to the caller.
+        let result = Arc::clone(&lease).try_acquire_with_minimum_epoch_within(0, &scope);
+        let record = lease.leader_store.read_current().unwrap().unwrap();
+
+        // Assert
+        assert!(matches!(result, Err(LeaseError::Indeterminate(_))));
+        assert_eq!(record.holder_id, lease.holder_id);
+        assert_eq!(
+            record.acquired_at,
+            super::super::fs_leader_store::RELEASED_TIMESTAMP
+        );
+        assert!(!lease.acquired.load(Ordering::Acquire));
+        assert!(!scope.cancel(), "exact-owner cleanup resolves uncertainty");
+        let guard = Arc::clone(&lease)
+            .try_acquire()
+            .expect("successor open can acquire");
+        assert!(lease.epoch() > record.epoch);
+        drop(guard);
     }
 
     #[test]
@@ -453,6 +738,8 @@ mod tests {
         let fs = Arc::new(FlakyRenameFs {
             inner: crate::io::MockFs::new(),
             fail_next_rename: AtomicBool::new(false),
+            effect_attempted: None,
+            cancel_after_leader_rename: None,
         });
         let lease = Arc::new(FileSystemLease::new_with_fs_for_test(
             Arc::clone(&fs) as Arc<dyn crate::io::Fs>,
@@ -526,6 +813,69 @@ mod tests {
 
         // Assert
         assert!(matches!(result, Err(LeaseError::AlreadyAcquired(_))));
+    }
+
+    #[test]
+    fn should_reject_live_second_open_before_waiting_for_writer_effect() {
+        // Arrange: the live writer is in a storage effect while another
+        // engine tries to open the same filesystem database.
+        let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
+        let first = Arc::new(FileSystemLease::new_with_fs_for_test(
+            Arc::clone(&fs),
+            Duration::from_secs(30),
+        ));
+        let _first_guard = Arc::clone(&first).try_acquire().expect("first lease");
+        let effect_store = Arc::new(FsLeaderStore::new(Arc::clone(&fs), LeaseClock::default()));
+        let effect_entered = Arc::new(std::sync::Barrier::new(2));
+        let effect_continue = Arc::new(std::sync::Barrier::new(2));
+        let effect_store_worker = Arc::clone(&effect_store);
+        let entered_worker = Arc::clone(&effect_entered);
+        let continue_worker = Arc::clone(&effect_continue);
+        let holder_id = first.holder_id();
+        let epoch = first.epoch();
+        let effect = std::thread::spawn(move || {
+            let mut operation = || {
+                entered_worker.wait();
+                continue_worker.wait();
+            };
+            effect_store_worker.with_writer_epoch(
+                &holder_id,
+                epoch,
+                Duration::from_secs(1),
+                &mut operation,
+            )
+        });
+        effect_entered.wait();
+
+        let second = Arc::new(FileSystemLease::new_with_fs_for_test(
+            fs,
+            Duration::from_secs(30),
+        ));
+        let (done, result) = std::sync::mpsc::sync_channel(1);
+        let open_attempt = std::thread::spawn(move || {
+            let result = Arc::clone(&second).try_acquire().map(|_| ());
+            done.send(result).expect("report second open result");
+        });
+
+        // Act: look for the failed open while the first effect remains held.
+        let result_during_effect = result.recv_timeout(Duration::from_millis(100));
+
+        // Release and join before asserting, so a regression cannot strand a
+        // worker holding the effect lock.
+        effect_continue.wait();
+        effect.join().expect("writer effect completed").unwrap();
+        open_attempt.join().expect("second open completed");
+
+        // Assert: the second open reports confirmed contention promptly and
+        // never takes the lock away from the live writer.
+        assert!(
+            result_during_effect.is_ok(),
+            "failed open waited for the live writer-effect lock"
+        );
+        assert!(matches!(
+            result_during_effect.unwrap(),
+            Err(LeaseError::AcquisitionFailed(_))
+        ));
     }
 
     #[test]
@@ -767,7 +1117,7 @@ mod tests {
 mod validity_anchor_tests {
     use super::*;
     use crate::io::traits::{DirEntry, Metadata};
-    use crate::io::{Durability, File, FsPath, FsResult, OpenOptions};
+    use crate::io::{Durability, File, FsPath, FsResult, OpenOptions, ReadFs};
 
     /// Stalls every rename, as a slow NFS commit would.
     struct SlowRenameFs {
@@ -775,24 +1125,38 @@ mod validity_anchor_tests {
         stall: Duration,
     }
 
+    impl ReadFs for SlowRenameFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
     impl Fs for SlowRenameFs {
+        fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
         fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
             self.inner.open(path, opts)
         }
         fn remove_file(&self, path: &FsPath) -> FsResult<()> {
             self.inner.remove_file(path)
         }
-        fn exists(&self, path: &FsPath) -> FsResult<bool> {
-            self.inner.exists(path)
-        }
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            self.inner.metadata(path)
-        }
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            self.inner.list_dir(path)
         }
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.remove_dir_all(path)

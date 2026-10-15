@@ -1,11 +1,13 @@
 use super::*;
 use crate::codec::{CompressionAlgo, CompressionPolicy, BLOCK_TRAILER_SIZE};
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions};
+use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions, ReadFs};
 use crate::sst::traits::{SstFactory, SstStateReader};
 use crate::types::EntryType;
 use std::collections::HashSet;
 use std::sync::Mutex;
+
+mod duplicate_successor;
 
 struct CountingFs {
     inner: crate::io::RealFs,
@@ -49,7 +51,7 @@ struct CountingFile<'a> {
     reads: Arc<Mutex<Vec<(u64, u64)>>>,
 }
 
-impl File for CountingFile<'_> {
+impl crate::io::ReadFile for CountingFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.reads
             .lock()
@@ -63,6 +65,12 @@ impl File for CountingFile<'_> {
         self.inner.read_at(offset, len)
     }
 
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for CountingFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         self.inner.write_at(offset, data)
     }
@@ -71,16 +79,55 @@ impl File for CountingFile<'_> {
         self.inner.append(data)
     }
 
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
-
     fn sync(&mut self, dur: Durability) -> FsResult<()> {
         self.inner.sync(dur)
     }
 }
 
+impl ReadFs for CountingFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
+impl crate::io::PersistentHandleFs for CountingFs {
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        if !self.persistent_handles {
+            return Err(FsError::Unsupported(
+                "test backend uses path-based SST reads".to_string(),
+            ));
+        }
+        crate::io::open_persistent_handle(&self.inner, path, opts)
+    }
+}
+
 impl Fs for CountingFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
         self.inner.host_addressing()
     }
@@ -92,33 +139,12 @@ impl Fs for CountingFs {
         }))
     }
 
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        if !self.persistent_handles {
-            return Err(FsError::Unsupported(
-                "test backend uses path-based SST reads".to_string(),
-            ));
-        }
-        self.inner.open_persistent_handle(path, opts)
-    }
-
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -1257,22 +1283,12 @@ fn should_match_summary_bounds_across_reader_modes() -> MidgeResult<()> {
     writer.add_with_meta(b"middle", Some(b"new"), 9, EntryType::Put, None)?;
     writer.add_range_tombstone(b"alpha", b"zulu", 5)?;
     crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("summary-parity.sst"))?;
-    let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
-    let mut progress = super::SstSummaryProgress::default();
 
     // Act
     let streaming = SstFileIo::summarize_with_fs("summary-parity.sst", Arc::clone(&fs))?;
     let verified = SstFileIo::open("summary-parity.sst", Arc::clone(&fs))?.verify_all_blocks()?;
-    let resumable = SstFileIo::summarize_with_fs_progress(
-        "summary-parity.sst",
-        fs,
-        &budget,
-        &mut progress,
-        &mut || Ok(()),
-    )?;
 
     // Assert
-    assert_eq!(&streaming, resumable);
     assert_eq!(streaming, verified.summary);
     assert_eq!(streaming.smallest_key, b"alpha");
     assert_eq!(streaming.largest_key, b"zulu");

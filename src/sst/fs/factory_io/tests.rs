@@ -1,9 +1,12 @@
 use super::*;
-use crate::io::traits::{DirEntry, Durability, File, FsError, FsResult, Metadata, OpenOptions};
+use crate::io::traits::{
+    DirEntry, Durability, File, FsError, FsResult, Metadata, OpenOptions, ReadFs,
+};
 use crate::io::FsPath;
 use crate::sst::SstStateReader;
 use crate::types::{EntryType, KeyState};
 use crate::MidgeError;
+use std::path::PathBuf;
 
 #[test]
 fn should_reject_valueless_put_when_writing_sst() -> MidgeResult<()> {
@@ -37,11 +40,17 @@ struct RecordingFile<'a> {
     events: Arc<parking_lot::Mutex<Vec<String>>>,
 }
 
-impl File for RecordingFile<'_> {
+impl crate::io::ReadFile for RecordingFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
         self.inner.read_at(offset, len)
     }
 
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for RecordingFile<'_> {
     fn write_at(&mut self, offset: u64, data: bytes::Bytes) -> FsResult<()> {
         self.inner.write_at(offset, data)?;
         self.events.lock().push(format!("write {}", self.name));
@@ -50,10 +59,6 @@ impl File for RecordingFile<'_> {
 
     fn append(&mut self, data: bytes::Bytes) -> FsResult<u64> {
         self.inner.append(data)
-    }
-
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
     }
 
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
@@ -79,7 +84,45 @@ impl RecordingFs {
     }
 }
 
+impl ReadFs for RecordingFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
+impl crate::io::PersistentHandleFs for RecordingFs {
+    fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
+        crate::io::open_persistent_handle(&self.inner, path, options)
+    }
+}
+
 impl Fs for RecordingFs {
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+    }
+
     fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
         self.inner.host_addressing()
     }
@@ -98,20 +141,8 @@ impl Fs for RecordingFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -360,7 +391,7 @@ fn should_stream_flush_larger_than_its_shared_buffer_allowance() -> MidgeResult<
     assert!(budget.peak() > 0 && budget.peak() <= budget.limit());
     assert_eq!(budget.used(), 0);
     assert!(factory.compaction_scratch_cleanup_verified());
-    let reader = super::super::SstFileIo::open_with_real_fs(&output)?;
+    let reader = super::super::SstFileIo::open("large.sst", factory.output_fs())?;
     for sequence in 0_u64..1024 {
         assert!(
             matches!(reader.get_state(&sequence.to_be_bytes())?, KeyState::Value(actual, _, _, _) if actual.as_ref() == value.as_slice())
@@ -372,9 +403,8 @@ fn should_stream_flush_larger_than_its_shared_buffer_allowance() -> MidgeResult<
 #[test]
 fn should_reject_flush_entry_when_shared_writer_memory_is_exhausted() -> MidgeResult<()> {
     // Arrange
-    let directory = tempfile::tempdir()?;
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
-        .with_compaction_scratch_directory(directory.path().to_path_buf());
+        .with_compaction_scratch_directory(PathBuf::from("scratch"));
     let budget = crate::common::resource_budget::ResourceBudget::new(0);
     let mut writer = factory.create_for_flush(budget.clone())?;
 
@@ -442,8 +472,8 @@ fn should_track_compaction_scratch_in_recoverable_directory_until_confirmed_clea
         // Arrange
         let directory = tempfile::tempdir()?;
         let scratch_directory = directory.path().join("sst/.flush-staging");
-        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096)
-            .with_compaction_scratch_directory(scratch_directory.clone());
+        let factory = FsSstFactoryIo::new(crate::io::real::test_root(directory.path()), 4096)
+            .with_compaction_scratch_directory(PathBuf::from("sst/.flush-staging"));
         let writer = factory.create_for_compaction(
             crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
         )?;

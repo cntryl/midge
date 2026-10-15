@@ -3,6 +3,7 @@
 //! Clean trait contracts for WAL implementations.
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::wal::format::{SealedFacts, SegmentTail};
 use crate::wal::types::{WalPos, WalRecord};
 use std::time::Duration;
 
@@ -36,18 +37,47 @@ impl WalAppendError {
 /// Writer contract for a WAL implementation.
 ///
 /// Implementations must provide append semantics and durability controls.
-///
-/// Every append takes a fully built [`WalRecord`], so the caller — the only
-/// party that knows the live writer epoch — always stamps it. There is
-/// deliberately no convenience append that builds a record from loose fields:
-/// such a helper has no epoch to stamp, and recovery exempts epoch 0 from
-/// stale-writer fencing, so its records could survive a failover and overwrite
-/// a newer writer's data on replay.
-pub(crate) type WriteAuthority = std::sync::Arc<dyn Fn() -> MidgeResult<()> + Send + Sync>;
+/// A writer appends to one segment, whose header names the writer epoch
+/// (#843); records carry no epoch of their own.
+pub(crate) type WriteAuthority = std::sync::Arc<dyn crate::wal::writer_authority::WriterAuthority>;
+
+/// A writer that can explicitly attach native authority to submitted work.
+#[doc(hidden)]
+pub trait GroupedWalWriter: Send + Sync {
+    /// Admit one explicit logical operation.
+    ///
+    /// # Errors
+    /// Returns the authority or admission deadline failure before any effect.
+    fn begin_group(&self, timeout: Duration) -> MidgeResult<crate::lease::WriterEffectGroup>;
+    /// Submit a batch with an owned child of the admitted group.
+    ///
+    /// # Errors
+    /// Returns the append failure and its proof of unchanged storage.
+    fn append_batch_in_group(
+        &self,
+        records: &[WalRecord],
+        group: &crate::lease::WriterEffectGroup,
+    ) -> Result<WalPos, WalAppendError>;
+    /// Sync with a separately admitted child and the existing per-I/O budget.
+    ///
+    /// # Errors
+    /// Returns the authority, filesystem or acknowledgement failure.
+    fn sync_in_group(
+        &self,
+        timeout: Duration,
+        group: &crate::lease::WriterEffectGroup,
+    ) -> MidgeResult<()>;
+}
 
 pub trait WalWriter: Send + Sync {
-    /// Install the authority check used immediately before background mutations.
+    /// Install the authority fence held around each background storage effect.
     fn set_write_authority(&self, _authority: Option<WriteAuthority>) {}
+
+    /// Native request grouping is optional; legacy and provider writers retain
+    /// their normal per-effect authority path.
+    fn writer_group_capability(&self) -> Option<&dyn GroupedWalWriter> {
+        None
+    }
 
     /// Append a pre-encoded record to the log and return the position where
     /// the record was written.
@@ -110,80 +140,53 @@ pub trait WalWriter: Send + Sync {
 
     /// Current append position in the WAL.
     fn current_pos(&self) -> WalPos;
+
+    /// The records acknowledged into the segment so far.
+    fn tail(&self) -> SegmentTail;
+
+    /// The facts that seal the segment as it stands: its digest and the
+    /// records in it. Waits, at most `timeout`, for queued writes to land;
+    /// performs no I/O of its own.
+    ///
+    /// # Errors
+    ///
+    /// The writer's failure, or `Timeout` when writes do not drain.
+    fn seal_facts(&self, timeout: Duration) -> MidgeResult<SealedFacts>;
+
+    /// Write the footer sealing `facts`, which must still describe the
+    /// segment, and sync it. The writer appends nothing afterwards.
+    ///
+    /// # Errors
+    ///
+    /// The write or sync error; the footer may or may not be durable.
+    fn write_footer(&self, facts: &SealedFacts, timeout: Duration) -> MidgeResult<()>;
+}
+
+/// The answers of a test writer that holds no segment: it tracks no
+/// records and refuses to seal.
+#[cfg(test)]
+pub(crate) mod unsealable {
+    use crate::common::{MidgeError, MidgeResult};
+    use crate::wal::format::{SealedFacts, SegmentTail};
+
+    pub(crate) fn tail() -> SegmentTail {
+        SegmentTail::default()
+    }
+
+    pub(crate) fn seal() -> MidgeResult<SealedFacts> {
+        Err(MidgeError::Internal(
+            "this test WAL writer holds no segment to seal".to_string(),
+        ))
+    }
+
+    pub(crate) fn write_footer() -> MidgeResult<()> {
+        Err(MidgeError::Internal(
+            "this test WAL writer holds no segment to seal".to_string(),
+        ))
+    }
 }
 
 // Reading a WAL back is recovery's job, not a writer-side capability: the
 // recovery path (`crate::wal::recovery`) owns frame scanning, torn-tail
-// tolerance, and writer-epoch fencing. No reader trait is published here,
-// because a generic "read one record" API cannot express those rules and an
-// embedder using it would bypass fencing entirely.
-
-#[cfg(test)]
-mod tests {
-    use super::WalWriter;
-    use crate::io::{Fs, FsPath};
-    use crate::wal::types::{WalOpKind, WalRecord};
-    use std::sync::Arc;
-
-    /// Decode the writer epoch of every frame the writer persisted.
-    fn persisted_writer_epochs(fs: &Arc<crate::io::MockFs>, path_str: &str) -> Vec<u64> {
-        let path = FsPath::new(path_str);
-        let file = fs
-            .open(
-                &path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
-            .expect("open persisted WAL");
-        let frames = crate::wal::frame::FileFrames::new(&*file, &path);
-        let mut epochs = Vec::new();
-        let mut pos = 0;
-        loop {
-            match crate::wal::frame::next_frame(
-                &frames,
-                &path,
-                pos,
-                crate::wal::frame::FrameLimits::default(),
-            ) {
-                Ok(crate::wal::frame::FrameStep::Eof) => break,
-                Ok(crate::wal::frame::FrameStep::Frame { payload, next_pos }) => {
-                    let record =
-                        crate::wal::encoding::decode(payload.as_ref()).expect("decode WAL frame");
-                    epochs.push(record.writer_epoch);
-                    pos = next_pos;
-                }
-                Err(error) => panic!("unexpected WAL frame error: {}", error.into_error()),
-            }
-        }
-        epochs
-    }
-
-    #[test]
-    fn should_persist_caller_epoch_when_writer_epoch_is_nonzero() {
-        // Arrange: the writer trait has no record-building convenience append,
-        // so the only way in stamps the caller's live epoch. Epoch 0 is exempt
-        // from stale-writer fencing during replay, so a record written by an
-        // epoch-3 writer must never land on disk as epoch 0.
-        let fs = Arc::new(crate::io::MockFs::new());
-        let writer = crate::wal::fs::FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn Fs>)
-            .expect("create WAL writer");
-        let record = WalRecord::new(
-            WalOpKind::Put,
-            bytes::Bytes::from_static(b"key"),
-            Some(bytes::Bytes::from_static(b"value")),
-            1,
-            3,
-        );
-
-        // Act
-        writer.append_record(&record).expect("append record");
-        drop(writer);
-
-        // Assert
-        assert_eq!(persisted_writer_epochs(&fs, "wal.log"), vec![3]);
-    }
-}
+// tolerance, and the segment chain. No reader trait is published here,
+// because a generic "read one record" API cannot express those rules.

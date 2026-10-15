@@ -89,18 +89,28 @@ impl FacadeAssembly {
 
         let hybrid_storage = started.runtime_handle.storage_budget.clone();
 
+        let root_host_directory = storage_path
+            .root
+            .host_addressing()
+            .map(|addressing| addressing.root.to_path_buf());
         Ok(Engine {
             #[cfg(feature = "internal-testing")]
             metadata_accounting: started.metadata_accounting,
             runtime: Some(started.runtime),
             runtime_handle: started.runtime_handle,
             db_path: storage_path.db_path,
+            root: storage_path.root,
             memory_mode: storage_path.memory_mode,
             cloud_mode: matches!(
                 opts.storage(),
                 Storage::Cloud { .. } | Storage::CloudSimulated { .. }
             ),
             simulated_cloud_mode: matches!(opts.storage(), Storage::CloudSimulated { .. }),
+            backup_source: if opts.injected_object_store().is_some() {
+                None
+            } else {
+                root_host_directory
+            },
             sequence: Arc::new(std::sync::atomic::AtomicU64::new(
                 started.recovered_sequence,
             )),
@@ -157,8 +167,7 @@ impl EngineStartup {
     ) -> MidgeResult<(Engine, Option<crate::runtime::StartupAdmission>)> {
         check_scope(scope, "startup entry")?;
         Self::trace_open(opts);
-        let storage_path = StartupStoragePath::resolve(opts.storage());
-        storage_path.prepare()?;
+        let storage_path = StartupStoragePath::resolve(opts)?;
         check_scope(scope, "storage path preparation")?;
 
         let minimum_epoch = super::timing::measure("lease_epoch_floor", || {
@@ -171,9 +180,9 @@ impl EngineStartup {
         check_scope(scope, "lease epoch discovery")?;
         let startup_lease = super::timing::measure("lease_acquisition", || {
             if let Some(scope) = scope {
-                StartupLease::acquire_within(opts, minimum_epoch, scope)
+                StartupLease::acquire_within(opts, &storage_path, minimum_epoch, scope)
             } else {
-                StartupLease::acquire(opts, minimum_epoch)
+                StartupLease::acquire(opts, &storage_path, minimum_epoch)
             }
         })?;
         if let Some(observer) = opts.startup_observer() {
@@ -183,7 +192,7 @@ impl EngineStartup {
         }
         check_scope(scope, "lease acquisition")?;
         if !storage_path.memory_mode {
-            crate::runtime::transaction_spill::cleanup_orphaned_runs(&storage_path.db_path)?;
+            crate::runtime::transaction_spill::cleanup_orphaned_runs(storage_path.root.as_ref())?;
         }
         check_scope(scope, "orphaned spill cleanup")?;
         let materialized = super::timing::measure("storage_materialization", || {
@@ -203,14 +212,12 @@ impl EngineStartup {
             if let Some(scope) = scope {
                 RuntimeRecoveryMaterialization::replay_and_repair_within(
                     materialized,
-                    &storage_path.db_path,
                     opts.recovery_policy(),
                     scope,
                 )
             } else {
                 RuntimeRecoveryMaterialization::replay_and_repair(
                     materialized,
-                    &storage_path.db_path,
                     opts.recovery_policy(),
                 )
             }

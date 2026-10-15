@@ -81,9 +81,21 @@ pub struct RuntimeHandle {
 }
 
 impl RuntimeHandle {
-    fn map_submission_error(error: crossbeam::channel::TrySendError<RuntimeMsg>) -> MidgeError {
+    fn map_submission_error(
+        &self,
+        error: crossbeam::channel::TrySendError<RuntimeMsg>,
+    ) -> MidgeError {
         match error {
             crossbeam::channel::TrySendError::Full(message) => {
+                if matches!(
+                    message,
+                    RuntimeMsg::ApplyTransaction { .. }
+                        | RuntimeMsg::ApplySpilledTransaction { .. }
+                ) {
+                    self.diagnostics.record_write_admission_rejection(
+                        crate::diagnostics::WriteAdmissionRejection::Queue,
+                    );
+                }
                 drop(message);
                 MidgeError::WriteStall("runtime request queue is full".to_string())
             }
@@ -191,7 +203,7 @@ impl RuntimeHandle {
         let result = self
             .msg_tx
             .try_send(msg)
-            .map_err(Self::map_submission_error);
+            .map_err(|error| self.map_submission_error(error));
         drop(submission_guard);
         result
     }
@@ -326,7 +338,7 @@ impl RuntimeHandle {
         // react to than by silently spending its response budget queueing.
         if let Err(error) = self.msg_tx.try_send(msg) {
             self.router.cancel(request_id);
-            return Err(Self::map_submission_error(error));
+            return Err(self.map_submission_error(error));
         }
         drop(submission_guard);
 
@@ -635,7 +647,7 @@ impl RuntimeHandle {
             response_tx: None,
         }) {
             self.router.cancel(request_id);
-            return Err(Self::map_submission_error(error));
+            return Err(self.map_submission_error(error));
         }
         drop(submission_guard);
 
@@ -664,7 +676,7 @@ impl RuntimeHandle {
             response_tx: None,
         }) {
             self.router.cancel(request_id);
-            return Err(Self::map_submission_error(error));
+            return Err(self.map_submission_error(error));
         }
         drop(submission_guard);
 
@@ -717,22 +729,58 @@ impl RuntimeHandle {
     ///
     /// Used by `Engine::commit()` to expose backpressure to clients before
     /// accepting new write transactions.
+    #[cfg(test)]
     pub fn check_write_stall(&self, cf_id: crate::types::ColumnFamilyId) -> MidgeResult<bool> {
+        self.check_write_stall_status(cf_id, false)
+            .map(|(stalled, _)| stalled)
+    }
+
+    pub(crate) fn check_ingest_write_stall(
+        &self,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> MidgeResult<bool> {
+        let (stalled, mask) = self.check_write_stall_status(cf_id, true)?;
+        if stalled {
+            self.diagnostics.record_ingest_hint_pressure(mask);
+        }
+        Ok(stalled)
+    }
+
+    fn check_write_stall_status(
+        &self,
+        cf_id: crate::types::ColumnFamilyId,
+        ingest_admission: bool,
+    ) -> MidgeResult<(bool, u8)> {
         let response = self.send_and_wait_timeout(
             RuntimeMsg::CheckWriteStall {
                 request_id: next_request_id()?,
                 cf_id,
             },
             WRITE_STALL_STATUS_TIMEOUT,
-        )?;
+        );
+        let response = match response {
+            Err(error @ MidgeError::WriteStall(_)) if ingest_admission => {
+                // A full queue can reject the admission check itself. Generic
+                // control requests remain excluded by map_submission_error.
+                self.diagnostics.record_write_admission_rejection(
+                    crate::diagnostics::WriteAdmissionRejection::Queue,
+                );
+                return Err(error);
+            }
+            other => other?,
+        };
 
         match response {
-            Some(RuntimeResponse::WriteStallStatus { is_stalled, .. }) => Ok(is_stalled),
+            Some(RuntimeResponse::WriteStallStatus {
+                is_stalled,
+                pressure_mask,
+                ..
+            }) => Ok((is_stalled, pressure_mask)),
             Some(RuntimeResponse::Error { error, .. }) => Err(error),
             Some(_) => Err(MidgeError::Internal(
                 "Unexpected response to CheckWriteStall".to_string(),
             )),
-            None => Ok(true),
+            None => Ok((true, 0)),
         }
     }
 }

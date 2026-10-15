@@ -18,8 +18,6 @@ use crate::types::{EntryType, KeyState, RangeTombstone};
 
 type IndexEntries = Arc<Vec<(Vec<u8>, BlockHandle)>>;
 
-mod recovery_index;
-
 /// Stable summary of the physical contents of a single SST file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SstFileSummary {
@@ -71,7 +69,6 @@ pub struct SstFileIo {
     range_tombstones: Vec<RangeTombstone>,
     metadata_budget: Option<crate::common::resource_budget::ResourceBudget>,
     metadata_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
-    recovery_block: Option<std::sync::Mutex<recovery::RecoveryBlock>>,
 }
 
 enum BlockEntryCursor {
@@ -200,7 +197,8 @@ impl SstRawVersionScan {
             .as_ref()
             .map(|budget| budget.reserve(bounds_bytes, "raw cursor bounds"))
             .transpose()?;
-        let (file, lifecycle) = match reader.fs.open_persistent_handle(
+        let (file, lifecycle) = match crate::io::open_persistent_handle(
+            reader.fs.as_ref(),
             &reader.path,
             OpenOptions {
                 mode: OpenMode::ReadOnly,
@@ -442,7 +440,8 @@ impl SstStateScan {
         snapshot_seq: u64,
         now_millis: u64,
     ) -> Self {
-        let (file, lifecycle) = match reader.fs.open_persistent_handle(
+        let (file, lifecycle) = match crate::io::open_persistent_handle(
+            reader.fs.as_ref(),
             &reader.path,
             OpenOptions {
                 mode: OpenMode::ReadOnly,
@@ -667,11 +666,10 @@ impl std::iter::Iterator for SstStateScan {
 }
 
 mod progress;
-pub(crate) use progress::{SstCursorPosition, SstSummaryProgress};
+pub(crate) use progress::SstSummaryProgress;
 
 mod index;
 mod io;
-mod recovery;
 mod scan;
 mod state;
 
@@ -702,7 +700,6 @@ impl SstFileIo {
             range_tombstones: Vec::new(),
             metadata_budget: None,
             metadata_reservations: Vec::new(),
-            recovery_block: None,
         }
     }
 
@@ -746,35 +743,8 @@ impl SstFileIo {
             .saturating_add(crate::sst::types::SST_FOOTER_SIZE as u64)
     }
 
-    /// Open an SST file using `RealFs` (convenience method for single-file access)
-    /// This creates a new `RealFs` instance for the parent directory of the SST file.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the filesystem cannot be opened or the SST metadata cannot be read.
-    pub fn open_with_real_fs(path: &std::path::Path) -> MidgeResult<Self> {
-        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let fs = Arc::new(crate::io::RealFs::new(parent).map_err(FsError::into_midge)?);
-        // Use filename relative to parent dir so RealFs (rooted at parent) resolves it correctly
-        let path_str = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_string();
-        Self::open(&path_str, fs)
-    }
-
-    /// Summarize an SST file opened via `RealFs`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the SST cannot be opened or summarized.
-    #[cfg(test)]
-    pub fn summarize_with_real_fs(path: &std::path::Path) -> MidgeResult<SstFileSummary> {
-        Self::open_with_real_fs(path)?.into_streaming_summary()
-    }
-
     /// Stream a summary through the caller's filesystem abstraction.
+    #[cfg(test)]
     pub(crate) fn summarize_with_fs(path: &str, fs: Arc<dyn Fs>) -> MidgeResult<SstFileSummary> {
         Self::open(path, fs)?.into_streaming_summary()
     }

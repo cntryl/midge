@@ -40,6 +40,7 @@ impl EventLoop {
             RuntimeResponse::WriteStallStatus {
                 request_id,
                 is_stalled,
+                pressure_mask: self.write_pressure_mask(cf_id),
             },
         );
     }
@@ -54,7 +55,9 @@ impl EventLoop {
             return;
         }
         if self.should_stall_writes(cf_id) {
-            self.write_stall_waiters.register(request_id, cf_id);
+            self.pipeline
+                .write_stall_waiters
+                .register(request_id, cf_id);
         } else {
             self.respond(request_id, RuntimeResponse::Ok { request_id });
         }
@@ -63,7 +66,7 @@ impl EventLoop {
     }
 
     pub(super) fn handle_cancel_wait_for_write_stall_clear(&mut self, wait_request_id: u64) {
-        self.write_stall_waiters.cancel(wait_request_id);
+        self.pipeline.write_stall_waiters.cancel(wait_request_id);
     }
 
     pub(super) fn handle_get_read_amp_metrics(&self, request_id: u64) {
@@ -116,9 +119,10 @@ impl EventLoop {
         crate::failpoints::fail_point!("midge::runtime::before_get_runtime_metrics_response");
         let mut snapshot = self.state.runtime_metrics_snapshot();
         let read_path = self.state.diagnostics.snapshot();
-        snapshot.durability_waiters_fanned_out_total = self.durability.waiters_fanned_out();
-        snapshot.abandoned_runtime_requests_total = self.router.abandoned_requests_total();
-        snapshot.late_runtime_responses_total = self.router.late_responses_total();
+        snapshot.durability_waiters_fanned_out_total =
+            self.pipeline.durability.waiters_fanned_out();
+        snapshot.abandoned_runtime_requests_total = self.routing.router.abandoned_requests_total();
+        snapshot.late_runtime_responses_total = self.routing.router.late_responses_total();
         snapshot.sst_bloom_rejects_total = read_path.bloom_rejects;
         snapshot.sst_bloom_checks_total = read_path.bloom_checks;
         snapshot.sst_data_blocks_read_total = read_path.data_blocks_read;
@@ -127,7 +131,7 @@ impl EventLoop {
         snapshot.remote_range_failures_total = read_path.remote_range_failures_total;
         snapshot.remote_range_latency_ns_total = read_path.remote_range_latency_ns_total;
         snapshot.remote_range_latency_ns_max = read_path.remote_range_latency_ns_max;
-        if let Some(storage) = &self.cloud_coordinator.hybrid_storage {
+        if let Some(storage) = &self.actors.cloud_coordinator.hybrid_storage {
             let budget = storage.budget_snapshot();
             snapshot.hybrid_max_local_bytes = budget.max_local_bytes;
             snapshot.hybrid_total_committed_bytes = budget.total_committed_bytes;
@@ -182,7 +186,7 @@ impl EventLoop {
 
         let candidate_wal_policy = update
             .wal_durability_policy
-            .unwrap_or(self.wal_actor.durability_policy());
+            .unwrap_or(self.actors.wal_actor.durability_policy());
         // The durability coordinator keys waiters by generation in local
         // modes and by segment id in `CloudAsync`. Switching between the two
         // at runtime would let the actor and coordinator disagree about what
@@ -191,7 +195,7 @@ impl EventLoop {
         let switches_cloud_mode = matches!(
             candidate_wal_policy,
             crate::wal::DurabilityPolicy::CloudAsync
-        ) != self.wal_actor.is_cloud_async();
+        ) != self.actors.wal_actor.is_cloud_async();
         if switches_cloud_mode {
             self.respond(
                 update.request_id,
@@ -217,7 +221,9 @@ impl EventLoop {
         if let Some(trigger) = update.l0_compaction_trigger {
             let trigger = trigger.max(1);
             self.state.limits.l0_compaction_trigger = trigger;
-            self.compaction_actor.set_l0_file_count_threshold(trigger);
+            self.actors
+                .compaction_actor
+                .set_l0_file_count_threshold(trigger);
         }
 
         self.wake_write_stall_waiters();
@@ -227,8 +233,9 @@ impl EventLoop {
                 .wal_batch_config
                 .as_ref()
                 .copied()
-                .unwrap_or(self.wal_actor.batch_config());
-            self.wal_actor
+                .unwrap_or(self.actors.wal_actor.batch_config());
+            self.actors
+                .wal_actor
                 .set_durability(candidate_wal_policy, batch_cfg);
         }
 
@@ -250,9 +257,9 @@ impl EventLoop {
                 memtable_size_limit: self.state.limits.memtable_size_limit,
                 memtable_flush_threshold: self.state.limits.memtable_flush_threshold,
                 enable_compaction: self.state.compaction_enabled(),
-                l0_compaction_trigger: self.compaction_actor.l0_file_count_threshold(),
-                wal_durability_policy: self.wal_actor.durability_policy(),
-                wal_batch_config: self.wal_actor.batch_config(),
+                l0_compaction_trigger: self.actors.compaction_actor.l0_file_count_threshold(),
+                wal_durability_policy: self.actors.wal_actor.durability_policy(),
+                wal_batch_config: self.actors.wal_actor.batch_config(),
             },
         );
     }
@@ -295,9 +302,9 @@ mod tests {
         let mut cloud = create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
-        let local_response = local.router.register(1, "SetRuntimeConfig");
-        let cloud_response = cloud.router.register(2, "SetRuntimeConfig");
-        let same_mode_response = local.router.register(3, "SetRuntimeConfig");
+        let local_response = local.routing.router.register(1, "SetRuntimeConfig");
+        let cloud_response = cloud.routing.router.register(2, "SetRuntimeConfig");
+        let same_mode_response = local.routing.router.register(3, "SetRuntimeConfig");
 
         // Act
         local
@@ -324,10 +331,10 @@ mod tests {
             same_mode_response.recv_timeout(std::time::Duration::from_secs(1)),
             Ok(RuntimeResponse::Ok { request_id: 3 })
         ));
-        assert!(!local.wal_actor.is_cloud_async());
-        assert!(cloud.wal_actor.is_cloud_async());
+        assert!(!local.actors.wal_actor.is_cloud_async());
+        assert!(cloud.actors.wal_actor.is_cloud_async());
         assert_eq!(
-            local.wal_actor.durability_policy(),
+            local.actors.wal_actor.durability_policy(),
             crate::wal::DurabilityPolicy::Strict
         );
         Ok(())

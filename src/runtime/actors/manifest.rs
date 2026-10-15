@@ -29,8 +29,12 @@ impl ManifestActor {
     pub fn add_sst(&mut self, state: &mut RuntimeState, file_meta: &FileMeta) -> MidgeResult<()> {
         // Validate SST file exists and is readable (defensive: avoid manifest pointing at corrupt file)
         if !state.is_memory_mode() {
-            let sst_path = state.sst_dir.join(&file_meta.name);
-            if !sst_path.exists() {
+            let sst_path = crate::sst::fs::sst_key(&file_meta.name);
+            if !state
+                .fs
+                .exists(&sst_path)
+                .map_err(crate::io::FsError::into_midge)?
+            {
                 return Err(crate::common::MidgeError::Internal(format!(
                     "SST file '{}' not found in sst dir",
                     file_meta.name
@@ -38,7 +42,9 @@ impl ManifestActor {
             }
 
             // Try opening the SST to validate footer/format correctness
-            if let Err(e) = crate::sst::fs::SstFileIo::open_with_real_fs(&sst_path) {
+            if let Err(e) =
+                crate::sst::fs::SstFileIo::open(&sst_path.0, std::sync::Arc::clone(&state.fs))
+            {
                 return Err(crate::common::MidgeError::Corruption(format!(
                     "SST file '{}' failed validation: {}",
                     file_meta.name, e
@@ -46,28 +52,25 @@ impl ManifestActor {
             }
         }
 
-        // Append to manifest journal (durable edit log) - skip in memory mode
-        let mut journaled_id = None;
-        if !state.is_memory_mode() {
-            let edit = crate::metadata::ManifestEdit::AddSst(file_meta.into());
+        let memory_mode = state.is_memory_mode();
+        let edit = crate::metadata::ManifestEdit::AddSst(file_meta.into());
+        let prepared = state.manifest.prepare_edit(&edit)?;
+        let journaled_id = if memory_mode {
+            None
+        } else {
             crate::failpoints::fail_point!(
                 "midge::manifest::inject_no_space_on_add_sst_edit",
                 |_| Err(crate::common::MidgeError::NoSpace(
                     "failpoint: no space on manifest add_sst append".to_string()
                 ))
             );
-            journaled_id = Some(
+            Some(
                 state
                     .manifest_store
                     .append_for(Origin::Unclassified, &edit)?,
-            );
-        }
-
-        // Now that intent is durable, apply mutation to in-memory manifest
-        // Convert to manifest FileMeta
-        let manifest_meta = file_meta.into();
-
-        state.manifest.add_file(manifest_meta);
+            )
+        };
+        prepared.commit();
         if let Some(edit_id) = journaled_id {
             state.manifest.note_applied_journal_edit(edit_id);
         }
@@ -98,30 +101,25 @@ impl ManifestActor {
         for f in added {
             edits.push(crate::metadata::ManifestEdit::AddSst(f.into()));
         }
-        let mut journaled_id = None;
-        if !edits.is_empty() {
+        let memory_mode = state.is_memory_mode();
+        let batch = crate::metadata::ManifestEdit::Batch(edits);
+        let prepared = state.manifest.prepare_edit(&batch)?;
+        let journaled_id = if !memory_mode && (!removed.is_empty() || !added.is_empty()) {
             crate::failpoints::fail_point!(
                 "midge::manifest::inject_no_space_on_compaction_batch_edit",
                 |_| Err(crate::common::MidgeError::NoSpace(
                     "failpoint: no space on manifest compaction batch append".to_string()
                 ))
             );
-            journaled_id = Some(
+            Some(
                 state
                     .manifest_store
-                    .append_batch_for(Origin::CompactionBeforeGc, &edits)?,
-            );
-        }
-
-        // Now that intent is durable, apply mutations to in-memory manifest
-        // Remove old files
-        state.manifest.retain_files(|f| !removed.contains(&f.name));
-
-        // Add new files
-        for file_meta in added {
-            let manifest_meta = file_meta.into();
-            state.manifest.add_file(manifest_meta);
-        }
+                    .append_for(Origin::CompactionBeforeGc, &batch)?,
+            )
+        } else {
+            None
+        };
+        prepared.commit();
         if let Some(edit_id) = journaled_id {
             state.manifest.note_applied_journal_edit(edit_id);
         }
@@ -220,7 +218,6 @@ impl Default for ManifestActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::FsError;
     use crate::sst::traits::SstFactory;
 
     #[test]
@@ -379,7 +376,7 @@ mod tests {
     fn should_keep_foreign_journal_edit_when_runtime_persists_after_racing_append() {
         // Arrange: a flush publish journals an edit from another thread that
         // the runtime manifest has not applied yet, then the runtime journals
-        // and applies its own edit (a backfill) and persists.
+        // and applies its own edit and persists.
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
         let mut actor = ManifestActor::new();
@@ -399,7 +396,7 @@ mod tests {
         // Act
         actor
             .compaction_complete(&mut state, &[], &[sst_meta(3)])
-            .expect("backfill-style local edit");
+            .expect("second local edit");
         ManifestActor::persist(&mut state).expect("persist");
 
         // Assert: the snapshot may not skip the edit this manifest never saw
@@ -495,15 +492,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("create tmpdir");
         let sst_name = crate::cloud_layout::file_name(0, 0, 3);
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
-        assert!(state.sst_dir.exists(), "sst dir must exist");
-        let sst_path = state.sst_dir.join(&sst_name);
+        assert!(state.host_sst_dir().exists(), "sst dir must exist");
+        let sst_path = state.host_sst_dir().join(&sst_name);
 
-        let factory = crate::sst::FsSstFactoryIo::new(
-            std::sync::Arc::new(
-                crate::io::RealFs::new(&state.sst_dir).map_err(FsError::into_midge)?,
-            ),
-            4096,
-        );
+        let factory = crate::sst::FsSstFactoryIo::new(std::sync::Arc::clone(&state.fs), 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"a", Some(b"value"), 10, EntryType::Put, None)?;
         crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
@@ -527,9 +519,9 @@ mod tests {
         };
 
         assert_eq!(
-            state.sst_dir.join(&sst_name),
+            state.host_sst_dir().join(&sst_name),
             sst_path,
-            "state.sst_dir should match the temp dir used for file creation"
+            "state.host_sst_dir() should match the temp dir used for file creation"
         );
         let mut actor = ManifestActor::new();
 
@@ -611,7 +603,11 @@ mod tests {
                 created_at: 1,
             })
             .expect("orphan append whose writer then failed");
-        let flushed = sst_meta(2);
+        let flushed = crate::runtime::FileMeta {
+            smallest_seq: Some(2),
+            largest_seq: Some(2),
+            ..sst_meta(2)
+        };
 
         // Act
         state
@@ -629,5 +625,17 @@ mod tests {
             "orphan journal edit was truncated away"
         );
         assert!(reloaded.files.iter().any(|file| file.name == flushed.name));
+        assert_eq!(
+            reloaded.flush_frontiers().get(0).expect("default frontier"),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 2,
+            }
+        );
+        assert_eq!(
+            reloaded.flush_frontiers().get(7).expect("orphan frontier"),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 0,
+            }
+        );
     }
 }

@@ -8,29 +8,6 @@ use crate::wal::DurabilityPolicy;
 use std::time::{Duration, Instant};
 
 impl WalActor {
-    pub(crate) fn restore_recovered_cloud_active_wal(
-        &mut self,
-        state: &mut RuntimeState,
-        recovered: crate::runtime::RecoveredCloudActiveWal,
-    ) -> MidgeResult<()> {
-        if self.durability_policy != DurabilityPolicy::CloudAsync {
-            return Err(MidgeError::Internal(
-                "recovered cloud active WAL installed outside CloudAsync mode".to_string(),
-            ));
-        }
-        if recovered.record_count == 0 || recovered.valid_bytes == 0 {
-            return Err(MidgeError::RecoveryFailed(
-                "recovered cloud active WAL metadata is empty".to_string(),
-            ));
-        }
-
-        self.segment_max_sequence = recovered.max_sequence;
-        self.pending_sync_count = recovered.record_count;
-        self.bytes_since_sync = recovered.valid_bytes;
-        state.wal.pending_writes = recovered.record_count;
-        Ok(())
-    }
-
     pub(super) fn apply_transaction_durability(
         &mut self,
         state: &mut RuntimeState,
@@ -57,8 +34,17 @@ impl WalActor {
         state: &mut RuntimeState,
         last_sequence: u64,
     ) -> MidgeResult<()> {
+        self.apply_strict_group_durability_with_group(state, last_sequence, None)
+    }
+
+    pub(super) fn apply_strict_group_durability_with_group(
+        &mut self,
+        state: &mut RuntimeState,
+        last_sequence: u64,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<()> {
         crate::failpoints::fail_point!("midge::wal::txn_after_commit_append_before_sync");
-        if let Err(error) = self.sync_internal(state) {
+        if let Err(error) = self.sync_internal_with_group(state, group) {
             // The strict records are already on disk but not yet in memory.
             // Continuing as `Open` would let the runtime view and the recovery
             // view diverge, so even a failure before the fsync call fences.
@@ -81,8 +67,12 @@ impl WalActor {
     /// no protocol ticket: the records are made durable and the frontier moves,
     /// but waiters keyed to the current generation stay pending until the
     /// paired event-loop sync closes that generation.
-    pub(super) fn sync_internal(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
-        let receipt = self.begin_sync_io(state)?;
+    fn sync_internal_with_group(
+        &mut self,
+        state: &mut RuntimeState,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<()> {
+        let receipt = self.begin_sync_io(state, group)?;
         self.commit_sync_io(state, receipt)
     }
 
@@ -97,7 +87,7 @@ impl WalActor {
         state: &mut RuntimeState,
         _ticket: &WalSyncTicket,
     ) -> MidgeResult<WalSyncReceipt> {
-        let result = self.begin_sync_io(state);
+        let result = self.begin_sync_io(state, None);
         debug_assert!(
             result.is_ok() || self.is_open() || self.is_fenced(),
             "a failed WAL sync must settle in Open or Fenced"
@@ -115,30 +105,47 @@ impl WalActor {
         self.commit_sync_io(state, receipt)
     }
 
-    fn begin_sync_io(&mut self, state: &mut RuntimeState) -> MidgeResult<WalSyncReceipt> {
+    fn validate_sync_authority(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+        let admission_prevalidated =
+            std::mem::replace(&mut self.sync_authority_prevalidated, false);
         self.ensure_lease_validity()?;
         self.ensure_filesystem_wal_available(state)?;
 
-        // Epoch fencing check: verify our epoch is still current before making
-        // data durable.  If a newer writer has taken over, we must stop.
-        if let Some(store) = &self.leader_store {
-            if let Err(error) = store.validate_epoch(&self.leader_holder_id, self.current_epoch) {
-                let error = MidgeError::from(error);
-                tracing::error!(epoch = self.current_epoch, err = %error, "fenced at sync boundary");
-                // A failed authority proof is not a retryable pre-fsync I/O
-                // error: this writer may already be stale. Keep it from
-                // accepting more WAL-backed work while the event loop pairs
-                // this actor fence with the transition protocol and waiters.
-                self.fence_with_cause(
-                    state,
-                    format!("WAL writer authority validation failed: {error}"),
-                    true,
-                );
-                return Err(error);
+        // A strict transaction group carries its provider proof from admission
+        // directly to this sync. Other syncs refresh authority once here; the
+        // physical sync remains guarded by `with_writer_epoch` in either case.
+        if !admission_prevalidated {
+            if let Some(store) = &self.leader_store {
+                if let Err(error) = store.validate_epoch_before_sync(
+                    &self.leader_holder_id,
+                    self.current_epoch,
+                    self.storage_io_timeout,
+                ) {
+                    let error = error.into_writer_effect_error("WAL sync authority validation");
+                    tracing::error!(epoch = self.current_epoch, err = %error, "fenced at sync boundary");
+                    // A failed authority proof is not a retryable pre-fsync I/O
+                    // error: this writer may already be stale. Keep it from
+                    // accepting more WAL-backed work while the event loop pairs
+                    // this actor fence with the transition protocol and waiters.
+                    self.fence_with_cause(
+                        state,
+                        format!("WAL writer authority validation failed: {error}"),
+                        true,
+                    );
+                    return Err(error);
+                }
             }
         }
 
-        self.ensure_lease_validity()?;
+        self.ensure_lease_validity()
+    }
+
+    fn begin_sync_io(
+        &mut self,
+        state: &mut RuntimeState,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<WalSyncReceipt> {
+        self.validate_sync_authority(state)?;
         self.begin_io_transition(WalTransitionOperation::Sync)?;
 
         if let Err(error) = WalTransitionBoundary::BeforeFsync.check() {
@@ -171,8 +178,14 @@ impl WalActor {
                 let writer = self.writer_mut().ok_or_else(|| {
                     MidgeError::Internal("WAL writer disappeared during fsync".to_string())
                 })?;
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    writer.sync_with_timeout(fsync_timeout)
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match group {
+                    Some(group) => writer
+                        .writer_group_capability()
+                        .ok_or_else(|| {
+                            MidgeError::Internal("strict WAL group lost its sync capability".into())
+                        })?
+                        .sync_in_group(fsync_timeout, group),
+                    None => writer.sync_with_timeout(fsync_timeout),
                 }))
             };
 
@@ -187,7 +200,11 @@ impl WalActor {
                     if matches!(e, MidgeError::NoSpace(_)) {
                         Self::record_no_space_event(&self.counters);
                     }
-                    self.fence_transition(state, format!("WAL fsync failed: {e}"));
+                    self.fence_with_cause(
+                        state,
+                        format!("WAL fsync failed: {e}"),
+                        Self::is_authority_failure(&e),
+                    );
                     return Err(e);
                 }
                 Err(panic_info) => {
@@ -236,10 +253,33 @@ impl WalActor {
             }
         }
 
+        self.persist_sync_boundary(state, group)?;
         Ok(WalSyncReceipt {
             durable_sequence: state.sequence,
             pending_writes: state.wal.pending_writes,
         })
+    }
+
+    fn persist_sync_boundary(
+        &mut self,
+        state: &mut RuntimeState,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<()> {
+        if let Some(writer) = self.writer() {
+            let bytes = writer.current_pos();
+            let recorded = match group {
+                Some(group) => state.wal.history.record_sync_in_group(bytes, group),
+                None => state.wal.history.record_sync(bytes),
+            };
+            if let Err(error) = recorded {
+                self.fence_transition(
+                    state,
+                    format!("failed to persist WAL sync boundary: {error}"),
+                );
+                return Err(Self::appended_unit_error(error));
+            }
+        }
+        Ok(())
     }
 
     fn commit_sync_io(
@@ -328,41 +368,16 @@ impl WalActor {
         &mut self,
         state: &mut RuntimeState,
         deadline: &crate::common::OperationDeadline,
-        ticket: &WalSealTicket,
-    ) -> MidgeResult<u64> {
-        self.flush_cloud_wal_within(state, deadline, ticket, false)
-    }
-
-    /// Startup owns and joins this writer before releasing its lease, so a
-    /// bounded recovery attempt may use its remaining fsync budget. A timed
-    /// out fsync fences the owned startup writer without admitting the runtime.
-    pub(crate) fn flush_recovered_cloud_wal_within(
-        &mut self,
-        state: &mut RuntimeState,
-        deadline: &crate::common::OperationDeadline,
-        ticket: &WalSealTicket,
-    ) -> MidgeResult<u64> {
-        self.flush_cloud_wal_within(state, deadline, ticket, true)
-    }
-
-    fn flush_cloud_wal_within(
-        &mut self,
-        state: &mut RuntimeState,
-        deadline: &crate::common::OperationDeadline,
         _ticket: &WalSealTicket,
-        recovered_startup: bool,
     ) -> MidgeResult<u64> {
         self.ensure_filesystem_wal_available(state)?;
         let pending = state.wal.pending_writes;
-        let segment_max_sequence = self.segment_max_sequence;
+        let open_max_sequence = self.open_segment_max_sequence();
 
         self.begin_io_transition(WalTransitionOperation::CloudFlush)?;
 
         if self.writer().is_some() {
-            if !recovered_startup
-                && deadline.is_bounded()
-                && deadline.remaining() < self.storage_io_timeout
-            {
+            if deadline.is_bounded() && deadline.remaining() < self.storage_io_timeout {
                 self.finish_io_transition()?;
                 return Err(crate::common::MidgeError::Timeout(format!(
                     "insufficient operation budget for WAL flush: remaining={:?}, required={:?}",
@@ -370,21 +385,11 @@ impl WalActor {
                     self.storage_io_timeout
                 )));
             }
-            // Sealing renames the segment and advances local_durable_seq, and
-            // cloud recovery treats a local sealed segment as complete. Fsync
-            // here (one barrier per sealed segment, not per write) so power
-            // loss cannot leave a torn sealed file.
-            let io_timeout = if recovered_startup {
-                let Some(timeout) = deadline.clamp_nonzero(self.storage_io_timeout) else {
-                    self.finish_io_transition()?;
-                    return Err(MidgeError::Timeout(
-                        "startup deadline exhausted before recovered WAL fsync".into(),
-                    ));
-                };
-                timeout
-            } else {
-                self.storage_io_timeout
-            };
+            // Sealing advances local_durable_seq, and cloud recovery treats a
+            // local sealed segment as complete. Fsync here (one barrier per
+            // sealed segment, not per write) so power loss cannot leave a
+            // torn sealed file.
+            let io_timeout = self.storage_io_timeout;
             let sync_result = self
                 .writer_mut()
                 .ok_or_else(|| MidgeError::Internal("WAL writer disappeared during flush".into()))?
@@ -393,12 +398,6 @@ impl WalActor {
                 self.fence_transition(state, format!("WAL seal fsync failed: {error}"));
                 return Err(error);
             }
-            if recovered_startup && deadline.is_expired() {
-                self.finish_io_transition()?;
-                return Err(MidgeError::Timeout(
-                    "startup deadline exhausted after recovered WAL fsync".into(),
-                ));
-            }
             self.counters.record(|m| {
                 m.record_wal_flush();
             });
@@ -406,11 +405,11 @@ impl WalActor {
 
         tracing::debug!(
             pending_writes = pending,
-            flushed_seq = segment_max_sequence,
+            flushed_seq = open_max_sequence,
             "WAL flush (CloudAsync upload)"
         );
 
-        Ok(segment_max_sequence)
+        Ok(open_max_sequence)
     }
 
     /// Clear buffered WAL accounting after a `CloudAsync` segment is sealed and
@@ -429,7 +428,6 @@ impl WalActor {
         state.wal.pending_writes = 0;
         self.pending_sync_count = 0;
         self.bytes_since_sync = 0;
-        self.segment_max_sequence = 0;
         self.last_sync_instant = Instant::now();
     }
 

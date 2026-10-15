@@ -1,68 +1,149 @@
-//! The filesystem directory that stands in for cloud storage in
-//! `Storage::CloudSimulated`, a supported open mode (#517).
+//! The object store a simulated-cloud engine runs on (`Storage::CloudSimulated`,
+//! a supported open mode, #517): a host directory under the database root
+//! that stands in for cloud storage, or a store a test injects.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
+use crate::io::Fs;
 
+use super::cloud::{CloudBackend, CloudStorage};
 use super::filesystem::FileSystem;
+use super::inventory::ObjectStore;
 use super::{HybridStorage, StorageEvent};
+
+/// Directory under the root's host directory that holds a simulated cloud.
+const SIMULATED_CLOUD_DIR: &str = "cloud_store";
 
 /// The stores a simulated-cloud engine runs on.
 pub(crate) struct SimulatedCloudStores {
     pub hybrid_storage: Arc<HybridStorage>,
     pub events: crossbeam::channel::Receiver<StorageEvent>,
-    pub cloud_root: PathBuf,
-    pub recovery_cloud_wal_dir: PathBuf,
 }
 
-/// Root of the filesystem store that simulates cloud storage under `db_path`.
-pub(crate) fn simulated_cloud_root(db_path: &Path) -> PathBuf {
-    db_path.join("cloud_store")
+/// Where a simulated cloud keeps its objects.
+pub(crate) enum SimulatedCloud {
+    /// The `cloud_store/` directory under the root's host directory.
+    Host(PathBuf),
+    /// A store a test injected in place of the host directory.
+    Injected(Arc<CloudStorage>),
 }
 
-/// Build the simulated cloud: a `FileSystem` store at `cloud_store/` behind
-/// `HybridStorage`, with the event stream and the WAL recovery directory.
-///
-/// # Errors
-///
-/// Fails when a store directory cannot be created.
+impl SimulatedCloud {
+    /// The host object store is durable shared state, outside the local cache.
+    pub(crate) fn cache_root_exclusion(&self) -> Option<&'static str> {
+        match self {
+            Self::Host(_) => Some(SIMULATED_CLOUD_DIR),
+            Self::Injected(_) => None,
+        }
+    }
+
+    /// Locate the simulated cloud for `root`, preferring an injected store.
+    ///
+    /// # Errors
+    ///
+    /// Fails when nothing is injected and the root has no host directory to
+    /// hold the simulated cloud.
+    pub(crate) fn locate(
+        root: &dyn Fs,
+        injected: Option<Arc<dyn CloudBackend>>,
+        timeout: std::time::Duration,
+    ) -> MidgeResult<Self> {
+        if let Some(backend) = injected {
+            return Ok(Self::Injected(Arc::new(CloudStorage::new_with_timeout(
+                backend,
+                String::new(),
+                timeout,
+            ))));
+        }
+        let addressing = root.host_addressing().ok_or_else(|| {
+            MidgeError::InvalidArgument(
+                "a simulated cloud lives under the root's host directory; a root without one \
+                 needs an injected object store"
+                    .to_string(),
+            )
+        })?;
+        Ok(Self::Host(addressing.root.join(SIMULATED_CLOUD_DIR)))
+    }
+
+    /// The object store, created if it does not exist yet. A host store
+    /// also gets its WAL directory: the host store reports a missing object
+    /// as definitively absent only inside an existing directory, so the
+    /// startup catalog probe needs one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the host directories cannot be created.
+    pub(crate) fn open(&self) -> MidgeResult<Arc<dyn ObjectStore>> {
+        Ok(match self {
+            Self::Host(path) => {
+                std::fs::create_dir_all(path.join(
+                    crate::cloud_layout::CloudObjectLayout::WAL_PREFIX.trim_end_matches('/'),
+                ))?;
+                Arc::new(FileSystem::new(path)?)
+            }
+            Self::Injected(store) => Arc::clone(store) as Arc<dyn ObjectStore>,
+        })
+    }
+
+    /// The object store if it already exists; discovery before the lease is
+    /// held must not create it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the host directory exists but cannot be inspected.
+    pub(crate) fn open_existing(&self) -> MidgeResult<Option<Arc<dyn ObjectStore>>> {
+        Ok(match self {
+            Self::Host(path) => FileSystem::open_existing(path)?
+                .map(|store| Arc::new(store) as Arc<dyn ObjectStore>),
+            Self::Injected(store) => Some(Arc::clone(store) as Arc<dyn ObjectStore>),
+        })
+    }
+}
+
+/// Build the `HybridStorage` a simulated-cloud engine publishes through,
+/// with its event stream.
 pub(crate) fn build_simulated_cloud_stores(
-    db_path: &Path,
+    store: Arc<dyn ObjectStore>,
     local_storage_budget_bytes: Option<u64>,
-) -> MidgeResult<SimulatedCloudStores> {
-    let cloud_root = simulated_cloud_root(db_path);
-    let recovery_cloud_wal_dir = cloud_root.join("wal");
-    std::fs::create_dir_all(&recovery_cloud_wal_dir)?;
-
-    let local_backend = Arc::new(FileSystem::new(db_path.join("hybrid_local"))?);
-    let cloud_backend = Arc::new(FileSystem::new(cloud_root.clone())?);
-
+) -> SimulatedCloudStores {
+    let backend: Arc<dyn super::StorageBackend> = store;
     let (tx, rx) = crossbeam::channel::bounded::<StorageEvent>(
         crate::storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
     );
     let hybrid_storage = if let Some(budget_bytes) = local_storage_budget_bytes {
         Arc::new(HybridStorage::with_policy_and_event_sender(
-            local_backend,
-            cloud_backend,
+            backend,
             crate::storage::hybrid::policy::StorageBudgetPolicy::new(budget_bytes),
             Some(tx),
         ))
     } else {
-        Arc::new(HybridStorage::new_with_event_sender(
-            local_backend,
-            cloud_backend,
-            tx,
-        ))
+        Arc::new(HybridStorage::new_with_event_sender(backend, tx))
     };
-
-    Ok(SimulatedCloudStores {
+    SimulatedCloudStores {
         hybrid_storage,
         events: rx,
-        cloud_root,
-        recovery_cloud_wal_dir,
-    })
+    }
+}
+
+/// Root of the host directory that simulates cloud storage under `db_path`.
+#[cfg(test)]
+pub(crate) fn simulated_cloud_root(db_path: &std::path::Path) -> PathBuf {
+    db_path.join(SIMULATED_CLOUD_DIR)
+}
+
+/// The simulated-cloud stores over the host directory under `db_path`.
+#[cfg(test)]
+pub(crate) fn host_simulated_cloud(
+    db_path: &std::path::Path,
+    local_storage_budget_bytes: Option<u64>,
+) -> MidgeResult<SimulatedCloudStores> {
+    let store = Arc::new(FileSystem::new(simulated_cloud_root(db_path))?);
+    Ok(build_simulated_cloud_stores(
+        store,
+        local_storage_budget_bytes,
+    ))
 }
 
 #[cfg(test)]
@@ -70,17 +151,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_fail_simulated_cloud_open_when_wal_dir_cannot_be_created() {
+    fn should_fail_simulated_cloud_open_when_wal_dir_cannot_be_created(
+    ) -> crate::common::MidgeResult<()> {
         // Arrange: a regular file where the WAL directory must go.
-        let temp = tempfile::tempdir().expect("temp dir");
+        let temp = tempfile::tempdir()?;
         let cloud_root = simulated_cloud_root(temp.path());
-        std::fs::create_dir_all(&cloud_root).expect("create cloud root");
-        std::fs::write(cloud_root.join("wal"), b"not a directory").expect("block wal dir");
+        std::fs::create_dir_all(&cloud_root)?;
+        std::fs::write(cloud_root.join("wal"), b"not a directory")?;
 
         // Act
-        let result = build_simulated_cloud_stores(temp.path(), None);
+        let result = SimulatedCloud::Host(cloud_root).open();
 
         // Assert
         assert!(result.is_err());
+        Ok(())
     }
 }

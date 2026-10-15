@@ -4,7 +4,7 @@ use super::{Manifest, ManifestEdit, ManifestPersistence};
 use crate::common::{MidgeError, MidgeResult};
 use crate::config::RecoveryPolicy;
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions};
+use crate::io::{Durability, File, Fs, FsError, FsPath, FsResult, OpenOptions, ReadFs};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const EDIT_COUNT: u32 = 16;
-const READ_DELAY: Duration = Duration::from_millis(20);
+// The real parser's 128 reads must outlast the paired 3s idle budget.
+const READ_DELAY: Duration = Duration::from_millis(30);
 
 /// Independent scalar evidence from the actual manifest journal load.
 #[doc(hidden)]
@@ -24,6 +25,7 @@ pub struct JournalRecoveryProgressFixtureResult {
     pub max_edit_id: u64,
     pub manifest_edit_checkpoint_id: u64,
     pub restored_cf_count: u64,
+    pub restored_frontier_count: u64,
     pub mismatches: u64,
     pub completed_local_reads: u64,
     pub completed_local_read_bytes: u64,
@@ -113,6 +115,7 @@ pub fn run_journal_recovery_progress_fixture(
                 max_edit_id,
                 manifest_edit_checkpoint_id: 0,
                 restored_cf_count: 0,
+                restored_frontier_count: 0,
                 mismatches: 0,
                 completed_local_reads: 0,
                 completed_local_read_bytes: 0,
@@ -141,9 +144,12 @@ pub fn run_journal_recovery_progress_fixture(
     snapshot.result.manifest_edit_checkpoint_id = manifest.edit_checkpoint_id;
     snapshot.result.restored_cf_count =
         u64::try_from(manifest.column_families.len()).unwrap_or(u64::MAX);
+    snapshot.result.restored_frontier_count =
+        u64::try_from(manifest.flush_frontiers().iter().count()).unwrap_or(u64::MAX);
     snapshot.result.mismatches = u64::from(EDIT_COUNT).saturating_sub(verified_edits)
         + u64::from(manifest.edit_checkpoint_id != max_edit_id)
         + u64::from(snapshot.result.restored_cf_count != u64::from(EDIT_COUNT))
+        + u64::from(snapshot.result.restored_frontier_count != u64::from(EDIT_COUNT) + 1)
         + u64::from(!manifest.files.is_empty());
     snapshot.result.local_wal_bytes = local_wal_bytes;
     snapshot.result.staged_wal_count = staged_wal_count;
@@ -183,6 +189,12 @@ fn verified_edits(manifest: &Manifest) -> u64 {
                     && family.drop_sequence.is_none()
                     && family.dropped_sst_names.is_empty()
                     && !family.reclaimed
+                    && matches!(
+                        manifest.flush_frontiers().get(id),
+                        Ok(super::frontiers::FamilyFrontier::Live {
+                            through_sequence: 0
+                        })
+                    )
             })
         })
         .count() as u64
@@ -206,7 +218,7 @@ struct DelayedReadFile<'a> {
     observations: Arc<Observations>,
 }
 
-impl File for DelayedReadFile<'_> {
+impl crate::io::ReadFile for DelayedReadFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         let bytes = self.inner.read_at(offset, len)?;
         std::thread::sleep(READ_DELAY);
@@ -214,6 +226,12 @@ impl File for DelayedReadFile<'_> {
         Ok(bytes)
     }
 
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for DelayedReadFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         self.inner.write_at(offset, data)
     }
@@ -226,10 +244,6 @@ impl File for DelayedReadFile<'_> {
         self.inner.append(data)
     }
 
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
-
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         self.inner.sync(durability)
     }
@@ -240,7 +254,30 @@ struct DelayedReadFs {
     observations: Arc<Observations>,
 }
 
+impl ReadFs for DelayedReadFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
 impl Fs for DelayedReadFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
     fn coordination_key(&self) -> u64 {
         self.inner.coordination_key()
     }
@@ -256,20 +293,8 @@ impl Fs for DelayedReadFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

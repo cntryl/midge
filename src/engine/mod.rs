@@ -88,12 +88,18 @@ pub struct Engine {
     runtime_handle: RuntimeHandle,
     /// Database path
     db_path: PathBuf,
+    /// The database root; transaction spill runs are written below it.
+    root: Arc<dyn crate::io::Fs>,
     /// Pure in-memory mode flag.
     memory_mode: bool,
     /// True when opened in cloud-backed mode.
     cloud_mode: bool,
     /// True when cloud mode uses the in-process filesystem simulator.
     simulated_cloud_mode: bool,
+    /// Host directory holding every durable file, which a backup captures.
+    /// `None` when the root, or a simulated cloud's store, is not a host
+    /// directory.
+    backup_source: Option<PathBuf>,
     /// Latest committed sequence observed by the engine.
     ///
     /// Sequence numbers are allocated inside the runtime (at WAL append time) and
@@ -164,6 +170,7 @@ impl Engine {
                 .get_leader_store()
                 .expect("provider-backed test lease has a leader store")
                 .as_ref(),
+            &crate::io::real::test_root(db_path),
             db_path,
             recovery_policy,
         )
@@ -181,7 +188,7 @@ impl Engine {
             .expect("provider-backed test lease has a leader store");
         crate::runtime::cloud_startup::CloudStartupRecovery::mirror_cloud_metadata(
             cloud,
-            db_path,
+            &crate::io::real::test_root(db_path),
             recovery_policy,
             crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
                 store: store.as_ref(),
@@ -194,11 +201,13 @@ impl Engine {
     }
 
     #[cfg(test)]
-    fn ensure_local_sst_cache_from_cloud_storage(
+    fn validate_manifest_ssts_in_store(
         state: &mut RuntimeState,
         cloud: &crate::storage::cloud::CloudStorage,
     ) -> MidgeResult<()> {
-        crate::runtime::cloud_startup::CloudStartupRecovery::ensure_local_sst_cache_from_cloud_storage(state, cloud)
+        crate::runtime::cloud_startup::CloudStartupRecovery::validate_manifest_ssts_in_store(
+            state, cloud,
+        )
     }
 
     #[cfg(test)]
@@ -403,7 +412,7 @@ impl Engine {
             start_sequence,
             read_snapshot: Some(read_snapshot),
             cloud_mode: self.cloud_mode,
-            db_path: self.db_path.clone(),
+            root: Arc::clone(&self.root),
             memory_mode: self.memory_mode,
             transaction_memory_pool: Arc::clone(&self.transaction_memory_pool),
             runtime_transaction_guard,
@@ -472,6 +481,11 @@ impl Engine {
         &self,
     ) -> crate::diagnostics::ReadPathDiagnosticsSnapshot {
         self.runtime_handle.read_path_diagnostics_snapshot()
+    }
+
+    #[cfg(feature = "internal-testing")]
+    pub(crate) fn write_admission_snapshot(&self) -> crate::diagnostics::WriteAdmissionSnapshot {
+        self.runtime_handle.diagnostics.write_admission_snapshot()
     }
 
     /// Wait for a write stall to clear for `cf_id`.
@@ -776,6 +790,7 @@ impl Engine {
     pub fn storage_verifier(&self) -> StorageVerifier {
         StorageVerifier::new(
             self.runtime_handle.clone(),
+            Arc::clone(&self.root),
             self.db_path.clone(),
             self.memory_mode,
             self.cloud_mode,

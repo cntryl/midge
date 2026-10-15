@@ -1,0 +1,28 @@
+{
+  "flushed_through": [
+    {
+      "cf_id": 0,
+      "through_sequence": 5
+    }
+  ],
+  "files": [
+    {
+      "name": "000000_00_00000000000000000001.sst",
+      "level": 0,
+      "size_bytes": 437,
+      "content_crc32c": 1313763752,
+      "cf_id": 0,
+      "sst_seq": 0,
+      "smallest_key": "666978747572652f616c706861",
+      "largest_key": "666978747572652f73747275637475726564",
+      "smallest_seq": 2,
+      "largest_seq": 4,
+      "sublevel": 0
+    }
+  ],
+  "column_families": [],
+  "next_sst_seqs": {
+    "0": 2
+  },
+  "edit_checkpoint_id": 1
+}

@@ -72,7 +72,7 @@ impl WalCoordinator {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
         }
-        match event_loop.wal_actor.append_spilled_transaction(
+        match event_loop.actors.wal_actor.append_spilled_transaction(
             &mut event_loop.state,
             &source,
             crate::runtime::actors::wal::SpilledTransactionAppendParams {
@@ -100,7 +100,7 @@ impl WalCoordinator {
             }
         }
 
-        if !event_loop.wal_actor.is_cloud_async() {
+        if !event_loop.actors.wal_actor.is_cloud_async() {
             const MAX_DRAIN_WRITES_AFTER_BATCH: usize = 1024;
             let _ = event_loop.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_AFTER_BATCH);
             event_loop.sync_batched_wal_if_needed(msg_rx);
@@ -145,6 +145,7 @@ impl WalCoordinator {
         }
 
         if event_loop
+            .actors
             .wal_actor
             .can_coalesce_transaction_append(durability_policy)
         {
@@ -162,7 +163,7 @@ impl WalCoordinator {
                 MAX_COALESCED_TRANSACTIONS_AFTER_WAKE,
             );
         } else {
-            match event_loop.wal_actor.append_transaction(
+            match event_loop.actors.wal_actor.append_transaction(
                 &mut event_loop.state,
                 crate::runtime::actors::wal::TransactionAppendParams {
                     request_id,
@@ -192,7 +193,7 @@ impl WalCoordinator {
             }
         }
 
-        if !event_loop.wal_actor.is_cloud_async() {
+        if !event_loop.actors.wal_actor.is_cloud_async() {
             const MAX_DRAIN_WRITES_AFTER_BATCH: usize = 1024;
             let _ = event_loop.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_AFTER_BATCH);
             event_loop.sync_batched_wal_if_needed(msg_rx);
@@ -225,7 +226,7 @@ impl WalCoordinator {
             return HandleOutcome::Continue;
         }
 
-        let result = event_loop.wal_actor.append_single_op(
+        let result = event_loop.actors.wal_actor.append_single_op(
             &mut event_loop.state,
             crate::runtime::actors::wal::AppendParams {
                 request_id,
@@ -275,7 +276,7 @@ impl WalCoordinator {
             return HandleOutcome::Continue;
         }
 
-        let result = event_loop.wal_actor.append_single_range_delete(
+        let result = event_loop.actors.wal_actor.append_single_range_delete(
             &mut event_loop.state,
             request_id,
             cf_id,
@@ -334,7 +335,7 @@ impl WalCoordinator {
         sequence: u64,
         wait_for_ack: bool,
     ) -> HandleOutcome {
-        if !event_loop.wal_actor.is_cloud_async() {
+        if !event_loop.actors.wal_actor.is_cloud_async() {
             let resp = if event_loop.state.wal.frontiers.local_durable() >= sequence {
                 RuntimeResponse::Ok { request_id }
             } else {
@@ -361,12 +362,13 @@ impl WalCoordinator {
         // A fenced runtime can no longer prove cloud durability for anything
         // beyond the committed frontier. Refuse now instead of queueing a
         // waiter whose only possible outcome is a later failure.
-        if let Err(error) = event_loop.wal_transition.ensure_ready() {
+        if let Err(error) = event_loop.pipeline.wal_transition.ensure_ready() {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
         }
 
         let mut inflight_segment = event_loop
+            .pipeline
             .durability
             .inflight_segment_for_sequence(sequence);
         if inflight_segment.is_none()
@@ -401,12 +403,29 @@ impl WalCoordinator {
             }
         }
 
+        // No record holds a sequence below the open segment's first that
+        // no segment holds, such as one an earlier process reserved (#843):
+        // the cloud holds it once every segment before the open one is
+        // durable, which the newest inflight segment's acknowledgement
+        // proves.
+        let open_first_seq = event_loop
+            .state
+            .wal
+            .history
+            .ledger()
+            .open_member()
+            .open
+            .first_seq;
+        if inflight_segment.is_none() && sequence < open_first_seq {
+            inflight_segment = event_loop.pipeline.durability.newest_inflight_segment();
+        }
         if !wait_for_ack || event_loop.state.wal.frontiers.cloud_durable() >= sequence {
             event_loop.drain_auto_flush_memtables();
             event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
         } else if let Some(segment_id) = inflight_segment {
             event_loop.drain_auto_flush_memtables();
             event_loop
+                .pipeline
                 .durability
                 .queue_waiter_for_key(segment_id, DurabilityWaiter::CloudDurability { request_id });
         } else {
@@ -428,48 +447,18 @@ impl WalCoordinator {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return false;
         }
-
-        if event_loop.wal_actor.is_cloud_async()
-            && event_loop.cloud_coordinator.hybrid_storage.is_none()
-        {
-            event_loop.respond(
-                request_id,
-                RuntimeResponse::Error {
-                    request_id,
-                    error: crate::common::MidgeError::Internal(
-                        "CloudAsync requires HybridStorage".to_string(),
-                    ),
-                },
-            );
+        if let Err(error) = event_loop.check_cloud_wal_admission() {
+            if matches!(error, crate::common::MidgeError::WriteStall(_)) {
+                event_loop
+                    .state
+                    .diagnostics
+                    .record_write_admission_rejection(
+                        crate::diagnostics::WriteAdmissionRejection::CloudWal,
+                    );
+            }
+            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return false;
         }
-
-        if event_loop.wal_actor.is_cloud_async() {
-            if !event_loop
-                .cloud_coordinator
-                .cloud_wal
-                .upload_backlog
-                .is_empty()
-            {
-                event_loop.respond(
-                    request_id,
-                    RuntimeResponse::Error {
-                        request_id,
-                        error: crate::common::MidgeError::WriteStall(
-                            "CloudAsync WAL recovery uploads are still draining".to_string(),
-                        ),
-                    },
-                );
-                return false;
-            }
-            if let Some(storage) = &event_loop.cloud_coordinator.hybrid_storage {
-                if let Err(error) = storage.ensure_wal_write_admission() {
-                    event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
-                    return false;
-                }
-            }
-        }
-
         true
     }
 

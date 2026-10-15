@@ -100,7 +100,11 @@ impl Engine {
             ));
         }
 
-        let source = fs::canonicalize(&self.db_path)?;
+        let source = self.backup_source.clone().ok_or_else(|| {
+            MidgeError::NotSupported(
+                "backup captures a database served from a host directory".to_string(),
+            )
+        })?;
         let destination = paths::prepare_target(&source, destination.as_ref())?;
         let parent = destination.parent().ok_or_else(|| {
             MidgeError::InvalidArgument("backup destination requires a parent".into())
@@ -113,7 +117,8 @@ impl Engine {
                 "backup capture barrier reports an unhealthy engine".to_string(),
             ));
         }
-        let database_format_version = crate::metadata::format::validate_format_marker(&source)?;
+        let database_format_version =
+            crate::metadata::format::validate_format_marker(self.root.as_ref(), &source)?;
         let pinned = pin_durable_files(&source, self.simulated_cloud_mode, parent)?;
         if !self.is_primary_lease_healthy() {
             return Err(MidgeError::Fenced(
@@ -182,6 +187,12 @@ impl Engine {
         artifact: impl AsRef<Path>,
         options: OpenOptions,
     ) -> MidgeResult<BackupManifest> {
+        if options.injected_filesystem().is_some() || options.injected_object_store().is_some() {
+            return Err(MidgeError::NotSupported(
+                "restore writes a host directory, which injected storage would not serve"
+                    .to_string(),
+            ));
+        }
         let artifact = fs::canonicalize(artifact.as_ref())?;
         let manifest = validate_backup(&artifact)?;
         let storage = options.storage().clone();
@@ -227,7 +238,10 @@ impl Engine {
                 }
             }?;
             let _ = verification;
-            let restored_format = crate::metadata::format::validate_format_marker(staging)?;
+            let restored_format = crate::metadata::format::validate_format_marker(
+                super::startup::existing_host_root(staging)?.as_ref(),
+                staging,
+            )?;
             if restored_format != manifest.database_format_version {
                 return Err(MidgeError::Corruption(format!(
                     "backup inventory format {} does not match restored database format {}",
@@ -269,13 +283,10 @@ fn pin_durable_files(
             paths.push(path);
         }
     }
-    for name in ["wal", "sst"] {
-        collect_files(&root.join(name), root, &mut paths)?;
-    }
+    paths.extend(ledger_wal_paths(root)?);
+    collect_files(&root.join("sst"), root, &mut paths)?;
     if simulated_cloud {
-        for name in ["cloud_store", "hybrid_local"] {
-            collect_files(&root.join(name), root, &mut paths)?;
-        }
+        collect_files(&root.join("cloud_store"), root, &mut paths)?;
     }
     paths.sort();
     paths.dedup();
@@ -294,9 +305,39 @@ fn pin_durable_files(
                     path.display()
                 )));
             }
+            let mut size = metadata.len();
+            if relative
+                == Path::new("cloud_store")
+                    .join(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+            {
+                if metadata.len() > crate::lease::cloud::MAX_LEASE_DOCUMENT_BYTES as u64 {
+                    return Err(MidgeError::Corruption(
+                        "cloud lease document exceeds its backup size limit".to_string(),
+                    ));
+                }
+                let capacity = usize::try_from(metadata.len()).map_err(|_| {
+                    MidgeError::Corruption(
+                        "cloud lease document exceeds the host address space".to_string(),
+                    )
+                })?;
+                let mut content = Vec::with_capacity(capacity);
+                file.read_to_end(&mut content)?;
+                if content.len() as u64 != metadata.len() {
+                    return Err(MidgeError::Corruption(
+                        "cloud lease document changed during backup capture".to_string(),
+                    ));
+                }
+                let expired = crate::lease::cloud::expired_backup_lease_document(&content)?;
+                let mut frozen = tempfile::tempfile_in(scratch_dir)?;
+                frozen.write_all(&expired)?;
+                frozen.sync_all()?;
+                frozen.seek(SeekFrom::Start(0))?;
+                size = expired.len() as u64;
+                file = frozen;
+            }
             // Checkpointing truncates this inode in place. An open handle
             // alone cannot preserve its bytes after the capture barrier ends.
-            if relative == Path::new("manifest.journal") {
+            else if relative == Path::new("manifest.journal") {
                 let mut frozen = tempfile::tempfile_in(scratch_dir)?;
                 let copied = std::io::copy(&mut file, &mut frozen)?;
                 if copied != metadata.len() {
@@ -309,11 +350,42 @@ fn pin_durable_files(
             }
             Ok(PinnedFile {
                 relative: relative.to_path_buf(),
-                size: metadata.len(),
+                size,
                 file,
             })
         })
         .collect()
+}
+
+/// The WAL files a backup captures (#844): the ledger and every member's
+/// segment, named by the ledger itself, read inside the capture barrier.
+/// Orphans, set-aside directories and retained salvage copies are not
+/// history. A ledger that cannot be read fails the backup closed.
+fn ledger_wal_paths(root: &Path) -> MidgeResult<Vec<PathBuf>> {
+    let wal_dir = root.join(crate::wal::WAL_DIR);
+    if !wal_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let wal: std::sync::Arc<dyn crate::io::ReadFs> = std::sync::Arc::new(
+        crate::io::RealFs::open_existing(&wal_dir).map_err(crate::io::FsError::into_midge)?,
+    );
+    let Some(ledger) = crate::runtime::wal_history::WalHistory::read(&wal)? else {
+        return Ok(Vec::new());
+    };
+    let names = std::iter::once(crate::wal::ledger_store::LEDGER_FILE.to_string())
+        .chain(ledger.members().map(crate::wal::segment_file_name));
+    let mut paths = Vec::new();
+    for name in names {
+        let path = wal_dir.join(name);
+        if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+            return Err(MidgeError::Corruption(format!(
+                "backup refuses symlink in durable state: '{}'",
+                path.display()
+            )));
+        }
+        paths.push(path);
+    }
+    Ok(paths)
 }
 
 fn collect_files(path: &Path, root: &Path, files: &mut Vec<PathBuf>) -> MidgeResult<()> {
@@ -655,16 +727,59 @@ mod tests {
         // Arrange
         let directory = tempfile::tempdir().expect("test directory");
         let source = directory.path().join("source");
-        let wal = source.join("wal").join("segment.wal");
-        fs::create_dir_all(wal.parent().expect("WAL directory")).expect("create WAL directory");
-        fs::write(&wal, b"sealed WAL").expect("seed WAL");
+        fs::create_dir_all(source.join("wal")).expect("create WAL directory");
+        crate::runtime::wal_history::fixture::record_at(&source, &[], 1).expect("record ledger");
 
         // Act
         let pinned = pin_durable_files(&source, false, directory.path()).expect("pin WAL");
 
         // Assert
-        assert_eq!(pinned.len(), 1);
-        assert_eq!(pinned[0].relative, Path::new("wal").join("segment.wal"));
+        let segment = Path::new("wal").join(crate::wal::segment_file_name(1));
+        assert!(pinned.iter().any(|file| file.relative == segment));
+    }
+
+    #[test]
+    fn should_capture_only_ledger_members_when_wal_directory_holds_orphans() {
+        // Arrange: the ledger names segments 1 and 2; the WAL directory also
+        // holds an orphan segment, a salvage directory and a retained copy.
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let wal = source.join("wal");
+        fs::create_dir_all(&wal).expect("create WAL directory");
+        crate::runtime::wal_history::fixture::record_at(&source, &[1], 2).expect("record ledger");
+        fs::write(wal.join(crate::wal::segment_file_name(9)), b"orphan").expect("seed orphan");
+        fs::create_dir(wal.join("salvaged-1")).expect("create salvage directory");
+        fs::write(
+            wal.join("salvaged-1")
+                .join(crate::wal::segment_file_name(1)),
+            b"set aside",
+        )
+        .expect("seed set-aside segment");
+        fs::write(
+            wal.join(format!(
+                "{}.salvage-retained",
+                crate::wal::segment_file_name(2)
+            )),
+            b"retained",
+        )
+        .expect("seed retained copy");
+
+        // Act
+        let pinned = pin_durable_files(&source, false, directory.path()).expect("pin WAL");
+
+        // Assert
+        let captured: BTreeSet<PathBuf> = pinned.iter().map(|file| file.relative.clone()).collect();
+        assert_eq!(
+            captured,
+            [
+                crate::wal::ledger_store::LEDGER_FILE.to_string(),
+                crate::wal::segment_file_name(1),
+                crate::wal::segment_file_name(2),
+            ]
+            .map(|name| Path::new("wal").join(name))
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+        );
     }
 
     #[test]

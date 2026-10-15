@@ -4,6 +4,32 @@
 
 mod common;
 
+#[derive(Debug)]
+struct TtlClock(std::sync::atomic::AtomicU64);
+
+impl cntryl_midge::Clock for TtlClock {
+    fn now_millis(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+fn spill_runs(opts: &common::MidgeOptions) -> Vec<std::path::PathBuf> {
+    let root = match &opts.storage_mode {
+        common::StorageMode::LocalDisk { db_path } => db_path,
+        common::StorageMode::CloudBacked { local_cache_path } => local_cache_path,
+        common::StorageMode::Memory => panic!("spill fixtures require durable storage"),
+    };
+    let directory = root.join("txn");
+    if !directory.exists() {
+        return Vec::new();
+    }
+    std::fs::read_dir(directory)
+        .expect("read transaction spill directory")
+        .map(|entry| entry.expect("read spill entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "run"))
+        .collect()
+}
+
 mod transaction_basic {
     //! Transaction Basic Tests
     //!
@@ -306,23 +332,23 @@ mod transaction_basic {
     }
 
     #[test]
-    fn should_release_locks_given_aborted_transaction_when_cleanup() {
+    fn should_allow_later_write_to_same_key_given_aborted_transaction() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
             let engine = Arc::new(open_with_mode(&opts, mode));
             let cf = engine.create_column_family("test").expect("create cf");
 
-            // Act - first txn acquires lock and aborts
+            // Act: abort the first transaction before committing a later write.
             {
                 let mut txn1 = engine
                     .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                     .unwrap();
                 txn1.put(b"key1".to_vec(), b"value1".to_vec(), None)
                     .unwrap();
-                // Dropped without commit - should release lock
+                // Dropped without commit.
             }
 
-            // Second txn should be able to acquire the lock
+            // A later transaction can commit to the same key.
             let mut txn2 = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
@@ -346,7 +372,7 @@ mod transaction_basic {
     // ============================================================================
 
     #[test]
-    fn should_allow_concurrent_writes_with_lww_semantics_given_transaction_when_active() {
+    fn should_preserve_read_only_snapshot_given_later_committed_write() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
             let engine = Arc::new(open_with_mode(&opts, mode));
@@ -369,12 +395,15 @@ mod transaction_basic {
             tx2.put(b"key1".to_vec(), b"v2".to_vec(), None).unwrap();
             tx2.commit(buffered_write_options(mode)).unwrap();
 
-            // Assert - Midge implements Last-Write-Wins (LWW) semantics
-            // Transactions see latest committed data (not true snapshot isolation)
+            // Assert: LWW governs commits; the existing read snapshot stays frozen.
             let value = txn.get(b"key1").unwrap();
-            assert!(
-                value == Some(Bytes::from_static(b"v1"))
-                    || value == Some(Bytes::from_static(b"v2"))
+            assert_eq!(value, Some(Bytes::from_static(b"v1")));
+            let current = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                .unwrap();
+            assert_eq!(
+                current.get(b"key1").unwrap(),
+                Some(Bytes::from_static(b"v2"))
             );
 
             // Drop transaction
@@ -487,7 +516,7 @@ mod transaction_basic {
     }
 
     #[test]
-    fn should_persist_writes_given_kv_transaction_when_committed_boxed() {
+    fn should_make_transaction_values_visible_given_successful_commit() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
             let engine = Arc::new(open_with_mode(&opts, mode));
@@ -527,7 +556,8 @@ mod transaction_basic {
             let mut txn = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
                 .unwrap();
-            txn.put(b"key1".to_vec(), b"value1".to_vec(), None).unwrap();
+            txn.insert(b"key1".to_vec(), b"value1".to_vec(), None)
+                .unwrap();
             txn.commit(buffered_write_options(mode)).unwrap();
 
             // Assert
@@ -802,7 +832,7 @@ mod transaction_basic {
     // ============================================================================
 
     #[test]
-    fn should_persist_transaction_given_commit_when_crash_after() {
+    fn should_persist_committed_transaction_given_clean_shutdown_when_reopened() {
         for_each_storage_mode(&["local", "cloud"], |mode, opts| {
             // Arrange
             // Act (Phase 1)
@@ -833,7 +863,7 @@ mod transaction_basic {
     }
 
     #[test]
-    fn should_not_persist_transaction_given_abort_when_crash_after() {
+    fn should_not_persist_aborted_transaction_given_clean_shutdown_when_reopened() {
         for_each_storage_mode(&["local", "cloud"], |mode, opts| {
             // Arrange
             // Act (Phase 1)
@@ -980,7 +1010,7 @@ mod transaction_basic {
 }
 
 mod transaction_advanced {
-    //! Tests for transaction crash recovery and durability semantics
+    //! Tests for transaction recovery across clean restart.
     //!
     //! All tests parametrized across durable storage modes only (`LocalDisk`, `CloudBacked`)
     //! Pattern: `for_each_storage_mode(&durable_storage_modes()`, |mode, opts| { ... })
@@ -989,15 +1019,14 @@ mod transaction_advanced {
     use bytes::Bytes;
 
     // ============================================================================
-    // TRANSACTION CRASH RECOVERY
+    // TRANSACTION RESTART RECOVERY
     // ============================================================================
 
-    /// `should_persist_atomic_transactions_after_restart`
-    /// Verify committed transaction persists across crash/restart
-    /// Phase 1: Commit transaction, then crash (drop engine)
+    /// Verify every committed transaction value persists across clean restart.
+    /// Phase 1: Commit transaction, then shut down the engine.
     /// Phase 2: Restart and verify transaction data persisted
     #[test]
-    fn should_persist_atomic_transactions_after_restart() {
+    fn should_recover_all_committed_transaction_values_after_clean_restart() {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let opts_clone = opts.clone();
@@ -1046,8 +1075,8 @@ mod transaction_advanced {
     }
 
     /// `should_not_persist_uncommitted_transaction_after_restart`
-    /// Verify uncommitted transaction rolls back across crash/restart
-    /// Phase 1: Create transaction, write but don't commit, then crash
+    /// Verify an aborted transaction remains absent across clean restart.
+    /// Phase 1: Create transaction, write, and drop without committing.
     /// Phase 2: Restart and verify data was rolled back
     #[test]
     fn should_not_persist_uncommitted_transaction_after_restart() {
@@ -1089,12 +1118,11 @@ mod transaction_advanced {
         });
     }
 
-    /// `should_recover_after_abort_given_transaction_with_delete_range_when_restart`
-    /// Verify `delete_range` in transaction persists and recovers correctly
-    /// Phase 1: Write initial data, commit transaction with `delete_range`, crash
+    /// Verify committed `delete_range` recovers correctly after clean restart.
+    /// Phase 1: Write initial data and commit a transaction with `delete_range`.
     /// Phase 2: Restart and verify deleted keys are gone
     #[test]
-    fn should_recover_after_abort_given_transaction_with_delete_range_when_restart() {
+    fn should_recover_committed_delete_range_given_clean_restart() {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let opts_clone = opts.clone();
@@ -1175,7 +1203,7 @@ mod transaction_advanced {
             // Arrange
             let opts_clone = opts.clone();
             let mut opts = opts.clone();
-            opts = opts.memory_budget(100 * 1024); // Force spill with 100KB limit
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             // Act: Phase 1 - Write large transaction
             {
@@ -1191,7 +1219,11 @@ mod transaction_advanced {
                     tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                         .expect("put");
                 }
-                tx.commit(buffered_write_options(mode)).expect("commit");
+                assert!(
+                    !super::spill_runs(&opts).is_empty(),
+                    "fixture must spill before commit"
+                );
+                tx.commit(sync_write_options(mode)).expect("commit");
                 engine
                     .shutdown(std::time::Duration::from_secs(5))
                     .expect("shutdown before spill restart");
@@ -1228,7 +1260,7 @@ mod transaction_advanced {
             // Arrange
             let opts_clone = opts.clone();
             let mut opts = opts.clone();
-            opts = opts.memory_budget(100 * 1024);
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             // Act: Phase 1 - Write but don't commit
             {
@@ -1244,7 +1276,15 @@ mod transaction_advanced {
                     tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                         .expect("put");
                 }
+                assert!(
+                    !super::spill_runs(&opts).is_empty(),
+                    "fixture must spill before rollback"
+                );
                 drop(tx);
+                assert!(
+                    super::spill_runs(&opts).is_empty(),
+                    "rollback must remove owned spill runs"
+                );
                 engine
                     .shutdown(std::time::Duration::from_secs(5))
                     .expect("shutdown before spill restart");
@@ -1619,7 +1659,7 @@ mod transaction_conflicts {
         let admitted = writer.put(b"spilled".to_vec(), b"value".to_vec(), None);
         let spill_runs = std::fs::read_dir(temp_dir.path().join("txn"))
             .expect("open transaction spill directory")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read spill directory entry"))
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "run"))
             .count();
         let committed = writer.commit(cntryl_midge::WriteOptions::buffered());
@@ -1650,7 +1690,14 @@ mod transaction_conflicts {
     #[test]
     fn should_use_transaction_snapshot_time_when_asserted_value_expires_before_commit() {
         // Arrange
-        let engine = Arc::new(open_with_mode(&MidgeOptions::default(), "memory"));
+        let clock = Arc::new(super::TtlClock(std::sync::atomic::AtomicU64::new(10_000)));
+        let engine = cntryl_midge::Engine::open(
+            cntryl_midge::OpenOptions::in_memory()
+                .ttl_clock(clock.clone())
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         let cf = engine
             .create_column_family("assertion-ttl")
             .expect("create cf");
@@ -1669,7 +1716,7 @@ mod transaction_conflicts {
             .expect("register ttl assertion");
 
         // Act
-        std::thread::sleep(Duration::from_millis(1_100));
+        clock.0.store(11_000, std::sync::atomic::Ordering::Release);
         let result = asserting.commit(cntryl_midge::WriteOptions::buffered());
 
         // Assert
@@ -2243,7 +2290,7 @@ mod transaction_conflicts {
             // disk, exercising validate_spilled_transaction's assertion check
             // rather than the in-memory path.
             let mut opts = opts;
-            opts = opts.memory_budget(256 * 1024);
+            opts = opts.transaction_memory_pool_size(8 * 1024);
             let engine = open_with_mode(&opts, mode);
             let cf = engine
                 .create_column_family("assert-spill")
@@ -2270,6 +2317,10 @@ mod transaction_conflicts {
                     .put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
+            assert!(
+                !super::spill_runs(&opts).is_empty(),
+                "conflicting transaction must have spilled"
+            );
 
             // Act
             let mut concurrent = engine
@@ -2293,10 +2344,22 @@ mod transaction_conflicts {
             let read_tx = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin read tx");
+            for index in 0..200 {
+                assert_eq!(
+                    read_tx
+                        .get(format!("spill-key{index:04}").as_bytes())
+                        .unwrap(),
+                    None,
+                    "rejected member {index}, mode {mode}"
+                );
+            }
             assert_eq!(
-                read_tx.get(b"spill-key0000").expect("read spilled key"),
-                None,
-                "a rejected spilled commit must not apply any of its writes in mode {mode}"
+                read_tx
+                    .scan(&cntryl_midge::Query::new())
+                    .unwrap()
+                    .try_collect()
+                    .unwrap(),
+                vec![(Bytes::from_static(b"guard"), Bytes::from_static(b"v2"))]
             );
         });
     }
@@ -2451,7 +2514,7 @@ mod transaction_conflicts {
     }
 
     #[test]
-    fn should_preserve_first_commit_given_write_conflict_when_second_aborts() {
+    fn should_preserve_first_commit_given_later_transaction_dropped_without_commit() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
             let engine = Arc::new(open_with_mode(&opts, mode));
@@ -3066,7 +3129,7 @@ mod transaction_conflicts {
     }
 
     #[test]
-    fn should_handle_concurrent_read_modify_writes_without_panic() {
+    fn should_accept_concurrent_last_write_wins_commits_to_one_key() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
             let engine = Arc::new(open_with_mode(&opts, mode));
@@ -3081,7 +3144,7 @@ mod transaction_conflicts {
             setup_tx.commit(buffered_write_options(mode)).unwrap();
             let mut handles = vec![];
 
-            // Act - 10 threads incrementing counter
+            // Act: ten concurrent LWW writers overwrite the same key.
             for i in 0..10 {
                 let engine_clone = Arc::clone(&engine);
                 let write_options = buffered_write_options(mode);
@@ -3109,7 +3172,7 @@ mod transaction_conflicts {
     }
 
     #[test]
-    fn should_handle_high_concurrency_optimistic_locking() {
+    fn should_preserve_a_committed_value_given_many_concurrent_last_write_wins_writers() {
         for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
             // Arrange
             let engine = Arc::new(open_with_mode(&opts, mode));
@@ -3118,7 +3181,7 @@ mod transaction_conflicts {
             let barrier = Arc::new(std::sync::Barrier::new(50));
             let mut handles = vec![];
 
-            // Act - 50 threads performing optimistic lock pattern (read then write)
+            // Act: fifty LWW writers start together.
             for i in 0..50 {
                 let engine_clone = Arc::clone(&engine);
                 let barrier_clone = Arc::clone(&barrier);
@@ -3127,7 +3190,7 @@ mod transaction_conflicts {
                     // Wait for all threads to be ready before starting
                     barrier_clone.wait();
 
-                    // Optimistic lock pattern: read first
+                    // Read before independently submitting a LWW write.
                     let read_tx = engine_clone
                         .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
                         .unwrap();
@@ -3276,7 +3339,7 @@ mod transaction_conflicts {
     }
 
     #[test]
-    fn should_persist_lost_update_prevention_after_restart() {
+    fn should_preserve_last_committed_value_given_sequential_overwrites_after_restart() {
         for_each_storage_mode(&["local", "cloud"], |mode, opts| {
             // Arrange
             // Act (Phase 1) - set up concurrent updates
@@ -4408,7 +4471,7 @@ mod transaction_semantics_hardening {
 
         let sst_paths: Vec<_> = std::fs::read_dir(db_path.join("sst"))
             .expect("read sst directory")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read SST directory entry"))
             .map(|entry| entry.path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "sst"))
             .collect();
@@ -4499,7 +4562,7 @@ mod transaction_semantics_hardening {
             .expect("queue spilled insert");
         let spill_runs = std::fs::read_dir(temp_dir.path().join("txn"))
             .expect("open transaction spill directory")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read spill directory entry"))
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "run"))
             .count();
         let result = tx.commit(WriteOptions::sync());
@@ -4854,7 +4917,16 @@ mod transaction_semantics_hardening {
     #[test]
     fn should_use_transaction_snapshot_time_for_ttl_visibility() {
         // Arrange
-        let engine = open_with_mode(&opts_for_mode("local"), "local");
+        let directory = tempfile::tempdir().unwrap();
+        let clock = std::sync::Arc::new(super::TtlClock(std::sync::atomic::AtomicU64::new(10_000)));
+        let engine = cntryl_midge::Engine::open(
+            cntryl_midge::OpenOptions::local(directory.path())
+                .ttl_clock(clock.clone())
+                .background_compaction(false)
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
         let cf = engine.create_column_family("ttl").expect("create cf");
         let mut writer = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
@@ -4870,7 +4942,7 @@ mod transaction_semantics_hardening {
             .expect("begin snapshot");
 
         // Act
-        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        clock.0.store(11_000, std::sync::atomic::Ordering::Release);
 
         // Assert: the old snapshot remains stable while a new snapshot observes expiry.
         assert_eq!(
@@ -5827,7 +5899,7 @@ mod transaction_spill {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let mut opts = opts;
-            opts = opts.memory_budget(256 * 1024); // 256KB limit
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -5842,6 +5914,10 @@ mod transaction_spill {
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
+            assert!(
+                !super::spill_runs(&opts).is_empty(),
+                "fixture must spill before commit"
+            );
             tx.commit(buffered_write_options(mode)).expect("commit");
 
             // Assert
@@ -5871,7 +5947,7 @@ mod transaction_spill {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let mut opts = opts;
-            opts = opts.memory_budget(128 * 1024); // 128KB - multiple spills
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -5886,16 +5962,24 @@ mod transaction_spill {
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
+            assert!(
+                super::spill_runs(&opts).len() > 1,
+                "fixture must create multiple spill runs"
+            );
             tx.commit(buffered_write_options(mode)).expect("commit");
 
             // Assert
             let tx_read = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            for i in (0..500).step_by(50) {
+            for i in 0..500 {
                 let key = format!("big_key{i:04}");
                 let got = tx_read.get(key.as_bytes()).expect("get");
-                assert!(got.is_some(), "key {key} not found after multiple spills");
+                assert_eq!(
+                    got,
+                    Some(Bytes::from(format!("big_value_{i:04}"))),
+                    "key: {key}"
+                );
             }
         });
     }
@@ -5907,7 +5991,7 @@ mod transaction_spill {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let mut opts = opts;
-            opts = opts.memory_budget(256 * 1024);
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -5922,6 +6006,10 @@ mod transaction_spill {
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
+            assert!(
+                !super::spill_runs(&opts).is_empty(),
+                "fixture must spill before commit"
+            );
             tx.commit(buffered_write_options(mode)).expect("commit");
 
             // Assert
@@ -5949,7 +6037,7 @@ mod transaction_spill {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let mut opts = opts;
-            opts = opts.memory_budget(128 * 1024);
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -5963,6 +6051,10 @@ mod transaction_spill {
                 tx.put(key.as_bytes().to_vec(), b"v".to_vec(), None)
                     .expect("put");
             }
+            assert!(
+                !super::spill_runs(&opts).is_empty(),
+                "fixture must spill before commit"
+            );
             tx.commit(buffered_write_options(mode)).expect("commit");
 
             // Assert: a real scan must return every key in ascending sorted
@@ -5999,7 +6091,7 @@ mod transaction_spill {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let mut opts = opts;
-            opts = opts.memory_budget(256 * 1024);
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -6014,14 +6106,24 @@ mod transaction_spill {
                     tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                         .expect("put");
                 }
+                assert!(
+                    !super::spill_runs(&opts).is_empty(),
+                    "fixture must spill before rollback"
+                );
             }
 
             // Assert
+            assert!(
+                super::spill_runs(&opts).is_empty(),
+                "drop must remove private spill runs"
+            );
             let tx_read = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            let got = tx_read.get(b"rollback_test_0000").expect("get");
-            assert_eq!(got, None, "rolled back data persisted in mode: {mode}");
+            for index in 0..200 {
+                let key = format!("rollback_test_{index:04}");
+                assert_eq!(tx_read.get(key.as_bytes()).unwrap(), None, "mode: {mode}");
+            }
         });
     }
 
@@ -6032,7 +6134,7 @@ mod transaction_spill {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let mut opts = opts;
-            opts = opts.memory_budget(100 * 1024);
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -6047,7 +6149,15 @@ mod transaction_spill {
                     tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                         .expect("put");
                 }
+                assert!(
+                    !super::spill_runs(&opts).is_empty(),
+                    "fixture must spill before rollback"
+                );
             }
+            assert!(
+                super::spill_runs(&opts).is_empty(),
+                "rollback must remove private spill runs"
+            );
 
             let mut tx_write = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
@@ -6069,6 +6179,10 @@ mod transaction_spill {
                 Some(Bytes::from_static(b"value")),
                 "engine broken after spill cleanup"
             );
+            for index in 0..300 {
+                let key = format!("spill_cleanup_{index:04}");
+                assert_eq!(tx_read.get(key.as_bytes()).unwrap(), None);
+            }
         });
     }
 
@@ -6080,7 +6194,7 @@ mod transaction_spill {
             // Arrange
             let opts_clone = opts.clone();
             let mut opts = opts.clone();
-            opts = opts.memory_budget(100 * 1024);
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             // Act
             {
@@ -6095,7 +6209,15 @@ mod transaction_spill {
                     tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                         .expect("put");
                 }
+                assert!(
+                    !super::spill_runs(&opts).is_empty(),
+                    "fixture must spill before rollback"
+                );
                 drop(tx);
+                assert!(
+                    super::spill_runs(&opts).is_empty(),
+                    "rollback must clean owned runs"
+                );
                 engine
                     .shutdown(std::time::Duration::from_secs(5))
                     .expect("shutdown before reopen");
@@ -6109,8 +6231,10 @@ mod transaction_spill {
                 let tx_read = engine
                     .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                     .expect("begin_tx");
-                let got = tx_read.get(b"uncom_spill_0000").expect("get");
-                assert_eq!(got, None, "uncommitted spill recovered in mode: {mode}");
+                for index in 0..300 {
+                    let key = format!("uncom_spill_{index:04}");
+                    assert_eq!(tx_read.get(key.as_bytes()).unwrap(), None, "mode: {mode}");
+                }
             }
         });
     }
@@ -6123,7 +6247,7 @@ mod transaction_spill {
             // Arrange
             let opts_clone = opts.clone();
             let mut opts = opts.clone();
-            opts = opts.memory_budget(100 * 1024);
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             // Act
             {
@@ -6138,7 +6262,11 @@ mod transaction_spill {
                     tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                         .expect("put");
                 }
-                tx.commit(buffered_write_options(mode)).expect("commit");
+                assert!(
+                    !super::spill_runs(&opts).is_empty(),
+                    "fixture must spill before commit"
+                );
+                tx.commit(sync_write_options(mode)).expect("commit");
                 engine
                     .shutdown(std::time::Duration::from_secs(5))
                     .expect("shutdown before reopen");
@@ -6152,14 +6280,97 @@ mod transaction_spill {
                 let tx_read = engine
                     .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                     .expect("begin_tx");
-                let got = tx_read.get(b"com_spill_0000").expect("get");
-                assert_eq!(
-                    got,
-                    Some(Bytes::from_static(b"value")),
-                    "committed spill not recovered"
-                );
+                for index in 0..300 {
+                    let key = format!("com_spill_{index:04}");
+                    assert_eq!(
+                        tx_read.get(key.as_bytes()).unwrap(),
+                        Some(Bytes::from_static(b"value"))
+                    );
+                }
             }
         });
+    }
+
+    struct SpillPressure {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        release: Option<std::sync::mpsc::Sender<()>>,
+        worker: Option<std::thread::JoinHandle<u32>>,
+    }
+
+    impl SpillPressure {
+        fn release_first_spill(&mut self) {
+            self.release
+                .take()
+                .expect("one staged spill")
+                .send(())
+                .expect("release background after foreground progress");
+        }
+
+        fn finish(mut self) -> u32 {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            self.worker
+                .take()
+                .expect("background worker")
+                .join()
+                .expect("background thread panicked")
+        }
+    }
+
+    impl Drop for SpillPressure {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+
+    fn exercise_background_spills(
+        engine: &cntryl_midge::Engine,
+        opts: &MidgeOptions,
+        write_options: cntryl_midge::WriteOptions,
+        stop: &std::sync::atomic::AtomicBool,
+        ready: &std::sync::mpsc::SyncSender<()>,
+        release: &std::sync::mpsc::Receiver<()>,
+    ) -> u32 {
+        let cf = engine.get_column_family("test").expect("background family");
+        let mut round = 0_u32;
+        let mut announced = false;
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            let mut tx = engine
+                .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadWrite)
+                .expect("begin background transaction");
+            for index in 0..300 {
+                tx.put(
+                    format!("bg_{round}_{index:04}").into_bytes(),
+                    vec![b'b'; 512],
+                    None,
+                )
+                .expect("stage background spill");
+            }
+            assert!(
+                !super::spill_runs(opts).is_empty(),
+                "background must really spill"
+            );
+            if !announced {
+                ready.send(()).expect("report staged spill");
+                release
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .expect("foreground must progress while spill is held");
+                announced = true;
+            }
+            match tx.commit(write_options) {
+                Ok(()) => round += 1,
+                Err(cntryl_midge::MidgeError::WriteStall(_)) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(error) => panic!("background commit failed: {error}"),
+            }
+        }
+        round
     }
 
     /// `should_not_starve_foreground_writes_given_background_spill_activity`
@@ -6172,7 +6383,7 @@ mod transaction_spill {
             // Arrange
             let mut opts = opts;
             // A small budget forces real spill activity.
-            opts = opts.memory_budget(64 * 1024);
+            opts = opts.transaction_memory_pool_size(64 * 1024);
             // This is a sustained-ingest progress test. With the hard L0 ceiling,
             // background compaction must be enabled so admitted generations can
             // retire and make room for later foreground writes.
@@ -6184,35 +6395,29 @@ mod transaction_spill {
 
             let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-            // Background thread: repeatedly commits large transactions that
-            // exceed the memory budget and spill to disk, for as long as the
-            // foreground thread is still working.
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
             let bg_engine = std::sync::Arc::clone(&engine);
-            let bg_cf_id = cf.id();
             let bg_stop = std::sync::Arc::clone(&stop);
+            let bg_opts = opts.clone();
             let background = std::thread::spawn(move || {
-                let mut round: u32 = 0;
-                while !bg_stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    let mut tx = bg_engine
-                        .begin_tx(bg_cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                        .expect("begin background tx");
-                    for i in 0..300 {
-                        let key = format!("bg_{round}_{i:04}");
-                        tx.put(key.as_bytes().to_vec(), vec![b'b'; 512], None)
-                            .expect("background put");
-                    }
-                    match tx.commit(write_options) {
-                        Ok(()) => round += 1,
-                        Err(cntryl_midge::MidgeError::WriteStall(_)) => {
-                            // The foreground and background writers share the
-                            // same deliberately tiny budget. Backpressure is an
-                            // expected retry signal, not a worker failure.
-                            std::thread::sleep(std::time::Duration::from_millis(5));
-                        }
-                        Err(other) => panic!("background commit failed: {other:?}"),
-                    }
-                }
+                exercise_background_spills(
+                    &bg_engine,
+                    &bg_opts,
+                    write_options,
+                    &bg_stop,
+                    &ready_tx,
+                    &release_rx,
+                )
             });
+            let mut background = SpillPressure {
+                stop: std::sync::Arc::clone(&stop),
+                release: Some(release_tx),
+                worker: Some(background),
+            };
+            ready_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("background must stage a real spill before foreground begins");
 
             // Act: run foreground writes concurrently with the background spill
             // activity and measure how long they take to complete. The shared
@@ -6246,11 +6451,13 @@ mod transaction_spill {
                         Err(other) => panic!("foreground commit failed: {other:?}"),
                     }
                 }
+                if i == 0 {
+                    background.release_first_spill();
+                }
             }
             let elapsed = start.elapsed();
 
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            background.join().expect("background thread panicked");
+            let background_commits = background.finish();
 
             // Assert: foreground writes completed in bounded time and are all
             // durably visible, despite concurrent background spill activity.
@@ -6258,6 +6465,10 @@ mod transaction_spill {
                 elapsed < std::time::Duration::from_secs(30),
                 "foreground writes starved by background spill activity: {elapsed:?} \
                  for {fg_count} commits, mode: {mode}"
+            );
+            assert!(
+                background_commits > 0,
+                "background must complete a spilled transaction"
             );
 
             let tx_read = engine
@@ -6272,6 +6483,15 @@ mod transaction_spill {
                     "foreground write {key} lost, mode: {mode}"
                 );
             }
+            for round in 0..background_commits {
+                for index in 0..300 {
+                    let key = format!("bg_{round}_{index:04}");
+                    assert_eq!(
+                        tx_read.get(key.as_bytes()).unwrap(),
+                        Some(Bytes::from(vec![b'b'; 512]))
+                    );
+                }
+            }
         });
     }
 
@@ -6282,12 +6502,13 @@ mod transaction_spill {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let mut opts = opts;
-            opts = opts.memory_budget(256 * 1024);
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             let engine = std::sync::Arc::new(open_with_mode(&opts, mode));
 
             // Act
             let engine_clone = std::sync::Arc::clone(&engine);
+            let spill_opts = opts.clone();
             let write_options = buffered_write_options(mode);
             let t1 = std::thread::spawn(move || {
                 let cf = engine_clone
@@ -6301,10 +6522,15 @@ mod transaction_spill {
                     tx.put(key.as_bytes().to_vec(), b"t1_value".to_vec(), None)
                         .expect("put");
                 }
+                assert!(
+                    !super::spill_runs(&spill_opts).is_empty(),
+                    "first writer must stage real spill runs"
+                );
                 tx.commit(write_options).expect("commit");
             });
 
             let engine_clone = std::sync::Arc::clone(&engine);
+            let spill_opts = opts.clone();
             let write_options = buffered_write_options(mode);
             let t2 = std::thread::spawn(move || {
                 let cf = engine_clone
@@ -6318,6 +6544,10 @@ mod transaction_spill {
                     tx.put(key.as_bytes().to_vec(), b"t2_value".to_vec(), None)
                         .expect("put");
                 }
+                assert!(
+                    !super::spill_runs(&spill_opts).is_empty(),
+                    "second writer must stage real spill runs"
+                );
                 tx.commit(write_options).expect("commit");
             });
 
@@ -6329,18 +6559,15 @@ mod transaction_spill {
             let tx_read = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            let got1 = tx_read.get(b"t1_key_0000").expect("get");
-            let got2 = tx_read.get(b"t2_key_0000").expect("get");
-            assert_eq!(
-                got1,
-                Some(Bytes::from_static(b"t1_value")),
-                "t1 data missing"
-            );
-            assert_eq!(
-                got2,
-                Some(Bytes::from_static(b"t2_value")),
-                "t2 data missing"
-            );
+            for lane in 1..=2 {
+                for index in 0..200 {
+                    let key = format!("t{lane}_key_{index:04}");
+                    assert_eq!(
+                        tx_read.get(key.as_bytes()).unwrap(),
+                        Some(Bytes::from(format!("t{lane}_value")))
+                    );
+                }
+            }
         });
     }
 
@@ -6351,7 +6578,7 @@ mod transaction_spill {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let mut opts = opts;
-            opts = opts.memory_budget(32 * 1024); // 32KB - reasonable limit
+            opts = opts.transaction_memory_pool_size(1024);
 
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -6366,14 +6593,23 @@ mod transaction_spill {
                 tx.put(key.as_bytes().to_vec(), value.as_bytes().to_vec(), None)
                     .expect("put");
             }
+            assert!(
+                !super::spill_runs(&opts).is_empty(),
+                "tiny pool must force spill"
+            );
             tx.commit(buffered_write_options(mode)).expect("commit");
 
             // Assert
             let tx_read = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            let got = tx_read.get(b"tiny_00").expect("get");
-            assert!(got.is_some(), "data lost with tiny memory limit");
+            for index in 0..20 {
+                let key = format!("tiny_{index:02}");
+                assert_eq!(
+                    tx_read.get(key.as_bytes()).unwrap(),
+                    Some(Bytes::from(format!("value{index:02}")))
+                );
+            }
         });
     }
 
@@ -6384,7 +6620,7 @@ mod transaction_spill {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             let mut opts = opts;
-            opts = opts.memory_budget(128 * 1024);
+            opts = opts.transaction_memory_pool_size(8 * 1024);
 
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
@@ -6404,60 +6640,36 @@ mod transaction_spill {
                 };
                 tx.put(key.as_bytes().to_vec(), value, None).expect("put");
             }
+            assert!(
+                !super::spill_runs(&opts).is_empty(),
+                "mixed-value transaction must spill"
+            );
             tx.commit(buffered_write_options(mode)).expect("commit");
 
             // Assert
             let tx_read = engine
                 .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
                 .expect("begin_tx");
-            let got_tiny = tx_read.get(b"mixed_0000").expect("get");
-            assert!(got_tiny.is_some(), "tiny value lost");
-
-            let got_med = tx_read.get(b"mixed_0001").expect("get");
-            assert_eq!(
-                got_med.as_ref().map(bytes::Bytes::len),
-                Some(256),
-                "medium size wrong"
-            );
-
-            let got_large = tx_read.get(b"mixed_0002").expect("get");
-            assert_eq!(
-                got_large.as_ref().map(bytes::Bytes::len),
-                Some(512),
-                "large size wrong"
-            );
+            for index in 0..100 {
+                let expected = match index % 3 {
+                    0 => b"tiny".to_vec(),
+                    1 => vec![b'x'; 256],
+                    _ => vec![b'y'; 512],
+                };
+                let key = format!("mixed_{index:04}");
+                assert_eq!(
+                    tx_read.get(key.as_bytes()).unwrap().as_deref(),
+                    Some(expected.as_slice())
+                );
+            }
         });
     }
 
-    /// Count on-disk directories that the engine's in-memory storage path would
-    /// use for a spill/data directory (see `StartupStoragePath::resolve` for
-    /// `Storage::InMemory`, which names such directories
-    /// `target/tmp/midge_test_memory_*`). `StartupStoragePath::prepare` never
-    /// calls `create_dir_all` for memory-mode engines, so in-memory mode should
-    /// never cause any such directory to come into existence.
-    fn count_memory_mode_artifact_dirs() -> usize {
-        let tmp_root = std::path::Path::new("target/tmp");
-        std::fs::read_dir(tmp_root).map_or(0, |entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_str()
-                        .is_some_and(|name| name.starts_with("midge_test_memory_"))
-                })
-                .count()
-        })
-    }
-
-    /// `should_not_create_disk_artifacts_given_large_transaction_when_memory_mode`
-    /// Verify memory-only mode doesn't create spill files
+    /// Verify every value from a large in-memory transaction is readable.
     #[test]
-    fn should_not_create_disk_artifacts_given_large_transaction_when_memory_mode() {
+    fn should_preserve_all_values_given_large_in_memory_transaction() {
         // Arrange
         let opts = memory_opts();
-        let dirs_before = count_memory_mode_artifact_dirs();
-
         let engine = open_with_mode(&opts, "memory");
         let cf = engine.create_column_family("test").expect("create cf");
 
@@ -6473,23 +6685,17 @@ mod transaction_spill {
         tx.commit(cntryl_midge::WriteOptions::buffered())
             .expect("commit");
 
-        // Assert: no filesystem artifacts (spill directory or otherwise) were
-        // created as a side effect of this large in-memory transaction.
-        let dirs_after = count_memory_mode_artifact_dirs();
-        assert_eq!(
-            dirs_after, dirs_before,
-            "memory mode must not create on-disk artifacts"
-        );
-
+        // Assert
         let tx_read = engine
             .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
             .expect("begin_tx");
-        let got = tx_read.get(b"mem_only_0000").expect("get");
-        assert_eq!(
-            got,
-            Some(Bytes::from_static(b"value")),
-            "memory mode data lost"
-        );
+        for index in 0..500 {
+            let key = format!("mem_only_{index:04}");
+            assert_eq!(
+                tx_read.get(key.as_bytes()).unwrap(),
+                Some(Bytes::from_static(b"value"))
+            );
+        }
     }
 }
 
@@ -6498,12 +6704,11 @@ mod runtime_transaction_coalescing {
     use cntryl_midge::Query;
     use std::sync::Arc;
     use std::thread;
-    use std::time::Instant;
 
     #[test]
-    fn should_preserve_runtime_coalescing_when_threads_write_concurrently() {
+    fn should_preserve_every_wal_backed_value_when_threads_write_concurrently() {
         // Arrange
-        let mut opts = opts_for_mode("memory");
+        let mut opts = opts_for_mode("local");
         opts.memtable_size = 64 * 1024 * 1024;
         let engine = Arc::new(cntryl_midge::Engine::open(opts.to_open_options()).unwrap());
         let cf = engine.create_column_family("test_cf").unwrap();
@@ -6511,12 +6716,15 @@ mod runtime_transaction_coalescing {
 
         let num_threads = 8_usize;
         let ops_per_thread = 500_usize;
+        let start = Arc::new(std::sync::Barrier::new(num_threads));
 
         // Act
         let mut handles = vec![];
         for thread_id in 0..num_threads {
             let engine_clone = Arc::clone(&engine);
+            let start = Arc::clone(&start);
             let handle = thread::spawn(move || {
+                start.wait();
                 for op_id in 0..ops_per_thread {
                     let key = format!("key-t{thread_id:02}-o{op_id:06}");
                     let value = format!("val-{op_id}");
@@ -6537,8 +6745,7 @@ mod runtime_transaction_coalescing {
             handle.join().expect("thread join");
         }
 
-        // Assert: caller submissions stay distinct, while the runtime coalesces
-        // their WAL frames and preserves every logical write.
+        // Assert: every acknowledged logical write is present in the real WAL-backed engine.
         let metrics = engine
             .metrics()
             .get_runtime_metrics()
@@ -6554,14 +6761,34 @@ mod runtime_transaction_coalescing {
         let total_ops =
             u64::try_from(num_threads * ops_per_thread).expect("operation count fits u64");
         assert_eq!(rows.len() as u64, total_ops);
+        let expected: Vec<_> = (0..num_threads)
+            .flat_map(|thread_id| {
+                (0..ops_per_thread).map(move |op_id| {
+                    (
+                        cntryl_midge::Bytes::from(format!("key-t{thread_id:02}-o{op_id:06}")),
+                        cntryl_midge::Bytes::from(format!("val-{op_id}")),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(rows, expected);
         assert!(
-            metrics.wal_append_count < total_ops,
-            "runtime write draining should coalesce logical transactions"
+            metrics.wal_append_count > 0,
+            "fixture must append a real WAL"
         );
+        for thread_id in 0..num_threads {
+            for op_id in 0..ops_per_thread {
+                let key = format!("key-t{thread_id:02}-o{op_id:06}");
+                assert_eq!(
+                    read.get(key.as_bytes()).unwrap(),
+                    Some(cntryl_midge::Bytes::from(format!("val-{op_id}")))
+                );
+            }
+        }
     }
 
     #[test]
-    fn should_handle_concurrent_writes_correctly_with_runtime_coalescing() {
+    fn should_preserve_every_memory_value_when_threads_write_concurrently() {
         // Arrange: Create engine
         let opts = opts_for_mode("memory");
         let engine =
@@ -6573,7 +6800,6 @@ mod runtime_transaction_coalescing {
         let ops_per_thread = 50_u64;
 
         // Act
-        let start = Instant::now();
         let handles: Vec<_> = (0..num_threads)
             .map(|thread_id| {
                 let engine_clone = Arc::clone(&engine);
@@ -6598,9 +6824,7 @@ mod runtime_transaction_coalescing {
             handle.join().expect("Thread should complete");
         }
 
-        let elapsed = start.elapsed();
-
-        // Assert: every logical write from every thread is durably visible with
+        // Assert: every logical write from every thread is visible with
         // the exact value that thread wrote, not merely "readable".
         let read_tx = engine
             .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
@@ -6634,17 +6858,17 @@ mod runtime_transaction_coalescing {
             total_ops,
             "scan should return exactly the rows written by all threads"
         );
-
-        let total_ops_f64 =
-            f64::from(u32::try_from(total_ops).expect("test operation count fits in u32"));
-        let throughput = total_ops_f64 / elapsed.as_secs_f64();
-        println!(
-            "OK: Runtime coalescing with backpressure: {total_ops} ops from {num_threads} threads, {throughput:.0} ops/sec"
+        assert!(
+            rows.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "scan must return unique ordered keys"
         );
+        for (key, value) in rows {
+            assert_eq!(read_tx.get(&key).unwrap(), Some(value));
+        }
     }
 
     #[test]
-    fn should_maintain_ordering_with_runtime_coalescing() {
+    fn should_preserve_last_committed_value_given_sequential_overwrites() {
         // Arrange
         let opts = opts_for_mode("memory");
         let engine = cntryl_midge::Engine::open(opts.to_open_options()).expect("Engine creation");
@@ -6655,7 +6879,7 @@ mod runtime_transaction_coalescing {
 
         let num_sequential_ops = 100_u64;
 
-        // Act: Insert sequential values for the same key via concurrent transactions
+        // Act: sequentially commit values for the same key.
         for i in 0..num_sequential_ops {
             let mut tx = engine
                 .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
@@ -6690,8 +6914,6 @@ mod runtime_transaction_coalescing {
             num_sequential_ops - 1,
             "Final value should match last written value"
         );
-
-        println!("OK: Ordering maintained across {num_sequential_ops} sequential operations");
     }
 }
 
@@ -6836,7 +7058,7 @@ mod transaction_delete_range_window {
     fn with_tombstone_headroom(opts: MidgeOptions) -> MidgeOptions {
         MidgeOptions {
             memtable_size: 32 * 1024 * 1024,
-            memory_budget: Some(512 * 1024 * 1024),
+            transaction_memory_pool_bytes: Some(512 * 1024 * 1024),
             ..opts
         }
     }
@@ -6893,7 +7115,7 @@ mod transaction_delete_range_window {
                 // the concurrent range deletes reach conflict validation.
                 let opts = MidgeOptions {
                     memtable_size: 32 * 1024 * 1024,
-                    ..opts_for_mode(mode).memory_budget(1_024)
+                    ..opts_for_mode(mode).transaction_memory_pool_size(1_024)
                 };
                 let dir = spill_dir(&opts);
                 assert_commit_conflicts_after_staging_check(
@@ -6938,11 +7160,14 @@ mod transaction_delete_range_window {
     }
 
     fn count_spill_runs(dir: &std::path::Path) -> usize {
-        std::fs::read_dir(dir).map_or(0, |entries| {
-            entries
-                .filter_map(Result::ok)
-                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "run"))
-                .count()
-        })
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return 0,
+            Err(error) => panic!("list spill directory {}: {error}", dir.display()),
+        };
+        entries
+            .map(|entry| entry.expect("read spill directory entry"))
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "run"))
+            .count()
     }
 }

@@ -1,0 +1,198 @@
+{
+  "schema_version": 1,
+  "baseline_sha": "fee88107cc5c76da2c4c9b7a1df486c8dce650a5",
+  "regressions": [
+    {
+      "id": "best-effort-delete",
+      "fixing_pr_stage": 3,
+      "target": "lifecycle",
+      "source": "tests/lifecycle.rs",
+      "test": "should_not_resurrect_best_effort_deleted_key_when_reopening_after_clean_shutdown",
+      "baseline": "green",
+      "failure_marker": "best_effort delete resurrected after"
+    },
+    {
+      "id": "best-effort-delete",
+      "fixing_pr_stage": 3,
+      "target": "lifecycle",
+      "source": "tests/lifecycle.rs",
+      "test": "should_not_resurrect_best_effort_deleted_key_when_recovering_a_crash_image",
+      "baseline": "green",
+      "failure_marker": "best_effort delete resurrected after"
+    },
+    {
+      "id": "failed-local-unlink",
+      "fixing_pr_stage": 2,
+      "target": "lifecycle",
+      "source": "tests/lifecycle.rs",
+      "test": "should_not_resurrect_deleted_key_when_older_flushed_segment_removal_fails",
+      "baseline": "green"
+    },
+    {
+      "id": "retired-local-cloud-copy",
+      "fixing_pr_stage": 3,
+      "target": "fault_injection",
+      "source": "tests/fault_injection/local_wal_gc.rs",
+      "test": "should_keep_deleted_key_absent_without_compaction_when_local_wal_removal_fails",
+      "baseline": "green"
+    },
+    {
+      "id": "retired-local-cloud-copy",
+      "fixing_pr_stage": 3,
+      "target": "fault_injection",
+      "source": "tests/fault_injection/local_wal_gc.rs",
+      "test": "should_not_resurrect_deleted_key_when_retired_local_wal_copy_survives_restart",
+      "baseline": "green"
+    },
+    {
+      "id": "empty-range-pin",
+      "fixing_pr_stage": 3,
+      "target": "wal_retention_regressions",
+      "source": "tests/wal_retention_regressions.rs",
+      "test": "should_retire_cloud_wal_when_empty_range_has_no_replayable_effect",
+      "baseline": "green",
+      "failure_marker": "empty range pinned"
+    },
+    {
+      "id": "dropped-family-pin",
+      "fixing_pr_stage": 3,
+      "target": "wal_retention_regressions",
+      "source": "tests/wal_retention_regressions.rs",
+      "test": "should_retire_cloud_wal_when_flushed_family_is_dropped",
+      "baseline": "green",
+      "failure_marker": "family pinned"
+    },
+    {
+      "id": "dropped-family-pin",
+      "fixing_pr_stage": 3,
+      "target": "wal_retention_regressions",
+      "source": "tests/wal_retention_regressions.rs",
+      "test": "should_retire_cloud_wal_when_unflushed_family_is_discarded",
+      "baseline": "green",
+      "failure_marker": "family pinned"
+    },
+    {
+      "id": "predecessor-cache",
+      "fixing_pr_stage": 2,
+      "target": "fault_injection",
+      "source": "tests/fault_injection/wal_authority_regressions.rs",
+      "test": "should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache",
+      "baseline": "green",
+      "requires_sqrzl": true
+    },
+    {
+      "id": "out-of-order-publication",
+      "fixing_pr_stage": 2,
+      "target": "lib",
+      "source": "src/runtime/event_loop/cloud_integration/tests.rs",
+      "test": "should_not_publish_later_upload_when_preceding_segment_is_unacknowledged",
+      "baseline": "green"
+    },
+    {
+      "id": "restarted-segment-id",
+      "fixing_pr_stage": 2,
+      "target": "lifecycle",
+      "source": "tests/lifecycle.rs",
+      "test": "should_allocate_wal_segment_ids_above_previous_runs_when_all_sealed_segments_were_pruned",
+      "baseline": "green"
+    },
+    {
+      "id": "noncorruption-salvage",
+      "fixing_pr_stage": 5,
+      "target": "wal_replay_io_failure",
+      "source": "tests/wal_replay_io_failure.rs",
+      "test": "should_keep_acknowledged_writes_when_salvage_replay_hits_a_transient_io_error",
+      "baseline": "red",
+      "failure_marker": "acknowledged writes vanished after salvage open"
+    },
+    {
+      "id": "interrupted-salvage-floor",
+      "fixing_pr_stage": 5,
+      "target": "lib",
+      "source": "src/runtime/cloud_startup/streaming_wal_plan/tests.rs",
+      "test": "should_preserve_sequence_floor_when_salvage_is_interrupted_before_authority_commit",
+      "baseline": "red",
+      "failure_marker": "interrupted salvage lost its sequence floor"
+    },
+    {
+      "id": "substitute-upload-collision",
+      "fixing_pr_stage": 5,
+      "target": "fault_injection",
+      "source": "tests/fault_injection/wal_authority_regressions.rs",
+      "test": "should_allow_strict_writes_when_salvage_substitutes_intact_local_segment",
+      "baseline": "red",
+      "failure_marker": "substituted old identity blocks new strict writes"
+    },
+    {
+      "id": "retryable-fsync-failure",
+      "fixing_pr_stage": 6,
+      "target": "fault_injection",
+      "source": "tests/fault_injection.rs",
+      "test": "should_not_replay_commit_reported_as_retryable_when_wal_sync_fails",
+      "baseline": "red",
+      "failure_marker": "but the write replayed after restart"
+    },
+    {
+      "id": "partial-spilled-admission",
+      "fixing_pr_stage": 6,
+      "target": "lib",
+      "source": "src/runtime/actors/wal/tests/admission.rs",
+      "test": "should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget",
+      "baseline": "red",
+      "failure_marker": "a budget rejection fenced the WAL"
+    },
+    {
+      "id": "abandoned-split-transaction",
+      "fixing_pr_stage": 6,
+      "target": "lib",
+      "source": "src/wal/recovery/streaming/tests.rs",
+      "test": "should_checkpoint_after_abandoned_split_transaction_when_newer_epoch_records_follow",
+      "baseline": "red",
+      "failure_marker": "cannot checkpoint while split WAL transactions remain open"
+    }
+  ],
+  "supplemental_regressions": [
+    {
+      "id": "failed-allocation-listing",
+      "fixing_pr_stage": 1,
+      "target": "lib",
+      "source": "src/runtime/state/recovery/timeout_tests.rs",
+      "test": "should_not_regress_next_segment_id_when_wal_directory_listing_fails",
+      "baseline": "green"
+    },
+    {
+      "id": "inverted-epoch-history",
+      "fixing_pr_stage": 2,
+      "target": "lib",
+      "source": "src/wal/recovery/tests.rs",
+      "test": "should_not_skip_older_epoch_segments_when_a_regressed_segment_id_holds_newer_epoch",
+      "baseline": "green"
+    },
+    {
+      "id": "torn-unsynced-tail",
+      "fixing_pr_stage": 5,
+      "target": "storage_root_injection",
+      "source": "tests/storage_root_injection.rs",
+      "test": "should_open_strictly_when_power_loss_tears_unsynced_multi_page_tail",
+      "baseline": "red",
+      "failure_marker": "strict open refused a torn unsynced WAL tail"
+    },
+    {
+      "id": "recovered-tail-not-durable",
+      "fixing_pr_stage": 2,
+      "target": "wal_campaigns",
+      "source": "tests/wal_campaigns.rs",
+      "test": "should_keep_recovered_tail_when_power_is_lost_after_a_process_crash",
+      "baseline": "green"
+    },
+    {
+      "id": "lost-buffered-delete",
+      "fixing_pr_stage": 3,
+      "target": "wal_campaigns",
+      "source": "tests/wal_campaigns.rs",
+      "test": "should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record",
+      "baseline": "green",
+      "failure_marker": "flushed delete resurrected after compaction"
+    }
+  ]
+}

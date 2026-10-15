@@ -1,13 +1,14 @@
 //! Overlapping generations across families, including destructive mutations.
 
 use super::{fixture::Campaign, workload};
-use cntryl_midge::{Engine, Query, TransactionMode, WriteOptions};
+use cntryl_midge::{Bytes, ColumnFamilyHandle, Engine, Query, TransactionMode, WriteOptions};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 const FAMILIES: u8 = 3;
 const ROUNDS: u8 = 8;
 const KEYS: u8 = 32;
+const GENERATION_KEY: &[u8] = &[u8::MAX];
 
 fn name(family: u8) -> String {
     format!("resource-family-{family}")
@@ -46,6 +47,16 @@ pub(super) fn exercise(
                 .expect("resource column family")
         })
         .collect();
+    for (family, cf) in families.iter().enumerate() {
+        write_generation(
+            engine,
+            cf,
+            u8::try_from(family).unwrap(),
+            0,
+            campaign,
+            progress,
+        );
+    }
     let stopped = Arc::new(AtomicBool::new(false));
     let scans = AtomicU64::new(0);
     std::thread::scope(|scope| {
@@ -53,63 +64,16 @@ pub(super) fn exercise(
         scope.spawn(|| {
             while !stopped.load(Ordering::Acquire) {
                 for (family, cf) in families.iter().enumerate() {
-                    let tx = engine
-                        .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                        .expect("maintenance snapshot");
-                    let mut generation = None;
-                    for entry in tx.scan(&Query::new()).expect("maintenance scan") {
-                        let (key, actual) = entry.expect("maintenance entry");
-                        let round = actual[1];
-                        assert_eq!(
-                            actual.as_ref(),
-                            value(
-                                u8::try_from(family).unwrap(),
-                                round,
-                                key[0],
-                                value_size(campaign)
-                            )
-                        );
-                        assert!(
-                            generation.is_none_or(|previous| previous == round),
-                            "torn generation within a snapshot"
-                        );
-                        generation = Some(round);
-                    }
+                    assert_snapshot(engine, cf, u8::try_from(family).unwrap(), campaign);
                     scans.fetch_add(1, Ordering::Relaxed);
                 }
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         });
-        for round in 0..ROUNDS {
+        for round in 1..ROUNDS {
             for (family, cf) in families.iter().enumerate() {
                 let family = u8::try_from(family).unwrap();
-                loop {
-                    progress.require_time("difficult write admission");
-                    let mut tx = engine
-                        .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                        .expect("overwrite transaction");
-                    for key in 0..KEYS {
-                        tx.put(
-                            vec![key],
-                            value(family, round, key, value_size(campaign)),
-                            (key == 31).then_some(1),
-                        )
-                        .expect("overwrite value or expiring value");
-                    }
-                    tx.delete(vec![round % 2]).expect("point tombstone");
-                    let start = if round % 2 == 0 { 8 } else { 16 };
-                    tx.delete_range(vec![start], vec![start + 8])
-                        .expect("range tombstone");
-                    match tx.commit(WriteOptions::cloud_strict()) {
-                        Ok(()) => break,
-                        Err(cntryl_midge::MidgeError::WriteStall(_)) => {
-                            progress.report_wait(engine, "difficult write admission");
-                            std::thread::sleep(std::time::Duration::from_millis(25));
-                        }
-                        Err(error) => panic!("difficult cloud acknowledgment failed: {error}"),
-                    }
-                }
-                engine.flush_cf(cf).expect("overlapping SST generation");
+                write_generation(engine, cf, family, round, campaign, progress);
             }
             if round % 4 == 3 {
                 workload::compact_all(engine, progress);
@@ -119,6 +83,78 @@ pub(super) fn exercise(
     assert!(scans.load(Ordering::Relaxed) > 0);
     super::clock::expire_values();
     verify(engine, campaign);
+}
+
+fn write_generation(
+    engine: &Engine,
+    cf: &ColumnFamilyHandle,
+    family: u8,
+    round: u8,
+    campaign: &Campaign,
+    progress: &mut workload::WorkloadProgress,
+) {
+    loop {
+        progress.require_time("difficult write admission");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("overwrite transaction");
+        for key in 0..KEYS {
+            tx.put(
+                vec![key],
+                value(family, round, key, value_size(campaign)),
+                (key == 31).then_some(1),
+            )
+            .expect("overwrite value or expiring value");
+        }
+        tx.put(GENERATION_KEY.to_vec(), vec![round], None)
+            .expect("atomic generation marker");
+        tx.delete(vec![round % 2]).expect("point tombstone");
+        let start = if round.is_multiple_of(2) { 8 } else { 16 };
+        tx.delete_range(vec![start], vec![start + 8])
+            .expect("range tombstone");
+        match tx.commit(WriteOptions::cloud_strict()) {
+            Ok(()) => break,
+            Err(cntryl_midge::MidgeError::WriteStall(_)) => {
+                progress.report_wait(engine, "difficult write admission");
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => panic!("difficult cloud acknowledgment failed: {error}"),
+        }
+    }
+    engine.flush_cf(cf).expect("overlapping SST generation");
+}
+
+fn assert_snapshot(engine: &Engine, cf: &ColumnFamilyHandle, family: u8, campaign: &Campaign) {
+    let tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("maintenance snapshot");
+    let marker = tx
+        .get(GENERATION_KEY)
+        .expect("generation read")
+        .expect("seeded generation");
+    assert_eq!(marker.len(), 1);
+    let round = marker[0];
+    assert!(round < ROUNDS);
+    let start = if round.is_multiple_of(2) { 8 } else { 16 };
+    let mut expected = Vec::new();
+    for key in 0..KEYS {
+        let value = (key != round % 2 && !(start..start + 8).contains(&key))
+            .then(|| Bytes::from(value(family, round, key, value_size(campaign))));
+        assert_eq!(tx.get(&[key]).expect("snapshot point read"), value);
+        if let Some(value) = value {
+            expected.push((Bytes::from(vec![key]), value));
+        }
+    }
+    expected.push((Bytes::copy_from_slice(GENERATION_KEY), marker));
+    let actual = tx
+        .scan(&Query::new())
+        .expect("maintenance scan")
+        .try_collect()
+        .expect("complete maintenance snapshot");
+    assert_eq!(
+        actual, expected,
+        "every row must belong to the marker's complete generation"
+    );
 }
 
 pub(super) fn verify(engine: &Engine, campaign: &Campaign) {
@@ -145,7 +181,12 @@ pub(super) fn verify(engine: &Engine, campaign: &Campaign) {
         let expected: Vec<_> = (0..KEYS)
             .filter(|key| live(*key))
             .map(|key| vec![key])
+            .chain(std::iter::once(GENERATION_KEY.to_vec()))
             .collect();
+        assert_eq!(
+            tx.get(GENERATION_KEY).expect("final generation"),
+            Some(Bytes::from(vec![ROUNDS - 1]))
+        );
         assert_eq!(
             actual, expected,
             "complete keyset after overwrites, tombstones and TTLs"

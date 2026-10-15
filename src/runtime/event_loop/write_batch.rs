@@ -60,12 +60,61 @@ impl EventLoop {
 
     pub(super) fn should_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
         self.state.should_stall_writes(cf_id)
-            || self.cloud_coordinator.cloud_wal.has_pending_uploads()
+            || !self.actors.cloud_coordinator.cloud_wal.backlog().is_empty()
             || self
+                .actors
                 .cloud_coordinator
                 .hybrid_storage
                 .as_ref()
-                .is_some_and(|storage| storage.is_wal_upload_stalled())
+                .is_some_and(|storage| {
+                    storage.is_wal_upload_stalled(
+                        self.actors.cloud_coordinator.cloud_wal.held_uploads(),
+                    )
+                })
+    }
+
+    pub(super) fn write_pressure_mask(&self, cf_id: crate::types::ColumnFamilyId) -> u8 {
+        #[cfg(any(test, feature = "internal-testing"))]
+        {
+            use crate::diagnostics::{
+                PRESSURE_CLOUD_PENDING, PRESSURE_L0, PRESSURE_MEMORY, PRESSURE_RUNTIME,
+                PRESSURE_UPLOAD_STALLED,
+            };
+            let mut mask = 0;
+            if self.state.write_stalled() {
+                mask |= PRESSURE_RUNTIME;
+            }
+            if self.state.l0_write_slot_unavailable(cf_id) {
+                mask |= PRESSURE_L0;
+            }
+            if self.state.is_immutable_memtable_queue_full(cf_id)
+                || self.state.is_total_memtable_hard_limit_exceeded()
+            {
+                mask |= PRESSURE_MEMORY;
+            }
+            if !self.actors.cloud_coordinator.cloud_wal.backlog().is_empty() {
+                mask |= PRESSURE_CLOUD_PENDING;
+            }
+            if self
+                .actors
+                .cloud_coordinator
+                .hybrid_storage
+                .as_ref()
+                .is_some_and(|storage| {
+                    storage.is_wal_upload_stalled(
+                        self.actors.cloud_coordinator.cloud_wal.held_uploads(),
+                    )
+                })
+            {
+                mask |= PRESSURE_UPLOAD_STALLED;
+            }
+            mask
+        }
+        #[cfg(not(any(test, feature = "internal-testing")))]
+        {
+            let _ = cf_id;
+            0
+        }
     }
 
     pub(super) fn ensure_l0_write_admission(
@@ -74,6 +123,9 @@ impl EventLoop {
     ) -> Result<(), MidgeError> {
         for cf_id in cf_ids {
             if self.state.l0_write_slot_unavailable(*cf_id) {
+                self.state.diagnostics.record_write_admission_rejection(
+                    crate::diagnostics::WriteAdmissionRejection::L0,
+                );
                 self.state.diagnostics.record(|m| {
                     m.record_write_stall_compaction();
                 });
@@ -89,14 +141,15 @@ impl EventLoop {
 
     pub(super) fn wake_write_stall_waiters(&mut self) {
         // Avoid borrowing issues by snapshotting keys.
-        let cf_ids: Vec<crate::types::ColumnFamilyId> = self.write_stall_waiters.column_families();
+        let cf_ids: Vec<crate::types::ColumnFamilyId> =
+            self.pipeline.write_stall_waiters.column_families();
 
         for cf_id in cf_ids {
             if self.check_lease_health().is_ok() && self.should_stall_writes(cf_id) {
                 continue;
             }
 
-            for wait_request_id in self.write_stall_waiters.take_column_family(cf_id) {
+            for wait_request_id in self.pipeline.write_stall_waiters.take_column_family(cf_id) {
                 let response = match self.check_lease_health() {
                     Ok(()) => RuntimeResponse::Ok {
                         request_id: wait_request_id,
@@ -114,14 +167,14 @@ impl EventLoop {
     /// Opportunistically drain pending *write* messages from the channel.
     ///
     /// This improves group commit by coalescing bursts of concurrent writers into a single WAL sync.
-    /// If a non-write message is encountered, it is stashed in `self.pending_msg` to preserve FIFO
+    /// If a non-write message is encountered, it is stashed in `self.routing.pending_msg` to preserve FIFO
     /// semantics (since we cannot "un-recv" with crossbeam channels).
     pub(super) fn drain_pending_writes(
         &mut self,
         msg_rx: &Receiver<RuntimeMsg>,
         max: usize,
     ) -> usize {
-        if self.wal_actor.is_cloud_async() {
+        if self.actors.wal_actor.is_cloud_async() {
             return 0;
         }
         // A fenced runtime must not pull writes around dispatch, which is the
@@ -133,14 +186,14 @@ impl EventLoop {
         // IMPORTANT: If we already have a buffered non-write message, do not `try_recv()`.
         // Otherwise we could consume another non-write message and have nowhere to stash it.
         // The stashed message is always consumed on the next main-loop recv (see event_loop mod).
-        if self.pending_msg.is_some() {
+        if self.routing.pending_msg.is_some() {
             return 0;
         }
 
         let mut drained = 0usize;
 
         while drained < max {
-            if self.pending_msg.is_some() {
+            if self.routing.pending_msg.is_some() {
                 break;
             }
 
@@ -150,7 +203,7 @@ impl EventLoop {
             }
         }
 
-        if drained > 0 && self.trace_enabled {
+        if drained > 0 && self.diagnostics.trace_enabled {
             tracing::trace!(drained, "drained pending writes");
         }
 
@@ -166,7 +219,7 @@ impl EventLoop {
         msg_rx: &Receiver<RuntimeMsg>,
         max: usize,
     ) -> DrainOutcome {
-        if self.pending_msg.is_some() {
+        if self.routing.pending_msg.is_some() {
             return DrainOutcome::StashedNonWrite;
         }
 
@@ -199,8 +252,8 @@ impl EventLoop {
                 DrainOutcome::WritesHandled(handled)
             }
             Ok(other) => {
-                if self.pending_msg.is_none() {
-                    self.pending_msg = Some(other);
+                if self.routing.pending_msg.is_none() {
+                    self.routing.pending_msg = Some(other);
                 }
                 DrainOutcome::StashedNonWrite
             }
@@ -274,7 +327,8 @@ impl EventLoop {
         &self,
         request: &ApplyTransactionRequest,
     ) -> Option<TransactionCoalescingKey> {
-        self.wal_actor
+        self.actors
+            .wal_actor
             .coalesced_transaction_durability(request.durability_policy)
             .map(|durability_policy| TransactionCoalescingKey {
                 durability_policy,
@@ -296,7 +350,7 @@ impl EventLoop {
             // A prior progress pass may have filled the single FIFO lookahead
             // slot before dispatching the current transaction. Do not consume
             // another message until the run loop restores that request.
-            if self.pending_msg.is_some() {
+            if self.routing.pending_msg.is_some() {
                 break;
             }
             match msg_rx.try_recv() {
@@ -392,8 +446,8 @@ impl EventLoop {
             // batch: it is stashed for the main loop, which runs it through
             // `RuntimeDispatcher::handle` and therefore through both runtime gates.
             other => {
-                if self.pending_msg.is_none() {
-                    self.pending_msg = Some(other);
+                if self.routing.pending_msg.is_none() {
+                    self.routing.pending_msg = Some(other);
                 }
                 false
             }
@@ -412,28 +466,54 @@ impl EventLoop {
             deferred_error,
         } = batch;
 
-        let append_result = self
+        let (applied, failure) = match self
+            .actors
             .wal_actor
-            .append_prepared_transactions(&mut self.state, prepared);
+            .append_prepared_transaction_group(&mut self.state, prepared)
+        {
+            Ok(outcome) => (outcome.applied, outcome.failure),
+            Err(error) => (Vec::new(), Some(error)),
+        };
 
-        match append_result {
-            Ok(results) => {
-                if !results.is_empty() {
-                    self.publish_snapshot();
-                }
-                for result in results {
-                    let touched_cfs = touched_cfs.remove(&result.request_id).unwrap_or_default();
-                    self.finish_drained_write_after_publish(
-                        result.request_id,
-                        Ok(WriteResult {
-                            last_sequence: result.last_sequence,
-                            op_count: result.op_count,
-                            deferred: result.deferred,
-                            touched_cfs,
-                        }),
-                    );
-                }
+        // Units applied before a failure are visible. A synced one is durable
+        // and replay keeps it whole, so it is acknowledged like any other. A
+        // deferred (`Batched`) one is written but not synced when the failure
+        // fences the WAL, and no later sync will run, so its durability is
+        // unknown and its caller gets `Timeout`, not an acknowledgement.
+        if !applied.is_empty() {
+            self.publish_snapshot();
+        }
+        let applied_ids = applied
+            .iter()
+            .map(|result| result.request_id)
+            .collect::<std::collections::HashSet<_>>();
+        for result in applied {
+            if failure.is_some() && result.deferred {
+                self.settle_applied_write(result.request_id, true);
+                self.handle_write_error(
+                    result.request_id,
+                    MidgeError::OutcomeUnknown(
+                        "the transaction is applied but the WAL was fenced before its \
+                         frame was synced; it may be lost in a crash"
+                            .to_string(),
+                    ),
+                );
+                continue;
+            }
+            let touched_cfs = touched_cfs.remove(&result.request_id).unwrap_or_default();
+            self.finish_drained_write_after_publish(
+                result.request_id,
+                Ok(WriteResult {
+                    last_sequence: result.last_sequence,
+                    op_count: result.op_count,
+                    deferred: result.deferred,
+                    touched_cfs,
+                }),
+            );
+        }
 
+        match failure {
+            None => {
                 if let Some((request_id, error)) = deferred_error {
                     self.finish_drained_write(request_id, Err(error));
                     handled += 1;
@@ -444,9 +524,11 @@ impl EventLoop {
                     handled += 1;
                 }
             }
-            Err(error) => {
+            Some(error) => {
                 for request_id in request_ids {
-                    self.finish_drained_write(request_id, Err(error.replay()));
+                    if !applied_ids.contains(&request_id) {
+                        self.finish_drained_write(request_id, Err(error.replay()));
+                    }
                 }
 
                 if let Some((request_id, error)) = deferred_error {
@@ -455,7 +537,7 @@ impl EventLoop {
                 }
 
                 if let Some(request) = fallback_request {
-                    self.finish_drained_write(request.request_id, Err(error));
+                    self.finish_drained_write(request.request_id, Err(not_attempted(error)));
                     handled += 1;
                 }
             }
@@ -484,7 +566,7 @@ impl EventLoop {
             return PrepareOutcome::Error { request_id, error };
         }
         staged_touches.record_ops(&request.ops);
-        let result = self.wal_actor.prepare_transaction_append(
+        let result = self.actors.wal_actor.prepare_transaction_append(
             &mut self.state,
             crate::runtime::actors::wal::TransactionAppendParams {
                 request_id,
@@ -531,6 +613,7 @@ impl EventLoop {
             return;
         }
         let result = self
+            .actors
             .wal_actor
             .append_transaction(
                 &mut self.state,
@@ -596,11 +679,13 @@ impl EventLoop {
         // A WAL append failure fences the actor itself, so ask it rather than
         // looking for "wal writer" in the message: a NoSpace raised elsewhere
         // (storage admission) is backpressure, not lost durability.
-        let must_fence =
-            matches!(error, crate::common::MidgeError::Timeout(_)) || self.wal_actor.is_fenced();
+        let must_fence = matches!(
+            error,
+            crate::common::MidgeError::Timeout(_) | crate::common::MidgeError::OutcomeUnknown(_)
+        ) || self.actors.wal_actor.is_fenced();
         if must_fence {
             self.state.mark_persistence_anomaly();
-            if let Some(healthy) = &self.fencing.lease_healthy {
+            if let Some(healthy) = &self.authority.fencing.lease_healthy {
                 healthy.store(false, std::sync::atomic::Ordering::Release);
             }
             tracing::error!(
@@ -610,6 +695,20 @@ impl EventLoop {
             );
         }
         self.respond(request_id, RuntimeResponse::Error { request_id, error });
+    }
+}
+
+/// The error for a request a failed group never prepared: it was neither
+/// logged nor applied. The group's `OutcomeUnknown` speaks only for logged units,
+/// so it becomes `Fenced`, which says the request is not applied; any other
+/// group error already makes no claim that it was.
+fn not_attempted(group_error: MidgeError) -> MidgeError {
+    match group_error {
+        MidgeError::OutcomeUnknown(reason) => MidgeError::Fenced(format!(
+            "the transaction was not logged or applied because an earlier \
+             transaction in its batch failed: {reason}"
+        )),
+        other => other,
     }
 }
 

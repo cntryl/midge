@@ -11,6 +11,7 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::traits::{FsPath, OpenMode, OpenOptions};
 use crate::io::FsError;
+use crate::metadata::manifest::FamilyLifecycleEdit;
 use crate::metadata::{ColumnFamilyMeta, Manifest, ManifestEdit};
 use crate::runtime::RuntimeState;
 use crate::storage::hybrid::backend::{HybridStorage, RemoteObjectProof};
@@ -74,8 +75,8 @@ pub(crate) struct DdlRegistry {
     pub(crate) column_families: Vec<ColumnFamilyMeta>,
     #[serde(default)]
     pub(crate) operations: Vec<DdlOperation>,
-    /// Present only for the provider-backed V2 wire format. V1 serialization
-    /// remains unchanged for simulated cloud stores.
+    /// The writer epoch carried by the V2 wire format, which every cloud store
+    /// writes, simulated ones included. A V1 document has none.
     #[serde(skip)]
     writer_epoch: Option<u64>,
 }
@@ -227,19 +228,12 @@ impl DdlRegistry {
     }
 
     fn apply_edit(&mut self, edit: &ManifestEdit) -> MidgeResult<()> {
-        if !matches!(
-            edit,
-            ManifestEdit::CreateColumnFamily { .. } | ManifestEdit::DropColumnFamilyAt { .. }
-        ) {
-            return Err(MidgeError::InvalidArgument(
+        let edit = FamilyLifecycleEdit::of(edit).ok_or_else(|| {
+            MidgeError::InvalidArgument(
                 "remote DDL registry accepts only column-family edits".to_string(),
-            ));
-        }
-        let mut manifest = Manifest::default();
-        manifest.column_families.clone_from(&self.column_families);
-        manifest.apply_edit(edit);
-        self.column_families = manifest.column_families;
-        Ok(())
+            )
+        })?;
+        crate::metadata::manifest::apply_column_family_lifecycle(&mut self.column_families, edit)
     }
 }
 
@@ -545,26 +539,17 @@ pub(crate) fn require_empty_registry_for_metadata_bootstrap(
 }
 
 fn local_edit_matches(state: &RuntimeState, edit: &ManifestEdit) -> bool {
-    match edit {
-        ManifestEdit::CreateColumnFamily { id, name, .. } => state
-            .manifest
-            .column_families
-            .iter()
-            .any(|cf| cf.id == *id && cf.name == *name && cf.deleted_at.is_none()),
-        ManifestEdit::DropColumnFamilyAt {
-            id, drop_sequence, ..
-        } => state.manifest.column_families.iter().any(|cf| {
-            cf.id == *id && cf.deleted_at.is_some() && cf.drop_sequence == Some(*drop_sequence)
-        }),
-        _ => false,
-    }
+    FamilyLifecycleEdit::of(edit).is_some_and(|edit| edit.is_reflected_in(&state.manifest))
 }
 
-fn apply_remote_committed_visibility(state: &mut RuntimeState, edit: &ManifestEdit) {
+fn apply_remote_committed_visibility(
+    state: &mut RuntimeState,
+    edit: &ManifestEdit,
+) -> MidgeResult<()> {
     if local_edit_matches(state, edit) {
-        return;
+        return Ok(());
     }
-    state.manifest.apply_edit(edit);
+    state.manifest.apply_edit(edit)?;
     match edit {
         ManifestEdit::CreateColumnFamily { id, name, .. } => {
             state.column_families.entry(*id).or_insert_with(|| {
@@ -576,10 +561,11 @@ fn apply_remote_committed_visibility(state: &mut RuntimeState, edit: &ManifestEd
         }
         _ => {}
     }
+    Ok(())
 }
 
 /// Apply a prepared edit to the local journal and runtime state.  The
-/// candidate manifest is built first so a failed journal append cannot mutate
+/// manifest transition is prepared first so a failed journal append cannot mutate
 /// in-memory visibility.
 pub(crate) fn apply_local_edit(state: &mut RuntimeState, edit: &ManifestEdit) -> MidgeResult<()> {
     apply_local_edit_for(state, edit, crate::metadata::accounting::Origin::Ddl)
@@ -593,12 +579,12 @@ fn apply_local_edit_for(
     if local_edit_matches(state, edit) {
         return Ok(());
     }
-    let mut candidate = state.manifest.clone();
-    candidate.apply_edit(edit);
+    let memory_mode = state.is_memory_mode();
+    let prepared = state.manifest.prepare_edit(edit)?;
     crate::failpoints::fail_point!("midge::ddl::before_local_commit", |_| Err(
         MidgeError::Internal("failpoint: DDL local commit failed".to_string())
     ));
-    let journaled_id = if state.is_memory_mode() {
+    let journaled_id = if memory_mode {
         None
     } else {
         Some(state.manifest_store.append_for(origin, edit)?)
@@ -606,7 +592,7 @@ fn apply_local_edit_for(
     crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
         MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
     ));
-    state.manifest.replace(candidate);
+    prepared.commit();
     if let Some(edit_id) = journaled_id {
         state.manifest.note_applied_journal_edit(edit_id);
     }
@@ -972,7 +958,7 @@ pub(crate) fn execute_within(
                             && authority.validate(deadline).is_ok()
                     }) =>
             {
-                apply_remote_committed_visibility(state, edit);
+                apply_remote_committed_visibility(state, edit)?;
                 state.mark_persistence_anomaly();
                 tracing::warn!(%error, "remote DDL CAS committed despite a lost response; retaining prepare for local reconciliation");
                 return Ok(());
@@ -999,7 +985,7 @@ pub(crate) fn execute_within(
         // accept writes that recovery will later discard. Fence that state in
         // memory immediately, retain the prepare for restart reconciliation,
         // and report the operation as committed but degraded.
-        apply_remote_committed_visibility(state, edit);
+        apply_remote_committed_visibility(state, edit)?;
         state.mark_persistence_anomaly();
         tracing::warn!(%error, "remote DDL committed; retaining prepare and applying authoritative visibility after local persistence failure");
         return Ok(());
@@ -1021,6 +1007,85 @@ mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn should_retain_schema_tombstone_when_registry_create_reuses_a_dropped_id() {
+        // Arrange
+        let mut registry = DdlRegistry::from_manifest(&Manifest::default());
+        let create = ManifestEdit::CreateColumnFamily {
+            id: 1,
+            name: "original".into(),
+            created_at: 1,
+        };
+        registry.apply_edit(&create).unwrap();
+        let drop = ManifestEdit::DropColumnFamilyAt {
+            id: 1,
+            drop_sequence: 7,
+            dropped_sst_names: Vec::new(),
+        };
+        registry.apply_edit(&drop).unwrap();
+        let before = serde_json::to_value(&registry).unwrap();
+
+        // Act
+        let result = registry.apply_edit(&ManifestEdit::CreateColumnFamily {
+            id: 1,
+            name: "revived".into(),
+            created_at: 9,
+        });
+
+        // Assert
+        assert!(result.is_err());
+        assert_eq!(serde_json::to_value(&registry).unwrap(), before);
+        registry.apply_edit(&drop).unwrap();
+        assert_eq!(serde_json::to_value(&registry).unwrap(), before);
+    }
+
+    #[test]
+    fn should_refuse_invalid_family_edits_when_registry_applies_them() {
+        // Arrange: family 1 was created and dropped, then its name reused.
+        let mut registry = DdlRegistry::from_manifest(&Manifest::default());
+        let original = ManifestEdit::CreateColumnFamily {
+            id: 1,
+            name: "shared".into(),
+            created_at: 1,
+        };
+        registry.apply_edit(&original).unwrap();
+        registry
+            .apply_edit(&ManifestEdit::DropColumnFamilyAt {
+                id: 1,
+                drop_sequence: 7,
+                dropped_sst_names: Vec::new(),
+            })
+            .unwrap();
+        registry
+            .apply_edit(&ManifestEdit::CreateColumnFamily {
+                id: 2,
+                name: "shared".into(),
+                created_at: 2,
+            })
+            .unwrap();
+        let before = serde_json::to_value(&registry).unwrap();
+
+        // Act
+        let collision = registry.apply_edit(&ManifestEdit::CreateColumnFamily {
+            id: 3,
+            name: "shared".into(),
+            created_at: 3,
+        });
+        let replayed_original = registry.apply_edit(&original);
+        let not_a_family_edit = registry.apply_edit(&ManifestEdit::RemoveSst {
+            name: "000001.sst".into(),
+        });
+
+        // Assert
+        assert!(matches!(collision, Err(MidgeError::Corruption(_))));
+        assert!(matches!(replayed_original, Err(MidgeError::Corruption(_))));
+        assert!(matches!(
+            not_a_family_edit,
+            Err(MidgeError::InvalidArgument(_))
+        ));
+        assert_eq!(serde_json::to_value(&registry).unwrap(), before);
+    }
 
     struct LoseFirstRegistryCasCallback {
         inner: Arc<dyn crate::storage::StorageBackend>,
@@ -1088,7 +1153,6 @@ mod tests {
             registry_writes: AtomicUsize::new(0),
         });
         let storage = Arc::new(HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             provider.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -1162,7 +1226,6 @@ mod tests {
             "ddl-prepare-expiry".into(),
         ));
         let storage = Arc::new(HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -1254,11 +1317,7 @@ mod tests {
             Arc::new(crate::storage::cloud::MockCloudBackend::new()),
             "ddl-fence-test".to_string(),
         ));
-        let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-            temp.path().join("hybrid-local"),
-        )?);
         let storage = Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -1399,9 +1458,6 @@ mod tests {
             registry_writes: AtomicUsize::new(0),
         });
         let storage = crate::storage::HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(
-                temp.path().join("hybrid-local"),
-            )?),
             lossy.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
@@ -1438,9 +1494,6 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
         let storage = Arc::new(crate::storage::HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(
-                temp.path().join("hybrid-local"),
-            )?),
             cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -1491,6 +1544,63 @@ mod tests {
     }
 
     #[test]
+    fn should_keep_dropped_family_inactive_when_startup_replays_its_create_and_drop(
+    ) -> MidgeResult<()> {
+        use crate::lease::PrimaryLease as _;
+
+        // Arrange: the registry holds a family's create and drop, and the
+        // local manifest already holds the drop tombstone (a same-cache restart).
+        let temp = tempfile::tempdir()?;
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+        let storage = Arc::new(crate::storage::HybridStorage::with_policy(
+            cloud.clone(),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ));
+        let lease = provider_test_lease(&cloud, &temp.path().join("lease"));
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let authority = provider_test_authority(&lease);
+        let deadline =
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        fence_remote_registry_on_startup(&storage, &authority, &deadline)?;
+        let mut state = RuntimeState::new(temp.path().join("state"), false);
+        let create = create_edit(&state, "dropped-cf")?;
+        execute_within(
+            &mut state,
+            Some(&storage),
+            &create,
+            Some(&authority),
+            &deadline,
+        )?;
+        let ManifestEdit::CreateColumnFamily { id, .. } = create else {
+            unreachable!("create_edit builds a create");
+        };
+        let drop = drop_edit(&state, id, false)?;
+        execute_within(
+            &mut state,
+            Some(&storage),
+            &drop,
+            Some(&authority),
+            &deadline,
+        )?;
+        assert!(state.get_cf(id).is_none());
+
+        // Act
+        reconcile_startup(&mut state, Some(&storage), Some(&authority))?;
+
+        // Assert: runtime family state follows the manifest tombstone.
+        assert!(
+            state.get_cf(id).is_none(),
+            "replaying the original create must not revive a dropped family's runtime state"
+        );
+        assert!(state
+            .manifest
+            .get_column_family_by_name("dropped-cf")
+            .is_none());
+        lease.release().expect("release lease");
+        Ok(())
+    }
+
+    #[test]
     fn should_reject_missing_ddl_registry_when_lease_metadata_is_committed() -> MidgeResult<()> {
         use crate::lease::PrimaryLease as _;
 
@@ -1499,9 +1609,6 @@ mod tests {
         let temp = tempfile::tempdir()?;
         let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
         let storage = crate::storage::HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(
-                temp.path().join("hybrid-local"),
-            )?),
             cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
@@ -1530,7 +1637,8 @@ mod tests {
                 authority.writer_epoch,
                 None,
                 crate::lease::CloudMetadataGeneration {
-                    manifest_sequence: 0,
+                    id: crate::lease::SharedGenerationId::FIRST,
+                    manifest_horizon: 0,
                     objects,
                 },
                 std::time::Duration::from_secs(5),

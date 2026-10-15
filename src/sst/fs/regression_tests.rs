@@ -1,6 +1,6 @@
 use crate::codec::{CompressionAlgo, CompressionPolicy};
 use crate::io::traits::{DirEntry, Metadata};
-use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions};
+use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions, ReadFs};
 use crate::sst::fs::FsSstFactoryIo;
 use crate::sst::traits::SstFactory;
 use crate::types::EntryType;
@@ -119,9 +119,8 @@ fn should_preserve_zero_sequence_states_in_both_scan_directions() {
         .add_with_meta(b"d", None, 0, EntryType::Delete, None)
         .unwrap();
     crate::sst::fs::finish_writer_to_path(writer, &dir.path().join("zero.sst")).unwrap();
-    let reader = Arc::new(
-        crate::sst::fs::SstFileIo::open_with_real_fs(&dir.path().join("zero.sst")).unwrap(),
-    );
+    let reader =
+        Arc::new(crate::sst::fs::SstFileIo::open("zero.sst", factory.output_fs()).unwrap());
     // Act
     let forward = reader
         .clone()
@@ -249,7 +248,30 @@ impl AddressingDelegatingFs {
     }
 }
 
+impl ReadFs for AddressingDelegatingFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
 impl Fs for AddressingDelegatingFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
     fn host_addressing(&self) -> Option<HostAddressing<'_>> {
         self.inner.host_addressing()
     }
@@ -266,20 +288,8 @@ impl Fs for AddressingDelegatingFs {
         self.inner.remove_file(path)
     }
 
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         self.inner.create_dir_all(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -334,11 +344,11 @@ fn should_reject_sst_publish_when_target_name_is_an_in_root_symlink() {
 }
 
 #[test]
-fn should_resolve_relative_target_against_recorded_anchor_when_wrapper_delegates_addressing() {
+fn should_map_relative_target_as_root_key_when_working_directory_moves() {
     // Arrange: an engine opened with a relative db path, exactly as
     // `Engine::open("mydb")` does, followed by a host process working-
-    // directory change. Every later flush and compaction still names its
-    // output by that same relative path.
+    // directory change. The engine names SSTs relative to its root, so
+    // neither the working directory nor the db path enters the mapping.
     let _serialized = WORKING_DIRECTORY_GUARD
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -351,14 +361,31 @@ fn should_resolve_relative_target_against_recorded_anchor_when_wrapper_delegates
 
     // Act
     std::env::set_current_dir(elsewhere.path()).unwrap();
-    let mapped = crate::sst::fs::fs_relative_sst_path(&fs, Path::new("mydb/output.sst"));
+    let mapped = crate::sst::fs::fs_relative_sst_path(&fs, Path::new("sst/output.sst"));
     std::env::set_current_dir(&original).unwrap();
 
     // Assert
     assert_eq!(
-        mapped.expect("a relative target must stay addressable after a chdir"),
-        crate::io::FsPath::new("output.sst")
+        mapped.expect("a relative target is a root key"),
+        crate::io::FsPath::new("sst/output.sst")
     );
+}
+
+#[test]
+fn should_reject_traversal_when_mapping_relative_target() {
+    // Arrange
+    let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+
+    // Act
+    let escaped = crate::sst::fs::fs_relative_sst_path(&fs, Path::new("sst/../../outside.sst"));
+    let absolute = crate::sst::fs::fs_relative_sst_path(&fs, Path::new("/tmp/outside.sst"));
+
+    // Assert
+    assert!(
+        escaped.is_err(),
+        "a rooted key must not climb out of the root"
+    );
+    assert!(absolute.is_err(), "a rootless filesystem has no host paths");
 }
 
 #[cfg(unix)]
@@ -440,4 +467,20 @@ fn should_reject_sst_publish_when_an_ancestor_symlink_is_dangling() {
     // Assert
     assert!(result.is_err());
     assert!(!root.path().join("missing").exists());
+}
+
+#[test]
+fn should_report_internal_fault_when_engine_sst_is_missing() {
+    // Arrange: flush and compaction ask for the identity of a file they
+    // wrote; its absence is an engine fault, not a caller's lookup miss.
+    let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+
+    // Act
+    let result = crate::sst::fs::identity_with_fs(&fs, Path::new("sst/missing.sst"));
+
+    // Assert
+    assert!(
+        matches!(result, Err(crate::common::MidgeError::Internal(_))),
+        "{result:?}"
+    );
 }

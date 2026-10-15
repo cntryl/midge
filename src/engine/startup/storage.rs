@@ -1,22 +1,41 @@
 use super::super::OpenOptions;
-use super::super::IN_MEMORY_OPEN_COUNTER;
 use super::{
     CloudStartupRecovery, RuntimeState, RuntimeStorageMaterialization, StartupLease,
     StartupStoragePath,
 };
 use crate::common::{DeadlineScope, MidgeError, MidgeResult};
 use crate::config::{RecoveryPolicy, Storage};
-use crate::io::FsError;
 use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::{CloudMetadataMirrorAuthority, CloudPersistence};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 struct CloudClassStores {
     wal: Arc<crate::storage::cloud::CloudStorage>,
     sst: Arc<crate::storage::cloud::CloudStorage>,
     metadata: Arc<crate::storage::cloud::CloudStorage>,
+}
+
+#[derive(Clone, Copy)]
+struct CloudWalRecoveryMetadata<'a> {
+    catalog: &'a crate::wal::cloud_catalog::WalPublicationCatalog,
+    hydrated_generation: Option<crate::lease::SharedGenerationId>,
+}
+
+fn remote_sst_read_fs(
+    opts: &OpenOptions,
+    path: &StartupStoragePath,
+    backend: Arc<dyn crate::storage::StorageBackend>,
+    scope: Option<&DeadlineScope>,
+) -> Arc<dyn crate::io::Fs> {
+    let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+        Arc::clone(&path.root),
+        backend,
+        opts.storage_io_timeout(),
+    ));
+    scope.map_or_else(
+        || Arc::clone(&fs),
+        |scope| crate::io::scope_fs(Arc::clone(&fs), scope.clone()),
+    )
 }
 
 fn scope_cloud_store(
@@ -37,56 +56,138 @@ fn check_startup_scope(scope: Option<&DeadlineScope>, context: &str) -> MidgeRes
 fn hydrate_metadata(
     storage: &crate::storage::cloud::CloudStorage,
     authority: &dyn crate::lease::LeaderStore,
-    db_path: &Path,
+    path: &StartupStoragePath,
     policy: RecoveryPolicy,
+    retired_by: crate::lease::SharedGenerationId,
     scope: Option<&DeadlineScope>,
-) -> MidgeResult<()> {
-    if let Some(scope) = scope {
-        CloudStartupRecovery::hydrate_cloud_metadata_within(
-            storage, authority, db_path, policy, scope,
-        )
-    } else {
-        CloudStartupRecovery::hydrate_cloud_metadata(storage, authority, db_path, policy)
-    }
+) -> MidgeResult<Option<crate::lease::SharedGenerationId>> {
+    let scope = scope.cloned().unwrap_or_else(|| {
+        DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+            storage.callback_timeout().saturating_mul(16),
+        ))
+    });
+    CloudStartupRecovery::hydrate_cloud_metadata_within(
+        storage,
+        authority,
+        &path.root,
+        &path.db_path,
+        policy,
+        retired_by,
+        &scope,
+    )
 }
 
 fn initialize_startup_state(
     opts: &OpenOptions,
     path: &StartupStoragePath,
-    replay_wal: bool,
+    wal: crate::runtime::state::RecoveryWal,
+    wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<RuntimeState> {
-    if let Some(scope) = scope {
-        scope.check("local recovery initialization")?;
-        if replay_wal {
-            RuntimeState::try_new_with_recovery_dir_within(
-                path.db_path.clone(),
-                path.memory_mode,
-                None,
-                opts.recovery_policy(),
-                scope,
-            )
-        } else {
-            RuntimeState::try_new_before_cloud_replay_within(
-                path.db_path.clone(),
-                opts.recovery_policy(),
-                scope,
-            )
-        }
-    } else if replay_wal {
-        RuntimeState::try_new(
-            path.db_path.clone(),
-            path.memory_mode,
-            opts.recovery_policy(),
-        )
-    } else {
-        RuntimeState::try_new_before_cloud_replay(path.db_path.clone(), opts.recovery_policy())
+    check_startup_scope(scope, "local recovery initialization")?;
+    RuntimeState::recover(
+        &path.db_path,
+        path.memory_mode,
+        Arc::clone(&path.root),
+        opts.recovery_policy(),
+        wal,
+        wal_fence,
+        scope,
+    )
+}
+
+/// The WAL history of a cloud cache: its ledger, opened after sweeping the
+/// files it does not name, or the WAL directory a new one starts in. The
+/// FORMAT marker comes first, as in local recovery: a WAL file without it
+/// reads as state of an unknown format.
+fn load_cloud_wal_history(
+    path: &StartupStoragePath,
+    writer_epoch: u64,
+    fence: &crate::runtime::wal_history::WalHistoryFence,
+    scope: Option<&DeadlineScope>,
+) -> MidgeResult<crate::runtime::cloud_startup::CacheHistory> {
+    // Bounded by the startup deadline, like local recovery; the scope stops
+    // bounding once startup completes.
+    let root = &scope.map_or_else(
+        || Arc::clone(&path.root),
+        |scope| crate::io::scope_fs(Arc::clone(&path.root), scope.clone()),
+    );
+    crate::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
+    let wal = crate::io::subdirectory(Arc::clone(root), crate::wal::WAL_DIR);
+    Ok(
+        match crate::runtime::wal_history::WalHistory::load_with_fence(
+            Arc::clone(&wal),
+            writer_epoch,
+            fence,
+        )? {
+            Some(history) => crate::runtime::cloud_startup::CacheHistory::Existing(history),
+            None => crate::runtime::cloud_startup::CacheHistory::Fresh(wal),
+        },
+    )
+}
+
+/// Plan cloud WAL recovery over the cache's ledger, then make the history
+/// writes continue in durable: a new cache starts one linked to the
+/// catalog's head, a cache behind the catalog rebases onto it, and salvage
+/// sets aside what it does not replay. Returns the plan and replay view,
+/// and that history.
+fn recover_cloud_wal(
+    opts: &OpenOptions,
+    storage_path: &StartupStoragePath,
+    backend: &Arc<dyn crate::storage::StorageBackend>,
+    storage: &Arc<crate::storage::HybridStorage>,
+    metadata: CloudWalRecoveryMetadata<'_>,
+    lease: &StartupLease,
+    scope: Option<&DeadlineScope>,
+) -> MidgeResult<(
+    crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery,
+    crate::runtime::wal_history::WalHistory,
+)> {
+    let catalog = metadata.catalog;
+    let hydrated = metadata
+        .hydrated_generation
+        .unwrap_or(crate::lease::SharedGenerationId::NONE);
+    if hydrated < catalog.retired_by() {
+        return Err(MidgeError::Corruption(
+            "hydrated metadata predates authoritative WAL retirement".into(),
+        ));
     }
+    let limits = super::streaming_recovery::CloudReplay::limits(opts);
+    let wal_fence = lease.wal_history_fence(opts.storage_io_timeout())?;
+    let cache = load_cloud_wal_history(storage_path, lease.writer_epoch, &wal_fence, scope)?;
+    let ledger = match &cache {
+        crate::runtime::cloud_startup::CacheHistory::Existing(history) => Some(history.ledger()),
+        crate::runtime::cloud_startup::CacheHistory::Fresh(_) => None,
+    };
+    let streaming = super::timing::measure("wal_plan", || {
+        build_wal_plan(
+            &storage_path.root,
+            ledger,
+            backend,
+            catalog,
+            opts.recovery_policy(),
+            opts.storage_io_timeout(),
+            super::streaming_recovery::CloudReplay::read_window(opts, limits),
+            limits,
+            scope,
+        )
+    })?;
+    let history = commit_wal_plan(
+        &streaming.plan,
+        &CloudPersistence::new(Arc::clone(storage)),
+        lease,
+        catalog,
+        cache,
+        Some(&wal_fence),
+        scope,
+    )?;
+    Ok((streaming, history))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_wal_plan(
-    db_path: &Path,
+    root: &Arc<dyn crate::io::Fs>,
+    ledger: Option<&crate::wal::ledger::WalLedger>,
     remote: &Arc<dyn crate::storage::StorageBackend>,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
     policy: RecoveryPolicy,
@@ -98,7 +199,8 @@ fn build_wal_plan(
     use crate::runtime::cloud_startup::streaming_wal_plan::StreamingCloudWalRecovery;
     if let Some(scope) = scope {
         StreamingCloudWalRecovery::build_within(
-            db_path,
+            root,
+            ledger,
             remote,
             catalog,
             policy,
@@ -109,7 +211,8 @@ fn build_wal_plan(
         )
     } else {
         StreamingCloudWalRecovery::build(
-            db_path,
+            root,
+            ledger,
             remote,
             catalog,
             policy,
@@ -120,27 +223,32 @@ fn build_wal_plan(
     }
 }
 
-fn commit_salvage_plan(
-    plan: &crate::runtime::cloud_startup::CloudWalRecoveryPlan,
+fn commit_wal_plan(
+    plan: &crate::wal::planner::RecoveryPlan,
     persistence: &CloudPersistence,
-    epoch: u64,
+    lease: &StartupLease,
     catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-    db_path: &Path,
-    validate: &dyn Fn() -> MidgeResult<()>,
+    cache: crate::runtime::cloud_startup::CacheHistory,
+    wal_fence: Option<&crate::runtime::wal_history::WalHistoryFence>,
     scope: Option<&DeadlineScope>,
-) -> MidgeResult<()> {
-    if let Some(scope) = scope {
-        plan.commit_set_aside_with_authority_within(
-            persistence,
-            epoch,
-            catalog,
-            db_path,
-            validate,
-            scope,
-        )
+) -> MidgeResult<crate::runtime::wal_history::WalHistory> {
+    let unbounded;
+    let scope = if let Some(scope) = scope {
+        scope
     } else {
-        plan.commit_set_aside_with_authority(persistence, epoch, catalog, db_path, validate)
-    }
+        unbounded = DeadlineScope::new(crate::common::OperationDeadline::unbounded());
+        &unbounded
+    };
+    crate::runtime::cloud_startup::commit_recovery_plan_within(
+        plan,
+        persistence,
+        lease.writer_epoch,
+        catalog,
+        cache,
+        wal_fence,
+        &|| lease.ensure_healthy("during WAL salvage set aside"),
+        scope,
+    )
 }
 
 fn provider_ddl_authority(lease: &StartupLease) -> MidgeResult<DdlLeaseAuthority> {
@@ -151,6 +259,23 @@ fn provider_ddl_authority(lease: &StartupLease) -> MidgeResult<DdlLeaseAuthority
         holder_id: lease.lease.holder_id(),
         writer_epoch: lease.writer_epoch,
     })
+}
+
+impl StartupLease {
+    fn wal_history_fence(
+        &self,
+        timeout: std::time::Duration,
+    ) -> MidgeResult<crate::runtime::wal_history::WalHistoryFence> {
+        let store = self.leader_store.clone().ok_or_else(|| {
+            MidgeError::Internal("WAL history startup requires a leader store".into())
+        })?;
+        Ok(crate::runtime::wal_history::WalHistoryFence::new(
+            store,
+            self.lease.holder_id(),
+            self.writer_epoch,
+            timeout,
+        ))
+    }
 }
 
 fn fence_provider_ddl(
@@ -176,22 +301,50 @@ fn fence_provider_ddl_within(
     lease.ensure_healthy("after cloud DDL registry fencing")
 }
 
-fn require_empty_local_cache_for_cloud_bootstrap(
-    db_path: &Path,
+fn fence_cloud_ddl_scoped(
+    opts: &OpenOptions,
+    storage: &crate::storage::HybridStorage,
+    lease: &StartupLease,
     scope: Option<&DeadlineScope>,
 ) -> MidgeResult<()> {
-    let mut directories = vec![db_path.to_path_buf()];
+    if let Some(scope) = scope {
+        fence_provider_ddl_within(storage, lease, &scope.deadline())
+    } else {
+        fence_provider_ddl(storage, lease, opts.storage_io_timeout())
+    }
+}
+
+fn require_empty_local_cache_for_cloud_bootstrap(
+    path: &StartupStoragePath,
+    shared_store_directory: Option<&str>,
+    scope: Option<&DeadlineScope>,
+) -> MidgeResult<()> {
+    let mut directories = vec![String::new()];
     while let Some(directory) = directories.pop() {
         check_startup_scope(scope, "bootstrap cache discovery")?;
-        for entry in std::fs::read_dir(directory)? {
+        let entries = path
+            .root
+            .list_dir(&crate::io::FsPath::new(directory.as_str()))
+            .map_err(|error| MidgeError::Io(error.into_io()))?;
+        for entry in entries {
             check_startup_scope(scope, "bootstrap cache entry")?;
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                directories.push(entry.path());
+            if directory.is_empty()
+                && entry.is_dir
+                && shared_store_directory == Some(entry.name.as_str())
+            {
+                continue;
+            }
+            let child = if directory.is_empty() {
+                entry.name
+            } else {
+                format!("{directory}/{}", entry.name)
+            };
+            if entry.is_dir {
+                directories.push(child);
             } else {
                 return Err(MidgeError::RecoveryFailed(format!(
                     "local cache '{}' contains state without a committed cloud metadata generation",
-                    entry.path().display()
+                    path.db_path.join(child).display()
                 )));
             }
         }
@@ -199,76 +352,43 @@ fn require_empty_local_cache_for_cloud_bootstrap(
     Ok(())
 }
 
-impl StartupStoragePath {
-    pub(super) fn resolve(storage: &Storage) -> Self {
-        match storage {
-            Storage::InMemory => Self {
-                db_path: {
-                    let counter = IN_MEMORY_OPEN_COUNTER.fetch_add(1, Ordering::SeqCst);
-                    let timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |duration| duration.as_nanos());
-                    PathBuf::from(format!(
-                        "target/tmp/midge_test_memory_{}_{}_{}",
-                        std::process::id(),
-                        counter,
-                        timestamp
-                    ))
-                },
-                memory_mode: true,
-            },
-            Storage::Local { path } => Self {
-                db_path: path.clone(),
-                memory_mode: false,
-            },
-            Storage::Cloud {
-                local_cache_path, ..
-            }
-            | Storage::CloudSimulated {
-                local_cache_path, ..
-            } => Self {
-                db_path: local_cache_path.clone(),
-                memory_mode: false,
-            },
-        }
-    }
-
-    pub(super) fn prepare(&self) -> MidgeResult<()> {
-        if !self.memory_mode {
-            crate::io::durable_dir::create_path_durably(&self.db_path)?;
-        }
-        Ok(())
-    }
-}
-
 impl StartupLease {
     /// Acquire the primary lease with an epoch strictly above
     /// `minimum_epoch`, the highest writer epoch already durable in this
     /// engine's storage.
-    pub(super) fn acquire(opts: &OpenOptions, minimum_epoch: u64) -> MidgeResult<Self> {
-        Self::acquire_configured(opts, minimum_epoch, None)
+    pub(super) fn acquire(
+        opts: &OpenOptions,
+        path: &StartupStoragePath,
+        minimum_epoch: u64,
+    ) -> MidgeResult<Self> {
+        Self::acquire_configured(opts, path, minimum_epoch, None)
     }
 
     pub(super) fn acquire_within(
         opts: &OpenOptions,
+        path: &StartupStoragePath,
         minimum_epoch: u64,
         scope: &DeadlineScope,
     ) -> MidgeResult<Self> {
         scope.check("lease creation")?;
-        Self::acquire_configured(opts, minimum_epoch, Some(scope))
+        Self::acquire_configured(opts, path, minimum_epoch, Some(scope))
     }
 
     fn acquire_configured(
         opts: &OpenOptions,
+        path: &StartupStoragePath,
         minimum_epoch: u64,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
         let storage = opts.storage();
         let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
             storage,
+            &path.root,
+            opts.injected_object_store(),
             opts.lease_clock_skew_tolerance(),
             opts.storage_io_timeout(),
             opts.lease_ttl(),
+            &opts.lease_clock(),
         )
         .map_err(|error| match MidgeError::from(error) {
             MidgeError::LeaseHeld(message) => MidgeError::LeaseHeld(message),
@@ -520,7 +640,7 @@ impl RuntimeStorageMaterialization {
         hybrid_storage: &crate::storage::HybridStorage,
         authority: &DdlLeaseAuthority,
         wal_catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        db_path: &Path,
+        db_path: &std::path::Path,
         timeout: std::time::Duration,
     ) -> MidgeResult<()> {
         Self::bootstrap_provider_metadata_scoped(
@@ -529,10 +649,16 @@ impl RuntimeStorageMaterialization {
             hybrid_storage,
             authority,
             wal_catalog,
-            db_path,
+            &StartupStoragePath {
+                db_path: db_path.to_path_buf(),
+                memory_mode: false,
+                root: crate::io::real::test_root(db_path),
+            },
             timeout,
             None,
+            None,
         )
+        .map(|_| ())
     }
 
     fn bootstrap_staging_fs() -> MidgeResult<Arc<dyn crate::io::Fs>> {
@@ -565,10 +691,11 @@ impl RuntimeStorageMaterialization {
         hybrid_storage: &crate::storage::HybridStorage,
         authority: &DdlLeaseAuthority,
         wal_catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
-        db_path: &Path,
+        path: &StartupStoragePath,
         timeout: std::time::Duration,
+        shared_store_directory: Option<&str>,
         scope: Option<&DeadlineScope>,
-    ) -> MidgeResult<()> {
+    ) -> MidgeResult<Option<crate::lease::SharedGenerationId>> {
         check_startup_scope(scope, "cloud metadata bootstrap")?;
         let leader_store = authority.store.as_ref();
         let head = leader_store
@@ -598,8 +725,9 @@ impl RuntimeStorageMaterialization {
                 return hydrate_metadata(
                     metadata_storage,
                     leader_store,
-                    db_path,
+                    path,
                     RecoveryPolicy::Strict,
+                    wal_catalog.retired_by(),
                     scope,
                 );
             }
@@ -612,12 +740,15 @@ impl RuntimeStorageMaterialization {
         hydrate_metadata(
             metadata_storage,
             leader_store,
-            db_path,
+            path,
             RecoveryPolicy::Strict,
+            wal_catalog.retired_by(),
             scope,
         )?;
-        require_empty_local_cache_for_cloud_bootstrap(db_path, scope)?;
-        if !wal_catalog.segments.is_empty() || wal_catalog.sequence_floor != 0 {
+        require_empty_local_cache_for_cloud_bootstrap(path, shared_store_directory, scope)?;
+        // A catalog that ever published or set anything aside holds history,
+        // even with every entry retired (#844).
+        if !wal_catalog.is_pristine() {
             return Err(MidgeError::RecoveryFailed(
                 "cannot bootstrap empty cloud metadata over existing WAL state".into(),
             ));
@@ -648,7 +779,6 @@ impl RuntimeStorageMaterialization {
                 fs: staging_fs.as_ref(),
                 publication_lock: &publication_lock,
                 lock_wait_budget: timeout,
-                local_manifest_sequence: 0,
                 deadline: &deadline,
                 authority: CloudMetadataMirrorAuthority {
                     store: leader_store,
@@ -662,8 +792,9 @@ impl RuntimeStorageMaterialization {
         hydrate_metadata(
             metadata_storage,
             leader_store,
-            db_path,
+            path,
             RecoveryPolicy::Strict,
+            wal_catalog.retired_by(),
             scope,
         )
     }
@@ -673,20 +804,22 @@ impl RuntimeStorageMaterialization {
         topology: &crate::config::CloudStorageTopology,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<CloudClassStores> {
-        let wal = crate::storage::providers::build_cloud_storage_with_timeout(
+        let wal = crate::storage::providers::build_class_store(
             topology.wal().provider(),
             topology.wal().prefix(),
             opts.storage_io_timeout(),
+            opts.injected_object_store(),
         )?;
         let wal = scope_cloud_store(wal, scope);
         let sst = if topology.sst() == topology.wal() {
             wal.clone()
         } else {
             scope_cloud_store(
-                crate::storage::providers::build_cloud_storage_with_timeout(
+                crate::storage::providers::build_class_store(
                     topology.sst().provider(),
                     topology.sst().prefix(),
                     opts.storage_io_timeout(),
+                    opts.injected_object_store(),
                 )?,
                 scope,
             )
@@ -697,19 +830,16 @@ impl RuntimeStorageMaterialization {
             sst.clone()
         } else {
             scope_cloud_store(
-                crate::storage::providers::build_cloud_storage_with_timeout(
+                crate::storage::providers::build_class_store(
                     topology.control().provider(),
                     topology.control().prefix(),
                     opts.storage_io_timeout(),
+                    opts.injected_object_store(),
                 )?,
                 scope,
             )
         };
-        if let Some(scope) = scope {
-            CloudStartupRecovery::reject_cloud_wal_without_catalog_within(&wal, scope)?;
-        } else {
-            CloudStartupRecovery::reject_cloud_wal_without_catalog(&wal)?;
-        }
+        CloudStartupRecovery::reject_cloud_wal_without_catalog(wal.as_ref(), scope)?;
         Ok(CloudClassStores { wal, sst, metadata })
     }
 
@@ -780,6 +910,7 @@ impl RuntimeStorageMaterialization {
             startup_scope: scope.cloned(),
             shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
             cloud_runtime_policy,
+            retry_policy: opts.retry_policy(),
             compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),
@@ -797,6 +928,21 @@ impl RuntimeStorageMaterialization {
         }
     }
 
+    fn build_simulated_cloud_stores(
+        opts: &OpenOptions,
+        store: &Arc<dyn crate::storage::inventory::ObjectStore>,
+    ) -> crate::storage::simulated::SimulatedCloudStores {
+        let cloud = crate::storage::simulated::build_simulated_cloud_stores(
+            Arc::clone(store),
+            opts.simulated_cloud_local_storage_budget_bytes(),
+        );
+        cloud.hybrid_storage.enable_ephemeral_sst_cache(
+            opts.simulated_cloud_local_storage_budget_bytes()
+                .unwrap_or_else(|| opts.local_storage_budget_bytes()),
+        );
+        cloud
+    }
+
     fn materialize_simulated_cloud(
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
@@ -804,66 +950,60 @@ impl RuntimeStorageMaterialization {
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
-        let cloud = crate::storage::simulated::build_simulated_cloud_stores(
-            &storage_path.db_path,
-            opts.simulated_cloud_local_storage_budget_bytes(),
+        let location = crate::storage::simulated::SimulatedCloud::locate(
+            storage_path.root.as_ref(),
+            opts.injected_object_store(),
+            opts.storage_io_timeout(),
         )?;
-        cloud.hybrid_storage.enable_ephemeral_sst_cache(
-            opts.simulated_cloud_local_storage_budget_bytes()
-                .unwrap_or_else(|| opts.local_storage_budget_bytes()),
-        );
-        let sst_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
-            cloud.cloud_root.clone(),
-        )?);
-        let sst_read_fs: Arc<dyn crate::io::Fs> =
-            Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-                Arc::new(
-                    crate::io::RealFs::new(&storage_path.db_path).map_err(FsError::into_midge)?,
-                ),
-                sst_backend,
-                opts.storage_io_timeout(),
-            ));
-        let sst_read_fs = scope.map_or_else(
-            || sst_read_fs.clone(),
-            |scope| crate::io::scope_fs(sst_read_fs.clone(), scope.clone()),
-        );
-        CloudStartupRecovery::reject_simulated_cloud_wal_without_catalog(
-            &cloud.recovery_cloud_wal_dir,
-        )?;
+        let store = location.open()?;
+        let cloud = Self::build_simulated_cloud_stores(opts, &store);
+        let backend: Arc<dyn crate::storage::StorageBackend> = Arc::clone(&store) as _;
+        let sst_read_fs = remote_sst_read_fs(opts, storage_path, Arc::clone(&backend), scope);
+        CloudStartupRecovery::reject_cloud_wal_without_catalog(store.as_ref(), scope)?;
         cloud
             .hybrid_storage
             .configure_maintenance_memory(opts.compaction_memory_pool_size());
-        startup_lease.install_storage_write_authority(&cloud.hybrid_storage)?;
+        fence_cloud_ddl_scoped(opts, &cloud.hybrid_storage, startup_lease, scope)?;
         let wal_catalog = startup_lease.prepare_wal_catalog_within(&cloud.hybrid_storage, scope)?;
 
-        let limits = super::streaming_recovery::CloudReplay::limits(opts);
-        let wal_backend: Arc<dyn crate::storage::StorageBackend> = Arc::new(
-            crate::storage::filesystem::FileSystem::new(cloud.cloud_root.clone())?,
-        );
-        let streaming = super::timing::measure("wal_plan", || {
-            build_wal_plan(
-                &storage_path.db_path,
-                &wal_backend,
-                &wal_catalog,
-                opts.recovery_policy(),
-                opts.storage_io_timeout(),
-                super::streaming_recovery::CloudReplay::read_window(opts, limits),
-                limits,
-                scope,
-            )
-        })?;
-        let recovery_plan = streaming.plan;
-        commit_salvage_plan(
-            &recovery_plan,
-            &CloudPersistence::new(Arc::clone(&cloud.hybrid_storage)),
-            startup_lease.writer_epoch,
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+            Arc::clone(&store),
+            opts.storage_io_timeout(),
+        ));
+        let authority = provider_ddl_authority(startup_lease)?;
+        let hydrated_generation = Self::bootstrap_provider_metadata_scoped(
+            &metadata_storage,
+            &metadata_storage,
+            &cloud.hybrid_storage,
+            &authority,
             &wal_catalog,
-            &storage_path.db_path,
-            &|| startup_lease.ensure_healthy("during WAL salvage set aside"),
+            storage_path,
+            opts.storage_io_timeout(),
+            location.cache_root_exclusion(),
             scope,
         )?;
-        let mut state = initialize_startup_state(opts, storage_path, false, scope)?;
-        state.wal.current_segment_id = streaming.next_segment_id;
+
+        let limits = super::streaming_recovery::CloudReplay::limits(opts);
+        let (streaming, history) = recover_cloud_wal(
+            opts,
+            storage_path,
+            &backend,
+            &cloud.hybrid_storage,
+            CloudWalRecoveryMetadata {
+                catalog: &wal_catalog,
+                hydrated_generation,
+            },
+            startup_lease,
+            scope,
+        )?;
+        let recovery_plan = streaming.plan;
+        let mut state = initialize_startup_state(
+            opts,
+            storage_path,
+            crate::runtime::state::RecoveryWal::Deferred(history),
+            None,
+            scope,
+        )?;
         if recovery_plan.opened_in_salvage_mode {
             state.mark_opened_in_salvage_mode();
             state.mark_persistence_anomaly();
@@ -871,13 +1011,21 @@ impl RuntimeStorageMaterialization {
 
         let runtime_config = crate::runtime::RuntimeConfig {
             hybrid_storage: Some(cloud.hybrid_storage),
+            cloud_metadata_storage: Some(Arc::clone(&metadata_storage)),
+            provider_ddl_fencing: true,
             sst_read_fs: Some(sst_read_fs),
             hybrid_storage_events: Some(cloud.events),
+            recovered_cloud_wal_anchor_sequence: wal_catalog.anchor().last_seq,
+            recovered_cloud_wal_entries: wal_catalog
+                .entries()
+                .iter()
+                .filter(|entry| recovery_plan.remote_segments.contains_key(&entry.id()))
+                .map(|entry| (entry.id(), entry.clone()))
+                .collect(),
             recovered_cloud_wal_segments: recovery_plan.remote_max_sequences(),
             recovered_cloud_wal_segment_epochs: recovery_plan.remote_writer_epochs(),
             recovered_local_wal_segments: recovery_plan.local_max_sequences(),
             recovered_local_wal_segment_epochs: recovery_plan.local_writer_epochs(),
-            recovered_cloud_active_wal: recovery_plan.active_wal,
             max_replayable_txn_bytes: Some(limits.max_replayable_txn_bytes()),
             ..Self::cloud_runtime_config(opts, startup_lease, cloud_runtime_policy, scope)
         };
@@ -885,13 +1033,18 @@ impl RuntimeStorageMaterialization {
         Ok(Self {
             state,
             runtime_config,
-            cloud_root: Some(cloud.cloud_root.clone()),
+            sst_inventory: Some(store as _),
             cloud_storage_for_restore: None,
-            cloud_metadata_storage_for_mirror: None,
+            cloud_metadata_storage_for_mirror: Some(metadata_storage),
             streaming_wal: Some(super::streaming_recovery::CloudReplay {
                 fs: streaming.fs,
+                segments: streaming.segments,
                 limits,
                 sequence_floor: recovery_plan.max_unreplayed_sequence,
+                substituted_wal: super::streaming_recovery::SubstitutedWal::from_plan(
+                    &recovery_plan,
+                    &wal_catalog,
+                ),
                 scope: scope.cloned(),
             }),
         })
@@ -899,17 +1052,13 @@ impl RuntimeStorageMaterialization {
 
     fn build_hybrid_storage(
         opts: &OpenOptions,
-        storage_path: &StartupStoragePath,
         wal_storage: &Arc<crate::storage::cloud::CloudStorage>,
         sst_storage: &Arc<crate::storage::cloud::CloudStorage>,
         metadata_storage: &Arc<crate::storage::cloud::CloudStorage>,
-    ) -> MidgeResult<(
+    ) -> (
         Arc<crate::storage::HybridStorage>,
         crossbeam::channel::Receiver<crate::storage::StorageEvent>,
-    )> {
-        let local_backend = Arc::new(crate::storage::filesystem::FileSystem::new(
-            storage_path.db_path.join("hybrid_local"),
-        )?);
+    ) {
         let wal_backend: Arc<dyn crate::storage::StorageBackend> = wal_storage.clone();
         let sst_backend: Arc<dyn crate::storage::StorageBackend> = sst_storage.clone();
         let control_backend: Arc<dyn crate::storage::StorageBackend> = metadata_storage.clone();
@@ -919,7 +1068,6 @@ impl RuntimeStorageMaterialization {
         );
         let hybrid_storage = Arc::new(
             crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
-                local_backend,
                 wal_backend,
                 sst_backend,
                 control_backend,
@@ -929,21 +1077,19 @@ impl RuntimeStorageMaterialization {
         );
         hybrid_storage.enable_ephemeral_sst_cache(opts.local_storage_budget_bytes());
         hybrid_storage.configure_maintenance_memory(opts.compaction_memory_pool_size());
-        Ok((hybrid_storage, rx))
+        (hybrid_storage, rx)
     }
 
     fn build_provider_sst_read_fs(
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
         sst_storage: &Arc<crate::storage::cloud::CloudStorage>,
-    ) -> MidgeResult<Arc<crate::storage::remote_sst::RemoteSstFs>> {
-        let local_fs =
-            Arc::new(crate::io::RealFs::new(&storage_path.db_path).map_err(FsError::into_midge)?);
-        Ok(Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-            local_fs,
+    ) -> Arc<crate::storage::remote_sst::RemoteSstFs> {
+        Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+            Arc::clone(&storage_path.root),
             sst_storage.clone(),
             opts.storage_io_timeout(),
-        )))
+        ))
     }
 
     fn materialize_cloud(
@@ -959,20 +1105,11 @@ impl RuntimeStorageMaterialization {
         let sst_storage = stores.sst;
         let metadata_storage = stores.metadata;
 
-        let (hybrid_storage, rx) = Self::build_hybrid_storage(
-            opts,
-            storage_path,
-            &wal_storage,
-            &sst_storage,
-            &metadata_storage,
-        )?;
-        if let Some(scope) = scope {
-            fence_provider_ddl_within(&hybrid_storage, startup_lease, &scope.deadline())?;
-        } else {
-            fence_provider_ddl(&hybrid_storage, startup_lease, opts.storage_io_timeout())?;
-        }
+        let (hybrid_storage, rx) =
+            Self::build_hybrid_storage(opts, &wal_storage, &sst_storage, &metadata_storage);
+        fence_cloud_ddl_scoped(opts, &hybrid_storage, startup_lease, scope)?;
         let sst_read_fs: Arc<dyn crate::io::Fs> =
-            Self::build_provider_sst_read_fs(opts, storage_path, &sst_storage)?;
+            Self::build_provider_sst_read_fs(opts, storage_path, &sst_storage);
         let sst_read_fs = scope.map_or_else(
             || sst_read_fs.clone(),
             |scope| crate::io::scope_fs(sst_read_fs.clone(), scope.clone()),
@@ -980,41 +1117,38 @@ impl RuntimeStorageMaterialization {
         let wal_catalog = startup_lease.prepare_wal_catalog_within(&hybrid_storage, scope)?;
 
         let authority = provider_ddl_authority(startup_lease)?;
-        Self::bootstrap_provider_metadata_scoped(
+        let hydrated_generation = Self::bootstrap_provider_metadata_scoped(
             &metadata_storage,
             &sst_storage,
             &hybrid_storage,
             &authority,
             &wal_catalog,
-            &storage_path.db_path,
+            storage_path,
             opts.storage_io_timeout(),
+            None,
             scope,
         )?;
         let limits = super::streaming_recovery::CloudReplay::limits(opts);
-        let streaming = super::timing::measure("wal_plan", || {
-            build_wal_plan(
-                &storage_path.db_path,
-                &(wal_storage.clone() as Arc<dyn crate::storage::StorageBackend>),
-                &wal_catalog,
-                opts.recovery_policy(),
-                opts.storage_io_timeout(),
-                super::streaming_recovery::CloudReplay::read_window(opts, limits),
-                limits,
-                scope,
-            )
-        })?;
-        let recovery_plan = streaming.plan;
-        commit_salvage_plan(
-            &recovery_plan,
-            &CloudPersistence::new(Arc::clone(&hybrid_storage)),
-            startup_lease.writer_epoch,
-            &wal_catalog,
-            &storage_path.db_path,
-            &|| startup_lease.ensure_healthy("during WAL salvage set aside"),
+        let (streaming, history) = recover_cloud_wal(
+            opts,
+            storage_path,
+            &(wal_storage.clone() as Arc<dyn crate::storage::StorageBackend>),
+            &hybrid_storage,
+            CloudWalRecoveryMetadata {
+                catalog: &wal_catalog,
+                hydrated_generation,
+            },
+            startup_lease,
             scope,
         )?;
-        let mut state = initialize_startup_state(opts, storage_path, false, scope)?;
-        state.wal.current_segment_id = streaming.next_segment_id;
+        let recovery_plan = streaming.plan;
+        let mut state = initialize_startup_state(
+            opts,
+            storage_path,
+            crate::runtime::state::RecoveryWal::Deferred(history),
+            None,
+            scope,
+        )?;
         if recovery_plan.opened_in_salvage_mode {
             state.mark_opened_in_salvage_mode();
             state.mark_persistence_anomaly();
@@ -1026,11 +1160,17 @@ impl RuntimeStorageMaterialization {
             hybrid_storage_events: Some(rx),
             cloud_metadata_storage: Some(metadata_storage.clone()),
             provider_ddl_fencing: true,
+            recovered_cloud_wal_anchor_sequence: wal_catalog.anchor().last_seq,
+            recovered_cloud_wal_entries: wal_catalog
+                .entries()
+                .iter()
+                .filter(|entry| recovery_plan.remote_segments.contains_key(&entry.id()))
+                .map(|entry| (entry.id(), entry.clone()))
+                .collect(),
             recovered_cloud_wal_segments: recovery_plan.remote_max_sequences(),
             recovered_cloud_wal_segment_epochs: recovery_plan.remote_writer_epochs(),
             recovered_local_wal_segments: recovery_plan.local_max_sequences(),
             recovered_local_wal_segment_epochs: recovery_plan.local_writer_epochs(),
-            recovered_cloud_active_wal: recovery_plan.active_wal,
             max_replayable_txn_bytes: Some(limits.max_replayable_txn_bytes()),
             ..Self::cloud_runtime_config(opts, startup_lease, cloud_runtime_policy, scope)
         };
@@ -1038,13 +1178,18 @@ impl RuntimeStorageMaterialization {
         Ok(Self {
             state,
             runtime_config,
-            cloud_root: None,
+            sst_inventory: Some(sst_storage.clone() as _),
             cloud_storage_for_restore: Some(sst_storage),
             cloud_metadata_storage_for_mirror: Some(metadata_storage),
             streaming_wal: Some(super::streaming_recovery::CloudReplay {
                 fs: streaming.fs,
+                segments: streaming.segments,
                 limits,
                 sequence_floor: recovery_plan.max_unreplayed_sequence,
+                substituted_wal: super::streaming_recovery::SubstitutedWal::from_plan(
+                    &recovery_plan,
+                    &wal_catalog,
+                ),
                 scope: scope.cloned(),
             }),
         })
@@ -1069,6 +1214,7 @@ impl RuntimeStorageMaterialization {
             runtime_response_timeout: opts.runtime_response_timeout(),
             shutdown_cloud_drain_timeout: opts.shutdown_cloud_drain_timeout(),
             cloud_runtime_policy,
+            retry_policy: opts.retry_policy(),
             compression_policy: opts.compression_policy().clone(),
             block_cache_size: opts.block_cache_size(),
             block_cache_policy: opts.block_cache_policy_type(),
@@ -1086,9 +1232,21 @@ impl RuntimeStorageMaterialization {
         };
 
         Ok(Self {
-            state: initialize_startup_state(opts, storage_path, true, scope)?,
+            state: initialize_startup_state(
+                opts,
+                storage_path,
+                crate::runtime::state::RecoveryWal::Replay {
+                    writer_epoch: startup_lease.writer_epoch,
+                },
+                if storage_path.memory_mode {
+                    None
+                } else {
+                    Some(startup_lease.wal_history_fence(opts.storage_io_timeout())?)
+                },
+                scope,
+            )?,
             runtime_config,
-            cloud_root: None,
+            sst_inventory: None,
             cloud_storage_for_restore: None,
             cloud_metadata_storage_for_mirror: None,
             streaming_wal: None,
@@ -1123,10 +1281,6 @@ mod authority_tests {
         let startup =
             StartupLease::acquire_for_test(lease_object, Some(Arc::clone(&validity))).unwrap();
         let storage = crate::storage::HybridStorage::with_policy(
-            Arc::new(
-                crate::storage::filesystem::FileSystem::new(directory.path().join("local"))
-                    .unwrap(),
-            ),
             cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
@@ -1149,5 +1303,180 @@ mod authority_tests {
             .remote_object_proof_optional(registry_key)
             .unwrap()
             .is_none());
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_cache_tests {
+    use super::*;
+    use crate::io::{Fs, FsPath};
+
+    fn cache(files: &[&str], directories: &[&str]) -> StartupStoragePath {
+        let root = Arc::new(crate::io::MockFs::new());
+        for directory in directories {
+            root.create_dir_all(&FsPath::new(*directory)).unwrap();
+        }
+        for file in files {
+            root.open(
+                &FsPath::new(*file),
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .and_then(|mut handle| handle.append(bytes::Bytes::from_static(b"state")))
+            .unwrap();
+        }
+        StartupStoragePath {
+            db_path: std::path::PathBuf::from("named-cache"),
+            memory_mode: false,
+            root,
+        }
+    }
+
+    #[test]
+    fn should_accept_bootstrap_when_cache_root_holds_only_empty_directories() {
+        // Arrange
+        let path = cache(&[], &["wal", "sst/nested"]);
+
+        // Act
+        let result = require_empty_local_cache_for_cloud_bootstrap(&path, None, None);
+
+        // Assert
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn should_refuse_bootstrap_when_cache_root_holds_nested_file() {
+        // Arrange
+        let path = cache(&["sst/nested/000001.sst"], &["wal"]);
+
+        // Act
+        let result = require_empty_local_cache_for_cloud_bootstrap(&path, None, None);
+
+        // Assert
+        assert!(
+            matches!(&result, Err(MidgeError::RecoveryFailed(message)) if message.contains("000001.sst")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_ignore_only_the_host_shared_store_when_checking_a_simulated_cache() {
+        // Arrange
+        let path = cache(&["cloud_store/metadata/lease"], &["wal"]);
+
+        // Act
+        let result =
+            require_empty_local_cache_for_cloud_bootstrap(&path, Some("cloud_store"), None);
+
+        // Assert
+        assert!(result.is_ok(), "{result:?}");
+        path.root
+            .open(
+                &FsPath::new("wal/copied.wal"),
+                crate::io::OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .unwrap();
+        assert!(
+            require_empty_local_cache_for_cloud_bootstrap(&path, Some("cloud_store"), None,)
+                .is_err()
+        );
+    }
+}
+
+#[cfg(all(test, feature = "internal-testing"))]
+mod shared_simulated_authority_tests {
+    use crate::{Clock, Engine, OpenOptions, TransactionMode, WriteOptions};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    struct FixedClock(u64);
+    impl Clock for FixedClock {
+        fn now_millis(&self) -> u64 {
+            self.0
+        }
+    }
+
+    #[test]
+    fn should_bootstrap_host_simulated_cloud_without_treating_its_shared_store_as_cache(
+    ) -> crate::MidgeResult<()> {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let options =
+            OpenOptions::cloud_simulated(directory.path(), "shared", "bootstrap").build()?;
+        // Act
+        let mut engine = Engine::open(options)?;
+        // Assert
+        assert!(engine.get_column_family("default").is_some());
+        engine.shutdown(Duration::from_secs(5))
+    }
+
+    #[test]
+    fn should_transfer_shared_authority_when_a_simulated_owner_takes_over_a_cold_cache(
+    ) -> crate::MidgeResult<()> {
+        // Arrange
+        let first_cache = tempfile::tempdir()?;
+        let second_cache = tempfile::tempdir()?;
+        let backend: Arc<dyn crate::storage::cloud::CloudBackend> =
+            Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let options = |path: &std::path::Path, millis| {
+            OpenOptions::cloud_simulated(path, "shared", "takeover")
+                .object_store_for_testing(Arc::clone(&backend))
+                .lease_clock_for_testing(Arc::new(FixedClock(millis)))
+                .lease_clock_skew_tolerance(Duration::ZERO)
+                .build()
+        };
+        let mut predecessor = Engine::open(options(first_cache.path(), 1_800_000_000_000)?)?;
+        let family = predecessor.create_column_family("preserved")?;
+        let mut seed = predecessor.begin_tx(family.id(), TransactionMode::ReadWrite)?;
+        seed.put(b"seed".to_vec(), b"shared".to_vec(), None)?;
+        seed.commit(WriteOptions::cloud_strict())?;
+        predecessor.flush_cf(&family)?;
+        let mut stale = predecessor.begin_tx(family.id(), TransactionMode::ReadWrite)?;
+        stale.put(b"stale".to_vec(), b"invalid".to_vec(), None)?;
+        let old_epoch = predecessor.lease_state.lease.as_ref().unwrap().epoch();
+        predecessor
+            .lease_state
+            .heartbeat
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stop();
+
+        // Act
+        let mut successor = Engine::open(options(second_cache.path(), 1_800_000_060_000)?)?;
+        let recovered = successor
+            .get_column_family("preserved")
+            .expect("shared DDL survives cold cache");
+        let read = successor.begin_tx(recovered.id(), TransactionMode::ReadOnly)?;
+        let value = read.get(b"seed")?;
+        drop(read);
+        let stale_result = stale.commit(WriteOptions::cloud_strict());
+
+        // Assert
+        assert!(successor.lease_state.lease.as_ref().unwrap().epoch() > old_epoch);
+        assert_eq!(value.as_deref(), Some(b"shared".as_slice()));
+        assert!(
+            matches!(stale_result, Err(crate::MidgeError::Fenced(_))),
+            "a stale cache must be fenced before any WAL effect: {stale_result:?}"
+        );
+        assert_eq!(
+            successor
+                .begin_tx(recovered.id(), TransactionMode::ReadOnly)?
+                .get(b"stale")?,
+            None
+        );
+        successor.shutdown(Duration::from_secs(5))?;
+        let _ = predecessor.shutdown(Duration::from_secs(1));
+        Ok(())
     }
 }

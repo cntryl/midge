@@ -1,8 +1,8 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
 use super::TransactionIntent;
 use super::{
-    PreparedTransactionAppend, TransactionAppendParams, TransactionAppendResult,
-    TransactionApplyOp, TxnSequencePlan, TxnWalBatch, WalActor,
+    PreparedGroupOutcome, PreparedTransactionAppend, TransactionAppendParams,
+    TransactionAppendResult, TransactionApplyOp, TxnSequencePlan, TxnWalBatch, WalActor,
 };
 #[cfg(all(test, feature = "failpoints"))]
 use super::{
@@ -120,6 +120,9 @@ impl WalActor {
             }
         }
 
+        let cf_id =
+            Self::transaction_family(ops.iter().map(crate::runtime::transaction_spill::op_cf_id))?;
+        Self::ensure_family_accepts_writes(state, cf_id)?;
         Self::validate_transaction_preconditions(
             state,
             self.read_resources.clone(),
@@ -128,7 +131,7 @@ impl WalActor {
             start_sequence,
             conflict_policy,
         )?;
-        let sequence_plan = Self::allocate_transaction_sequences(state, ops.len())?;
+        let sequence_plan = Self::allocate_transaction_sequences(state, ops.len(), cf_id)?;
         let (apply_ops, wal_batch) = match self.build_transaction_wal_batch(
             state,
             ops,
@@ -139,14 +142,14 @@ impl WalActor {
             Err(error) => {
                 // Nothing was written; give the sequences back so the
                 // durable frontier never skips over an unwritten range.
-                state.sequence = sequence_plan.begin_seq - 1;
+                state.release_sequences(&sequence_plan.range());
                 return Err(error);
             }
         };
 
         crate::failpoints::fail_point!("midge::wal::after_transaction_preparation");
         if let Err(error) = self.ensure_lease_validity() {
-            state.sequence = sequence_plan.begin_seq - 1;
+            state.release_sequences(&sequence_plan.range());
             return Err(error);
         }
         Ok(PreparedTransactionAppend {
@@ -158,17 +161,42 @@ impl WalActor {
         })
     }
 
+    /// Append and apply `prepared_transactions` as one group, failing the
+    /// whole group unless every unit is applied.
     pub(crate) fn append_prepared_transactions(
         &mut self,
         state: &mut RuntimeState,
         prepared_transactions: Vec<PreparedTransactionAppend>,
     ) -> MidgeResult<Vec<TransactionAppendResult>> {
+        let outcome = self.append_prepared_transaction_group(state, prepared_transactions)?;
+        match outcome.failure {
+            Some(error) => Err(error),
+            None => Ok(outcome.applied),
+        }
+    }
+
+    /// Append and apply `prepared_transactions` as one group. A failure
+    /// before any unit is applied fails the group. A failure after some
+    /// units are applied reports those units in `applied`, since they are
+    /// visible, and the error that stopped the rest in `failure`. An applied
+    /// unit is durable only under its policy: a `Strict` one is synced, a
+    /// `Batched` one is written but not synced. A unit in `failure` whose frame is
+    /// appended may be applied on restart, so its error is `Timeout`.
+    pub(crate) fn append_prepared_transaction_group(
+        &mut self,
+        state: &mut RuntimeState,
+        prepared_transactions: Vec<PreparedTransactionAppend>,
+    ) -> MidgeResult<PreparedGroupOutcome> {
         if prepared_transactions.is_empty() {
-            return Ok(Vec::new());
+            return Ok(PreparedGroupOutcome {
+                applied: Vec::new(),
+                failure: None,
+            });
         }
 
         for prepared in &prepared_transactions {
             self.ensure_write_durability_available(state, prepared.effective_durability)?;
+            Self::ensure_family_accepts_writes(state, prepared.sequence_plan.cf_id)?;
         }
 
         let apply_ops = prepared_transactions
@@ -178,19 +206,43 @@ impl WalActor {
         Self::preflight_prepared_transaction_ops(state, &apply_ops)?;
         self.ensure_lease_validity()?;
 
-        self.append_prepared_transaction_batches(state, &prepared_transactions)?;
         let strict_group = prepared_transactions
             .iter()
             .all(|prepared| matches!(prepared.effective_durability, DurabilityPolicy::Strict));
-        if strict_group {
-            let last_sequence = prepared_transactions
-                .last()
-                .map_or(state.sequence, |prepared| prepared.sequence_plan.commit_seq);
-            self.apply_strict_transaction_group_durability(state, last_sequence)?;
-        }
+        self.append_prepared_group_wal(state, &prepared_transactions, strict_group)?;
 
         let mut results = Vec::with_capacity(prepared_transactions.len());
-        for prepared in prepared_transactions {
+        let mut pending = prepared_transactions.into_iter();
+        while let Some(prepared) = pending.next() {
+            if !strict_group {
+                if let Err(error) = self.apply_transaction_durability(
+                    state,
+                    prepared.effective_durability,
+                    prepared.sequence_plan.commit_seq,
+                ) {
+                    let unapplied = std::iter::once(&prepared)
+                        .chain(pending.as_slice())
+                        .collect::<Vec<_>>();
+                    return Ok(PreparedGroupOutcome {
+                        applied: results,
+                        failure: Some(Self::group_durability_error(&unapplied, error)),
+                    });
+                }
+            }
+            crate::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
+            // Every unit in the group is in the WAL and `state.sequence` is
+            // past every commit; the earlier units are applied. A lease that
+            // lapsed since is a failed apply of this unit and the rest, none
+            // of which reached the memtables.
+            if let Err(error) = self.ensure_lease_validity() {
+                let unapplied = std::iter::once(&prepared)
+                    .chain(pending.as_slice())
+                    .collect::<Vec<_>>();
+                return Ok(PreparedGroupOutcome {
+                    applied: results,
+                    failure: Some(self.fail_unapplied_group(state, &unapplied, error)),
+                });
+            }
             let PreparedTransactionAppend {
                 request_id,
                 sequence_plan,
@@ -200,11 +252,6 @@ impl WalActor {
             } = prepared;
             let last_sequence = sequence_plan.commit_seq;
             let apply_op_count = apply_ops.len();
-
-            if !strict_group {
-                self.apply_transaction_durability(state, effective_durability, last_sequence)?;
-            }
-            self.ensure_lease_validity()?;
             Self::apply_prevalidated_transaction_ops(
                 state,
                 apply_ops,
@@ -232,7 +279,101 @@ impl WalActor {
             });
         }
 
-        Ok(results)
+        Ok(PreparedGroupOutcome {
+            applied: results,
+            failure: None,
+        })
+    }
+
+    fn append_prepared_group_wal(
+        &mut self,
+        state: &mut RuntimeState,
+        prepared: &[PreparedTransactionAppend],
+        strict: bool,
+    ) -> MidgeResult<()> {
+        let group = if strict {
+            let acquired = self
+                .writer()
+                .and_then(crate::wal::WalWriter::writer_group_capability)
+                .map(|writer| writer.begin_group(self.storage_io_timeout))
+                .transpose();
+            match acquired {
+                Ok(group) => group,
+                Err(error) => {
+                    if Self::is_authority_failure(&error) {
+                        self.fence_with_cause(
+                            state,
+                            format!("WAL group admission authority validation failed: {error}"),
+                            true,
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        let prevalidated = group.is_some() || self.validate_writer_admission(state)?;
+        self.append_prepared_transaction_batches(state, prepared, group.as_ref())?;
+        if strict {
+            let last_sequence = prepared
+                .last()
+                .map_or(state.sequence, |unit| unit.sequence_plan.commit_seq);
+            // The root covers append, fsync and ledger evidence, then leaves
+            // before applying any unit or starting a lease transition.
+            self.sync_authority_prevalidated = prevalidated;
+            let result =
+                self.apply_strict_group_durability_with_group(state, last_sequence, group.as_ref());
+            self.sync_authority_prevalidated = false;
+            if let Err(error) = result {
+                return Err(Self::group_durability_error(
+                    &prepared.iter().collect::<Vec<_>>(),
+                    error,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Fence the WAL for group units none of whose ops reached the memtables.
+    /// The error for group units a durability step failed before any of
+    /// them was applied: outcome unknown when their frames are appended.
+    fn group_durability_error(
+        unapplied: &[&PreparedTransactionAppend],
+        error: MidgeError,
+    ) -> MidgeError {
+        if unapplied
+            .iter()
+            .any(|prepared| prepared.wal_batch.wal_record.is_some())
+        {
+            Self::appended_unit_error(error)
+        } else {
+            error
+        }
+    }
+
+    fn fail_unapplied_group(
+        &mut self,
+        state: &mut RuntimeState,
+        unapplied: &[&PreparedTransactionAppend],
+        error: MidgeError,
+    ) -> MidgeError {
+        let logged = unapplied
+            .iter()
+            .any(|prepared| prepared.wal_batch.wal_record.is_some());
+        let plans = unapplied
+            .iter()
+            .map(|prepared| &prepared.sequence_plan)
+            .collect::<Vec<_>>();
+        self.fail_unapplied_transactions(
+            state,
+            &plans,
+            super::UnappliedOutcome {
+                logged,
+                partly_applied: false,
+            },
+            error,
+        )
     }
 
     fn validate_transaction_preconditions(
@@ -342,33 +483,58 @@ impl WalActor {
         Ok(())
     }
 
+    /// The one column family a transaction's operations write. A transaction
+    /// is per family (#843): its WAL frames carry that family, and replay
+    /// rejects an operation from another one.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidArgument` when the operations span families.
+    pub(super) fn transaction_family(
+        mut families: impl Iterator<Item = crate::types::ColumnFamilyId>,
+    ) -> MidgeResult<crate::types::ColumnFamilyId> {
+        let first = families.next().unwrap_or_default();
+        match families.find(|cf_id| *cf_id != first) {
+            Some(other) => Err(MidgeError::InvalidArgument(format!(
+                "a transaction writes one column family; it holds operations for {first} and {other}"
+            ))),
+            None => Ok(first),
+        }
+    }
+
     pub(super) fn allocate_transaction_sequences(
         state: &mut RuntimeState,
         ops_count: usize,
+        cf_id: crate::types::ColumnFamilyId,
     ) -> MidgeResult<TxnSequencePlan> {
         debug_assert!(
             ops_count > 0,
             "append_transaction requires at least one operation"
         );
-        let ops_count_u64 = u64::try_from(ops_count).map_err(|_| {
-            MidgeError::ResourceLimit("transaction operation count exceeds sequence space".into())
-        })?;
-        let begin_seq = state.sequence.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
-        })?;
-        let first_op_seq = begin_seq.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
-        })?;
-        let commit_seq = first_op_seq.checked_add(ops_count_u64).ok_or_else(|| {
-            MidgeError::ResourceLimit("transaction sequence space exhausted".into())
-        })?;
-        let txn_id = state.next_txn_id()?;
-        state.sequence = commit_seq;
+        // The begin marker, one sequence per operation, the commit marker.
+        let count = u64::try_from(ops_count)
+            .ok()
+            .and_then(|ops| ops.checked_add(2))
+            .ok_or_else(|| {
+                MidgeError::ResourceLimit(
+                    "transaction operation count exceeds sequence space".into(),
+                )
+            })?;
+        let range = state.allocate_sequences(count)?;
+        let txn_id = match state.next_txn_id() {
+            Ok(txn_id) => txn_id,
+            Err(error) => {
+                state.release_sequences(&range);
+                return Err(error);
+            }
+        };
+        let begin_seq = *range.start();
         Ok(TxnSequencePlan {
             txn_id,
+            cf_id,
             begin_seq,
-            first_op_seq,
-            commit_seq,
+            first_op_seq: begin_seq + 1,
+            commit_seq: *range.end(),
         })
     }
 
@@ -412,14 +578,14 @@ impl WalActor {
         }
         let nested_records = apply_ops
             .iter()
-            .map(|op| op.batch_record(sequence_plan.txn_id, self.current_epoch))
+            .map(|op| op.batch_record(sequence_plan.txn_id))
             .collect::<Vec<_>>();
 
         let payload = crate::wal::encoding::encode_txn_batch_payload_records(
             sequence_plan.txn_id,
             sequence_plan.begin_seq,
             sequence_plan.commit_seq,
-            self.current_epoch,
+            sequence_plan.cf_id,
             &nested_records,
         )
         .map_err(|error| {
@@ -440,12 +606,11 @@ impl WalActor {
         let decoded_bound =
             crate::wal::encoding::txn_batch_decoded_bound(payload.len(), nested_records.len());
         let mut batch_record = WalRecord::new_cf(
-            0,
+            sequence_plan.cf_id,
             WalOpKind::TxnBatch,
             Bytes::from_static(b"txn"),
             Some(payload),
             sequence_plan.commit_seq,
-            self.current_epoch,
         );
         batch_record.txn_id = Some(sequence_plan.txn_id);
         // Replay rejects the batch if either its frame or its decoded
@@ -459,6 +624,7 @@ impl WalActor {
         &mut self,
         state: &mut RuntimeState,
         prepared_transactions: &[PreparedTransactionAppend],
+        group: Option<&crate::lease::WriterEffectGroup>,
     ) -> MidgeResult<()> {
         let mut records = Vec::with_capacity(prepared_transactions.len());
         let mut total_wal_bytes = 0usize;
@@ -504,20 +670,32 @@ impl WalActor {
         }
         if let Some(writer) = self.writer_mut() {
             let append_start = Instant::now();
-            let append_result = writer.append_batch_accounted(&records);
+            let append_result = match group {
+                Some(group) => writer
+                    .writer_group_capability()
+                    .ok_or_else(|| {
+                        MidgeError::Internal("strict WAL group lost its writer capability".into())
+                    })?
+                    .append_batch_in_group(&records, group),
+                None => writer.append_batch_accounted(&records),
+            };
             if let Err(failure) = append_result {
+                let unchanged = failure.unchanged;
                 let error = self.settle_failed_wal_append(admitted, failure);
                 self.fence_transition(state, format!("WAL batch append failed: {error}"));
-                return Err(error);
+                // One write carries every unit's frames. When it may have
+                // left some of them in the file, replay may apply them.
+                return Err(if unchanged {
+                    error
+                } else {
+                    Self::appended_unit_error(error)
+                });
             }
             self.settle_wal_append(admitted, previous_position);
             self.finish_append_instrumentation(total_wal_bytes as u64, append_start.elapsed());
-            if let Some(max_sequence) = records.iter().map(|record| record.seq).max() {
-                self.record_segment_sequence(max_sequence);
-            }
             if let Err(error) = WalTransitionBoundary::AfterAppendBeforeAccounting.check() {
                 self.fence_transition(state, error.to_string());
-                return Err(error);
+                return Err(Self::appended_unit_error(error));
             }
             crate::failpoints::fail_point!("midge::wal::after_append_batch_before_sync");
         }

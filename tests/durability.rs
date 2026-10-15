@@ -30,18 +30,45 @@ mod durability_wal {
     };
     use tempfile::TempDir;
 
+    fn wait_for_retained_wal_members(
+        engine: &Engine,
+        root: &std::path::Path,
+        previous: u64,
+        count: usize,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let current = engine
+                .metrics()
+                .get_runtime_metrics()
+                .unwrap()
+                .wal_current_segment_id;
+            if current > previous && sealed_wal_segments(root).len() >= count {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "WAL rotation did not retain {count} sealed members"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     // ============================================================================
     // WAL RECOVERY TESTS
     // ============================================================================
 
+    /// Sealed WAL segment files: every segment but the newest, which is the
+    /// open one.
     fn sealed_wal_segments(db_path: &std::path::Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(db_path.join("wal"))
             .expect("read wal dir")
-            .filter_map(Result::ok)
+            .map(|entry| entry.expect("read WAL directory entry"))
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| cntryl_midge::__internal::wal::parse_segment_id(name).is_some())
+            .filter(|name| cntryl_midge::__internal::wal::parse_segment_file_name(name).is_some())
             .collect();
         names.sort();
+        names.pop();
         names
     }
 
@@ -151,93 +178,120 @@ mod durability_wal {
     }
 
     #[test]
-    fn should_persist_write_given_fsync_enabled_when_crash_occurs() {
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-            // Arrange
-            // Act (Phase 1)
-            {
-                let mut engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
-                let cf_id = cf.id();
+    fn should_preserve_synced_write_when_power_loss_discards_unsynced_effects() {
+        use cntryl_midge::__internal::io::Fs;
+        use cntryl_midge::__internal::simulation::{CrashDevice, SimulatedClock};
+        use std::sync::Arc;
+        use std::time::Duration;
 
-                // Write with fsync guarantee (durability_opts sets fsync_enabled: true)
-                let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-                tx.put(b"critical_key".to_vec(), b"critical_value".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).unwrap();
-                engine
-                    .shutdown(std::time::Duration::from_secs(5))
-                    .expect("shutdown before reopen");
-            }
+        // Arrange
+        let named = TempDir::new().expect("named directory");
+        let device = CrashDevice::new();
+        let clock = SimulatedClock::new();
+        let options = || {
+            let root: Arc<dyn Fs> = Arc::new(device.fs());
+            OpenOptions::local(named.path())
+                .background_compaction(false)
+                .lease_ttl(Duration::from_secs(1))
+                .lease_clock_skew_tolerance(Duration::ZERO)
+                .lease_clock_for_testing(Arc::new(clock.clone()))
+                .filesystem_for_testing(root)
+                .build()
+                .expect("crash-device options")
+        };
+        let engine = Engine::open(options()).expect("open engine");
+        let cf = engine.get_column_family("default").expect("default family");
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(b"critical_key".to_vec(), b"critical_value".to_vec(), None)
+            .expect("stage durable write");
+        tx.commit(WriteOptions::sync())
+            .expect("sync acknowledgement");
 
-            // Assert (Phase 2)
-            {
-                let engine = open_with_mode(&opts, mode);
-                let cf = engine.get_column_family("test").expect("get cf");
-                let cf_id = cf.id();
+        // Act
+        device.process_crash();
+        drop(engine);
+        device.power_loss_with(|_| 0);
+        clock.advance(Duration::from_secs(2));
+        let mut reopened = Engine::open(options()).expect("recover after power loss");
 
-                let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-                assert_eq!(
-                    tx.get(b"critical_key").expect("get"),
-                    Some(Bytes::from_static(b"critical_value")),
-                    "mode: {mode}"
-                );
-            }
-        });
+        // Assert
+        let read = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(
+            read.get(b"critical_key")
+                .expect("recover acknowledged write"),
+            Some(Bytes::from_static(b"critical_value"))
+        );
+        drop(read);
+        reopened
+            .shutdown(Duration::from_secs(5))
+            .expect("shutdown recovery");
     }
-
-    // `should_call_fsync_given_wal_sync_enabled_when_put` was removed: it only
-    // asserted `put()` returned `Ok`, never observing whether fsync actually ran,
-    // and its commit used `buffered_write_options` (non-durable), so it exercised
-    // no fsync path at all despite its name. A real fix — commit with a durable
-    // `WriteOptions`, shut down, and reopen to prove the write survived — is
-    // exactly what `should_persist_write_given_fsync_enabled_when_crash_occurs`
-    // above already does, so it was pruned as a near-duplicate rather than
-    // rewritten into a copy of that test.
 
     // ============================================================================
     // WAL ROTATION TESTS
     // ============================================================================
 
     #[test]
-    fn should_rotate_wal_given_small_buffer_when_writes_exceed_buffer() {
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-            // Arrange
-            // Act (Phase 1)
-            {
-                let mut engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
-                let cf_id = cf.id();
+    fn should_recover_wal_only_values_when_flush_seals_a_retained_segment() {
+        // Arrange
+        let directory = TempDir::new().expect("database directory");
+        let options = OpenOptions::local(directory.path())
+            .background_compaction(false)
+            .build()
+            .expect("local options");
+        let mut engine = Engine::open(options.clone()).expect("open engine");
+        let retained = engine
+            .create_column_family("retained")
+            .expect("retained family");
+        let flushed = engine.get_column_family("default").expect("default family");
+        for cf in [&retained, &flushed] {
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .unwrap();
+            tx.put(b"key".to_vec(), cf.name().as_bytes().to_vec(), None)
+                .unwrap();
+            tx.commit(WriteOptions::sync()).expect("sync commit");
+        }
+        let original = open_wal_segment(directory.path());
+        let previous = engine
+            .metrics()
+            .get_runtime_metrics()
+            .unwrap()
+            .wal_current_segment_id;
 
-                // Write enough data to trigger WAL rotation
-                let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-                for i in 0..1000 {
-                    let key = format!("key_{i:04}");
-                    let value = format!("value_{i:04}_with_padding_to_exceed_buffer_size");
-                    tx.put(key.into_bytes(), value.into_bytes(), None)
-                        .expect("put");
-                }
-                tx.commit(buffered_write_options(mode)).unwrap();
-                // Force checkpoint to ensure WAL segments are created
-                engine.flush_cf(&cf).expect("flush");
-                engine
-                    .shutdown(std::time::Duration::from_secs(5))
-                    .expect("shutdown before reopen");
-            }
+        // Act
+        engine
+            .flush_cf(&flushed)
+            .expect("seal shared WAL by flushing default");
+        wait_for_retained_wal_members(&engine, directory.path(), previous, 1);
+        let active = open_wal_segment(directory.path());
+        let sealed = std::fs::read(&original).expect("idle family retains original WAL");
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown");
+        let reopened = Engine::open(options).expect("recover rotated history");
 
-            // Assert (Phase 2): All writes recovered after rotation
-            {
-                let engine = open_with_mode(&opts, mode);
-                let cf = engine.get_column_family("test").expect("get cf");
-                let cf_id = cf.id();
-
-                // Spot check across the range
-                let tx = engine.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
-                assert!(tx.get(b"key_0000").expect("get").is_some(), "mode: {mode}");
-                assert!(tx.get(b"key_0500").expect("get").is_some(), "mode: {mode}");
-                assert!(tx.get(b"key_0999").expect("get").is_some(), "mode: {mode}");
-            }
-        });
+        // Assert
+        assert_ne!(
+            active, original,
+            "flush must install a successor WAL member"
+        );
+        assert!(cntryl_midge::__internal::wal::segment::footer_link(&sealed)
+            .expect("decode sealed member")
+            .is_some());
+        for cf in [&retained, &flushed] {
+            let read = reopened
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                .unwrap();
+            assert_eq!(
+                read.get(b"key").unwrap().as_deref(),
+                Some(cf.name().as_bytes())
+            );
+        }
     }
 
     // ============================================================================
@@ -246,13 +300,14 @@ mod durability_wal {
 
     #[test]
     fn should_replay_all_records_given_multiple_wal_segments_when_recovering() {
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+        for_each_storage_mode(&["local"], |mode, opts| {
             // Arrange
             // Act (Phase 1)
             {
                 let mut engine = open_with_mode(&opts, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
                 let cf_id = cf.id();
+                let flushed = engine.get_column_family("default").expect("default family");
 
                 // Write in phases to create multiple WAL segments
                 for batch in 0..3 {
@@ -263,7 +318,31 @@ mod durability_wal {
                         tx.put(key.into_bytes(), value.into_bytes(), None)
                             .expect("put");
                     }
-                    tx.commit(buffered_write_options(mode)).unwrap();
+                    tx.commit(WriteOptions::sync()).unwrap();
+                    let mut marker = engine
+                        .begin_tx(flushed.id(), TransactionMode::ReadWrite)
+                        .unwrap();
+                    marker
+                        .put(vec![batch], b"flushed marker".to_vec(), None)
+                        .unwrap();
+                    marker.commit(WriteOptions::sync()).unwrap();
+                    let previous = engine
+                        .metrics()
+                        .get_runtime_metrics()
+                        .unwrap()
+                        .wal_current_segment_id;
+                    engine
+                        .flush_cf(&flushed)
+                        .expect("rotate while test family pins each batch");
+                    let StorageMode::LocalDisk { db_path } = &opts.storage_mode else {
+                        panic!("local fixture");
+                    };
+                    wait_for_retained_wal_members(
+                        &engine,
+                        db_path,
+                        previous,
+                        usize::from(batch) + 1,
+                    );
                 }
                 engine
                     .shutdown(std::time::Duration::from_secs(5))
@@ -281,9 +360,10 @@ mod durability_wal {
                 for batch in 0..3 {
                     for i in 0..100 {
                         let key = format!("batch_{batch}_key_{i:03}");
-                        assert!(
-                            tx.get(key.as_bytes()).expect("get").is_some(),
-                            "Missing key from batch {batch} in mode: {mode}"
+                        assert_eq!(
+                            tx.get(key.as_bytes()).expect("get"),
+                            Some(Bytes::from(format!("batch_{batch}_value_{i:03}"))),
+                            "batch {batch}, mode: {mode}"
                         );
                     }
                 }
@@ -292,7 +372,7 @@ mod durability_wal {
     }
 
     #[test]
-    fn should_recover_all_writes_given_concurrent_puts_when_crash_occurs() {
+    fn should_recover_all_buffered_values_when_reopening_after_concurrent_commits() {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             // Act (Phase 1)
@@ -342,9 +422,10 @@ mod durability_wal {
                 for thread_id in 0..5 {
                     for i in 0..20 {
                         let key = format!("thread_{thread_id}_key_{i:02}");
-                        assert!(
-                            tx.get(key.as_bytes()).expect("get").is_some(),
-                            "Missing write from thread {thread_id} in mode: {mode}"
+                        assert_eq!(
+                            tx.get(key.as_bytes()).expect("get"),
+                            Some(Bytes::from(format!("thread_{thread_id}_value_{i:02}"))),
+                            "thread {thread_id}, mode: {mode}"
                         );
                     }
                 }
@@ -359,10 +440,8 @@ mod durability_wal {
     #[test]
     fn should_skip_corrupted_wal_tail_given_truncated_tail_when_recovering() {
         // Arrange
-        // Exercises the *default* open path (no explicit `.recovery_policy(..)` call),
-        // unlike the dedicated Strict/Salvage trust-boundary tests below which always
-        // set the policy explicitly. Several separately-committed frames are written so
-        // truncating only the final frame's tail leaves the earlier frames intact.
+        // Exercises the default Strict open path with an incomplete frame beyond the
+        // last acknowledged fsync boundary. Earlier sync commits remain authoritative.
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
 
@@ -373,7 +452,7 @@ mod durability_wal {
             let cf = engine.create_column_family("test").expect("create cf");
             let cf_id = cf.id();
 
-            for i in 0..5 {
+            for i in 0..4 {
                 let key = format!("key_{i:02}");
                 let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
                 tx.put(key.into_bytes(), b"value".to_vec(), None)
@@ -385,16 +464,16 @@ mod durability_wal {
                 .expect("shutdown before corruption");
         }
 
-        // Truncate a few trailing bytes so only the final commit's frame is incomplete.
-        truncate_last_bytes(&db_path.join("wal").join("wal.log"), 3);
+        // Append only a partial frame header after the last persisted sync boundary.
+        append_partial_frame_bytes(&open_wal_segment(db_path));
 
         // Act: reopen with default options (default recovery policy is Strict).
         let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
-            .expect("default recovery should tolerate a truncated tail frame");
+            .expect("default strict recovery should discard an incomplete unacknowledged tail");
         let cf = reopened.get_column_family("test").expect("get cf");
         let cf_id = cf.id();
 
-        // Assert: every frame before the truncated tail survives, the torn one does not.
+        // Assert: every acknowledged commit survives; the incomplete tail adds no record.
         let tx = reopened.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         for i in 0..4 {
             let key = format!("key_{i:02}");
@@ -407,19 +486,18 @@ mod durability_wal {
         assert_eq!(
             tx.get(b"key_04").expect("get"),
             None,
-            "key_04's frame was truncated and must not be recovered"
+            "an incomplete frame beyond the durable boundary must not be recovered"
         );
     }
 
     #[test]
     fn should_not_recover_data_given_truncated_wal_append_when_reopening() {
         // Arrange
-        // Simulates a *torn write* (the OS only wrote part of the value bytes before the
-        // crash) by truncating deep into the payload of the final frame, as opposed to
-        // `should_drop_partial_wal_entry_given_manual_tail_append_when_reopening_in_salvage_mode`
-        // below, which appends synthetic garbage bytes *after* a clean shutdown.
+        // A valid frame header and partial payload beyond the durable boundary model a
+        // write interrupted before its payload was complete.
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
+        let wal_path = first_wal_segment(db_path);
 
         {
             let mut engine =
@@ -432,41 +510,25 @@ mod durability_wal {
             tx.put(b"safe_key".to_vec(), b"safe_value".to_vec(), None)
                 .expect("put safe key");
             tx.commit(WriteOptions::sync()).expect("sync safe commit");
-
-            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(
-                b"unsafe_key".to_vec(),
-                b"unsafe_value_long_enough_to_truncate_mid_payload".to_vec(),
-                None,
-            )
-            .expect("put unsafe key");
-            tx.commit(WriteOptions::sync()).expect("sync unsafe commit");
             engine
                 .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before corruption");
+                .expect("shutdown before interrupted append");
         }
 
-        // Cut well into the last frame's payload, simulating a write that was torn
-        // mid-value rather than merely missing its trailing CRC bytes.
-        truncate_last_bytes(&db_path.join("wal").join("wal.log"), 20);
+        append_incomplete_frame_payload(&wal_path);
 
         // Act
         let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
-            .expect("recovery must tolerate a torn final frame, not panic");
+            .expect("recovery must tolerate an incomplete unacknowledged frame");
         let cf = reopened.get_column_family("test").expect("get cf");
         let cf_id = cf.id();
 
-        // Assert: the torn write is definitively lost; the prior committed key survives.
+        // Assert: no partial frame becomes a transaction; the prior commit survives.
         let tx = reopened.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
         assert_eq!(
             tx.get(b"safe_key").expect("get"),
             Some(Bytes::from_static(b"safe_value")),
             "commit preceding the torn write must survive"
-        );
-        assert_eq!(
-            tx.get(b"unsafe_key").expect("get"),
-            None,
-            "torn write must not be recovered"
         );
     }
 
@@ -476,64 +538,65 @@ mod durability_wal {
 
     #[test]
     fn should_allow_data_loss_given_skipped_fsync_when_crash_occurs() {
+        use cntryl_midge::__internal::io::Fs;
+        use cntryl_midge::__internal::simulation::{CrashDevice, SimulatedClock};
+        use std::sync::Arc;
+        use std::time::Duration;
+
         // Arrange
         // Documents the fsync-disabled contract: a write that is committed without a
-        // durability guarantee (buffered, no fsync) can be lost on crash. A real crash
-        // can't be induced in-process, so the bytes that would never have made it past
-        // the OS page cache are removed directly, and the loss is asserted concretely.
+        // durability guarantee (buffered, no fsync) can be lost on crash. Use the crash
+        // device directly so a graceful engine shutdown cannot sync the buffered write.
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        let wal_path = db_path.join("wal").join("wal.log");
-
-        let len_before_unsynced_write = {
-            let mut engine =
-                Engine::open(OpenOptions::local(db_path).build().expect("build options"))
-                    .expect("open engine");
-            let cf = engine.create_column_family("test").expect("create cf");
-            let cf_id = cf.id();
-
-            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(b"durable_key".to_vec(), b"durable_value".to_vec(), None)
-                .expect("put durable key");
-            tx.commit(WriteOptions::sync())
-                .expect("sync durable commit");
-
-            let len_before = std::fs::metadata(&wal_path)
-                .expect("wal metadata before unsynced write")
-                .len();
-
-            // Write without a durability guarantee, simulating a commit that only ever
-            // reached the OS page cache before the crash.
-            let mut tx = engine.begin_tx(cf_id, TransactionMode::ReadWrite).unwrap();
-            tx.put(b"transient_key".to_vec(), b"transient_value".to_vec(), None)
-                .expect("put transient key");
-            tx.commit(WriteOptions::buffered())
-                .expect("buffered commit");
-            engine
-                .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before crash simulation");
-            len_before
+        let device = CrashDevice::new();
+        let clock = SimulatedClock::new();
+        let options = || {
+            let root: Arc<dyn Fs> = Arc::new(device.fs());
+            OpenOptions::local(db_path)
+                .background_compaction(false)
+                .lease_ttl(Duration::from_secs(1))
+                .lease_clock_skew_tolerance(Duration::ZERO)
+                .lease_clock_for_testing(Arc::new(clock.clone()))
+                .filesystem_for_testing(root)
+                .build()
+                .expect("crash-device options")
         };
+        let engine = Engine::open(options()).expect("open engine");
+        let cf = engine.get_column_family("default").expect("default family");
 
-        // Simulate the crash: truncate away everything written after the last fsync'd
-        // commit, standing in for bytes that a real power-loss would never have
-        // persisted past the OS page cache.
-        truncate_last_bytes(
-            &wal_path,
-            std::fs::metadata(&wal_path)
-                .expect("wal metadata after crash")
-                .len()
-                - len_before_unsynced_write,
-        );
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin durable write");
+        tx.put(b"durable_key".to_vec(), b"durable_value".to_vec(), None)
+            .expect("put durable key");
+        tx.commit(WriteOptions::sync())
+            .expect("sync durable commit");
+
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin buffered write");
+        tx.put(b"transient_key".to_vec(), b"transient_value".to_vec(), None)
+            .expect("put transient key");
+        tx.commit(WriteOptions::buffered())
+            .expect("buffered commit");
+
+        // Simulate power loss without running the engine's graceful shutdown path.
+        device.process_crash();
+        drop(engine);
+        device.power_loss_with(|_| 0);
+        clock.advance(Duration::from_secs(2));
 
         // Act
-        let reopened = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
-            .expect("recovery after crash must not fail");
-        let cf = reopened.get_column_family("test").expect("get cf");
-        let cf_id = cf.id();
+        let reopened = Engine::open(options()).expect("recovery after crash must not fail");
+        let cf = reopened
+            .get_column_family("default")
+            .expect("get default family");
 
         // Assert: the fsync'd write survives, the never-durable write is gone.
-        let tx = reopened.begin_tx(cf_id, TransactionMode::ReadOnly).unwrap();
+        let tx = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin read transaction");
         assert_eq!(
             tx.get(b"durable_key").expect("get"),
             Some(Bytes::from_static(b"durable_value")),
@@ -555,7 +618,7 @@ mod durability_wal {
         // records that precede the corruption rather than merely open successfully.
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        let wal_path = db_path.join("wal").join("wal.log");
+        let wal_path = first_wal_segment(db_path);
 
         let offset_of_second_frame = {
             let mut engine =
@@ -669,8 +732,8 @@ mod durability_wal {
     }
 
     #[test]
-    fn should_keep_valid_prefix_given_truncated_wal_tail_when_reopening_in_strict_mode() {
-        // Arrange
+    fn should_fail_strict_given_missing_acknowledged_wal_tail_when_reopening() {
+        // Arrange: the final commit is acknowledged, then its bytes are removed.
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
 
@@ -698,27 +761,22 @@ mod durability_wal {
                 .expect("shutdown before corruption");
         }
 
-        truncate_last_bytes(&db_path.join("wal").join("wal.log"), 3);
+        truncate_last_bytes(&open_wal_segment(db_path), 3);
 
-        // Act
-        let reopened = Engine::open(
+        // Act: deleting bytes below a persisted fsync boundary is data loss, not an
+        // unacknowledged torn append. Strict mode must refuse to discard that commit.
+        let result = Engine::open(
             OpenOptions::local(db_path)
                 .recovery_policy(RecoveryPolicy::Strict)
                 .build()
                 .expect("build options"),
-        )
-        .expect("strict recovery should keep valid truncated-tail prefix");
-        let cf = reopened.get_column_family("trust").expect("get trust cf");
+        );
 
         // Assert
-        let tx = reopened
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .expect("begin read tx");
-        assert_eq!(
-            tx.get(b"prefix").expect("get prefix"),
-            Some(Bytes::from_static(b"value"))
+        assert!(
+            matches!(result, Err(MidgeError::Corruption(message)) if message.contains("fsync boundary")),
+            "strict recovery must reject missing acknowledged WAL bytes"
         );
-        assert_eq!(tx.get(b"torn").expect("get torn key"), None);
     }
 
     #[test]
@@ -726,28 +784,24 @@ mod durability_wal {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        let wal_log = db_path.join("wal").join("wal.log");
+        let wal_log = first_wal_segment(db_path);
 
         {
             let mut engine =
                 Engine::open(OpenOptions::local(db_path).build().expect("build options"))
                     .expect("open engine");
             let cf = engine.create_column_family("trust").expect("create cf");
-            for key in [b"prefix".as_slice(), b"torn".as_slice()] {
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin tx");
-                tx.put(key.to_vec(), b"value".to_vec(), None).expect("put");
-                tx.commit(WriteOptions::sync()).expect("sync commit");
-            }
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin prefix tx");
+            tx.put(b"prefix".to_vec(), b"value".to_vec(), None)
+                .expect("put prefix");
+            tx.commit(WriteOptions::sync()).expect("sync prefix commit");
             engine
                 .shutdown(std::time::Duration::from_secs(5))
-                .expect("shutdown before corruption");
+                .expect("shutdown before interrupted append");
         }
-        truncate_last_bytes(&wal_log, 3);
-        let torn_len = std::fs::metadata(&wal_log)
-            .expect("torn wal metadata")
-            .len();
+        append_partial_frame_bytes(&wal_log);
 
         {
             let mut engine = Engine::open(
@@ -792,10 +846,25 @@ mod durability_wal {
             tx.get(b"after").expect("get after"),
             Some(Bytes::from_static(b"value"))
         );
-        let recovered_len = std::fs::metadata(&wal_log).expect("wal metadata").len();
+        // The restart sealed the torn segment after its replayed prefix
+        // (#843), so the post-restart commit stays in a later segment.
+        let sealed = std::fs::read(&wal_log).expect("read sealed torn segment");
+        assert!(cntryl_midge::__internal::wal::segment::footer_link(&sealed)
+            .expect("decode sealed torn segment")
+            .is_some());
+        let later_records: usize = wal_segment_files(db_path)
+            .into_iter()
+            .filter(|(_, path)| *path != wal_log)
+            .map(|(_, path)| {
+                let bytes = std::fs::read(path).expect("read later segment");
+                cntryl_midge::__internal::wal::segment::records(&bytes)
+                    .expect("decode later segment")
+                    .len()
+            })
+            .sum();
         assert!(
-            recovered_len > torn_len,
-            "post-restart commit should remain in the active WAL (torn_len={torn_len}, len={recovered_len})"
+            later_records > 0,
+            "post-restart commit should remain in a later WAL segment"
         );
     }
 
@@ -823,7 +892,10 @@ mod durability_wal {
                 .expect("shutdown before corruption");
         }
 
-        corrupt_byte(&db_path.join("wal").join("wal.log"), 4);
+        let first_frame_payload = (cntryl_midge::__internal::wal::segment::HEADER_LEN
+            + cntryl_midge::__internal::wal::frame::WAL_FRAME_HEADER_LEN)
+            as u64;
+        corrupt_byte(&open_wal_segment(db_path), first_frame_payload);
 
         // Act
         let Err(strict_error) = Engine::open(
@@ -886,7 +958,7 @@ mod durability_wal {
                 .expect("shutdown before corruption");
         }
 
-        append_partial_frame_bytes(&db_path.join("wal").join("wal.log"));
+        append_partial_frame_bytes(&open_wal_segment(db_path));
 
         // Act
         let reopened = Engine::open(
@@ -945,7 +1017,21 @@ mod durability_wal {
             .expect("open wal for append");
         file.write_all(&[0x34, 0x12, 0x00])
             .expect("append partial frame");
-        file.sync_all().expect("sync partial frame");
+    }
+
+    fn append_incomplete_frame_payload(path: &std::path::Path) {
+        use std::io::Write;
+
+        let mut frame = Vec::new();
+        cntryl_midge::__internal::wal::frame::append_frame(&mut frame, &[0x5a; 64])
+            .expect("encode frame");
+        frame.truncate(frame.len() - 20);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open wal for append");
+        file.write_all(&frame)
+            .expect("append incomplete frame payload");
     }
 }
 
@@ -1241,7 +1327,7 @@ mod durability_recovery {
     }
 
     #[test]
-    fn should_skip_wal_entries_given_already_in_sst_when_recovering() {
+    fn should_recover_flushed_best_effort_values_without_wal_data() {
         for_each_storage_mode(durable_storage_modes(), |mode, opts| {
             // Arrange
             // Act (Phase 1)
@@ -1249,13 +1335,14 @@ mod durability_recovery {
                 let mut engine = open_with_mode(&opts, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
 
-                // Write v1, flush to SST (WAL can be discarded)
+                // BestEffort records reach only the memtable and flushed SST.
                 let mut tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadWrite)
                     .expect("begin_tx");
                 tx.put(b"key".to_vec(), b"value_v1".to_vec(), None)
                     .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
+                tx.commit(cntryl_midge::WriteOptions::best_effort())
+                    .expect("commit");
                 engine.flush_cf(&cf).expect("flush");
                 engine
                     .shutdown(std::time::Duration::from_secs(5))
@@ -1267,7 +1354,7 @@ mod durability_recovery {
                 let engine = open_with_mode(&opts, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
 
-                // Should recover from SST (WAL not needed)
+                // This value has no corresponding WAL data record to replay.
                 let tx = engine
                     .begin_tx(cf.id(), TransactionMode::ReadOnly)
                     .expect("begin_tx");
@@ -1291,12 +1378,11 @@ mod durability_recovery {
 
                 // Write sequence (order matters)
                 for i in 0..100 {
-                    let key = format!("seq_key_{i:03}");
                     let mut tx = engine
                         .begin_tx(cf.id(), TransactionMode::ReadWrite)
                         .expect("begin_tx");
                     tx.put(
-                        key.as_bytes().to_vec(),
+                        b"ordered".to_vec(),
                         format!("value_{i:03}").as_bytes().to_vec(),
                         None,
                     )
@@ -1313,19 +1399,14 @@ mod durability_recovery {
                 let engine = open_with_mode(&opts, mode);
                 let cf = engine.create_column_family("test").expect("create cf");
 
-                // Verify correct order (last write wins for same key)
-                for i in 0..100 {
-                    let key = format!("seq_key_{i:03}");
-                    let expected = Bytes::from(format!("value_{i:03}"));
-                    let tx = engine
-                        .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                        .expect("begin_tx");
-                    assert_eq!(
-                        tx.get(key.as_bytes()).expect("get"),
-                        Some(expected),
-                        "mode: {mode}"
-                    );
-                }
+                let tx = engine
+                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                    .expect("begin read");
+                assert_eq!(
+                    tx.get(b"ordered").expect("read final overwrite"),
+                    Some(Bytes::from_static(b"value_099")),
+                    "replay must preserve last-write order in mode {mode}"
+                );
             }
         });
     }
@@ -1726,56 +1807,59 @@ mod durability_atomicity {
 
     #[test]
     fn should_not_expose_sst_without_manifest_entry_given_orphan_file_when_recovering() {
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-            // Arrange
-            // Act (Phase 1)
-            {
-                let mut engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
+        // Arrange: use a real SST from a separate database as an unlisted output.
+        let directory = tempfile::tempdir().expect("database directory");
+        let donor = tempfile::tempdir().expect("donor database");
+        let donor_file = flushed_default_sst(donor.path(), b"unlisted", b"must stay absent");
+        flushed_default_sst(directory.path(), b"owned", b"acknowledged");
+        let orphan = directory
+            .path()
+            .join("sst/000000_00_00000000000000000099.sst");
+        std::fs::copy(donor_file, &orphan).expect("plant valid unlisted SST");
+        assert!(orphan.exists());
 
-                // Write and flush to create SST file
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin_tx");
-                tx.put(b"key1".to_vec(), b"value1".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
-                engine.flush_cf(&cf).expect("flush");
+        // Act
+        let reopened = Engine::open(OpenOptions::local(directory.path()).build().unwrap())
+            .expect("reopen with orphan");
+        let cf = reopened.get_column_family("default").unwrap();
+        let read = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .unwrap();
 
-                // Write more data (will create another SST)
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin_tx");
-                tx.put(b"key2".to_vec(), b"value2".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
-                engine
-                    .shutdown(std::time::Duration::from_secs(5))
-                    .expect("shutdown before reopen");
-            }
+        // Assert
+        assert_eq!(read.get(b"unlisted").unwrap(), None);
+        assert_eq!(
+            read.get(b"owned").unwrap(),
+            Some(Bytes::from_static(b"acknowledged"))
+        );
+        assert!(!orphan.exists(), "startup must remove the unowned output");
+    }
 
-            // Assert (Phase 2)
-            {
-                let engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
-
-                // key1 should be visible (from first SST, manifest entry exists)
-                let tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                    .expect("begin_tx");
-                assert!(tx.get(b"key1").expect("get").is_some(), "mode: {mode}");
-
-                // key2 should be readable from the later committed write on reopen
-                let tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                    .expect("begin_tx");
-                assert_eq!(
-                    tx.get(b"key2").expect("get"),
-                    Some(Bytes::from_static(b"value2")),
-                    "mode: {mode}"
-                );
-            }
-        });
+    fn flushed_default_sst(root: &std::path::Path, key: &[u8], value: &[u8]) -> std::path::PathBuf {
+        let mut engine = Engine::open(
+            OpenOptions::local(root)
+                .background_compaction(false)
+                .build()
+                .unwrap(),
+        )
+        .expect("open fixture database");
+        let cf = engine.get_column_family("default").unwrap();
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        tx.put(key.to_vec(), value.to_vec(), None).unwrap();
+        tx.commit(WriteOptions::best_effort()).unwrap();
+        engine.flush_cf(&cf).expect("publish fixture SST");
+        let layout = engine.metrics().get_storage_layout().unwrap();
+        let file = layout
+            .levels
+            .iter()
+            .flat_map(|level| &level.files)
+            .next()
+            .expect("published SST");
+        let path = root.join("sst").join(&file.name);
+        engine.shutdown(std::time::Duration::from_secs(5)).unwrap();
+        path
     }
 
     #[test]
@@ -1847,50 +1931,39 @@ mod durability_atomicity {
     }
 
     #[test]
-    fn should_preserve_manifest_authority_given_wal_newer_when_sst_missing() {
-        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
-            // Arrange
-            // Act (Phase 1)
-            {
-                let mut engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
+    fn should_report_unavailable_authority_when_a_manifest_owned_sst_is_missing() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("database directory");
+        let owned = flushed_default_sst(directory.path(), b"key", b"flushed value");
+        std::fs::remove_file(owned).expect("remove manifest-owned SST");
 
-                // Write, flush, then overwrite
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin_tx");
-                tx.put(b"key".to_vec(), b"value_old".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
-                engine.flush_cf(&cf).expect("flush");
-
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin_tx");
-                tx.put(b"key".to_vec(), b"value_new".to_vec(), None)
-                    .expect("put");
-                tx.commit(buffered_write_options(mode)).expect("commit");
-                engine
-                    .shutdown(std::time::Duration::from_secs(5))
-                    .expect("shutdown before reopen");
+        // Act
+        let error = match Engine::open(OpenOptions::local(directory.path()).build().unwrap()) {
+            Err(error) => error,
+            Ok(mut engine) => {
+                let family = engine.get_column_family("default").unwrap();
+                let read = engine
+                    .begin_tx(family.id(), TransactionMode::ReadOnly)
+                    .unwrap();
+                let result = read.get(b"key");
+                drop(read);
+                engine.shutdown(std::time::Duration::from_secs(5)).unwrap();
+                result.expect_err(
+                    "missing authoritative SST must not become a successful missing-key read",
+                )
             }
+        };
 
-            // Assert (Phase 2)
-            {
-                let engine = open_with_mode(&opts, mode);
-                let cf = engine.create_column_family("test").expect("create cf");
-
-                // WAL should take precedence over SST when both exist
-                let tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
-                    .expect("begin_tx");
-                assert_eq!(
-                    tx.get(b"key").expect("get"),
-                    Some(Bytes::from_static(b"value_new")),
-                    "mode: {mode}"
-                );
-            }
-        });
+        // Assert
+        assert!(
+            matches!(
+                &error,
+                cntryl_midge::MidgeError::NotFound
+                    | cntryl_midge::MidgeError::RecoveryFailed(_)
+                    | cntryl_midge::MidgeError::Corruption(_)
+            ) || matches!(&error, cntryl_midge::MidgeError::Io(error) if error.kind() == std::io::ErrorKind::NotFound),
+            "missing SST must report unavailable or corrupt authority: {error:?}"
+        );
     }
 
     #[test]
@@ -1938,7 +2011,11 @@ mod durability_atomicity {
 
     #[test]
     fn should_not_resurrect_manifest_covered_value_from_retained_wal_after_tombstone_gc() {
-        // Arrange
+        // Arrange: an idle family's unflushed write pins every WAL segment
+        // from the seed on, so retention keeps WAL history the manifest
+        // already covers. Segments are linked (#843): covered records stay
+        // in the retained segments that wrote them rather than being spliced
+        // into the open one.
         let directory = tempfile::tempdir().expect("create database directory");
         let options = || {
             OpenOptions::local(directory.path())
@@ -1949,6 +2026,16 @@ mod durability_atomicity {
         let cf = engine
             .get_column_family("default")
             .expect("default column family");
+        let idle = engine
+            .create_column_family("idle")
+            .expect("create idle column family");
+        let mut pin = engine
+            .begin_tx(idle.id(), TransactionMode::ReadWrite)
+            .expect("begin idle transaction");
+        pin.put(b"pin".to_vec(), b"unflushed".to_vec(), None)
+            .expect("put idle pin");
+        pin.commit(WriteOptions::sync()).expect("commit idle pin");
+        let seed_segment = open_wal_segment(directory.path());
         let mut seed = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin seed transaction");
@@ -1959,8 +2046,6 @@ mod durability_atomicity {
         seed.put(b"z-anchor".to_vec(), b"z".to_vec(), None)
             .expect("put upper anchor");
         seed.commit(WriteOptions::sync()).expect("commit seed");
-        let retained_wal = std::fs::read(directory.path().join("wal/wal.log"))
-            .expect("capture retained WAL bytes");
         engine.flush_cf(&cf).expect("flush seed values");
 
         let mut delete = engine
@@ -1970,8 +2055,6 @@ mod durability_atomicity {
         delete
             .commit(WriteOptions::sync())
             .expect("commit durable delete");
-        let retained_delete_wal = std::fs::read(directory.path().join("wal/wal.log"))
-            .expect("capture retained delete WAL bytes");
         engine.flush_cf(&cf).expect("flush delete tombstone");
         for index in 0..2 {
             let mut filler = engine
@@ -1998,21 +2081,13 @@ mod durability_atomicity {
         engine
             .shutdown(std::time::Duration::from_secs(5))
             .expect("shutdown database");
+        assert!(
+            seed_segment.exists(),
+            "the idle family must retain the WAL segment holding the seed"
+        );
 
-        // Act: model conservative WAL retention of an already-flushed prefix.
-        // Retention is prefix-closed (a segment is retired only with every
-        // older one), so a retained seed segment implies the later delete
-        // segment is retained too. The manifest already incorporates both.
-        std::fs::write(
-            directory.path().join("wal/00000000000000000000.wal"),
-            retained_wal,
-        )
-        .expect("restore retained WAL segment");
-        std::fs::write(
-            directory.path().join("wal/00000000000000000001.wal"),
-            retained_delete_wal,
-        )
-        .expect("restore retained delete WAL segment");
+        // Act: recovery replays the retained segments, whose seed and delete
+        // records the manifest already covers.
         let reopened = Engine::open(options()).expect("reopen database");
         let cf = reopened
             .get_column_family("default")
@@ -2134,9 +2209,10 @@ mod durability_atomicity {
                         let tx = engine
                             .begin_tx(cf.id(), TransactionMode::ReadOnly)
                             .expect("begin_tx");
-                        assert!(
-                            tx.get(key.as_bytes()).expect("get").is_some(),
-                            "mode: {mode}"
+                        assert_eq!(
+                            tx.get(key.as_bytes()).expect("get").as_deref(),
+                            Some(b"value".as_slice()),
+                            "mode: {mode}, key: {key}"
                         );
                     }
                 }
@@ -2184,9 +2260,10 @@ mod durability_atomicity {
                     let tx = engine
                         .begin_tx(cf.id(), TransactionMode::ReadOnly)
                         .expect("begin_tx");
-                    assert!(
-                        tx.get(key.as_bytes()).expect("get").is_some(),
-                        "mode: {mode}"
+                    assert_eq!(
+                        tx.get(key.as_bytes()).expect("get").as_deref(),
+                        Some(format!("value_{i:03}").as_bytes()),
+                        "mode: {mode}, key: {key}"
                     );
                 }
             }
@@ -2296,17 +2373,8 @@ mod durability_atomicity {
         });
     }
 
-    /// Phase 0 Guardrail #3: Transaction atomicity barrier enforcement
-    ///
-    /// Validates that reads see consistent state when a transaction is committed
-    /// in Batched mode: a transaction's operations reach the memtables together,
-    /// so no read observes part of one.
-    ///
-    /// NOTE: This test validates that the transaction is atomic - the read sees
-    /// either the old value or the new value, never partial state. The actual
-    /// barrier implementation is internal to the runtime.
     #[test]
-    fn should_maintain_atomicity_given_concurrent_reads_when_transaction_commits() {
+    fn should_keep_read_snapshot_consistent_when_transaction_commits_between_reads() {
         use std::sync::{Arc, Barrier};
         use std::thread;
 
@@ -2354,34 +2422,23 @@ mod durability_atomicity {
         // Wait until the writer has staged both updates but not yet committed them
         start_barrier.wait();
 
-        // Issue reads while transaction may be in progress
+        // Establish the old snapshot and read the first member before commit.
         let tx_read = engine
             .begin_tx(cf_id, TransactionMode::ReadOnly)
             .expect("begin_tx");
 
         let val1 = tx_read.get(b"key1").expect("get key1");
-        let val2 = tx_read.get(b"key2").expect("get key2");
 
-        // Allow the writer to commit after the read snapshot is established
+        // Commit both replacements between reads through the same snapshot.
         release_barrier.wait();
 
         // Wait for transaction to complete
         tx_handle.join().expect("tx thread");
+        let val2 = tx_read.get(b"key2").expect("get key2 after commit");
 
-        // Assert: Both keys should have consistent state
-        // Either both are "initial" or both are "updated" - never mixed
-        let val1_bytes = val1.expect("key1 should exist");
-        let val2_bytes = val2.expect("key2 should exist");
-
-        let is_initial = val1_bytes.as_ref() == b"initial1" && val2_bytes.as_ref() == b"initial2";
-        let is_updated = val1_bytes.as_ref() == b"updated1" && val2_bytes.as_ref() == b"updated2";
-
-        assert!(
-            is_initial || is_updated,
-            "Transaction atomicity violated: key1={:?}, key2={:?}",
-            String::from_utf8_lossy(&val1_bytes),
-            String::from_utf8_lossy(&val2_bytes)
-        );
+        // Assert: publication cannot change an already established snapshot.
+        assert_eq!(val1.as_deref(), Some(b"initial1".as_slice()));
+        assert_eq!(val2.as_deref(), Some(b"initial2".as_slice()));
 
         // Verify final state is updated
         let tx_final = engine
@@ -2393,8 +2450,6 @@ mod durability_atomicity {
 
         assert_eq!(final1.unwrap().as_ref(), b"updated1");
         assert_eq!(final2.unwrap().as_ref(), b"updated2");
-
-        eprintln!("Transaction atomicity maintained: reads see consistent state");
     }
 }
 
@@ -2417,6 +2472,7 @@ mod best_effort_durability {
         let opts = opts_for_mode("local");
         let engine = Engine::open(opts.to_open_options())?;
         let cf = engine.create_column_family("test")?;
+        let before = engine.metrics().get_runtime_metrics()?.wal_append_count;
 
         // Act - Write with BestEffort (should skip WAL)
         let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
@@ -2430,6 +2486,10 @@ mod best_effort_durability {
         let val2 = tx.get(b"key2")?;
         assert_eq!(val1.as_deref(), Some(&b"value1"[..]));
         assert_eq!(val2.as_deref(), Some(&b"value2"[..]));
+        assert_eq!(
+            engine.metrics().get_runtime_metrics()?.wal_append_count,
+            before
+        );
 
         Ok(())
     }
@@ -2471,17 +2531,22 @@ mod best_effort_durability {
         let val_0 = tx.get(b"key0")?;
         let marker = tx.get(b"durable_marker")?;
 
-        assert!(
-            val_0.is_some(),
-            "BestEffort data should survive restart once flush_cf() succeeds"
-        );
+        assert_eq!(val_0.as_deref(), Some(b"value0".as_slice()));
+        for index in 1..100 {
+            assert_eq!(
+                tx.get(format!("key{index}").as_bytes())?.as_deref(),
+                Some(format!("value{index}").as_bytes()),
+                "flushed best-effort key {index}"
+            );
+        }
         assert_eq!(marker.as_deref(), Some(&b"marker"[..]));
 
         Ok(())
     }
 
     #[test]
-    fn should_lose_best_effort_data_when_not_flushed() -> cntryl_midge::MidgeResult<()> {
+    fn should_lose_unflushed_best_effort_data_when_reopening_after_shutdown(
+    ) -> cntryl_midge::MidgeResult<()> {
         // Arrange
         let opts = opts_for_mode("local");
         let mut engine = Engine::open(opts.clone().to_open_options())?;
@@ -2499,7 +2564,7 @@ mod best_effort_durability {
         assert_eq!(val_before.as_deref(), Some(&b"ephemeral_value"[..]));
         drop(tx);
 
-        // Simulate crash: drop engine WITHOUT flush
+        // Act: close without explicitly flushing the best-effort memtable.
         engine.shutdown(Duration::from_secs(2))?;
 
         // Reopen engine
@@ -2510,7 +2575,7 @@ mod best_effort_durability {
         let val_after = tx.get(b"ephemeral_key")?;
         assert_eq!(
             val_after, None,
-            "BestEffort data should be lost on crash without flush"
+            "unflushed best-effort data has no persistent record"
         );
 
         Ok(())
@@ -2539,13 +2604,13 @@ mod best_effort_durability {
 
         // Assert - All data is visible
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
-        let val_first = tx.get(b"key00000000")?;
-        let val_mid = tx.get(b"key00025000")?;
-        let val_last = tx.get(b"key00049999")?;
-
-        assert!(val_first.is_some(), "First key should exist");
-        assert!(val_mid.is_some(), "Middle key should exist");
-        assert!(val_last.is_some(), "Last key should exist");
+        for index in 0..50_000 {
+            assert_eq!(
+                tx.get(format!("key{index:08}").as_bytes())?.as_deref(),
+                Some(format!("value{index:08}").as_bytes()),
+                "acknowledged key {index}"
+            );
+        }
 
         Ok(())
     }
@@ -2631,7 +2696,10 @@ mod concurrent_commit_durability {
 }
 
 mod recovery_policy_api {
-    use cntryl_midge::{Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy};
+    use cntryl_midge::{
+        Engine, EngineHealth, MidgeError, OpenOptions, RecoveryPolicy, TransactionMode,
+        WriteOptions,
+    };
     use std::fs;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -2644,16 +2712,49 @@ mod recovery_policy_api {
             .expect("shutdown initialized engine");
     }
 
+    /// Leave the database with a sealed WAL segment that recovery replays:
+    /// an unflushed write in a second column family holds segment 1 after a
+    /// flush of the default family seals it. Returns that segment's path.
+    fn initialize_with_sealed_wal_segment(db_path: &std::path::Path) -> std::path::PathBuf {
+        let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
+            .expect("initialize engine");
+        let retained = engine
+            .create_column_family("retained")
+            .expect("create retaining column family");
+        let default = engine
+            .get_column_family("default")
+            .expect("default column family");
+        for cf in [&retained, &default] {
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin write");
+            tx.put(b"key".to_vec(), b"value".to_vec(), None)
+                .expect("stage write");
+            tx.commit(WriteOptions::sync()).expect("commit write");
+        }
+        engine.flush_cf(&default).expect("flush default family");
+        engine
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown initialized engine");
+        let sealed = db_path
+            .join("wal")
+            .join(cntryl_midge::__internal::wal::segment_file_name(1));
+        assert!(
+            sealed.exists()
+                && db_path
+                    .join("wal")
+                    .join(cntryl_midge::__internal::wal::segment_file_name(2))
+                    .exists(),
+            "the flush must seal segment 1 and the retaining family must hold it"
+        );
+        sealed
+    }
+
     fn write_corrupt_wal(db_path: &std::path::Path) {
-        let wal_dir = db_path.join("wal");
-        fs::create_dir_all(&wal_dir).expect("create wal dir");
         // A sealed segment is not allowed to hide an incomplete/corrupt prefix;
-        // the active `wal.log` tail is intentionally tolerated by strict replay.
-        fs::write(
-            wal_dir.join(cntryl_midge::__internal::wal::segment_file_name(1)),
-            b"\x01\x02\x03",
-        )
-        .expect("write corrupt wal");
+        // the open segment's tail is intentionally tolerated by strict replay.
+        let sealed = initialize_with_sealed_wal_segment(db_path);
+        fs::write(sealed, b"\x01\x02\x03").expect("write corrupt wal");
     }
 
     #[test]
@@ -2746,7 +2847,7 @@ mod recovery_policy_api {
     }
 
     #[test]
-    fn should_retain_sst_files_when_salvage_opens_with_unreadable_manifest() {
+    fn should_retain_sst_files_when_salvage_rejects_unreadable_manifest() {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
@@ -2781,31 +2882,24 @@ mod recovery_policy_api {
         }
 
         // Act
-        let engine = Engine::open(
+        let Err(MidgeError::Corruption(message)) = Engine::open(
             OpenOptions::local(db_path)
                 .recovery_policy(RecoveryPolicy::Salvage)
                 .build()
                 .expect("build options"),
-        )
-        .expect("salvage open");
+        ) else {
+            panic!("salvage must reject a database without readable manifest authority");
+        };
 
         // Assert
-        assert_eq!(
-            engine
-                .metrics()
-                .get_runtime_metrics()
-                .expect("metrics")
-                .health,
-            EngineHealth::SalvageMode
+        assert!(
+            message.contains("manifest snapshot"),
+            "unexpected error: {message}"
         );
         assert_eq!(
             sst_file_names(db_path),
             before,
-            "salvage must retain SSTs the unreadable manifest no longer lists"
-        );
-        assert!(
-            db_path.join("salvage-retained").is_dir(),
-            "retained SSTs are quarantined out of the SST directory"
+            "failed salvage must leave every SST in place when manifest authority is unreadable"
         );
     }
 
@@ -2844,7 +2938,6 @@ mod recovery_policy_api {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        initialize_format_marker(db_path);
         write_corrupt_wal(db_path);
 
         // Act
@@ -2857,14 +2950,14 @@ mod recovery_policy_api {
 
         // Assert
         match result {
-            Err(MidgeError::RecoveryFailed(message)) => {
+            Err(MidgeError::Corruption(message)) => {
                 assert!(
                     message.contains("WAL"),
-                    "expected WAL recovery context, got: {message}"
+                    "expected WAL corruption context, got: {message}"
                 );
             }
-            Ok(_) => panic!("expected strict WAL recovery failure, got successful open"),
-            Err(other) => panic!("expected RecoveryFailed, got: {other}"),
+            Ok(_) => panic!("expected strict WAL corruption error, got successful open"),
+            Err(other) => panic!("expected Corruption, got: {other}"),
         }
     }
 
@@ -2873,7 +2966,6 @@ mod recovery_policy_api {
         // Arrange
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        initialize_format_marker(db_path);
         write_corrupt_wal(db_path);
 
         // Act

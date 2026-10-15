@@ -12,24 +12,9 @@ use crate::runtime::RuntimeMsg;
 #[cfg(test)]
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
-
-// Failed deletion must remain retryable, but immediately resubmitting a
-// permanently failing provider request would turn the event loop into a busy
-// loop. The short test delay keeps the regression test deterministic while the
-// production delay keeps retries bounded.
-#[cfg(not(test))]
-const CLOUD_DELETE_RETRY_DELAY: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const CLOUD_DELETE_RETRY_DELAY: Duration = Duration::from_millis(10);
-
-#[cfg(not(test))]
-const MANIFEST_RECLAMATION_RETRY_DELAY: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const MANIFEST_RECLAMATION_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Actor handling garbage collection
 pub struct GcActor {
@@ -37,6 +22,9 @@ pub struct GcActor {
     last_gc_run: Option<std::time::Instant>,
     /// Obsolete files that were retained because a transaction still pins them.
     pending_obsolete: VecDeque<String>,
+    /// Files below the durable WAL log start, with their accounted byte size.
+    pending_retired_wal: VecDeque<(u64, u64)>,
+    retired_wal_retry: crate::runtime::retry_schedule::RetrySchedule,
     /// SSTs removed from the local manifest but waiting for the updated
     /// manifest to be published to the remote authority before deletion.
     pending_manifest_reclamation: VecDeque<String>,
@@ -61,20 +49,37 @@ pub struct GcActor {
 
 impl GcActor {
     pub fn new() -> Self {
+        Self::with_retry_policy(crate::runtime::RuntimeRetryPolicy::default())
+    }
+
+    pub(crate) fn with_retry_policy(retry_policy: crate::runtime::RuntimeRetryPolicy) -> Self {
         Self {
             last_gc_run: None,
             pending_obsolete: VecDeque::new(),
+            pending_retired_wal: VecDeque::new(),
+            retired_wal_retry: crate::runtime::retry_schedule::RetrySchedule::new(
+                retry_policy.cloud_delete,
+            ),
             pending_manifest_reclamation: VecDeque::new(),
             manifest_reclamation_retry: crate::runtime::retry_schedule::RetrySchedule::new(
-                MANIFEST_RECLAMATION_RETRY_DELAY,
+                retry_policy.manifest_reclamation,
             ),
             failed_cloud_deletes: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             failed_delete_retry: crate::runtime::retry_schedule::RetrySchedule::new(
-                CLOUD_DELETE_RETRY_DELAY,
+                retry_policy.cloud_delete,
             ),
             retry_notifier: None,
             cloud_delete_workers: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retry_delays(&self) -> (Duration, Duration, Duration) {
+        (
+            self.retired_wal_retry.configured_delay(),
+            self.manifest_reclamation_retry.configured_delay(),
+            self.failed_delete_retry.configured_delay(),
+        )
     }
 
     /// Configure the event-loop wakeup channel used by cloud delete workers.
@@ -94,21 +99,18 @@ impl GcActor {
             .collect();
 
         // List actual files on disk
-        let disk_ssts = match std::fs::read_dir(&state.sst_dir) {
+        let listed = state
+            .fs
+            .list_dir(&crate::io::FsPath::new(crate::sst::fs::SST_DIR));
+        let disk_ssts = match listed {
             Ok(entries) => entries
-                .filter_map(|entry| {
-                    entry
-                        .ok()
-                        .and_then(|e| e.file_name().into_string().ok())
-                        .filter(|name| {
-                            let path = std::path::Path::new(&name);
-                            path.extension()
-                                .is_some_and(|ext| ext.eq_ignore_ascii_case("sst"))
-                                || path
-                                    .file_name()
-                                    .and_then(|file_name| file_name.to_str())
-                                    .is_some_and(|file_name| file_name.ends_with(".sst.tmp"))
-                        })
+                .into_iter()
+                .map(|entry| entry.name)
+                .filter(|name| {
+                    std::path::Path::new(name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("sst"))
+                        || name.ends_with(".sst.tmp")
                 })
                 .collect::<HashSet<_>>(),
             Err(e) => {
@@ -168,7 +170,7 @@ impl GcActor {
         let mut cloud_sst_deletes = Vec::new();
 
         for sst_name in sst_names {
-            let sst_path = state.sst_dir.join(sst_name);
+            let sst_path = crate::sst::fs::sst_key(sst_name);
 
             // Check that file is not in active manifest
             let is_active = state.manifest.files.iter().any(|f| f.name == *sst_name);
@@ -200,24 +202,24 @@ impl GcActor {
             }
 
             if hybrid_storage.is_some() {
-                cloud_sst_deletes.push((sst_name.clone(), sst_path));
+                cloud_sst_deletes.push(sst_name.clone());
                 continue;
             }
 
             // Actually delete the file
-            match std::fs::remove_file(&sst_path) {
+            match state.fs.remove_file(&sst_path) {
                 Ok(()) => {
-                    tracing::info!(sst_name, path = %sst_path.display(), "Deleted obsolete SST");
+                    tracing::info!(sst_name, path = sst_path.0, "Deleted obsolete SST");
                     deleted_count += 1;
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    tracing::debug!(sst_name, path = %sst_path.display(), "Obsolete SST already missing");
+                Err(crate::io::FsError::NotFound(_)) => {
+                    tracing::debug!(sst_name, path = sst_path.0, "Obsolete SST already missing");
                     deleted_count += 1;
                 }
                 Err(e) => {
                     tracing::warn!(
                         sst_name,
-                        path = %sst_path.display(),
+                        path = sst_path.0,
                         error = %e,
                         "Failed to delete SST file"
                     );
@@ -230,12 +232,10 @@ impl GcActor {
         if let Some(storage) = hybrid_storage {
             scheduled_count = cloud_sst_deletes.len();
             if !cloud_sst_deletes.is_empty() {
-                let retry_names = cloud_sst_deletes
-                    .iter()
-                    .map(|(name, _)| name.clone())
-                    .collect::<Vec<_>>();
+                let retry_names = cloud_sst_deletes.clone();
                 match Self::spawn_cloud_sst_delete_worker(
                     storage,
+                    Arc::clone(&state.fs),
                     cloud_sst_deletes,
                     Arc::clone(&self.failed_cloud_deletes),
                     self.retry_notifier.clone(),
@@ -301,12 +301,56 @@ impl GcActor {
         state: &mut RuntimeState,
         hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     ) {
+        self.retry_retired_wal(state, hybrid_storage.as_deref());
         self.schedule_failed_cloud_delete_retry();
         if self.pending_obsolete.is_empty() {
             return;
         }
         let pending = self.pending_obsolete.drain(..).collect::<Vec<_>>();
         self.delete_ssts(state, &pending, hybrid_storage);
+    }
+
+    pub(crate) fn enqueue_retired_wal(
+        &mut self,
+        retired: &crate::runtime::wal_history::RetiredWal,
+    ) {
+        self.pending_retired_wal
+            .extend(retired.pending.iter().copied());
+    }
+
+    pub(crate) fn retry_retired_wal(
+        &mut self,
+        state: &mut RuntimeState,
+        storage: Option<&crate::storage::HybridStorage>,
+    ) {
+        let Some(wal) = state.wal.history.segment_files() else {
+            return;
+        };
+        self.retired_wal_retry.clear();
+        let mut retained = VecDeque::new();
+        while let Some((id, bytes)) = self.pending_retired_wal.pop_front() {
+            // The durable ledger, not a callback, authorizes every unlink.
+            if id >= state.wal.history.ledger().log_start() {
+                retained.push_back((id, bytes));
+                continue;
+            }
+            match wal.remove_file(&crate::io::FsPath::new(crate::wal::segment_file_name(id))) {
+                Ok(()) | Err(crate::io::FsError::NotFound(_)) => {
+                    if let Some(storage) = storage {
+                        storage.release_local_wal_bytes(bytes);
+                    }
+                }
+                Err(error) => {
+                    state.mark_persistence_anomaly();
+                    tracing::warn!(segment_id=id, %error, "retaining ignored WAL file for GC retry");
+                    retained.push_back((id, bytes));
+                }
+            }
+        }
+        self.pending_retired_wal = retained;
+        if !self.pending_retired_wal.is_empty() {
+            self.retired_wal_retry.defer();
+        }
     }
 
     pub fn queue_manifest_reclamation(&mut self, names: impl IntoIterator<Item = String>) {
@@ -355,6 +399,7 @@ impl GcActor {
     pub fn retry_deadline_timeout(&self) -> Option<Duration> {
         [
             self.failed_delete_retry.remaining(),
+            self.retired_wal_retry.remaining(),
             self.manifest_reclamation_retry.remaining(),
         ]
         .into_iter()
@@ -371,6 +416,9 @@ impl GcActor {
         state: &mut RuntimeState,
         hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     ) {
+        if self.retired_wal_retry.is_scheduled() && self.retired_wal_retry.is_ready() {
+            self.retry_retired_wal(state, hybrid_storage.as_deref());
+        }
         self.schedule_failed_cloud_delete_retry();
 
         if !self.failed_delete_retry.is_scheduled() {
@@ -454,7 +502,8 @@ impl GcActor {
 
     fn spawn_cloud_sst_delete_worker(
         storage: Arc<crate::storage::HybridStorage>,
-        ssts: Vec<(String, PathBuf)>,
+        fs: Arc<dyn crate::io::Fs>,
+        ssts: Vec<String>,
         failed_cloud_deletes: Arc<parking_lot::Mutex<VecDeque<String>>>,
         retry_notifier: Option<crossbeam::channel::Sender<RuntimeMsg>>,
     ) -> MidgeResult<JoinHandle<()>> {
@@ -462,7 +511,8 @@ impl GcActor {
             .name("midge-sst-gc".to_string())
             .spawn(move || {
                 let storage = CloudPersistence::new(storage);
-                for (sst_name, sst_path) in ssts {
+                for sst_name in ssts {
+                    let sst_path = crate::sst::fs::sst_key(&sst_name);
                     if let Err(error) = storage.delete_sst_object_blocking(&sst_name) {
                         tracing::warn!(
                             sst_name,
@@ -477,21 +527,21 @@ impl GcActor {
                         continue;
                     }
 
-                    let resident_bytes = std::fs::metadata(&sst_path).ok().map(|metadata| metadata.len());
-                    match std::fs::remove_file(&sst_path) {
+                    let resident_bytes = fs.metadata(&sst_path).ok().map(|metadata| metadata.len);
+                    match fs.remove_file(&sst_path) {
                         Ok(()) => {
                             storage.release_local_sst_bytes(resident_bytes.unwrap_or(0));
                             tracing::info!(
                                 sst_name,
-                                path = %sst_path.display(),
+                                path = sst_path.0,
                                 "Deleted obsolete SST after cloud provider cleanup"
                             );
                         }
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                        Err(crate::io::FsError::NotFound(_)) => {},
                         Err(error) => {
                             tracing::warn!(
                                 sst_name,
-                                path = %sst_path.display(),
+                                path = sst_path.0,
                                 %error,
                                 "Failed to delete obsolete local SST after cloud provider cleanup"
                             );
@@ -543,7 +593,83 @@ impl Drop for GcActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{cloud::CloudStorage, HybridStorage};
     use std::time::Instant;
+
+    #[test]
+    fn should_unlink_wal_only_below_the_durable_ledger_log_start() {
+        // Arrange
+        let device = crate::simulation::crash_fs::CrashDevice::new();
+        let wal = crate::io::subdirectory(Arc::new(device.fs()), crate::wal::WAL_DIR);
+        let mut state = RuntimeState::new("/tmp/midge-gc-retirement".into(), true);
+        state.wal.history =
+            crate::runtime::wal_history::WalHistory::open(wal.clone(), 1, 0).unwrap();
+        crate::runtime::wal_history::fixture::rotate(&mut state.wal.history).unwrap();
+        let name = crate::io::FsPath::new(crate::wal::segment_file_name(1));
+        let mut actor = GcActor::new();
+        actor.enqueue_retired_wal(&crate::runtime::wal_history::RetiredWal {
+            pending: vec![(1, 0)],
+        });
+
+        // Act
+        actor.retry_retired_wal(&mut state, None);
+
+        assert!(wal.exists(&name).unwrap());
+        assert_eq!(actor.pending_retired_wal.len(), 1);
+
+        // Retry after the ledger makes the same physical cleanup authoritative.
+        state.wal.history.retire_below(2).unwrap();
+        actor.retry_retired_wal(&mut state, None);
+
+        // Assert
+        assert!(!wal.exists(&name).unwrap());
+        assert!(actor.pending_retired_wal.is_empty());
+    }
+
+    #[test]
+    fn should_release_local_wal_bytes_once_after_a_failed_unlink_is_retried() {
+        use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
+        // Arrange
+        let device = CrashDevice::new();
+        let wal = crate::io::subdirectory(Arc::new(device.fs()), crate::wal::WAL_DIR);
+        let mut state = RuntimeState::new("/tmp/midge-gc-accounting".into(), true);
+        state.wal.history =
+            crate::runtime::wal_history::WalHistory::open(wal.clone(), 1, 0).unwrap();
+        crate::runtime::wal_history::fixture::rotate(&mut state.wal.history).unwrap();
+        let retired = state.wal.history.retire_below(2).unwrap();
+        let bytes = retired.pending[0].1;
+        let storage = HybridStorage::with_policy(
+            Arc::new(CloudStorage::with_mock()),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        );
+        storage.enable_ephemeral_sst_cache(1024);
+        storage.admit_local_wal_bytes(bytes).unwrap();
+        assert_eq!(storage.budget_snapshot().usage.wal_bytes, bytes);
+        let fault = device.inject(Fault {
+            op: FaultOp::RemoveFile,
+            path: format!("wal/{}", crate::wal::segment_file_name(1)),
+            nth: 1,
+            effect: FaultEffect::Before,
+            error: FaultError::Io,
+        });
+        let mut actor = GcActor::new();
+        actor.enqueue_retired_wal(&retired);
+
+        // Act
+        actor.retry_retired_wal(&mut state, Some(&storage));
+
+        assert!(device.fired(fault));
+        assert_eq!(storage.budget_snapshot().usage.wal_bytes, bytes);
+        assert_eq!(actor.pending_retired_wal.len(), 1);
+
+        // Retry the retained target, then confirm an extra retry cannot release twice.
+        actor.retry_retired_wal(&mut state, Some(&storage));
+        actor.retry_retired_wal(&mut state, Some(&storage));
+
+        // Assert
+        assert_eq!(storage.budget_snapshot().usage.wal_bytes, 0);
+        assert!(actor.pending_retired_wal.is_empty());
+    }
 
     #[test]
     fn should_not_block_worker_when_retry_notification_queue_is_full() {
@@ -581,9 +707,9 @@ mod tests {
         // is a deadlock until the response timeout breaks it.
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
-        std::fs::create_dir_all(&state.sst_dir).expect("sst dir");
+        std::fs::create_dir_all(state.host_sst_dir()).expect("sst dir");
         let name = crate::cloud_layout::file_name(0, 0, 1);
-        let path = state.sst_dir.join(&name);
+        let path = state.host_sst_dir().join(&name);
         std::fs::write(&path, b"obsolete").expect("obsolete SST");
         let (notifier, notifications) = crossbeam::channel::unbounded();
         let mut actor = GcActor::new();

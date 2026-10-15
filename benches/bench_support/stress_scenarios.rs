@@ -32,19 +32,27 @@ use recovery_progress::{is_recovery_work, RecoveryProgressLayer, RecoveryScope};
 #[path = "stress_scenarios/checkpoint_accounting.rs"]
 mod checkpoint_accounting;
 use checkpoint_accounting::CheckpointAccounting;
+#[path = "stress_scenarios/admission.rs"]
+mod admission;
 #[cfg(all(test, feature = "failpoints"))]
 #[path = "stress_scenarios/final_flush_watchdog.rs"]
 mod final_flush_watchdog;
 #[path = "stress_scenarios/latency.rs"]
 mod latency;
+#[cfg(test)]
+#[path = "stress_scenarios/watchdog_preparation.rs"]
+mod watchdog_preparation;
 #[cfg(all(test, feature = "failpoints"))]
 #[allow(
     unused_imports,
     reason = "Only the watchdog integration target uses these shared fixture exports"
 )]
 pub(super) use final_flush_watchdog::{
-    run_final_flush_terminal_policy_fixture, run_final_flush_watchdog_fixture,
+    prepare_final_flush_watchdog_fixture, run_final_flush_terminal_policy_fixture,
+    run_final_flush_watchdog_fixture, FlushFixtureKind,
 };
+#[cfg(test)]
+pub(super) use watchdog_preparation::PreparationGuard;
 
 const VALUE_SIZE: usize = 128;
 const SEED_ROWS: usize = 512;
@@ -686,6 +694,8 @@ struct StageReport<'a> {
     stats: &'a StageStats,
     before: &'a RuntimeMetricsSnapshot,
     after: &'a RuntimeMetricsSnapshot,
+    admission_before: &'a cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
+    admission_after: &'a cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
 }
 
 pub(super) fn run_case(ctx: &mut StressContext, case: WorkloadCase) {
@@ -703,7 +713,12 @@ pub(super) fn run_case(ctx: &mut StressContext, case: WorkloadCase) {
     let run_dir = tempfile::tempdir().expect("create isolated stress directory");
     let mut opened = open_case(case, run_dir.path(), &progress, &artifacts);
     let sampler = ResourceSampler::start(&artifacts, &opened.database, progress.clone());
+    let maintenance =
+        admission::MaintenanceSampler::start(&opened.engine, &artifacts.path, artifacts.started);
     let expected = run_stages(ctx, case, duration, &mut opened, &progress, &mut artifacts);
+    if let Some(maintenance) = maintenance {
+        maintenance.finish();
+    }
     finish_case(opened, &expected, &progress, &mut artifacts);
     let (resource_start, resource_end, peak_rss) = sampler.finish();
     record_resources(ctx, resource_start, resource_end, peak_rss);
@@ -812,6 +827,8 @@ fn run_stages(
         let started = Instant::now();
         let before = runtime_metrics(&opened.engine);
         capture_prestate(case, stage_index, clients, opened, artifacts, &before);
+        let admission_before =
+            cntryl_midge::__internal::diagnostics::write_admission_snapshot(&opened.engine);
         let (stage, outcomes) = run_stage(
             case,
             stage_index,
@@ -839,11 +856,13 @@ fn run_stages(
         }
         let elapsed = started.elapsed().max(Duration::from_nanos(1));
         let after = runtime_metrics(&opened.engine);
+        let admission_after =
+            cntryl_midge::__internal::diagnostics::write_admission_snapshot(&opened.engine);
         write_atomic_json(
             &artifacts
                 .path
                 .join(format!("stage-{stage_index:02}-endstate.json")),
-            &json!({ "stage_index": stage_index, "runtime": after }),
+            &json!({ "stage_index": stage_index, "runtime": after, "write_admission": admission_after }),
         )
         .expect("persist measured end-stage runtime state");
         record_stage(
@@ -856,6 +875,8 @@ fn run_stages(
                 stats: &stage,
                 before: &before,
                 after: &after,
+                admission_before: &admission_before,
+                admission_after: &admission_after,
             },
         );
     }
@@ -919,6 +940,7 @@ fn capture_prestate(
             "prior_stage_count": stage_index,
             "database_logical_file_bytes": directory_bytes(&opened.database),
             "runtime": before,
+            "write_admission": cntryl_midge::__internal::diagnostics::write_admission_snapshot(&opened.engine),
             "storage_layout": layout,
         }),
     )
@@ -1289,7 +1311,13 @@ fn append_final_flush_attempt(artifacts: &WorkloadArtifacts, attempt: &serde_jso
         .append(true)
         .open(artifacts.path.join("final-flush-attempts.jsonl"))
         .expect("open final-flush attempt report");
-    writeln!(output, "{attempt}").expect("retain actual final-flush result");
+    // Serialize before I/O so JSON formatting does not turn every field into a
+    // separate filesystem write inside the active watchdog window.
+    let mut record = serde_json::to_vec(attempt).expect("encode final-flush result");
+    record.push(b'\n');
+    output
+        .write_all(&record)
+        .expect("retain actual final-flush result");
 }
 
 fn shutdown_engine(
@@ -1804,6 +1832,8 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
         stats,
         before,
         after,
+        admission_before,
+        admission_after,
     } = report;
     let name = format!(
         "{}/{}/{}",
@@ -1849,19 +1879,8 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
             after.write_stalls_no_space_total,
         );
     record_stage_diagnostics(ctx, stats, before, after);
-    for (name, quantile) in [
-        ("transaction_latency_p50_us", 0.50),
-        ("transaction_latency_p95_us", 0.95),
-        ("transaction_latency_p99_us", 0.99),
-    ] {
-        let value = observation_value(self::quantile(&stats.latency_us, quantile));
-        ctx.record_observation(
-            name,
-            value,
-            ObservationUnit::Microseconds,
-            ObservationDirection::LowerIsBetter,
-        );
-    }
+    record_admission_diagnostics(ctx, stats, *admission_before, *admission_after);
+    record_legacy_latency(ctx, stats);
     ctx.record_observation(
         "logical_operations",
         observation_value(stats.logical_operations),
@@ -1898,12 +1917,64 @@ fn record_stage(ctx: &mut StressContext, report: StageReport<'_>) {
     );
 }
 
+fn record_legacy_latency(ctx: &mut StressContext, stats: &StageStats) {
+    for (name, rank) in [
+        ("transaction_latency_p50_us", 0.50),
+        ("transaction_latency_p95_us", 0.95),
+        ("transaction_latency_p99_us", 0.99),
+    ] {
+        ctx.record_observation(
+            name,
+            observation_value(quantile(&stats.latency_us, rank)),
+            ObservationUnit::Microseconds,
+            ObservationDirection::LowerIsBetter,
+        );
+    }
+}
+
 fn record_stage_diagnostics(
     ctx: &mut StressContext,
     stats: &StageStats,
     before: &RuntimeMetricsSnapshot,
     after: &RuntimeMetricsSnapshot,
 ) {
+    for (name, initial, final_value) in [
+        (
+            "flush_build_count",
+            before.flush_build_count,
+            after.flush_build_count,
+        ),
+        (
+            "flush_build_ns",
+            before.flush_build_ns_total,
+            after.flush_build_ns_total,
+        ),
+        (
+            "flush_publish_count",
+            before.flush_publish_count,
+            after.flush_publish_count,
+        ),
+        (
+            "flush_publish_ns",
+            before.flush_publish_ns_total,
+            after.flush_publish_ns_total,
+        ),
+        ("compactions", before.compactions_run, after.compactions_run),
+        (
+            "compaction_bytes",
+            before.compaction_bytes_rewritten,
+            after.compaction_bytes_rewritten,
+        ),
+        (
+            "write_stall_ns",
+            before.write_stall_ns_total,
+            after.write_stall_ns_total,
+        ),
+    ] {
+        let delta = final_value.checked_sub(initial);
+        ctx.parameter(format!("midge_{name}_delta_valid"), delta.is_some())
+            .parameter(format!("midge_{name}_delta"), delta.unwrap_or(0));
+    }
     for (name, initial, final_value) in [
         (
             "memory",
@@ -1957,6 +2028,77 @@ fn observation_value(value: u64) -> f64 {
         .to_string()
         .parse::<f64>()
         .expect("integer observations fit in f64")
+}
+
+fn record_admission_diagnostics(
+    ctx: &mut StressContext,
+    stats: &StageStats,
+    before: cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
+    after: cntryl_midge::__internal::diagnostics::WriteAdmissionSnapshot,
+) {
+    let mut origins = Some(0_u64);
+    for (name, initial, final_value) in [
+        ("queue", before.queue_total, after.queue_total),
+        ("l0", before.l0_total, after.l0_total),
+        (
+            "cloud_generation",
+            before.cloud_generation_total,
+            after.cloud_generation_total,
+        ),
+        ("cloud_wal", before.cloud_wal_total, after.cloud_wal_total),
+        (
+            "ingest_hint",
+            before.ingest_hint_total,
+            after.ingest_hint_total,
+        ),
+    ] {
+        let delta = final_value.checked_sub(initial);
+        origins = origins
+            .zip(delta)
+            .and_then(|(sum, count)| sum.checked_add(count));
+        ctx.parameter(
+            format!("midge_admission_{name}_delta_valid"),
+            delta.is_some(),
+        )
+        .parameter(format!("midge_admission_{name}_delta"), delta.unwrap_or(0));
+    }
+    let commits = after
+        .commit_write_stall_total
+        .checked_sub(before.commit_write_stall_total);
+    ctx.parameter("midge_admission_commit_delta_valid", commits.is_some())
+        .parameter("midge_admission_commit_delta", commits.unwrap_or(0))
+        .parameter(
+            "midge_admission_counts_reconcile",
+            commits == Some(stats.saturation.write_stall) && origins == commits,
+        );
+    for (name, initial, final_value) in [
+        (
+            "runtime",
+            before.hint_runtime_total,
+            after.hint_runtime_total,
+        ),
+        ("l0", before.hint_l0_total, after.hint_l0_total),
+        ("memory", before.hint_memory_total, after.hint_memory_total),
+        (
+            "cloud_pending",
+            before.hint_cloud_pending_total,
+            after.hint_cloud_pending_total,
+        ),
+        (
+            "upload_stalled",
+            before.hint_upload_stalled_total,
+            after.hint_upload_stalled_total,
+        ),
+        (
+            "unknown",
+            before.hint_unknown_total,
+            after.hint_unknown_total,
+        ),
+    ] {
+        let delta = final_value.checked_sub(initial);
+        ctx.parameter(format!("midge_hint_{name}_delta_valid"), delta.is_some())
+            .parameter(format!("midge_hint_{name}_delta"), delta.unwrap_or(0));
+    }
 }
 
 fn append_stage_csv(path: &Path, stage: &str, stats: &StageStats) {
@@ -2451,12 +2593,18 @@ fn signed_gcs_json_namespace(bucket: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
+static PREPARED_RECOVERY: watchdog_preparation::PreparedSlot<(
+    WorkloadArtifacts,
+    cntryl_midge::__internal::recovery::PreparedRecoveryProgressFixture,
+)> = watchdog_preparation::PreparedSlot::new();
+
+#[cfg(test)]
 #[allow(
     dead_code,
     reason = "Only the watchdog integration target calls this fixture"
 )]
 pub(super) fn run_watchdog_fixture(ctx: &mut StressContext, resume_successes: bool) {
-    let duration = Duration::from_secs(if resume_successes { 2 } else { 4 });
+    let duration = Duration::from_secs(4);
     let case = WorkloadCase {
         benchmark: if resume_successes {
             "resumed_successes_with_disk_churn"
@@ -2542,19 +2690,19 @@ pub(super) fn run_watchdog_fixture(ctx: &mut StressContext, resume_successes: bo
     dead_code,
     reason = "Only the watchdog integration target calls this fixture"
 )]
-pub(super) fn run_recovery_watchdog_fixture(
-    ctx: &mut StressContext,
+pub(super) fn prepare_recovery_watchdog_fixture(
     mode: cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode,
-) {
+    samples: usize,
+    setup_delay: Duration,
+) -> impl PreparationGuard {
     use cntryl_midge::__internal::recovery::{
-        run_recovery_progress_fixture, RecoveryProgressFixtureMode,
+        prepare_recovery_progress_fixture, RecoveryProgressFixtureMode,
     };
 
     enable_phase_tracing();
     let benchmark = match mode {
         RecoveryProgressFixtureMode::DelayedRanges => "delayed_recovery_with_flat_cache",
         RecoveryProgressFixtureMode::HeldFirstRange => "held_recovery_with_flat_cache",
-        RecoveryProgressFixtureMode::CachedCoverage => "cached_recovery_with_flat_cache",
         RecoveryProgressFixtureMode::MetadataInventory => {
             "metadata_inventory_recovery_with_flat_cache"
         }
@@ -2568,11 +2716,59 @@ pub(super) fn run_recovery_watchdog_fixture(
         workload: "recovery-fixture",
         stages: &[],
     };
+    let scope = PREPARED_RECOVERY.install(Vec::new(), |(mut artifacts, _)| {
+        artifacts.terminal_error = Some("prepared fixture was not invoked".into());
+        // Seal the cancellation receipt before the fallback Drop marks unfinished work failed.
+        artifacts.complete = true;
+        artifacts.persist("canceled");
+    });
+    for _ in 0..samples {
+        let mut artifacts = WorkloadArtifacts::begin(case, Duration::from_secs(8));
+        let fixture_root = artifacts.path.join("recovery-fixture");
+        let database = fixture_root.join("local");
+        fs::create_dir_all(&database).expect("create empty recovery fixture database");
+        let prepared = prepare_recovery_progress_fixture(&fixture_root, mode, setup_delay)
+            .unwrap_or_else(|error| {
+                artifacts.terminal_error = Some(format!("fixture preparation failed: {error}"));
+                artifacts.persist("failed");
+                panic!("recovery fixture preparation failed: {error}");
+            });
+        write_atomic_json(
+            &artifacts.path.join("fixture-preparation.json"),
+            &json!({
+                "setup_elapsed_ms": prepared.setup_elapsed().as_millis(),
+                "mode": prepared.mode(),
+            }),
+        )
+        .expect("retain actual component preparation time");
+        scope.push((artifacts, prepared));
+    }
+    scope
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "Only the watchdog integration target calls this fixture"
+)]
+pub(super) fn run_recovery_watchdog_fixture(
+    ctx: &mut StressContext,
+    mode: cntryl_midge::__internal::recovery::RecoveryProgressFixtureMode,
+) {
+    let (mut artifacts, prepared) = PREPARED_RECOVERY.take();
+    assert_eq!(
+        prepared.mode(),
+        mode,
+        "run the workload whose input was prepared"
+    );
+    let database = artifacts.path.join("recovery-fixture/local");
     let progress = ctx.progress_handle();
-    let mut artifacts = WorkloadArtifacts::begin(case, Duration::from_secs(8));
-    let fixture_root = artifacts.path.join("recovery-fixture");
-    let database = fixture_root.join("local");
-    fs::create_dir_all(&database).expect("create empty recovery fixture database");
+    ctx.record_observation(
+        "fixture_setup_elapsed_ns",
+        prepared.setup_elapsed().as_secs_f64() * 1e9,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
+    );
     artifacts.enter_phase("recovery", "actual-planner-and-replay", &progress);
     let _sampler = ResourceSampler::start_with_interval(
         &artifacts,
@@ -2582,18 +2778,26 @@ pub(super) fn run_recovery_watchdog_fixture(
     );
     // The real planner and replay own successful work. The fixture delays or
     // holds their provider responses and retains independent observations.
-    let (result, recovery_units) = ctx
-        .measure("actual cloud WAL recovery", || {
-            let before = progress.completed_units();
-            let _scope =
-                RecoveryScope::enter(&progress, &artifacts.resource_phase, artifacts.phase);
-            run_recovery_progress_fixture(&fixture_root, mode)
-                .map(|result| (result, progress.completed_units() - before))
-        })
-        .expect("actual planner and replay fixture completes");
+    let before = progress.completed_units();
+    let result = {
+        let _scope = RecoveryScope::enter(&progress, &artifacts.resource_phase, artifacts.phase);
+        prepared
+            .run()
+            .expect("actual planner and replay fixture completes")
+    };
+    let recovery_units = progress.completed_units() - before;
+    // This is a complete fixture invocation, not a repeatable timing closure.
+    // Native warmup/measured/cooldown samples each consume their own input.
+    ctx.record_external_outcome(
+        "actual cloud WAL recovery",
+        Duration::from_millis(result.elapsed_ms),
+        LogicalUnit::new("recovery"),
+        OperationOutcome::success(1),
+    );
     write_atomic_json(
         &artifacts.path.join("recovery-result.json"),
         &json!({
+            "progress_units": recovery_units,
             "expected_records": result.expected_records,
             "verified_records": result.verified_records,
             "mismatches": result.mismatches,
@@ -2605,7 +2809,6 @@ pub(super) fn run_recovery_watchdog_fixture(
             "local_wal_bytes": result.local_wal_bytes,
             "staged_wal_count": result.staged_wal_count,
             "elapsed_ms": result.elapsed_ms,
-            "coverage_checks": result.coverage_checks,
             "replay_completed_range_reads": result.replay_completed_range_reads,
             "expected_inventory_entries": result.expected_inventory_entries,
             "retained_inventory_entries": result.retained_inventory_entries,
@@ -2614,9 +2817,7 @@ pub(super) fn run_recovery_watchdog_fixture(
         }),
     )
     .expect("persist successful actual recovery fixture result");
-    ctx.metadata("fixture_recovery_elapsed_ms", result.elapsed_ms);
     ctx.metadata("fixture_recovery_verified_records", result.verified_records);
-    ctx.metadata("fixture_recovery_progress_units", recovery_units);
     progress.advance();
     artifacts.enter_phase("complete", "actual-planner-and-replay", &progress);
     artifacts.complete = true;
@@ -2664,11 +2865,13 @@ pub(super) fn run_journal_recovery_watchdog_fixture(ctx: &mut StressContext) {
     write_atomic_json(
         &artifacts.path.join("recovery-result.json"),
         &json!({
+            "progress_units": recovery_units,
             "expected_edits": result.expected_edits,
             "verified_edits": result.verified_edits,
             "max_edit_id": result.max_edit_id,
             "manifest_edit_checkpoint_id": result.manifest_edit_checkpoint_id,
             "restored_cf_count": result.restored_cf_count,
+            "restored_frontier_count": result.restored_frontier_count,
             "mismatches": result.mismatches,
             "completed_local_reads": result.completed_local_reads,
             "completed_local_read_bytes": result.completed_local_read_bytes,

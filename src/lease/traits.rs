@@ -4,6 +4,8 @@ use std::fmt;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::types::SharedGenerationId;
+
 // Type alias to improve readability and satisfy Clippy's type_complexity lint
 type ReleaseFn = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 
@@ -18,6 +20,8 @@ pub(crate) enum LeaseValidityState {
 #[cfg(test)]
 std::thread_local! {
     static REMAINING_CHECK_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+    static WAIT_PREDICATE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
 }
 
@@ -222,13 +226,30 @@ impl LeaseValidity {
         let (state, _) = self
             .changed
             .wait_timeout_while(state, timeout, |state| {
-                *state == observed && running.load(std::sync::atomic::Ordering::Acquire)
+                let keep_waiting =
+                    *state == observed && running.load(std::sync::atomic::Ordering::Acquire);
+                #[cfg(test)]
+                if keep_waiting {
+                    WAIT_PREDICATE_HOOK.with(|hook| {
+                        if let Some(hook) = hook.borrow_mut().take() {
+                            hook();
+                        }
+                    });
+                }
+                keep_waiting
             })
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *state
     }
 
     pub(crate) fn notify_all(&self) {
+        // Stop changes an external atomic used by wait_for_change's predicate.
+        // Serialize notification with the predicate's mutex so a waiter that
+        // read running=true cannot register after the only shutdown wakeup.
+        let _state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.changed.notify_all();
     }
 }
@@ -311,6 +332,67 @@ pub(super) fn scope_lease_error(error: crate::common::MidgeError) -> LeaseError 
     }
 }
 
+#[cfg(test)]
+mod stop_notification_tests {
+    use super::{LeaseValidity, WAIT_PREDICATE_HOOK};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn should_wake_lease_waiter_when_stop_races_with_wait_registration() {
+        // Arrange: pause after the wait predicate observes running=true,
+        // while the validity mutex is still held, before entering the condvar.
+        let validity = Arc::new(LeaseValidity::new());
+        validity
+            .activate(7, Instant::now() + Duration::from_secs(30))
+            .unwrap();
+        let observed = validity.snapshot();
+        let running = Arc::new(AtomicBool::new(true));
+        let (predicate_tx, predicate_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+        let waiter = {
+            let validity = Arc::clone(&validity);
+            let running = Arc::clone(&running);
+            std::thread::spawn(move || {
+                WAIT_PREDICATE_HOOK.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        predicate_tx.send(()).unwrap();
+                        resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    }));
+                });
+                let state = validity.wait_for_change(observed, Duration::from_secs(2), &running);
+                finished_tx.send(state).unwrap();
+            })
+        };
+        predicate_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        // Act: stop and notify while the waiter has already read the old
+        // predicate. An unsynchronized notify returns before registration.
+        running.store(false, Ordering::Release);
+        let (notified_tx, notified_rx) = mpsc::sync_channel(1);
+        let notifier = {
+            let validity = Arc::clone(&validity);
+            std::thread::spawn(move || {
+                validity.notify_all();
+                notified_tx.send(()).unwrap();
+            })
+        };
+        let _ = notified_rx.recv_timeout(Duration::from_millis(100));
+        resume_tx.send(()).unwrap();
+        let finished = finished_rx.recv_timeout(Duration::from_millis(500));
+        // Join even on RED so the fixture never leaves a waiting worker behind.
+        notifier.join().unwrap();
+        waiter.join().unwrap();
+
+        // Assert: stopping wakes promptly without changing lease authority.
+        assert!(finished.is_ok(), "stop notification was lost: {finished:?}");
+        assert_eq!(finished.unwrap(), observed);
+        assert_eq!(validity.snapshot(), observed);
+    }
+}
+
 fn definite_acquisition_rejection(error: &LeaseError) -> bool {
     matches!(
         error,
@@ -368,6 +450,15 @@ impl LeaseGuard {
             if let Some(release_fn) = guard.take() {
                 release_fn();
             }
+        }
+    }
+
+    /// Disarm release when a test replaces only the heartbeat implementation
+    /// but keeps the filesystem writer record active for WAL effect checks.
+    #[cfg(test)]
+    pub(crate) fn disarm_for_test(self) {
+        if let Ok(mut guard) = self.release_fn.lock() {
+            guard.take();
         }
     }
 }
@@ -532,11 +623,30 @@ pub struct CloudMetadataObject {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CloudMetadataGeneration {
-    /// Manifest sequence observed while capturing these bodies.
-    pub manifest_sequence: u64,
+    /// Shared publication ordinal, preserved across writer takeover.
+    pub id: SharedGenerationId,
+    /// Applied durable manifest journal horizon, distinct from publication order.
+    pub manifest_horizon: u64,
     /// Present control-metadata bodies. Unchanged bodies may retain keys from
     /// earlier immutable generations.
     pub objects: Vec<CloudMetadataObject>,
+}
+
+impl CloudMetadataGeneration {
+    pub(crate) fn validate_successor(&self, previous: Option<&Self>) -> Result<(), LeaseError> {
+        if previous == Some(self) {
+            return Ok(());
+        }
+        let expected = previous
+            .map_or(Some(SharedGenerationId::FIRST), |old| old.id.checked_next())
+            .ok_or_else(|| LeaseError::Internal("shared metadata generation exhausted".into()))?;
+        if self.id != expected
+            || previous.is_some_and(|old| self.manifest_horizon < old.manifest_horizon)
+        {
+            return Err(LeaseError::RenewalFailed("shared metadata publication must follow its exact predecessor without regressing the manifest horizon".into()));
+        }
+        Ok(())
+    }
 }
 
 /// State of the authority pointer in a provider-backed cloud lease.
@@ -610,11 +720,116 @@ pub fn parse_leader_record(content: &str) -> Option<LeaderRecord> {
     Some(record)
 }
 
+/// Admission and cleanup ownership for one leader acquisition.
+///
+/// Implementations must call [`Self::begin_mutation`] immediately before a
+/// potentially committed acquisition and retain the exact candidate epoch
+/// when it is known. The context carries cancellation and the original
+/// absolute deadline together, so a fresh provider budget cannot revive a
+/// cancelled open.
+pub struct LeaderAcquisition<'a> {
+    scope: crate::common::DeadlineScope,
+    on_cleanup_epoch: &'a mut dyn FnMut(u64),
+    mutation_admitted: bool,
+    cleanup_epoch: Option<u64>,
+}
+
+impl<'a> LeaderAcquisition<'a> {
+    pub(crate) fn within(
+        scope: &crate::common::DeadlineScope,
+        on_cleanup_epoch: &'a mut dyn FnMut(u64),
+    ) -> Self {
+        Self {
+            scope: scope.clone(),
+            on_cleanup_epoch,
+            mutation_admitted: false,
+            cleanup_epoch: None,
+        }
+    }
+
+    #[must_use]
+    pub fn remaining(&self) -> Duration {
+        self.scope.deadline().remaining()
+    }
+
+    pub fn check(&self) -> Result<(), LeaseError> {
+        self.scope
+            .check("leader acquisition")
+            .map_err(scope_lease_error)?;
+        Ok(())
+    }
+
+    pub fn begin_mutation(&mut self, cleanup_epoch: Option<u64>) -> Result<(), LeaseError> {
+        self.check()?;
+        self.scope
+            .begin_ambiguous_mutation("leader acquisition mutation")
+            .map_err(scope_lease_error)?;
+        self.mutation_admitted = true;
+        if let Some(epoch) = cleanup_epoch {
+            self.track_owner(epoch);
+        }
+        Ok(())
+    }
+
+    /// Record a confirmed owner even when cancellation won before completion.
+    pub fn track_owner(&mut self, epoch: u64) {
+        if self.cleanup_epoch != Some(epoch) {
+            self.cleanup_epoch = Some(epoch);
+            (self.on_cleanup_epoch)(epoch);
+        }
+    }
+
+    pub(crate) fn scope(&self) -> &crate::common::DeadlineScope {
+        &self.scope
+    }
+
+    pub(crate) fn restrict_timeout(&mut self, timeout: Duration) {
+        self.scope = self
+            .scope
+            .with_deadline(crate::common::OperationDeadline::from_budget(timeout));
+    }
+
+    pub(crate) fn finish(
+        &mut self,
+        result: Result<LeaderRecord, LeaseError>,
+    ) -> Result<LeaderRecord, LeaseError> {
+        match result {
+            Ok(record) => {
+                self.track_owner(record.epoch);
+                self.check().map_err(|error| {
+                    LeaseError::Indeterminate(format!(
+                        "leader acquisition committed but ownership acceptance failed: {error}"
+                    ))
+                })?;
+                Ok(record)
+            }
+            Err(error) => {
+                if self.mutation_admitted {
+                    if definite_acquisition_rejection(&error) {
+                        self.scope.resolve_ambiguous_mutation();
+                    } else {
+                        return Err(LeaseError::Indeterminate(format!(
+                            "leader acquisition mutation is unresolved: {error}"
+                        )));
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+}
+
 /// Abstraction over the persistent leader record storage.
 ///
-/// Implementations use CAS semantics (atomic-rename for filesystems,
-/// conditional PUT for object stores) — never file locks.
+/// Implementations publish records with provider CAS or atomic filesystem
+/// replacement. Filesystem stores serialize replacement with the
+/// crash-releasing locks shared by writer effects.
 pub trait LeaderStore: Send + Sync {
+    /// Optional grouping of physical writer jobs under one continuous fence.
+    fn writer_effect_groups(&self) -> Option<&dyn super::WriterEffectGroups> {
+        None
+    }
+
     /// Atomically acquire leadership by incrementing the epoch via CAS.
     ///
     /// On success returns the newly written `LeaderRecord` with a strictly
@@ -651,34 +866,29 @@ pub trait LeaderStore: Send + Sync {
         )))
     }
 
-    /// Acquisition scope with a conditional cleanup candidate observer.
+    /// Acquire leadership under the caller's cancellation and I/O budget.
     ///
-    /// Native stores report the attempted epoch after mutation admission and
-    /// before submission. This does not confirm acquisition: cleanup must read
-    /// and match the exact holder, owner token and epoch before expiring it.
-    /// Compatibility implementations can report only a confirmed result.
-    fn acquire_leadership_with_minimum_epoch_within(
+    /// Stores that can observe an ambiguous provider mutation report its
+    /// cleanup candidate after admission and before submission. The candidate
+    /// is not proof of acquisition: cleanup must still read and match the exact
+    /// holder, owner token and epoch before expiring it. Compatibility stores
+    /// report only a confirmed result.
+    fn acquire_leadership_with_context(
         &self,
         holder_id: &str,
         minimum_epoch: u64,
-        scope: &crate::common::DeadlineScope,
-        on_cleanup_epoch: &mut dyn FnMut(u64),
+        acquisition: &mut LeaderAcquisition<'_>,
     ) -> Result<LeaderRecord, LeaseError> {
-        scope
-            .begin_ambiguous_mutation("leader-store acquisition")
-            .map_err(scope_lease_error)?;
+        // An opaque compatibility operation may mutate before returning any
+        // epoch. Mark that uncertainty before invoking it, not at completion.
+        acquisition.begin_mutation(None)?;
         let result = self.acquire_leadership_with_minimum_epoch(holder_id, minimum_epoch);
         match result {
             Ok(record) => {
-                on_cleanup_epoch(record.epoch);
+                acquisition.track_owner(record.epoch);
                 Ok(record)
             }
-            Err(error) => {
-                if definite_acquisition_rejection(&error) {
-                    scope.resolve_ambiguous_mutation();
-                }
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -757,13 +967,6 @@ pub trait LeaderStore: Send + Sync {
         ))
     }
 
-    #[cfg(test)]
-    fn remove_test_coordination_document(&self) -> Result<(), LeaseError> {
-        Err(LeaseError::Internal(
-            "leader store has no test coordination document".to_string(),
-        ))
-    }
-
     /// Convenience: read current record and verify both the epoch and the
     /// expected holder still own it.
     ///
@@ -806,7 +1009,71 @@ pub trait LeaderStore: Send + Sync {
     ) -> Result<(), LeaseError> {
         self.validate_epoch(expected_holder_id, expected_epoch)
     }
+
+    /// Validate once before admitting a logical WAL write group. Provider
+    /// stores keep this remote proof at the group boundary instead of making
+    /// one provider request for every physical append and ledger edit.
+    fn validate_write_admission(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.validate_epoch_with_timeout(expected_holder_id, expected_epoch, timeout)
+    }
+
+    /// Refresh authority before a sync that was not preceded by a validated
+    /// strict write group. The physical sync remains inside
+    /// `with_writer_epoch`, which performs the final local or provider check.
+    fn validate_epoch_before_sync(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.validate_epoch_with_timeout(expected_holder_id, expected_epoch, timeout)
+    }
+
+    /// Run one writer-owned storage effect only while this holder and epoch
+    /// remain current. Stores with a local mutation lock override this to
+    /// serialize the validation and effect with takeover; provider stores
+    /// validate immediately before the local effect. Shared cloud publication
+    /// still requires its own conditional commit at the provider boundary.
+    fn with_writer_epoch(
+        &self,
+        expected_holder_id: &str,
+        expected_epoch: u64,
+        timeout: Duration,
+        operation: &mut dyn FnMut(),
+    ) -> Result<(), LeaseError> {
+        self.validate_epoch_with_timeout(expected_holder_id, expected_epoch, timeout)?;
+        operation();
+        Ok(())
+    }
 }
+
+/// Acquire leadership inside a shared deadline scope and resolve an
+/// ambiguous mutation only when the store proves a definite rejection.
+///
+/// Stores may report a candidate epoch before submission. The candidate is
+/// intentionally left to the caller for exact owner-token verification and
+/// conditional cleanup.
+pub(crate) fn acquire_leadership_with_minimum_epoch_within(
+    store: &dyn LeaderStore,
+    holder_id: &str,
+    minimum_epoch: u64,
+    scope: &crate::common::DeadlineScope,
+    on_cleanup_epoch: &mut dyn FnMut(u64),
+) -> Result<LeaderRecord, LeaseError> {
+    let mut acquisition = LeaderAcquisition::within(scope, on_cleanup_epoch);
+    acquisition.check()?;
+    let result = store.acquire_leadership_with_context(holder_id, minimum_epoch, &mut acquisition);
+    acquisition.finish(result)
+}
+
+#[cfg(test)]
+#[path = "acquisition_tests.rs"]
+mod acquisition_tests;
 
 #[cfg(test)]
 mod checksum_tests {

@@ -58,6 +58,32 @@ impl WrittenCheckpoint {
 }
 
 impl ManifestPersistence {
+    /// Decode a committed immutable metadata generation without hydrating cache.
+    pub(crate) fn decode_bodies(
+        snapshot: &[u8],
+        journal: Option<&[u8]>,
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Manifest> {
+        scope.check("shared manifest decode")?;
+        let mut manifest: Manifest = serde_json::from_slice(snapshot)
+            .map_err(|error| MidgeError::Corruption(format!("invalid shared manifest: {error}")))?;
+        manifest.validate_persisted()?;
+        if let Some(journal) = journal {
+            for (id, edit) in crate::metadata::journal::replay_identified_edits_from_bytes(
+                journal,
+                manifest.edit_checkpoint_id,
+                scope,
+            )? {
+                scope.check("shared manifest application")?;
+                manifest.apply_edit(&edit)?;
+                manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(id);
+            }
+        }
+        manifest.validate_persisted()?;
+        scope.check("shared manifest validation")?;
+        Ok(manifest)
+    }
+
     /// Manifest file name
     const MANIFEST_FILE: &'static str = super::files::MANIFEST;
     #[cfg(test)]
@@ -70,13 +96,13 @@ impl ManifestPersistence {
     /// Get the manifest file path
     #[cfg(test)]
     pub fn manifest_path(db_path: &Path) -> PathBuf {
-        db_path.join(Self::MANIFEST_SNAPSHOT)
+        db_path.join(ManifestPersistence::MANIFEST_SNAPSHOT)
     }
 
     /// Get the manifest snapshot path
     #[cfg(test)]
     pub fn manifest_snapshot_path(db_path: &Path) -> PathBuf {
-        db_path.join(Self::MANIFEST_SNAPSHOT)
+        db_path.join(ManifestPersistence::MANIFEST_SNAPSHOT)
     }
 
     fn load_json_manifest_file(
@@ -110,9 +136,9 @@ impl ManifestPersistence {
         let data = file
             .read_at(0, len)
             .map_err(|error| recovery_io_error(error, &format!("failed to read {context}")))?;
-        let manifest: Manifest = serde_json::from_slice(&data).map_err(|e| {
-            MidgeError::RecoveryFailed(format!("failed to parse {context} JSON: {e}"))
-        })?;
+        let manifest: Manifest = serde_json::from_slice(&data)
+            .map_err(|e| MidgeError::Corruption(format!("failed to parse {context} JSON: {e}")))?;
+        manifest.validate_persisted()?;
         let elapsed = start.elapsed();
         tracing::info!(
             path = ?path,
@@ -214,7 +240,7 @@ impl ManifestPersistence {
             Ok(edits) => {
                 for (edit_id, edit) in &edits {
                     check_scope(scope, "manifest journal application")?;
-                    manifest.apply_edit(edit);
+                    manifest.apply_edit(edit)?;
                     // The loaded manifest now holds every edit up to this one,
                     // so the horizon may cover it (#493).
                     manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(*edit_id);
@@ -255,7 +281,7 @@ impl ManifestPersistence {
         )?;
         for edit in &salvaged.edits {
             check_scope(scope, "salvaged manifest application")?;
-            manifest.apply_edit(edit);
+            manifest.apply_edit(edit)?;
         }
         tracing::warn!(
             error = %replay_error,
@@ -304,22 +330,15 @@ impl ManifestPersistence {
     }
 
     fn validate_persisted_sst_names(manifest: &Manifest) -> Result<(), String> {
-        for file in &manifest.files {
-            crate::cloud_layout::PersistedSstName::parse(&file.name)
-                .map_err(|error| format!("manifest SST name is invalid: {error}"))?;
-        }
-        if let Some(checkpoint) = &manifest.cloud_checkpoint {
-            for name in &checkpoint.covering_ssts {
-                crate::cloud_layout::PersistedSstName::parse(name)
-                    .map_err(|error| format!("cloud checkpoint SST name is invalid: {error}"))?;
-            }
-        }
-        Ok(())
+        manifest
+            .validate_persisted()
+            .map_err(|error| error.to_string())
     }
 
     fn checkpoint_base_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
+        replay_from_durable_base: bool,
     ) -> Result<Manifest, String> {
         use crate::io::traits::FsPath;
 
@@ -328,44 +347,25 @@ impl ManifestPersistence {
             format!("failed to check for manifest snapshot {snapshot_path:?}: {error:?}")
         })?;
         if !snapshot_exists {
-            return Ok(manifest.clone());
+            return Ok(if replay_from_durable_base {
+                Manifest::default()
+            } else {
+                manifest.clone()
+            });
         }
 
-        let mut persisted = Self::load_json_manifest_file(fs, &snapshot_path, "manifest snapshot")?;
-        if persisted.edit_checkpoint_id <= manifest.edit_checkpoint_id {
+        let persisted = Self::load_json_manifest_file(fs, &snapshot_path, "manifest snapshot")?;
+        if !replay_from_durable_base && persisted.edit_checkpoint_id <= manifest.edit_checkpoint_id
+        {
             return Ok(manifest.clone());
         }
 
         tracing::warn!(
             caller_checkpoint = manifest.edit_checkpoint_id,
             durable_checkpoint = persisted.edit_checkpoint_id,
-            "preserving a newer durable manifest checkpoint over a stale caller"
+            "reconstructing durable manifest authority before checkpointing a stale caller"
         );
 
-        // The caller cloned its manifest before a competing checkpoint was
-        // published. The durable snapshot is authoritative for structural
-        // state; only monotonic progress that is not fully represented by
-        // journal edits may safely be carried forward from the caller.
-        persisted.last_persisted_sequence = persisted
-            .last_persisted_sequence
-            .max(manifest.last_persisted_sequence);
-        persisted.next_wal_seq = persisted.next_wal_seq.max(manifest.next_wal_seq);
-        for (&cf_id, &next_seq) in &manifest.next_sst_seqs {
-            persisted
-                .next_sst_seqs
-                .entry(cf_id)
-                .and_modify(|current| *current = (*current).max(next_seq))
-                .or_insert(next_seq);
-        }
-        if let Some(candidate) = &manifest.cloud_checkpoint {
-            let should_advance = persisted
-                .cloud_checkpoint
-                .as_ref()
-                .is_none_or(|current| candidate.checkpoint_sequence > current.checkpoint_sequence);
-            if should_advance {
-                persisted.cloud_checkpoint = Some(candidate.clone());
-            }
-        }
         Ok(persisted)
     }
 
@@ -455,25 +455,30 @@ impl ManifestPersistence {
         Self::save_snapshot_unlocked_observed(fs, manifest, known, None)
     }
 
-    pub(crate) fn save_snapshot_unlocked_observed(
+    fn reconstruct_checkpoint_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
         known: Option<JournalPosition>,
-        observation: Option<&crate::metadata::accounting::Operation>,
-    ) -> crate::common::MidgeResult<WrittenCheckpoint> {
+    ) -> crate::common::MidgeResult<(Manifest, bool)> {
         use crate::common::MidgeError;
-        use crate::io::traits::FsPath;
-
-        let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
-        let temp = FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP);
+        let highest_edit_id = match known {
+            Some(position) => position.highest_edit_id,
+            None => crate::metadata::journal::highest_edit_id_with_fs_unlocked(fs)?,
+        };
+        let replay_from_durable_base = highest_edit_id > manifest.edit_checkpoint_id;
 
         let mut checkpoint = match known {
-            // The durable snapshot is not newer than the caller, so the
-            // caller is the base; no need to read the snapshot.
-            Some(position) if position.checkpoint_edit_id <= manifest.edit_checkpoint_id => {
+            // A current caller holds the complete contiguous journal prefix.
+            // A caller with a gap may already contain later edits; replaying
+            // older frontiers into it would regress otherwise valid authority.
+            Some(position)
+                if !replay_from_durable_base
+                    && position.checkpoint_edit_id <= manifest.edit_checkpoint_id =>
+            {
                 manifest.clone()
             }
-            _ => Self::checkpoint_base_with_fs(fs, manifest).map_err(MidgeError::Internal)?,
+            _ => Self::checkpoint_base_with_fs(fs, manifest, replay_from_durable_base)
+                .map_err(MidgeError::Internal)?,
         };
         let journal_edits = match known {
             // Nothing was journaled past what the base already holds.
@@ -487,7 +492,17 @@ impl ManifestPersistence {
         };
         let replayed_nothing = journal_edits.is_empty();
         for edit in &journal_edits {
-            checkpoint.apply_edit(edit);
+            checkpoint.apply_edit(edit)?;
+        }
+        // Allocation counters may retain a caller's reservations, but only
+        // durable replay establishes the families and their flush authority.
+        for (&cf_id, &next_seq) in &manifest.next_sst_seqs {
+            checkpoint.flush_frontiers().get(cf_id)?;
+            checkpoint
+                .next_sst_seqs
+                .entry(cf_id)
+                .and_modify(|current| *current = (*current).max(next_seq))
+                .or_insert(next_seq);
         }
         // The caller already held every journaled edit exactly when the
         // snapshot is its own manifest unchanged by the replay above.
@@ -498,11 +513,23 @@ impl ManifestPersistence {
                 (serde_json::to_value(&checkpoint), serde_json::to_value(manifest)),
                 (Ok(written), Ok(caller)) if written == caller
             );
-        let highest_edit_id = match known {
-            Some(position) => position.highest_edit_id,
-            None => crate::metadata::journal::highest_edit_id_with_fs_unlocked(fs)?,
-        };
         checkpoint.edit_checkpoint_id = checkpoint.edit_checkpoint_id.max(highest_edit_id);
+        Ok((checkpoint, caller_was_current))
+    }
+
+    pub(crate) fn save_snapshot_unlocked_observed(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        manifest: &Manifest,
+        known: Option<JournalPosition>,
+        observation: Option<&crate::metadata::accounting::Operation>,
+    ) -> crate::common::MidgeResult<WrittenCheckpoint> {
+        use crate::common::MidgeError;
+        use crate::io::traits::FsPath;
+
+        let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
+        let temp = FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP);
+        let (checkpoint, caller_was_current) =
+            Self::reconstruct_checkpoint_with_fs(fs, manifest, known)?;
         Self::validate_persisted_sst_names(&checkpoint).map_err(MidgeError::Corruption)?;
         let json = serde_json::to_vec(&checkpoint).map_err(|e| {
             MidgeError::Internal(format!("failed to serialize manifest to JSON: {e}"))
@@ -547,7 +574,7 @@ impl ManifestPersistence {
         })
     }
 
-    /// Save manifest to disk in JSON format (compat wrapper for tests and callers using Path)
+    /// Save `manifest` as JSON through a `RealFs` rooted at `db_path`.
     #[cfg(test)]
     pub fn save(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
         use crate::io::real::RealFs;
@@ -559,7 +586,7 @@ impl ManifestPersistence {
         Self::save_with_fs(&fs, manifest)
     }
 
-    /// Load manifest using a `RealFs` (compat wrapper)
+    /// Load the manifest strictly through a `RealFs` rooted at `db_path`.
     #[cfg(test)]
     pub fn load(db_path: &Path) -> Result<Manifest, String> {
         use crate::io::real::RealFs;
@@ -644,24 +671,17 @@ impl ManifestPersistence {
 mod tests {
     use super::*;
     use crate::io::traits::{
-        DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions,
+        DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, Metadata, OpenOptions, ReadFs,
     };
     use std::process;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct UnavailableExistsFs;
 
-    impl Fs for UnavailableExistsFs {
-        fn open(&self, _path: &FsPath, _options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
-            Err(FsError::Unavailable(
-                "test filesystem unavailable".to_string(),
-            ))
-        }
-
-        fn remove_file(&self, _path: &FsPath) -> FsResult<()> {
-            Err(FsError::Unavailable(
-                "test filesystem unavailable".to_string(),
-            ))
+    impl ReadFs for UnavailableExistsFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
         }
 
         fn exists(&self, _path: &FsPath) -> FsResult<bool> {
@@ -676,13 +696,27 @@ mod tests {
             ))
         }
 
-        fn create_dir_all(&self, _path: &FsPath) -> FsResult<()> {
+        fn list_dir(&self, _path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+    }
+
+    impl Fs for UnavailableExistsFs {
+        fn open(&self, _path: &FsPath, _options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
             Err(FsError::Unavailable(
                 "test filesystem unavailable".to_string(),
             ))
         }
 
-        fn list_dir(&self, _path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        fn remove_file(&self, _path: &FsPath) -> FsResult<()> {
+            Err(FsError::Unavailable(
+                "test filesystem unavailable".to_string(),
+            ))
+        }
+
+        fn create_dir_all(&self, _path: &FsPath) -> FsResult<()> {
             Err(FsError::Unavailable(
                 "test filesystem unavailable".to_string(),
             ))
@@ -709,6 +743,216 @@ mod tests {
 
     static NEXT_TEST_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
+    fn flush(cf_id: u32, name: &str, freeze_sequence: u64) -> crate::metadata::ManifestEdit {
+        crate::metadata::ManifestEdit::Batch(vec![
+            crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                name: name.into(),
+                cf_id,
+                largest_seq: Some(freeze_sequence.saturating_sub(1)),
+                ..Default::default()
+            }),
+            crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                cf_id,
+                freeze_sequence,
+            },
+        ])
+    }
+
+    #[test]
+    fn should_refuse_missing_family_authority_under_both_recovery_policies() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let fs: std::sync::Arc<dyn crate::io::Fs> =
+            std::sync::Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
+        let mut manifest = Manifest::default();
+        manifest
+            .apply_edit(&crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: 1,
+                name: "missing".into(),
+                created_at: 1,
+            })
+            .unwrap();
+        let mut encoded = serde_json::to_value(&manifest).unwrap();
+        encoded["flushed_through"].as_array_mut().unwrap().pop();
+        let bytes = serde_json::to_vec(&encoded).unwrap();
+        std::fs::write(
+            directory
+                .path()
+                .join(ManifestPersistence::MANIFEST_SNAPSHOT),
+            &bytes,
+        )
+        .unwrap();
+
+        // Act
+        for policy in [
+            crate::config::RecoveryPolicy::Strict,
+            crate::config::RecoveryPolicy::Salvage,
+        ] {
+            let result = ManifestPersistence::load_with_fs_and_policy_typed(&fs, policy);
+            // Assert
+            assert!(matches!(result, Err(MidgeError::Corruption(_))));
+            assert_eq!(
+                std::fs::read(
+                    directory
+                        .path()
+                        .join(ManifestPersistence::MANIFEST_SNAPSHOT)
+                )
+                .unwrap(),
+                bytes
+            );
+        }
+    }
+
+    #[test]
+    fn should_leave_journal_untouched_when_a_durable_transition_is_invalid() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let fs: std::sync::Arc<dyn crate::io::Fs> =
+            std::sync::Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
+        ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
+        crate::metadata::journal::append_edit_with_fs(
+            &fs,
+            &crate::metadata::ManifestEdit::BumpNextSstSeq {
+                cf_id: 99,
+                next_seq: 7,
+            },
+        )
+        .unwrap();
+        let journal = std::fs::read(directory.path().join("manifest.journal")).unwrap();
+        let snapshot = std::fs::read(
+            directory
+                .path()
+                .join(ManifestPersistence::MANIFEST_SNAPSHOT),
+        )
+        .unwrap();
+
+        // Act
+        for policy in [
+            crate::config::RecoveryPolicy::Strict,
+            crate::config::RecoveryPolicy::Salvage,
+        ] {
+            let result = ManifestPersistence::load_with_fs_and_policy_typed(&fs, policy);
+            // Assert
+            assert!(result.is_err());
+            assert_eq!(
+                std::fs::read(directory.path().join("manifest.journal")).unwrap(),
+                journal
+            );
+            assert_eq!(
+                std::fs::read(
+                    directory
+                        .path()
+                        .join(ManifestPersistence::MANIFEST_SNAPSHOT)
+                )
+                .unwrap(),
+                snapshot
+            );
+        }
+    }
+
+    #[test]
+    fn should_refuse_salvage_when_a_durable_frontier_has_no_paired_output() {
+        // Arrange: bypass append preflight to model corrupt durable authority.
+        let directory = tempfile::tempdir().unwrap();
+        let fs: std::sync::Arc<dyn crate::io::Fs> =
+            std::sync::Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
+        ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
+        crate::metadata::journal::append_validated_edit_with_id(
+            &fs,
+            &crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                cf_id: 0,
+                freeze_sequence: 7,
+            },
+            1,
+        )
+        .unwrap();
+        let before = std::fs::read(directory.path().join("manifest.journal")).unwrap();
+
+        // Act
+        for policy in [
+            crate::config::RecoveryPolicy::Strict,
+            crate::config::RecoveryPolicy::Salvage,
+        ] {
+            let result = ManifestPersistence::load_with_fs_and_policy_typed(&fs, policy);
+            // Assert
+            assert!(result.is_err());
+            assert_eq!(
+                std::fs::read(directory.path().join("manifest.journal")).unwrap(),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn should_preserve_durable_frontier_when_a_stale_caller_has_unpublished_progress() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let fs: std::sync::Arc<dyn crate::io::Fs> =
+            std::sync::Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
+        let mut durable = Manifest::default();
+        durable.apply_edit(&flush(0, "durable.sst", 4)).unwrap();
+        durable.edit_checkpoint_id = 1;
+        ManifestPersistence::save_with_fs(&fs, &durable).unwrap();
+        let mut stale = Manifest::default();
+        stale.apply_edit(&flush(0, "unpublished.sst", 8)).unwrap();
+
+        // Act
+        ManifestPersistence::save_snapshot_and_truncate_journal_with_fs(&fs, &stale).unwrap();
+        let recovered = ManifestPersistence::load_with_fs_and_policy_typed(
+            &fs,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .unwrap();
+
+        // Assert
+        assert_eq!(
+            recovered.flush_frontiers().get(0).unwrap(),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 4
+            }
+        );
+        assert_eq!(recovered.files[0].name, "durable.sst");
+    }
+
+    #[test]
+    fn should_decode_immutable_bodies_with_the_same_durable_batch_boundary() {
+        // Arrange
+        let directory = tempfile::tempdir().unwrap();
+        let snapshot = serde_json::to_vec(&Manifest::default()).unwrap();
+        let edit = flush(0, "shared.sst", 4);
+        crate::metadata::journal::append_edit(directory.path(), &edit).unwrap();
+        let journal = std::fs::read(directory.path().join("manifest.journal")).unwrap();
+        let scope = DeadlineScope::new(crate::common::OperationDeadline::unbounded());
+
+        // Act
+        let recovered =
+            ManifestPersistence::decode_bodies(&snapshot, Some(&journal), &scope).unwrap();
+        let incomplete = ManifestPersistence::decode_bodies(
+            &snapshot,
+            Some(&journal[..journal.len() - 1]),
+            &scope,
+        )
+        .unwrap();
+
+        // Assert
+        assert_eq!(
+            recovered.flush_frontiers().get(0).unwrap(),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 4
+            }
+        );
+        assert_eq!(recovered.files.len(), 1);
+        assert_eq!(recovered.edit_checkpoint_id, 1);
+        assert!(incomplete.files.is_empty());
+        assert_eq!(
+            incomplete.flush_frontiers().get(0).unwrap(),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 0
+            }
+        );
+        assert_eq!(incomplete.edit_checkpoint_id, 0);
+    }
+
     /// Create a unique temp directory for tests
     fn create_test_dir() -> PathBuf {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -728,31 +972,28 @@ mod tests {
     fn should_roundtrip_manifest_when_persisting() {
         // Arrange: build manifest in one expression to avoid field_reassign_with_default
         let test_dir = create_test_dir();
-        let manifest = Manifest {
-            next_wal_seq: 42,
-            last_persisted_sequence: 100,
-            column_families: vec![
-                crate::metadata::ColumnFamilyMeta {
-                    id: 0,
-                    name: "default".to_string(),
-                    created_at: 0,
-                    deleted_at: None,
-                    drop_sequence: None,
-                    dropped_sst_names: Vec::new(),
-                    reclaimed: false,
+        let mut manifest = Manifest::default();
+        manifest
+            .apply_edit(&crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: 1,
+                name: "secondary".into(),
+                created_at: 0,
+            })
+            .expect("create secondary family");
+        manifest
+            .apply_edit(&crate::metadata::ManifestEdit::Batch(vec![
+                crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+                    name: "roundtrip.sst".into(),
+                    cf_id: 1,
+                    largest_seq: Some(98),
+                    ..Default::default()
+                }),
+                crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                    cf_id: 1,
+                    freeze_sequence: 100,
                 },
-                crate::metadata::ColumnFamilyMeta {
-                    id: 1,
-                    name: "secondary".to_string(),
-                    created_at: 0,
-                    deleted_at: None,
-                    drop_sequence: None,
-                    dropped_sst_names: Vec::new(),
-                    reclaimed: false,
-                },
-            ],
-            ..Default::default()
-        };
+            ]))
+            .expect("publish secondary flush");
 
         // Act
         ManifestPersistence::save(&test_dir, &manifest).expect("save should succeed");
@@ -768,20 +1009,24 @@ mod tests {
             manifest_path.exists(),
             "manifest file should exist after save"
         );
-        assert_eq!(loaded.next_wal_seq, 42);
-        assert_eq!(loaded.last_persisted_sequence, 100);
-        assert_eq!(loaded.column_families.len(), 2);
-        assert_eq!(loaded.column_families[0].name, "default");
-        assert_eq!(loaded.column_families[1].name, "secondary");
+        assert_eq!(
+            loaded.flush_frontiers().get(1).unwrap(),
+            crate::metadata::frontiers::FamilyFrontier::Live {
+                through_sequence: 100
+            }
+        );
+        assert_eq!(loaded.column_families.len(), 1);
+        assert_eq!(loaded.column_families[0].name, "secondary");
     }
 
     #[test]
     fn should_recover_when_manifest_json_is_absent_after_checkpoint() {
         // Arrange
         let test_dir = create_test_dir();
-        let manifest = Manifest {
-            last_persisted_sequence: 42,
-            ..Default::default()
+        let manifest = {
+            let mut fixture = Manifest::default();
+            fixture.next_sst_seqs = std::collections::HashMap::from([(0, 42)]);
+            fixture
         };
 
         // Act
@@ -791,19 +1036,20 @@ mod tests {
 
         // Assert
         assert!(!test_dir.join("manifest.json").exists());
-        assert_eq!(recovered.last_persisted_sequence, 42);
+        assert_eq!(recovered.next_sst_seqs.get(&0).copied().unwrap_or(0), 42);
     }
 
     #[test]
     fn should_reject_unsafe_sst_name_before_manifest_is_persisted() {
         // Arrange
         let test_dir = create_test_dir();
-        let manifest = Manifest {
-            files: vec![crate::metadata::FileMeta {
+        let manifest = {
+            let mut fixture = Manifest::default();
+            fixture.files = vec![crate::metadata::FileMeta {
                 name: "../outside.sst".to_string(),
                 ..Default::default()
-            }],
-            ..Default::default()
+            }];
+            fixture
         };
 
         // Act
@@ -827,8 +1073,7 @@ mod tests {
         let loaded = ManifestPersistence::load(&test_dir).expect("load should succeed");
 
         // Assert
-        assert_eq!(loaded.next_wal_seq, 1);
-        assert_eq!(loaded.last_persisted_sequence, 0);
+        assert_eq!(loaded.next_sst_seqs.get(&0).copied().unwrap_or(0), 0);
         assert_eq!(loaded.column_families.len(), 0);
     }
 
@@ -966,9 +1211,10 @@ mod tests {
     fn should_ignore_temp_manifest_files_when_loading_default_state() {
         // Arrange
         let test_dir = create_test_dir();
-        let manifest = Manifest {
-            last_persisted_sequence: 99,
-            ..Default::default()
+        let manifest = {
+            let mut fixture = Manifest::default();
+            fixture.next_sst_seqs = std::collections::HashMap::from([(0, 99)]);
+            fixture
         };
         std::fs::write(
             test_dir.join(ManifestPersistence::MANIFEST_FILE_TEMP),
@@ -986,7 +1232,8 @@ mod tests {
 
         // Assert
         assert_eq!(
-            loaded.last_persisted_sequence, 0,
+            loaded.next_sst_seqs.get(&0).copied().unwrap_or(0),
+            0,
             "temp manifest artifacts must not become authoritative on load"
         );
         assert!(
@@ -1207,9 +1454,13 @@ mod tests {
         let mut first_writer_manifest = Manifest::default();
         let mut second_writer_manifest = Manifest::default();
         crate::metadata::append_edit(&test_dir, &first_edit).expect("append first writer edit");
-        first_writer_manifest.apply_edit(&first_edit);
+        first_writer_manifest
+            .apply_edit(&first_edit)
+            .expect("valid manifest fixture edit");
         crate::metadata::append_edit(&test_dir, &second_edit).expect("append second writer edit");
-        second_writer_manifest.apply_edit(&second_edit);
+        second_writer_manifest
+            .apply_edit(&second_edit)
+            .expect("valid manifest fixture edit");
 
         // Act
         ManifestPersistence::save_snapshot_and_truncate_journal(&test_dir, &first_writer_manifest)
@@ -1250,7 +1501,9 @@ mod tests {
         crate::metadata::append_edit(&test_dir, &pre_checkpoint)
             .expect("append pre-checkpoint edit");
         let mut checkpoint_manifest = Manifest::default();
-        checkpoint_manifest.apply_edit(&pre_checkpoint);
+        checkpoint_manifest
+            .apply_edit(&pre_checkpoint)
+            .expect("valid manifest fixture edit");
         let _test_guard = crate::failpoints::test_failpoint_guard();
         let crash = fail::FailGuard::new(
             "midge::manifest::after_snapshot_rename_before_journal_truncate",
@@ -1342,7 +1595,9 @@ mod tests {
         });
         crate::metadata::append_edit(&test_dir, &edit).expect("append authoritative edit");
         let mut manifest = Manifest::default();
-        manifest.apply_edit(&edit);
+        manifest
+            .apply_edit(&edit)
+            .expect("valid manifest fixture edit");
         let _test_guard = crate::failpoints::test_failpoint_guard();
         let failure =
             fail::FailGuard::new("midge::manifest::inject_snapshot_write_failure", "return")
@@ -1496,9 +1751,10 @@ mod tests {
     fn should_clear_manifest_temp_files_when_requested() {
         // Arrange
         let test_dir = create_test_dir();
-        let manifest = Manifest {
-            last_persisted_sequence: 17,
-            ..Default::default()
+        let manifest = {
+            let mut fixture = Manifest::default();
+            fixture.next_sst_seqs = std::collections::HashMap::from([(0, 17)]);
+            fixture
         };
         let manifest_temp_path = test_dir.join(ManifestPersistence::MANIFEST_FILE_TEMP);
         let snapshot_temp_path = test_dir.join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP);
@@ -1586,7 +1842,8 @@ mod tests {
             "load after delete should not recover manifest files from snapshot or journal"
         );
         assert_eq!(
-            loaded.last_persisted_sequence, 0,
+            loaded.next_sst_seqs.get(&0).copied().unwrap_or(0),
+            0,
             "load after delete should reset to default manifest state"
         );
     }

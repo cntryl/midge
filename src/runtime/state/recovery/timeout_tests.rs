@@ -3,7 +3,7 @@
 use super::*;
 use crate::config::RecoveryPolicy;
 use crate::io::traits::{DirEntry, HostAddressing, Metadata};
-use crate::io::{Durability, File, FsPath, FsResult, OpenOptions};
+use crate::io::{Durability, File, FsPath, FsResult, OpenOptions, ReadFs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -40,7 +40,7 @@ struct TimedReadFile<'a> {
     delivery: ReadDelivery,
 }
 
-impl File for TimedReadFile<'_> {
+impl crate::io::ReadFile for TimedReadFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
         let started = Instant::now();
         let bytes = self.inner.read_at(offset, len)?;
@@ -59,7 +59,7 @@ impl File for TimedReadFile<'_> {
         // This is an actual RealFs read whose controlled local caller budget
         // expires before its result is delivered. It is not provider evidence.
         std::thread::sleep(self.delay);
-        if matches!(self.delivery, ReadDelivery::IoBeforeQuarantine) {
+        if matches!(self.delivery, ReadDelivery::IoBeforeQuarantine) && completed == 1 {
             self.evidence.read_failed.store(true, Ordering::Release);
             return Err(FsError::Io(
                 "controlled failure after genuine WAL read".into(),
@@ -71,6 +71,12 @@ impl File for TimedReadFile<'_> {
         Ok(bytes)
     }
 
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for TimedReadFile<'_> {
     fn write_at(&mut self, offset: u64, bytes: bytes::Bytes) -> FsResult<()> {
         self.evidence.mutations.fetch_add(1, Ordering::AcqRel);
         self.inner.write_at(offset, bytes)
@@ -86,17 +92,41 @@ impl File for TimedReadFile<'_> {
         self.inner.append(bytes)
     }
 
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
-
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         self.evidence.mutations.fetch_add(1, Ordering::AcqRel);
         self.inner.sync(durability)
     }
 }
 
+impl ReadFs for TimedReadFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        let entries = self.inner.list_dir(path)?;
+        self.evidence.completed_lists.fetch_add(1, Ordering::AcqRel);
+        if self.evidence.read_failed.load(Ordering::Acquire) {
+            return Err(FsError::Timeout("timed local quarantine inventory".into()));
+        }
+        Ok(entries)
+    }
+}
+
 impl Fs for TimedReadFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
     fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
         let inner = self.inner.open(path, options)?;
         if path.0 != self.target {
@@ -116,23 +146,6 @@ impl Fs for TimedReadFs {
 
     fn coordination_key(&self) -> u64 {
         self.inner.coordination_key()
-    }
-
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
-
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        let entries = self.inner.list_dir(path)?;
-        self.evidence.completed_lists.fetch_add(1, Ordering::AcqRel);
-        if self.evidence.read_failed.load(Ordering::Acquire) {
-            return Err(FsError::Timeout("timed local quarantine inventory".into()));
-        }
-        Ok(entries)
     }
 
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
@@ -196,10 +209,8 @@ fn assert_preserved_read(
 fn assert_manifest_timeout(policy: RecoveryPolicy) {
     // Arrange: persist a genuine nonempty manifest before the timed read view.
     let directory = tempfile::tempdir().expect("create actual manifest directory");
-    let manifest = Manifest {
-        last_persisted_sequence: 7,
-        ..Manifest::default()
-    };
+    let mut manifest = Manifest::default();
+    manifest.edit_checkpoint_id = 7;
     crate::metadata::ManifestPersistence::save(directory.path(), &manifest)
         .expect("persist actual manifest");
     let target = crate::metadata::files::MANIFEST_SNAPSHOT;
@@ -392,10 +403,9 @@ fn should_stop_salvage_journal_replay_when_successful_reads_exhaust_shared_budge
 }
 
 #[test]
-fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_failure() {
-    // Arrange: the wrapper forwards a genuine WAL read before an explicitly
-    // injected local Io failure. Its next genuine directory listing times out.
-    // This is recovery error-policy coverage, not a native provider failure.
+fn should_preserve_read_failure_without_quarantine_when_salvage_cannot_read_local_wal() {
+    // Arrange: a genuine WAL read fails with Io. Any later quarantine walk
+    // would time out, but an unreadable segment is never evidence of damage.
     let directory = tempfile::tempdir().unwrap();
     let wal_dir = directory.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
@@ -404,41 +414,126 @@ fn should_preserve_typed_quarantine_timeout_when_salvage_follows_local_wal_read_
         bytes::Bytes::from_static(b"acknowledged"),
         Some(bytes::Bytes::from_static(b"value")),
         7,
-        1,
     );
     let payload = crate::wal::encoding::encode(&record).unwrap();
     let mut before = Vec::new();
     crate::wal::frame::append_frame(&mut before, &payload).unwrap();
-    let target = crate::wal::ACTIVE_FILE_NAME;
+    let target = "00000000000000000001.wal";
+    assert_eq!(target, crate::wal::segment_file_name(1));
     std::fs::write(wal_dir.join(target), &before).unwrap();
+    crate::runtime::wal_history::fixture::record_at(directory.path(), &[], 1).unwrap();
+    // The recorded segment: the frame behind its header.
+    let before = std::fs::read(wal_dir.join(target)).unwrap();
     let (fs, evidence) = read_fs(
         &wal_dir,
         target,
         Duration::ZERO,
         ReadDelivery::IoBeforeQuarantine,
     );
+    let history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&fs), 1, 0).unwrap();
+    let completed_lists_before_replay = evidence.completed_lists.load(Ordering::Acquire);
 
     // Act: exercise the actual replay and its production salvage boundary.
     let result = RuntimeState::replay_wal_storage_within(
         &wal_dir,
-        &directory.path().join("sst"),
+        &crate::io::real::test_root(directory.path()),
         RecoveryPolicy::Salvage,
         &Manifest::default(),
         HashMap::new(),
         None,
+        None,
         fs.as_ref(),
+        history,
     );
 
-    // Assert: a secondary timeout retains its type and all source bytes.
+    // Assert: the original error and history survive; quarantine never runs.
     let Err(error) = result else {
         panic!("local read failure must stop recovery");
     };
-    assert!(
-        matches!(error, MidgeError::Timeout(message) if message == "timed local quarantine inventory")
-    );
+    assert!(matches!(error, MidgeError::Io(_)), "{error:?}");
     assert!(evidence.read_failed.load(Ordering::Acquire));
-    assert!(evidence.completed_lists.load(Ordering::Acquire) >= 2);
-    assert_eq!(evidence.completed_reads.load(Ordering::Acquire), 1);
-    assert_preserved_read(&wal_dir, target, &before, &evidence);
-    assert_eq!(std::fs::read_dir(wal_dir).unwrap().count(), 1);
+    assert_eq!(
+        evidence.completed_lists.load(Ordering::Acquire),
+        completed_lists_before_replay,
+        "recovery did not start a quarantine inventory after the read failure"
+    );
+    assert_eq!(std::fs::read(wal_dir.join(target)).unwrap(), before);
+}
+
+/// Forwards to the host, except that every directory listing fails.
+struct ListingFailsFs(crate::io::RealFs);
+
+impl ReadFs for ListingFailsFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.0.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.0.metadata(path)
+    }
+
+    fn list_dir(&self, _path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        Err(FsError::Io("injected directory listing failure".into()))
+    }
+}
+
+impl Fs for ListingFailsFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.0.try_lock_exclusive(path)
+    }
+
+    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+        self.0.open(path, opts)
+    }
+    fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+        self.0.remove_file(path)
+    }
+    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        self.0.create_dir_all(path)
+    }
+    fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        self.0.remove_dir_all(path)
+    }
+    fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
+        self.0.sync_dir(path, dur)
+    }
+    fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+        self.0.rename_atomic(from, to)
+    }
+}
+
+#[test]
+fn should_not_regress_next_segment_id_when_wal_directory_listing_fails() {
+    // Arrange: the ledger records segments 5 and 6, with 6 open, but the
+    // directory listing fails (EACCES, EMFILE or EIO in the field).
+    let directory = tempfile::tempdir().unwrap();
+    let wal_dir = directory.path().join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    std::fs::write(wal_dir.join(crate::wal::segment_file_name(5)), b"x").unwrap();
+    std::fs::write(wal_dir.join(crate::wal::segment_file_name(6)), b"").unwrap();
+    crate::runtime::wal_history::fixture::record_at(directory.path(), &[5], 6).unwrap();
+    let wal: Arc<dyn Fs> = Arc::new(ListingFailsFs(crate::io::RealFs::new(&wal_dir).unwrap()));
+
+    // Act: open the WAL history the way recovery does.
+    let result = crate::runtime::wal_history::WalHistory::open(wal, 1, 0).map(|history| {
+        (
+            history.ledger().open_segment(),
+            history.ledger().next_segment_id(),
+        )
+    });
+
+    // Assert: either the open fails, or history continues in segment 6 and
+    // allocates above every recorded id.
+    match result {
+        Err(_) => {}
+        Ok((open, next)) => assert!(
+            open == 6 && next > 6,
+            "segment ids regressed to open {open}, next {next} with segments 5 and 6 recorded"
+        ),
+    }
 }

@@ -12,14 +12,6 @@ pub(crate) struct RecoveredCloudWalSegment {
     pub writer_epoch: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RecoveredCloudActiveWal {
-    pub max_sequence: u64,
-    pub writer_epoch: u64,
-    pub record_count: usize,
-    pub valid_bytes: usize,
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct CloudWalSealPolicy {
     pub min_segment_bytes: usize,
@@ -52,6 +44,38 @@ impl Default for CloudRuntimePolicy {
     }
 }
 
+/// Delays for cloud retry schedules owned by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RuntimeRetryPolicy {
+    pub cloud_seal: Duration,
+    pub cloud_wal: Duration,
+    pub cloud_delete: Duration,
+    pub manifest_reclamation: Duration,
+}
+
+impl RuntimeRetryPolicy {
+    #[cfg(any(test, feature = "failpoints"))]
+    pub(crate) fn fast_for_testing() -> Self {
+        Self {
+            cloud_seal: Duration::from_millis(10),
+            cloud_wal: Duration::from_millis(10),
+            cloud_delete: Duration::from_millis(10),
+            manifest_reclamation: Duration::from_millis(10),
+        }
+    }
+}
+
+impl Default for RuntimeRetryPolicy {
+    fn default() -> Self {
+        Self {
+            cloud_seal: Duration::from_secs(1),
+            cloud_wal: Duration::from_secs(1),
+            cloud_delete: Duration::from_secs(1),
+            manifest_reclamation: Duration::from_secs(1),
+        }
+    }
+}
+
 /// Runtime configuration for wiring durability/storage behavior.
 #[derive(Clone)]
 pub struct RuntimeConfig {
@@ -65,6 +89,7 @@ pub struct RuntimeConfig {
     /// default; deterministic shutdown tests inject a shorter budget.
     pub(crate) shutdown_cloud_drain_timeout: Duration,
     pub cloud_runtime_policy: CloudRuntimePolicy,
+    pub(crate) retry_policy: RuntimeRetryPolicy,
     pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     pub hybrid_storage_events: Option<crossbeam::channel::Receiver<crate::storage::StorageEvent>>,
     pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
@@ -81,6 +106,8 @@ pub struct RuntimeConfig {
     pub(crate) sst_read_fs: Option<Arc<dyn crate::io::Fs>>,
     /// Remote WAL segments replayed during startup and still eligible for
     /// manifest-covered cleanup.
+    pub(crate) recovered_cloud_wal_entries: BTreeMap<u64, crate::wal::cloud_catalog::CatalogEntry>,
+    pub(crate) recovered_cloud_wal_anchor_sequence: u64,
     pub recovered_cloud_wal_segments: BTreeMap<u64, u64>,
     /// Writer epochs paired with `recovered_cloud_wal_segments` by segment id.
     /// Kept crate-private so the existing public runtime configuration remains
@@ -92,9 +119,6 @@ pub struct RuntimeConfig {
     pub(crate) recovered_local_wal_segments: BTreeMap<u64, u64>,
     /// Writer epochs paired with `recovered_local_wal_segments` by segment id.
     pub(crate) recovered_local_wal_segment_epochs: BTreeMap<u64, u64>,
-    /// A recovered active WAL file that must be sealed and enqueued after the
-    /// runtime has installed its cloud upload pipeline.
-    pub(crate) recovered_cloud_active_wal: Option<RecoveredCloudActiveWal>,
     pub compression_policy: crate::codec::CompressionPolicy,
     pub block_cache_size: usize,
     pub block_cache_policy: crate::sst::cache::CachePolicyType,
@@ -137,17 +161,19 @@ impl Default for RuntimeConfig {
             runtime_response_timeout: crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
             shutdown_cloud_drain_timeout: crate::config::DEFAULT_CLOUD_SHUTDOWN_DRAIN_TIMEOUT,
             cloud_runtime_policy: CloudRuntimePolicy::default(),
+            retry_policy: RuntimeRetryPolicy::default(),
             hybrid_storage: None,
             hybrid_storage_events: None,
             cloud_metadata_storage: None,
             provider_ddl_fencing: false,
             metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
             sst_read_fs: None,
+            recovered_cloud_wal_entries: BTreeMap::new(),
+            recovered_cloud_wal_anchor_sequence: 0,
             recovered_cloud_wal_segments: BTreeMap::new(),
             recovered_cloud_wal_segment_epochs: BTreeMap::new(),
             recovered_local_wal_segments: BTreeMap::new(),
             recovered_local_wal_segment_epochs: BTreeMap::new(),
-            recovered_cloud_active_wal: None,
             compression_policy: crate::codec::CompressionPolicy::default(),
             block_cache_size: 128 * 1024 * 1024,
             block_cache_policy: crate::sst::cache::CachePolicyType::Lru,

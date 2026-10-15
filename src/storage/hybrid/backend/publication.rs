@@ -1,110 +1,23 @@
 //! Immutable SST publication and retry compatibility.
 
-use super::{mpsc, HybridStorage, StorageEvent, StorageOutcome};
+use super::HybridStorage;
 #[cfg(test)]
-use super::{Arc, StorageBackend};
-use crate::common::OperationDeadline;
-use crate::common::{MidgeError, MidgeResult};
+use super::{mpsc, StorageEvent, StorageOutcome};
+#[cfg(test)]
+use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 
 impl HybridStorage {
-    /// A failed publisher can release staging only after its backend confirms
-    /// there is no secondary local copy. Unsupported metadata fails closed.
-    pub(crate) fn local_object_cache_is_absent(&self, key: &str) -> MidgeResult<bool> {
-        let Some(local) = self.local_store_if_active() else {
-            return Ok(true);
-        };
-        let (tx, rx) = mpsc::channel();
-        local.submit_range_head_request(
-            crate::storage::StorageRequest::new(
-                key,
-                OperationDeadline::from_budget(self.callback_timeout),
-                self.callback_timeout,
-            ),
-            tx,
-        );
-        match rx.recv_timeout(self.callback_timeout) {
-            Ok(StorageEvent::HeadComplete {
-                key: actual,
-                result,
-            }) if actual == key => match result {
-                StorageOutcome::Ok(_) => Ok(false),
-                StorageOutcome::Err(error) if Self::storage_error_indicates_missing(&error) => {
-                    Ok(true)
-                }
-                StorageOutcome::Err(error) => Err(MidgeError::Internal(error.to_string())),
-            },
-            Ok(event) => Err(MidgeError::Internal(format!(
-                "unexpected local cache metadata response: {event:?}"
-            ))),
-            Err(error) => Err(MidgeError::Internal(format!(
-                "local cache absence proof failed: {error}"
-            ))),
-        }
-    }
-
-    /// Legacy byte-oriented fixture publication; runtime SST publishers use
+    /// Byte-oriented fixture publication; runtime SST publishers use
     /// `publish_immutable_file` with shared admission and bounded readback.
-    /// Publish immutable bytes to the remote backend and local cache. Retries
-    /// succeed only when an existing object contains exactly the same bytes.
+    /// Retries succeed only when an existing object holds exactly these bytes.
     #[cfg(test)]
     pub(crate) fn publish_immutable_object_within(
         &self,
         key: &str,
-        data: Vec<u8>,
-        deadline: &OperationDeadline,
-    ) -> MidgeResult<()> {
-        let local_exists = self.ensure_local_immutable_retry_compatible(key, &data, deadline)?;
-        self.ensure_remote_immutable_published(key, &data, deadline)?;
-        if !local_exists
-            && !self
-                .ephemeral_sst_cache
-                .load(std::sync::atomic::Ordering::Acquire)
-        {
-            self.write_local_immutable_cache(key, data, deadline)?;
-        }
-        Ok(())
-    }
-
-    /// Drop a disposable local object copy. Remote authority and remote
-    /// deletion are deliberately outside this operation.
-    pub(crate) fn evict_local_object_cache(&self, key: &str) -> MidgeResult<()> {
-        let Some(local) = self.local_store_if_active() else {
-            return Ok(());
-        };
-        Self::delete_object_from_backend_blocking(&local, key, self.callback_timeout)
-            .map(|_| ())
-            .map_err(|error| {
-                MidgeError::Internal(format!("local object cache eviction failed: {error}"))
-            })
-    }
-
-    #[cfg(test)]
-    fn ensure_local_immutable_retry_compatible(
-        &self,
-        key: &str,
         data: &[u8],
         deadline: &OperationDeadline,
-    ) -> MidgeResult<bool> {
-        let local = self
-            .local_store_if_active()
-            .expect("local fixture backend active");
-        let exists =
-            Self::object_exists_in_backend_within(&local, key, self.callback_timeout, deadline)
-                .map_err(|error| {
-                    Self::publication_error("local immutable cache preflight", error)
-                })?;
-        if !exists {
-            return Ok(false);
-        }
-
-        let existing =
-            Self::read_object_from_backend_within(&local, key, self.callback_timeout, deadline)?;
-        if existing != data {
-            return Err(MidgeError::Internal(format!(
-                "local cache already exists with different bytes for immutable object '{key}'"
-            )));
-        }
-        Ok(true)
+    ) -> MidgeResult<()> {
+        self.ensure_remote_immutable_published(key, data, deadline)
     }
 
     #[cfg(test)]
@@ -121,14 +34,7 @@ impl HybridStorage {
             deadline,
         )?;
         if exists {
-            return Self::ensure_backend_object_matches(
-                &self.stores.sst,
-                key,
-                data,
-                None,
-                self.callback_timeout,
-                deadline,
-            );
+            return self.ensure_remote_object_matches(key, data, None, deadline);
         }
 
         Self::deadline_timeout(
@@ -174,14 +80,7 @@ impl HybridStorage {
                         "cloud immutable upload timed out for '{key}': {error}"
                     )));
                 }
-                Self::ensure_backend_object_matches(
-                    &self.stores.sst,
-                    key,
-                    data,
-                    Some(&error.to_string()),
-                    self.callback_timeout,
-                    deadline,
-                )
+                self.ensure_remote_object_matches(key, data, Some(&error.to_string()), deadline)
             }
             other => Err(MidgeError::Internal(format!(
                 "unexpected cloud immutable upload response: {other:?}"
@@ -190,25 +89,28 @@ impl HybridStorage {
     }
 
     #[cfg(test)]
-    fn ensure_backend_object_matches(
-        backend: &Arc<dyn StorageBackend>,
+    fn ensure_remote_object_matches(
+        &self,
         key: &str,
         expected: &[u8],
         upload_error: Option<&str>,
-        callback_timeout: std::time::Duration,
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
-        let existing =
-            Self::read_object_from_backend_within(backend, key, callback_timeout, deadline)
-                .map_err(|error| {
-                    Self::publication_error(
-                        &format!(
-                            "cloud immutable upload failed{}; readback failed",
-                            upload_error.map_or_else(String::new, |error| format!(": {error}"))
-                        ),
-                        error,
-                    )
-                })?;
+        let existing = Self::read_object_from_backend_within(
+            &self.stores.sst,
+            key,
+            self.callback_timeout,
+            deadline,
+        )
+        .map_err(|error| {
+            Self::publication_error(
+                &format!(
+                    "cloud immutable upload failed{}; readback failed",
+                    upload_error.map_or_else(String::new, |error| format!(": {error}"))
+                ),
+                error,
+            )
+        })?;
         if existing == expected {
             return Ok(());
         }
@@ -219,61 +121,6 @@ impl HybridStorage {
     }
 
     #[cfg(test)]
-    fn write_local_immutable_cache(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        deadline: &OperationDeadline,
-    ) -> MidgeResult<()> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let timeout = Self::deadline_timeout(
-            key,
-            "local immutable cache write",
-            self.callback_timeout,
-            deadline,
-        )?;
-        self.local_store_if_active()
-            .expect("local fixture backend active")
-            .submit_write_request(
-                crate::storage::StorageRequest::new(key, *deadline, timeout)
-                    .with_precondition(crate::storage::StoragePrecondition::IfAbsent),
-                data,
-                tx,
-            );
-        let event = rx.recv_timeout(timeout).map_err(|error| match error {
-            mpsc::RecvTimeoutError::Timeout => {
-                MidgeError::Timeout("local immutable cache write callback timed out".to_string())
-            }
-            mpsc::RecvTimeoutError::Disconnected => MidgeError::Internal(
-                "local immutable cache write callback channel closed".to_string(),
-            ),
-        })?;
-        match event {
-            StorageEvent::WriteComplete {
-                result: StorageOutcome::Ok(()),
-                ..
-            } => Ok(()),
-            StorageEvent::WriteComplete {
-                result: StorageOutcome::Err(error),
-                ..
-            } => {
-                if deadline.is_expired() || Self::storage_error_indicates_timeout(&error) {
-                    Err(MidgeError::Timeout(format!(
-                        "local immutable cache write timed out: {error}"
-                    )))
-                } else {
-                    Err(MidgeError::Internal(format!(
-                        "local immutable cache write failed: {error}"
-                    )))
-                }
-            }
-            other => Err(MidgeError::Internal(format!(
-                "unexpected local immutable cache write response: {other:?}"
-            ))),
-        }
-    }
-
-    #[cfg(test)]
     fn publication_error(context: &str, error: MidgeError) -> MidgeError {
         match error {
             MidgeError::Timeout(message) => MidgeError::Timeout(format!("{context}: {message}")),
@@ -281,8 +128,8 @@ impl HybridStorage {
         }
     }
 
-    /// Delete one immutable key from the remote backend and best-effort local
-    /// cache. The caller owns any manifest or lifecycle decision.
+    /// Delete one immutable key from the remote backend. The caller owns any
+    /// manifest or lifecycle decision.
     pub(crate) fn delete_immutable_object_blocking(
         &self,
         key: &str,
@@ -302,27 +149,6 @@ impl HybridStorage {
                 return Err(crate::common::MidgeError::Internal(format!(
                     "remote immutable object delete failed: {error}"
                 )));
-            }
-        }
-
-        // This runs inside the tracked GC worker that owns this deletion.
-        // Avoid a detached local-cache delete that could outlive the lease.
-        let Some(local) = self.local_store_if_active() else {
-            return Ok(());
-        };
-        match Self::delete_object_from_backend_blocking(&local, key, self.callback_timeout) {
-            Ok(true) => {
-                tracing::debug!(key, "deleted obsolete local immutable cache object");
-            }
-            Ok(false) => {
-                tracing::debug!(key, "local immutable cache object already missing");
-            }
-            Err(error) => {
-                tracing::warn!(
-                    key,
-                    %error,
-                    "failed to delete obsolete local immutable cache object"
-                );
             }
         }
 

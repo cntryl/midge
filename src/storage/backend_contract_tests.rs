@@ -382,6 +382,13 @@ fn backends(root: &std::path::Path) -> Vec<(&'static str, Box<dyn StorageBackend
             Box::new(FileSystem::new(root).expect("filesystem backend")),
         ),
         ("cloud-mock", Box::new(CloudStorage::with_mock())),
+        (
+            "cloud-simulated",
+            Box::new(CloudStorage::new(
+                std::sync::Arc::new(crate::simulation::object_store::SimulatedObjectStore::eager()),
+                "midge".to_string(),
+            )),
+        ),
     ]
 }
 

@@ -9,17 +9,23 @@ impl GcCoordinator {
         event_loop: &mut EventLoop,
         deadline: &crate::common::OperationDeadline,
     ) -> HandleOutcome {
-        let hybrid_storage = event_loop.cloud_coordinator.hybrid_storage.clone();
-        event_loop.gc_actor.begin_manifest_reclamation_attempt();
+        let hybrid_storage = event_loop.actors.cloud_coordinator.hybrid_storage.clone();
+        event_loop
+            .actors
+            .gc_actor
+            .begin_manifest_reclamation_attempt();
         match event_loop.state.reclaim_dropped_column_families() {
-            Ok(names) => event_loop.gc_actor.queue_manifest_reclamation(names),
+            Ok(names) => event_loop.actors.gc_actor.queue_manifest_reclamation(names),
             Err(error) => {
-                event_loop.gc_actor.defer_manifest_reclamation_retry();
+                event_loop
+                    .actors
+                    .gc_actor
+                    .defer_manifest_reclamation_retry();
                 tracing::warn!(%error, "dropped column-family reclamation journal append failed; retaining files");
                 return HandleOutcome::Continue;
             }
         }
-        if event_loop.gc_actor.has_manifest_reclamation() {
+        if event_loop.actors.gc_actor.has_manifest_reclamation() {
             let published = crate::runtime::actors::ManifestActor::persist_for(
                 &mut event_loop.state,
                 crate::metadata::accounting::Origin::Administration,
@@ -31,22 +37,26 @@ impl GcCoordinator {
                 event_loop.mirror_metadata_to_authoritative_cloud_within(deadline)
             });
             if let Err(error) = published {
-                event_loop.gc_actor.defer_manifest_reclamation_retry();
+                event_loop
+                    .actors
+                    .gc_actor
+                    .defer_manifest_reclamation_retry();
                 event_loop.state.mark_persistence_anomaly();
                 tracing::warn!(%error, "dropped column-family manifest publication failed; retaining files");
                 return HandleOutcome::Continue;
             }
-            let reclaimed = event_loop.gc_actor.take_manifest_reclamation();
+            let reclaimed = event_loop.actors.gc_actor.take_manifest_reclamation();
             // Stop new transactions from capturing the reclaimed generation
             // before GC samples the pins held by older snapshots.
             event_loop.publish_snapshot();
-            event_loop.gc_actor.delete_ssts(
+            event_loop.actors.gc_actor.delete_ssts(
                 &mut event_loop.state,
                 &reclaimed,
                 hybrid_storage.clone(),
             );
         }
         event_loop
+            .actors
             .gc_actor
             .retry_pending(&mut event_loop.state, hybrid_storage);
         HandleOutcome::Continue
@@ -73,8 +83,9 @@ impl GcCoordinator {
         request_id: u64,
         sst_names: &[String],
     ) -> HandleOutcome {
-        let hybrid_storage = event_loop.cloud_coordinator.hybrid_storage.clone();
+        let hybrid_storage = event_loop.actors.cloud_coordinator.hybrid_storage.clone();
         event_loop
+            .actors
             .gc_actor
             .delete_ssts(&mut event_loop.state, sst_names, hybrid_storage);
         event_loop.respond(request_id, RuntimeResponse::Ok { request_id });

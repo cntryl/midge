@@ -11,7 +11,9 @@ use crate::runtime::snapshot_pins::SnapshotPinRegistry;
 use crate::runtime::{IntentLogEntry, PublicationPhase};
 
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,6 +27,7 @@ mod snapshots;
 
 pub(crate) use accounting::FlushPublicationAccounting;
 pub(crate) use manifest::FlushManifestPublication;
+pub(crate) use recovery::RecoveryWal;
 
 const MAX_RECENT_DELETE_RANGES: usize = 4096;
 #[derive(Debug, Clone)]
@@ -54,7 +57,6 @@ pub(crate) struct ImmutableFlush {
     pub writer_epoch: u64,
     /// Earliest WAL segment that can contain this generation's records.
     /// Missing provenance must veto retirement until the generation publishes.
-    pub first_wal_segment: Option<u64>,
     pub memtable: Arc<SkipListMemtable>,
     pub sst_name: Option<String>,
     pub sst_seq: Option<u64>,
@@ -96,6 +98,11 @@ pub struct ColumnFamilyState {
     /// `WalState::appended_bytes` when the active memtable first became
     /// non-empty; set with `active_memtable_started_in_segment`.
     pub(crate) active_memtable_started_at_wal_bytes: u64,
+    /// Commit sequence of a durably logged unit that reached the active
+    /// memtable only in part. Freezing that memtable would publish a flush
+    /// frontier at or past the commit, and restart would then skip the unit
+    /// as flushed, so the family refuses to freeze until restart replays it.
+    partially_applied_commit: Option<u64>,
 }
 
 /// Root directory for SSTs a salvage open kept but could not prove
@@ -110,7 +117,19 @@ impl ColumnFamilyState {
             immutable_flushes: Vec::new(),
             active_memtable_started_in_segment: 1,
             active_memtable_started_at_wal_bytes: 0,
+            partially_applied_commit: None,
         }
+    }
+
+    /// Record that the unit committed at `commit_seq` reached the active
+    /// memtable only in part.
+    pub(crate) fn mark_partially_applied(&mut self, commit_seq: u64) {
+        self.partially_applied_commit.get_or_insert(commit_seq);
+    }
+
+    /// Commit sequence of a unit the active memtable holds only in part.
+    pub(crate) fn partially_applied_commit(&self) -> Option<u64> {
+        self.partially_applied_commit
     }
 }
 
@@ -130,41 +149,42 @@ pub(crate) struct SstNameAllocation {
 
 /// WAL state
 pub struct WalState {
-    /// Current WAL segment ID
-    pub current_segment_id: u64,
     /// Pending writes waiting for sync
     pub pending_writes: usize,
     /// Synced, locally durable and cloud durable sequences; they only move
     /// forward outside recovery.
     pub frontiers: crate::runtime::frontiers::WalFrontiers,
-    /// Why each retained sealed local WAL segment last failed its coverage
-    /// proof. In memory only; an empty map just means re-proving (#490).
-    pub(crate) local_segment_proofs:
-        HashMap<u64, crate::runtime::hybrid_persistence::FailedWalProof>,
-    /// Manifest SSTs whose identity a local prune proof has already checked
-    /// by reading them in full, so later passes do not reread them (#548).
-    pub(crate) proven_coverage_ssts: crate::runtime::hybrid_persistence::ProvenSstIdentities,
-    /// The last sealed local WAL segment a prune pass read for a proof. The
-    /// next pass starts after it, so a bounded pass cannot starve later
-    /// segments (#548). In memory only.
-    pub(crate) local_prune_cursor: u64,
     /// WAL bytes appended by this process, across segments. In memory only:
     /// it measures how much local WAL a family's memtable pins (#552).
     pub(crate) appended_bytes: u64,
+    /// The segment ledger (#842): which WAL files are history and which
+    /// segment the writer appends to. It is the only open-segment authority
+    /// in every mode (#851); memory mode keeps it in memory.
+    pub(crate) history: crate::runtime::wal_history::WalHistory,
 }
 
-impl Default for WalState {
-    fn default() -> Self {
+impl WalState {
+    /// The WAL state of a recovery that continues `history`.
+    pub(crate) fn new(history: crate::runtime::wal_history::WalHistory) -> Self {
         Self {
-            current_segment_id: 1,
             pending_writes: 0,
             frontiers: crate::runtime::frontiers::WalFrontiers::default(),
-            local_segment_proofs: HashMap::new(),
-            proven_coverage_ssts: crate::runtime::hybrid_persistence::ProvenSstIdentities::default(
-            ),
-            local_prune_cursor: 0,
             appended_bytes: 0,
+            history,
         }
+    }
+
+    /// Record cloud durability through `sequence`, and over the sequences
+    /// no record holds below the open segment (#843).
+    pub(crate) fn advance_cloud_through(&mut self, sequence: u64) {
+        let open = self.history.ledger().open_member().open;
+        self.frontiers
+            .advance_cloud_over(sequence, open.prev.last_seq, open.first_seq);
+    }
+
+    /// The segment the WAL writer appends to: the ledger's open segment.
+    pub(crate) fn open_segment(&self) -> crate::wal::ledger::SegmentId {
+        self.history.ledger().open_segment()
     }
 }
 
@@ -178,11 +198,18 @@ pub struct CompactionState {
 /// Cloud sync state
 #[derive(Default)]
 pub struct CloudState {
-    /// SSTs pending upload
+    /// WAL objects queued for upload
     pub pending_uploads: Vec<String>,
-    /// Last checkpoint sequence uploaded to cloud
-    #[cfg(test)]
-    pub last_cloud_checkpoint_seq: u64,
+}
+
+impl CloudState {
+    /// Stop tracking `segment_id`'s WAL object as queued for upload.
+    pub fn forget_pending_upload(&mut self, segment_id: u64) {
+        self.pending_uploads.retain(|item| {
+            crate::wal::parse_segment_object_key(item)
+                .is_none_or(|(_, pending)| pending != segment_id)
+        });
+    }
 }
 
 /// Snapshot pinning state
@@ -327,6 +354,21 @@ pub struct ManifestRuntimeState {
     read_views: std::cell::RefCell<crate::runtime::sst_read_view::SstReadViewCache>,
 }
 
+pub(crate) struct PreparedRuntimeManifestEdit<'a> {
+    prepared: crate::metadata::manifest::PreparedManifestEdit<'a>,
+    read_views: &'a mut crate::runtime::sst_read_view::SstReadViewCache,
+    changes_files: bool,
+}
+
+impl PreparedRuntimeManifestEdit<'_> {
+    pub(crate) fn commit(self) {
+        self.prepared.commit();
+        if self.changes_files {
+            self.read_views.invalidate();
+        }
+    }
+}
+
 impl ManifestRuntimeState {
     pub fn new(manifest: Manifest) -> Self {
         Self {
@@ -364,10 +406,6 @@ impl ManifestRuntimeState {
         self.manifest.note_applied_journal_edit(edit_id)
     }
 
-    pub(crate) fn advance_persisted_sequence(&mut self, sequence: u64) {
-        self.manifest.last_persisted_sequence = self.manifest.last_persisted_sequence.max(sequence);
-    }
-
     pub(crate) fn set_next_sst_seq(&mut self, cf_id: u32, sequence: u64) {
         self.manifest.next_sst_seqs.insert(cf_id, sequence);
     }
@@ -384,7 +422,10 @@ impl ManifestRuntimeState {
         checkpoint.adopt_into(&mut self.manifest);
     }
 
-    pub(crate) fn apply_edit(&mut self, edit: &crate::metadata::ManifestEdit) {
+    pub(crate) fn prepare_edit<'a>(
+        &'a mut self,
+        edit: &crate::metadata::ManifestEdit,
+    ) -> MidgeResult<PreparedRuntimeManifestEdit<'a>> {
         fn changes_files(edit: &crate::metadata::ManifestEdit) -> bool {
             use crate::metadata::ManifestEdit;
             match edit {
@@ -395,10 +436,18 @@ impl ManifestRuntimeState {
                 _ => false,
             }
         }
-        if changes_files(edit) {
-            self.read_views.get_mut().invalidate();
-        }
-        self.manifest.apply_edit(edit);
+        let changes_files = changes_files(edit);
+        let prepared = self.manifest.prepare_edit(edit)?;
+        Ok(PreparedRuntimeManifestEdit {
+            prepared,
+            read_views: self.read_views.get_mut(),
+            changes_files,
+        })
+    }
+
+    pub(crate) fn apply_edit(&mut self, edit: &crate::metadata::ManifestEdit) -> MidgeResult<()> {
+        self.prepare_edit(edit)?.commit();
+        Ok(())
     }
 
     #[cfg(test)]
@@ -447,7 +496,7 @@ struct RecoveryLoadState {
 struct WalRecoveryState {
     column_families: HashMap<u32, ColumnFamilyState>,
     recovered_sequence: u64,
-    next_segment_id: u64,
+    history: crate::runtime::wal_history::WalHistory,
     records_replayed: u64,
     bytes_replayed: u64,
     opened_in_salvage_mode: bool,
@@ -463,10 +512,10 @@ struct WalRecoveryState {
 /// - Response routing is handled exclusively by `ResponseRouter`
 ///   (shared between `RuntimeHandle` and `EventLoop`).
 pub struct RuntimeState {
-    // === Paths ===
+    /// The configured database path. The runtime reaches storage only
+    /// through `fs`; tests use this to place or inspect host files.
+    #[cfg(test)]
     pub db_path: PathBuf,
-    pub wal_dir: PathBuf,
-    pub sst_dir: PathBuf,
 
     // === Sequence Numbers ===
     /// Global monotonic sequence number
@@ -536,6 +585,21 @@ pub struct RuntimeState {
     pub pending_compaction_waits: std::collections::BTreeMap<u64, crate::common::OperationDeadline>,
 }
 
+struct RuntimeMetricsGauges {
+    active_memtables: usize,
+    immutable_memtables: usize,
+    pinned_ssts: usize,
+    oldest_snapshot_age_seconds: u64,
+    sst_count: usize,
+    sst_bytes: u64,
+    obsolete_file_backlog: usize,
+    flush_queue_depth: usize,
+    flush_inflight: usize,
+    write_stall_ns_total: u64,
+    write_stall_ns_max: u64,
+    write_stall_active_ns: u64,
+}
+
 impl RuntimeState {
     pub(crate) fn observed_time_millis(&self) -> u64 {
         self.ttl_clock.now_millis()
@@ -547,6 +611,21 @@ impl RuntimeState {
 }
 
 impl RuntimeState {
+    /// The host directory behind the root's `wal/`, for tests that place or
+    /// inspect WAL files directly. The runtime itself addresses them only by
+    /// root-relative keys through `fs`.
+    #[cfg(test)]
+    pub(crate) fn host_wal_dir(&self) -> PathBuf {
+        self.db_path.join(crate::wal::WAL_DIR)
+    }
+
+    /// The host directory behind the root's `sst/`, for tests that place or
+    /// inspect SST files directly.
+    #[cfg(test)]
+    pub(crate) fn host_sst_dir(&self) -> PathBuf {
+        self.db_path.join(crate::sst::fs::SST_DIR)
+    }
+
     pub fn health(&self) -> crate::config::EngineHealth {
         let residue = self.storage_residue_assessment();
         crate::runtime::storage_residue::classify_engine_health(
@@ -583,7 +662,6 @@ impl RuntimeState {
         )
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn runtime_metrics_snapshot(&self) -> crate::types::RuntimeMetricsSnapshot {
         let now = Instant::now();
         let (pinned_ssts, oldest_snapshot_age_seconds) = self.snapshot_retention_metrics(now);
@@ -593,7 +671,39 @@ impl RuntimeState {
         let read_path = self.diagnostics.snapshot();
         // This engine's own counters: no telemetry setup needed, and another
         // engine in the process never shows up here.
-        let telemetry = Some(self.diagnostics.counters());
+        let telemetry = self.diagnostics.counters();
+        let (flush_queue_depth, flush_inflight) = self.flush_metrics_gauges();
+        let write_stall_active_ns = self
+            .flush_metrics
+            .write_stall_started_at
+            .map_or(0, |started| {
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+            });
+        let gauges = RuntimeMetricsGauges {
+            active_memtables,
+            immutable_memtables,
+            pinned_ssts,
+            oldest_snapshot_age_seconds,
+            sst_count,
+            sst_bytes,
+            obsolete_file_backlog: residue.orphan_ssts.len(),
+            flush_queue_depth,
+            flush_inflight,
+            write_stall_ns_total: self
+                .flush_metrics
+                .write_stall_ns_total
+                .saturating_add(write_stall_active_ns),
+            write_stall_ns_max: self
+                .flush_metrics
+                .write_stall_ns_max
+                .max(write_stall_active_ns),
+            write_stall_active_ns,
+        };
+
+        self.assemble_runtime_metrics(&gauges, &telemetry, &read_path)
+    }
+
+    fn flush_metrics_gauges(&self) -> (usize, usize) {
         let flush_queue_depth = self
             .column_families
             .values()
@@ -615,74 +725,69 @@ impl RuntimeState {
                 )
             })
         }));
-        let write_stall_active_ns = self
-            .flush_metrics
-            .write_stall_started_at
-            .map_or(0, |started| {
-                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
-            });
+        (flush_queue_depth, flush_inflight)
+    }
 
+    fn assemble_runtime_metrics(
+        &self,
+        gauges: &RuntimeMetricsGauges,
+        telemetry: &crate::telemetry::metrics::MetricsSnapshot,
+        read_path: &crate::diagnostics::ReadPathDiagnosticsSnapshot,
+    ) -> crate::types::RuntimeMetricsSnapshot {
         crate::types::RuntimeMetricsSnapshot {
             health: self.health(),
             current_sequence: self.sequence,
-            manifest_last_persisted_sequence: self.manifest.last_persisted_sequence,
-            manifest_next_wal_seq: self.manifest.next_wal_seq,
-            active_memtables,
-            immutable_memtables,
+            active_memtables: gauges.active_memtables,
+            immutable_memtables: gauges.immutable_memtables,
             total_memtable_bytes: self.total_memtable_bytes,
             memtable_size_limit: self.limits.memtable_size_limit,
             memtable_flush_threshold: self.limits.memtable_flush_threshold,
             max_memtable_wal_segment_gap: self.max_memtable_wal_segment_gap(),
             write_stalled: self.has_any_hard_write_stall(),
-            wal_current_segment_id: self.wal.current_segment_id,
+            wal_current_segment_id: self.wal.open_segment(),
             wal_pending_writes: self.wal.pending_writes,
             wal_last_synced_seq: self.wal.frontiers.last_synced(),
             wal_local_durable_seq: self.wal.frontiers.local_durable(),
             wal_cloud_durable_seq: self.wal.frontiers.cloud_durable(),
             compacting_ssts: self.compaction.compacting_ssts.len(),
-            active_compactions: self
-                .active_compactions
-                .load(std::sync::atomic::Ordering::SeqCst),
+            active_compactions: self.active_compactions.load(Ordering::SeqCst),
             pending_cloud_uploads: self.cloud.pending_uploads.len(),
             active_snapshots: self.snapshot_pins.active_count(),
-            pinned_ssts,
-            oldest_snapshot_age_seconds,
-            sst_count,
-            sst_bytes,
+            pinned_ssts: gauges.pinned_ssts,
+            oldest_snapshot_age_seconds: gauges.oldest_snapshot_age_seconds,
+            sst_count: gauges.sst_count,
+            sst_bytes: gauges.sst_bytes,
+            manifest_flush_frontiers: self.manifest_flush_frontier_metrics(),
             salvage_mode_opens: u64::from(self.opened_in_salvage_mode()),
-            no_space_events: telemetry.as_ref().map_or(0, |m| m.no_space_events),
-            compactions_run: telemetry.as_ref().map_or(0, |m| m.compactions_run),
-            compaction_bytes_rewritten: telemetry
-                .as_ref()
-                .map_or(0, |m| m.compaction_bytes_rewritten),
-            compaction_failures: telemetry.as_ref().map_or(0, |m| m.compaction_failures),
-            obsolete_file_backlog: residue.orphan_ssts.len(),
-            write_stalls_total: telemetry.as_ref().map_or(0, |m| m.write_stalls),
-            write_stalls_memory_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_memory),
-            write_stalls_compaction_total: telemetry
-                .as_ref()
-                .map_or(0, |m| m.write_stalls_compaction),
-            write_stalls_cloud_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_cloud),
-            write_stalls_no_space_total: telemetry.as_ref().map_or(0, |m| m.write_stalls_no_space),
-            write_conflicts_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts),
-            write_conflicts_point_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts_point),
-            write_conflicts_range_total: telemetry.as_ref().map_or(0, |m| m.write_conflicts_range),
+            no_space_events: telemetry.no_space_events,
+            compactions_run: telemetry.compactions_run,
+            compaction_bytes_rewritten: telemetry.compaction_bytes_rewritten,
+            compaction_failures: telemetry.compaction_failures,
+            obsolete_file_backlog: gauges.obsolete_file_backlog,
+            write_stalls_total: telemetry.write_stalls,
+            write_stalls_memory_total: telemetry.write_stalls_memory,
+            write_stalls_compaction_total: telemetry.write_stalls_compaction,
+            write_stalls_cloud_total: telemetry.write_stalls_cloud,
+            write_stalls_no_space_total: telemetry.write_stalls_no_space,
+            write_conflicts_total: telemetry.write_conflicts,
+            write_conflicts_point_total: telemetry.write_conflicts_point,
+            write_conflicts_range_total: telemetry.write_conflicts_range,
             cache_hits: read_path.sst_block_cache_hits,
             cache_misses: read_path.sst_block_cache_misses,
-            wal_append_count: telemetry.as_ref().map_or(0, |m| m.wal_append_count),
-            wal_flush_count: telemetry.as_ref().map_or(0, |m| m.wal_flush_count),
-            wal_fsync_count: telemetry.as_ref().map_or(0, |m| m.wal_fsync_count),
-            wal_append_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_append_ns_total),
-            wal_fsync_ns_total: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_total),
-            wal_fsync_ns_max: telemetry.as_ref().map_or(0, |m| m.wal_fsync_ns_max),
+            wal_append_count: telemetry.wal_append_count,
+            wal_flush_count: telemetry.wal_flush_count,
+            wal_fsync_count: telemetry.wal_fsync_count,
+            wal_append_ns_total: telemetry.wal_append_ns_total,
+            wal_fsync_ns_total: telemetry.wal_fsync_ns_total,
+            wal_fsync_ns_max: telemetry.wal_fsync_ns_max,
             durability_waiters_fanned_out_total: 0,
             abandoned_runtime_requests_total: 0,
             late_runtime_responses_total: 0,
             sst_bloom_rejects_total: read_path.bloom_rejects,
             sst_bloom_checks_total: read_path.bloom_checks,
             sst_data_blocks_read_total: read_path.data_blocks_read,
-            flush_queue_depth,
-            flush_inflight,
+            flush_queue_depth: gauges.flush_queue_depth,
+            flush_inflight: gauges.flush_inflight,
             flush_enqueued_total: self.flush_metrics.enqueued_total,
             flush_build_count: self.flush_metrics.build_count,
             flush_build_ns_total: self.flush_metrics.build_ns_total,
@@ -692,39 +797,17 @@ impl RuntimeState {
             flush_publish_ns_max: self.flush_metrics.publish_ns_max,
             flush_failures_total: self.flush_metrics.failures_total,
             flush_retries_total: self.flush_metrics.retries_total,
-            write_stall_ns_total: self
-                .flush_metrics
-                .write_stall_ns_total
-                .saturating_add(write_stall_active_ns),
-            write_stall_ns_max: self
-                .flush_metrics
-                .write_stall_ns_max
-                .max(write_stall_active_ns),
-            write_stall_active_ns,
-            cloud_async_wal_segments_sealed: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_segments_sealed),
-            cloud_async_wal_bytes_sealed: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_bytes_sealed),
-            cloud_async_wal_seal_latency_us: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_seal_latency_us),
-            cloud_async_wal_uploads_started: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_uploads_started),
-            cloud_async_wal_uploads_completed: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_uploads_completed),
-            cloud_async_wal_uploads_failed: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_uploads_failed),
-            cloud_async_wal_upload_latency_us: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_upload_latency_us),
-            cloud_async_wal_ack_latency_us: telemetry
-                .as_ref()
-                .map_or(0, |m| m.cloud_async_wal_ack_latency_us),
+            write_stall_ns_total: gauges.write_stall_ns_total,
+            write_stall_ns_max: gauges.write_stall_ns_max,
+            write_stall_active_ns: gauges.write_stall_active_ns,
+            cloud_async_wal_segments_sealed: telemetry.cloud_async_wal_segments_sealed,
+            cloud_async_wal_bytes_sealed: telemetry.cloud_async_wal_bytes_sealed,
+            cloud_async_wal_seal_latency_us: telemetry.cloud_async_wal_seal_latency_us,
+            cloud_async_wal_uploads_started: telemetry.cloud_async_wal_uploads_started,
+            cloud_async_wal_uploads_completed: telemetry.cloud_async_wal_uploads_completed,
+            cloud_async_wal_uploads_failed: telemetry.cloud_async_wal_uploads_failed,
+            cloud_async_wal_upload_latency_us: telemetry.cloud_async_wal_upload_latency_us,
+            cloud_async_wal_ack_latency_us: telemetry.cloud_async_wal_ack_latency_us,
             hybrid_max_local_bytes: 0,
             hybrid_total_committed_bytes: 0,
             hybrid_free_bytes: 0,
@@ -741,6 +824,24 @@ impl RuntimeState {
             intent_log_replay_runs: self.recovery_stats.intent_log_replay_runs,
             intent_log_entries_replayed: self.recovery_stats.intent_log_entries_replayed,
         }
+    }
+
+    fn manifest_flush_frontier_metrics(
+        &self,
+    ) -> std::collections::BTreeMap<crate::types::ColumnFamilyId, Option<u64>> {
+        self.manifest
+            .flush_frontiers()
+            .iter()
+            .map(|(id, frontier)| {
+                let through = match frontier {
+                    crate::metadata::FamilyFrontier::Live { through_sequence } => {
+                        Some(through_sequence)
+                    }
+                    crate::metadata::FamilyFrontier::Dropped => None,
+                };
+                (id, through)
+            })
+            .collect()
     }
 
     pub fn storage_layout_snapshot(&self) -> crate::types::StorageLayoutSnapshot {
@@ -781,8 +882,6 @@ impl RuntimeState {
 
         crate::types::StorageLayoutSnapshot {
             health: self.health(),
-            manifest_last_persisted_sequence: self.manifest.last_persisted_sequence,
-            manifest_next_wal_seq: self.manifest.next_wal_seq,
             levels,
             active_snapshots,
             compacting_ssts: self.compaction.compacting_ssts.clone(),
@@ -797,10 +896,12 @@ impl RuntimeState {
             return crate::runtime::storage_residue::StorageResidueAssessment::default();
         }
 
-        crate::runtime::storage_residue::StorageResidueAssessment::scan_sst_dir(
-            &self.db_path,
+        crate::runtime::storage_residue::StorageResidueAssessment::scan(
+            self.fs.as_ref(),
             &self.manifest,
+            |_| Ok(()),
         )
+        .unwrap_or_default()
     }
 
     #[cfg(test)]
@@ -814,36 +915,11 @@ impl RuntimeState {
         &self,
     ) -> MidgeResult<crate::runtime::storage_residue::StorageResidueAssessment> {
         self.check_startup_scope("storage residue inventory")?;
-        let mut residue = crate::runtime::storage_residue::StorageResidueAssessment::default();
-        let entries = match self.fs.list_dir(&FsPath::new("sst")) {
-            Ok(entries) => entries,
-            Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
-            Err(_) => return Ok(residue),
-        };
-        let published: HashSet<_> = self
-            .manifest
-            .files
-            .iter()
-            .map(|file| file.name.as_str())
-            .collect();
-        for entry in entries {
-            self.check_startup_scope("storage residue inventory entry")?;
-            let name = entry.name;
-            let path = std::path::Path::new(&name);
-            if name.ends_with(".sst.tmp")
-                || path
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("tmp"))
-            {
-                residue.sst_temp_files.push(name);
-            } else if path.extension().is_some_and(|extension| extension == "sst")
-                && !published.contains(name.as_str())
-            {
-                residue.orphan_ssts.push(name);
-            }
-        }
-        residue.orphan_ssts.sort();
-        residue.sst_temp_files.sort();
+        let residue = crate::runtime::storage_residue::StorageResidueAssessment::scan(
+            self.fs.as_ref(),
+            &self.manifest,
+            |context| self.check_startup_scope(context),
+        )?;
         self.check_startup_scope("storage residue inventory completion")?;
         Ok(residue)
     }
@@ -925,11 +1001,11 @@ impl RuntimeState {
 
     fn cleanup_flush_staging_residue(&mut self) -> MidgeResult<()> {
         self.check_startup_scope("flush staging residue")?;
-        let staging_dir = self.sst_dir.join(".flush-staging");
-        match self.fs.remove_dir_all(&FsPath::new("sst/.flush-staging")) {
+        let staging_dir = crate::sst::fs::FLUSH_STAGING_DIR;
+        match self.fs.remove_dir_all(&FsPath::new(staging_dir)) {
             Ok(()) => {
                 tracing::info!(
-                    path = %staging_dir.display(),
+                    path = staging_dir,
                     "deleted non-authoritative flush staging residue during startup"
                 );
             }
@@ -938,7 +1014,7 @@ impl RuntimeState {
             Err(error) => {
                 self.mark_persistence_anomaly();
                 tracing::warn!(
-                    path = %staging_dir.display(),
+                    path = staging_dir,
                     error = %error,
                     "failed to delete non-authoritative flush staging residue"
                 );
@@ -952,19 +1028,16 @@ impl RuntimeState {
     /// directory.
     fn cleanup_repair_scratch_residue(&mut self) -> MidgeResult<()> {
         self.check_startup_scope("repair scratch residue")?;
-        let directory = self.sst_dir.join(".compaction-repair");
-        match self
-            .fs
-            .remove_dir_all(&FsPath::new("sst/.compaction-repair"))
-        {
+        let directory = crate::sst::fs::REPAIR_SCRATCH_DIR;
+        match self.fs.remove_dir_all(&FsPath::new(directory)) {
             Ok(()) => {
-                tracing::info!(path = %directory.display(), "deleted stale overlap-repair scratch");
+                tracing::info!(path = directory, "deleted stale overlap-repair scratch");
             }
             Err(FsError::NotFound(_)) => {}
             Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
             Err(error) => {
                 self.mark_persistence_anomaly();
-                tracing::warn!(path = %directory.display(), error = %error, "retaining unclean overlap-repair scratch");
+                tracing::warn!(path = directory, error = %error, "retaining unclean overlap-repair scratch");
             }
         }
         self.check_startup_scope("startup residue completion")
@@ -1161,66 +1234,152 @@ impl RuntimeState {
         Ok(bytes)
     }
 
-    fn ensure_directories(
-        db_path: &std::path::Path,
-        memory_mode: bool,
-    ) -> MidgeResult<(std::path::PathBuf, std::path::PathBuf)> {
-        let wal_dir = db_path.join("wal");
-        let sst_dir = db_path.join("sst");
-
+    /// Create the WAL and SST directories below `root`. `Fs::create_dir_all`
+    /// is durable: each new entry survives a crash before the first
+    /// acknowledged write, whatever else syncs the database root (#519).
+    fn ensure_directories(root: &dyn Fs, memory_mode: bool) -> MidgeResult<()> {
         if !memory_mode {
-            crate::io::durable_dir::create_path_durably(db_path)?;
-            // Durable: the entries must survive a crash before the first
-            // acknowledged write, whatever else syncs the database root (#519).
-            crate::io::durable_dir::create_dir_all_durably(db_path, &wal_dir)?;
-            crate::io::durable_dir::create_dir_all_durably(db_path, &sst_dir)?;
+            for directory in ["wal", crate::sst::fs::SST_DIR] {
+                root.create_dir_all(&FsPath::new(directory))
+                    .map_err(FsError::into_midge)?;
+            }
         }
-
-        Ok((wal_dir, sst_dir))
+        Ok(())
     }
 
-    /// Allocate the next sequence number. Saturates at `u64::MAX` to avoid wrap;
-    /// after that, duplicate sequence numbers would occur (documented limitation).
+    /// Allocate the next sequence number, through the reservation.
     #[cfg(test)]
     pub fn next_sequence(&mut self) -> u64 {
-        self.sequence = self.sequence.saturating_add(1);
-        self.sequence
+        *self
+            .allocate_sequences(1)
+            .expect("a test sequence fits the reservation")
+            .end()
+    }
+
+    /// Allocate `count` consecutive sequences, the only way a sequence is
+    /// handed out (#843). Every one lies at or below the reservation the WAL
+    /// ledger made durable, raised first when less than half a block would
+    /// remain. A failed raise is tolerated while the old reservation still
+    /// covers the allocation; otherwise the error returns before any WAL
+    /// byte names a sequence.
+    ///
+    /// # Errors
+    ///
+    /// The ledger error when the reservation cannot cover the allocation,
+    /// or `ResourceLimit` when the sequence space is exhausted.
+    pub(crate) fn allocate_sequences(
+        &mut self,
+        count: u64,
+    ) -> MidgeResult<std::ops::RangeInclusive<u64>> {
+        use crate::wal::sequence::{allocate, refill_due, Allocation};
+        let last = self.sequence;
+        let reserved = self.wal.history.ledger().seq_reserved_through();
+        if allocate(last, reserved, count).is_none() {
+            return Err(MidgeError::ResourceLimit(
+                "sequence space exhausted".to_string(),
+            ));
+        }
+        if let Some(through) = refill_due(last, reserved, count) {
+            if let Err(error) = self.wal.history.reserve(through) {
+                if !matches!(allocate(last, reserved, count), Some(Allocation::Ready(_))) {
+                    return Err(error);
+                }
+                tracing::warn!(
+                    %error,
+                    through,
+                    reserved,
+                    "could not raise the WAL sequence reservation; the current one still covers this allocation"
+                );
+            }
+        }
+        let reserved = self.wal.history.ledger().seq_reserved_through();
+        match allocate(last, reserved, count) {
+            Some(Allocation::Ready(range)) => {
+                self.sequence = *range.end();
+                Ok(range)
+            }
+            Some(Allocation::NeedsReservation { through }) => Err(MidgeError::Internal(format!(
+                "sequence allocation through {through} exceeds the WAL reservation {reserved}"
+            ))),
+            None => Err(MidgeError::ResourceLimit(
+                "sequence space exhausted".to_string(),
+            )),
+        }
+    }
+
+    /// Give back `range`, the latest allocation, before any WAL byte named
+    /// one of its sequences, so the durable frontier never skips an unwritten
+    /// range.
+    pub(crate) fn release_sequences(&mut self, range: &std::ops::RangeInclusive<u64>) {
+        if self.sequence == *range.end() {
+            self.sequence = range.start().saturating_sub(1);
+        }
+    }
+
+    /// Raise the sequence to at least `floor`: recovered state proves every
+    /// sequence up to it was handed out.
+    pub(crate) fn raise_sequence_to(&mut self, floor: u64) {
+        self.sequence = self.sequence.max(floor);
+    }
+
+    /// Start this process's WAL epoch `epoch`, before it admits work (#843).
+    ///
+    /// Every sequence an earlier process may have handed out, which is
+    /// everything it reserved, counts as used. The open segment recovery
+    /// left is sealed durably when it holds records, so nothing served from
+    /// it can be lost to a later power loss, and a new open segment starts
+    /// past every used sequence; an open segment holding no record is kept
+    /// or replaced instead. Then a new reservation is made durable past the
+    /// used sequences, and the local durable frontier covers them. Returns
+    /// the segment sealed, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns the segment or ledger error, or `ResourceLimit` when the
+    /// sequence space is exhausted.
+    pub(crate) fn begin_wal_epoch(
+        &mut self,
+        epoch: u64,
+    ) -> MidgeResult<Option<crate::runtime::wal_history::SealedSegment>> {
+        let last = crate::wal::sequence::opening_last(
+            self.sequence,
+            self.compaction_output_generation,
+            self.wal.history.ledger().seq_reserved_through(),
+        );
+        let exhausted = || MidgeError::ResourceLimit("sequence space exhausted".to_string());
+        let first_seq = last.checked_add(1).ok_or_else(exhausted)?;
+        let through = last
+            .checked_add(crate::wal::sequence::RESERVATION_BLOCK)
+            .ok_or_else(exhausted)?;
+        let sealed = self.wal.history.start_epoch(epoch, first_seq)?;
+        self.wal.history.reserve(through)?;
+        self.sequence = last;
+        self.wal.frontiers.advance_local_to(last);
+        Ok(sealed)
     }
 
     pub(crate) fn next_compaction_output_generation(&mut self) -> MidgeResult<u64> {
-        let current = self.compaction_output_generation.max(self.sequence);
-        let next = current.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("compaction output sequence exhausted".to_string())
-        })?;
-        self.compaction_output_generation = next;
-        self.sequence = next;
-        Ok(next)
+        self.raise_sequence_to(self.compaction_output_generation);
+        let generation = *self.allocate_sequences(1)?.end();
+        self.compaction_output_generation = generation;
+        Ok(generation)
     }
 
     pub fn restore_sequence_floor_from_manifest(&mut self) {
         let sequence_floor = Self::manifest_visible_sequence_floor(&self.manifest);
-        if self.manifest.last_persisted_sequence < sequence_floor {
-            self.manifest.advance_persisted_sequence(sequence_floor);
-        }
         if self.sequence < sequence_floor {
             self.sequence = sequence_floor;
         }
         self.wal.frontiers.advance_local_to(sequence_floor);
-        self.wal.frontiers.advance_cloud_to(sequence_floor);
         self.compaction_output_generation =
             self.compaction_output_generation.max(self.sequence).max(
                 Self::manifest_compaction_output_generation_floor(&self.manifest),
             );
     }
 
-    /// Reset the cloud durability frontier to bytes proven durable by the
-    /// manifest. Startup separately advances it through the contiguous set of
-    /// validated remote WAL segments; local-only replay must never contribute
-    /// to this frontier until its resumed upload is acknowledged.
-    pub(crate) fn reset_cloud_durable_sequence_for_recovery(&mut self) {
-        self.wal
-            .frontiers
-            .reset_cloud_for_recovery(Self::manifest_visible_sequence_floor(&self.manifest));
+    /// Seed cloud acknowledgement from the hydrated catalog's retired anchor.
+    pub(crate) fn reset_cloud_durable_sequence_for_recovery(&mut self, anchor_sequence: u64) {
+        self.wal.frontiers.reset_cloud_for_recovery(anchor_sequence);
     }
 
     /// Get the next transaction ID
@@ -1284,9 +1443,13 @@ impl RuntimeState {
 
     #[cfg(test)]
     pub fn create_cf(&mut self, name: String) -> MidgeResult<u32> {
-        let id = u32::try_from(self.column_families.len()).map_err(|_| {
-            crate::common::MidgeError::Internal("too many column families".to_string())
-        })?;
+        let id = self.manifest.next_cf_id()?;
+        self.manifest
+            .apply_edit(&crate::metadata::ManifestEdit::CreateColumnFamily {
+                id,
+                name: name.clone(),
+                created_at: 0,
+            })?;
         self.column_families
             .insert(id, ColumnFamilyState::new(id, name));
         Ok(id)

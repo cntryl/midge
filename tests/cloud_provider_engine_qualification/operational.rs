@@ -31,7 +31,6 @@ const PHASE_ENV: &str = "MIDGE_OPERATIONAL_CHILD_PHASE";
 const CHILD_TEST: &str = "operational::should_execute_cloud_recovery_phase_in_child";
 
 #[test]
-#[ignore = "requires Sqrzl; cloud-integration.yml runs this configurable recovery campaign"]
 fn should_recover_cloud_backlog_after_complete_local_disk_loss() {
     // Arrange
     super::require_sqrzl("operational-recovery");
@@ -80,12 +79,10 @@ fn should_recover_cloud_backlog_after_complete_local_disk_loss() {
                         > 0
                 );
                 assert_eq!(report["costs"]["recovery_phases"]["wal_replay"]["count"], 1);
-                assert!(
-                    report["costs"]["recovery_phases"]["coverage"]["probes"]
-                        .as_u64()
-                        .expect("coverage probes")
-                        > 0
-                );
+                let plan = &report["costs"]["recovery_phases"]["wal_plan"];
+                assert_eq!(plan["started_count"], 1, "recovery must plan WAL authority");
+                assert_eq!(plan["count"], 1, "WAL planning must complete");
+                assert_eq!(plan["failed"], 0, "WAL authority planning failed");
             }
             println!("MIDGE_OPERATIONAL_EVIDENCE {report}");
         }
@@ -93,7 +90,6 @@ fn should_recover_cloud_backlog_after_complete_local_disk_loss() {
 }
 
 #[test]
-#[ignore = "child entry point for native cloud recovery qualification"]
 fn should_execute_cloud_recovery_phase_in_child() {
     // Arrange
     let Some(config) = std::env::var_os(CHILD_ENV) else {
@@ -261,7 +257,7 @@ fn run_child(campaign: &Campaign, config: &Path, phase: &str, expected_code: i32
         Command::new(executable)
     };
     let mut child = command
-        .args(["--exact", CHILD_TEST, "--ignored", "--nocapture"])
+        .args(["--exact", CHILD_TEST, "--nocapture"])
         .env(CHILD_ENV, config)
         .env(PHASE_ENV, phase)
         .stdout(Stdio::from(output.try_clone().expect("clone log")))

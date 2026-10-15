@@ -10,24 +10,97 @@
 //! - `sync_dir` uses a directory durability barrier on Unix and Windows.
 
 use super::traits::{
-    DirEntry, Durability, File, Fs, FsError, FsPath, FsResult, HostAddressing, Metadata,
-    OpenOptions,
+    DirEntry, Durability, File, Fs, FsError, FsLock, FsPath, FsResult, HostAddressing, Metadata,
+    OpenOptions, ReadFs,
 };
+use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Weak};
+
+/// NFS can implement advisory locks with process-scoped record locks, where
+/// closing any descriptor for the lock file releases the process's lock.
+/// Keep one local owner per canonical path so a contending thread never opens
+/// and closes another descriptor while an effect is in progress.
+static LOCAL_FILE_LOCKS: LazyLock<parking_lot::Mutex<HashMap<PathBuf, Weak<AtomicBool>>>> =
+    LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+fn local_file_lock(path: &Path) -> Arc<AtomicBool> {
+    let mut locks = LOCAL_FILE_LOCKS.lock();
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(AtomicBool::new(false));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
+
+struct RealFsLock {
+    file: Option<fs::File>,
+    local: Arc<AtomicBool>,
+}
+
+impl Drop for RealFsLock {
+    fn drop(&mut self) {
+        // Release the OS/NFS lock before allowing another local descriptor to
+        // open the same path.
+        self.file.take();
+        self.local.store(false, Ordering::Release);
+    }
+}
+
+impl FsLock for RealFsLock {
+    fn validate_held(&self) -> FsResult<()> {
+        // The exclusively owned descriptor remains locked until this guard drops.
+        Ok(())
+    }
+}
+
+fn lock_error(path: &Path, error: &io::Error) -> FsError {
+    let unsupported = error.kind() == io::ErrorKind::Unsupported || {
+        #[cfg(unix)]
+        {
+            error.raw_os_error().is_some_and(|code| {
+                code == libc::EOPNOTSUPP || code == libc::ENOTSUP || code == libc::ENOSYS
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    };
+    if unsupported {
+        FsError::Unsupported(format!(
+            "exclusive file locks are unsupported for {}: {error}",
+            path.display()
+        ))
+    } else {
+        io_err("lock_exclusive", path, error)
+    }
+}
 
 /// Real filesystem backend
 pub struct RealFs {
     base_path: PathBuf,
-    /// Working directory `base_path` was resolved from, recorded at the same
-    /// instant. Relative host paths naming this filesystem's contents were
-    /// written in that frame, so callers must resolve them there rather than
-    /// against a process working directory that may since have moved.
-    relative_anchor: Option<PathBuf>,
+    /// `base_path` as the caller named it, made absolute at construction
+    /// without resolving symlinks.
+    named_root: PathBuf,
+}
+
+/// A host-backed database root for tests, created if missing.
+///
+/// # Panics
+///
+/// Panics when the directory cannot be created or resolved.
+#[cfg(test)]
+pub fn test_root(path: impl AsRef<Path>) -> std::sync::Arc<dyn Fs> {
+    std::sync::Arc::new(RealFs::new(path).expect("test database root"))
 }
 
 impl RealFs {
@@ -41,17 +114,12 @@ impl RealFs {
     /// # Errors
     ///
     /// Returns an error when the base directory cannot be created.
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn new(base_path: impl AsRef<Path>) -> FsResult<Self> {
         let path = base_path.as_ref().to_path_buf();
         super::durable_dir::create_path_durably(&path)
             .map_err(|error| io_err("create_path_durably", &path, &error))?;
-        let relative_anchor = std::env::current_dir().ok();
-        let path =
-            fs::canonicalize(path).map_err(|e| io_err("canonicalize", base_path.as_ref(), &e))?;
-        Ok(Self {
-            base_path: path,
-            relative_anchor,
-        })
+        Self::resolved(&path)
     }
 
     /// Open a filesystem root that must already exist, without creating it.
@@ -71,12 +139,17 @@ impl RealFs {
                 path.display()
             )));
         }
-        let relative_anchor = std::env::current_dir().ok();
-        let path =
-            fs::canonicalize(path).map_err(|e| io_err("canonicalize", base_path.as_ref(), &e))?;
+        Self::resolved(&path)
+    }
+
+    fn resolved(path: &Path) -> FsResult<Self> {
+        let named_root =
+            std::path::absolute(path).map_err(|error| io_err("absolute", path, &error))?;
+        let base_path =
+            fs::canonicalize(path).map_err(|error| io_err("canonicalize", path, &error))?;
         Ok(Self {
-            base_path: path,
-            relative_anchor,
+            base_path,
+            named_root,
         })
     }
 
@@ -158,45 +231,17 @@ impl RealFs {
             std_opts.truncate(true);
         }
 
-        let file = std_opts.open(&full).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                super::traits::FsError::NotFound(format!("{}: {error}", full.display()))
-            } else {
-                io_error(format!("open {}", full.display()), &error)
-            }
-        })?;
+        let file = std_opts
+            .open(&full)
+            .map_err(|error| file_op_err("open", &full, &error))?;
         Ok(Box::new(RealFile { file }))
     }
 }
 
-impl Fs for RealFs {
-    fn host_addressing(&self) -> Option<HostAddressing<'_>> {
-        Some(HostAddressing {
-            root: &self.base_path,
-            anchor: self.relative_anchor.as_deref(),
-        })
-    }
-
-    fn coordination_key(&self) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.base_path.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        // Delegate to shared implementation that returns a 'static file handle.
-        self.open_inner(path, opts)
-    }
-
-    fn open_persistent_handle(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
-        // For real FS, a file handle is independently owned and therefore 'static.
-        // Delegate to the shared implementation which returns a `'static` handle.
-        self.open_inner(path, opts)
-    }
-
-    fn remove_file(&self, path: &FsPath) -> FsResult<()> {
-        let full = self.full_path(path)?;
-        fs::remove_file(&full).map_err(|error| file_op_err("remove_file", &full, &error))
+impl ReadFs for RealFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -211,21 +256,16 @@ impl Fs for RealFs {
     fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
         let full = self.full_path(path)?;
         let meta = fs::metadata(&full).map_err(|error| file_op_err("metadata", &full, &error))?;
-        Ok(Metadata { len: meta.len() })
-    }
-
-    /// Creates missing directories durably: each new entry's parent is
-    /// fsynced before this returns (#519).
-    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
-        let full = self.full_path(path)?;
-        super::durable_dir::create_dir_all_durably(&self.base_path, &full)
-            .map_err(|e| io_err("create_dir_all", &full, &e))
+        Ok(Metadata {
+            len: meta.len(),
+            is_dir: meta.is_dir(),
+        })
     }
 
     fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
         let full = self.full_path(path)?;
         let entries = fs::read_dir(&full)
-            .map_err(|e| io_err("read_dir", &full, &e))?
+            .map_err(|error| file_op_err("read_dir", &full, &error))?
             .map(|entry| {
                 let entry = entry.map_err(|e| io_err("read_dir_entry", &full, &e))?;
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -237,6 +277,78 @@ impl Fs for RealFs {
             })
             .collect::<Result<Vec<_>, FsError>>()?;
         Ok(entries)
+    }
+}
+
+impl Fs for RealFs {
+    fn persistent_handle_capability(&self) -> Option<&dyn super::PersistentHandleFs> {
+        Some(self)
+    }
+
+    fn host_addressing(&self) -> Option<HostAddressing<'_>> {
+        Some(HostAddressing {
+            root: &self.base_path,
+            named_root: &self.named_root,
+        })
+    }
+
+    fn coordination_key(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.base_path.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn FsLock>> {
+        let full = self.full_path(path)?;
+        let local = local_file_lock(&full);
+        local
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .map_err(|_| FsError::AlreadyExists(path.0.clone()))?;
+        let file = match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&full)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                local.store(false, Ordering::Release);
+                return Err(file_op_err("open_lock", &full, &error));
+            }
+        };
+        match file.try_lock() {
+            Ok(()) => Ok(Box::new(RealFsLock {
+                file: Some(file),
+                local,
+            })),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                local.store(false, Ordering::Release);
+                Err(FsError::AlreadyExists(path.0.clone()))
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                local.store(false, Ordering::Release);
+                Err(lock_error(&full, &error))
+            }
+        }
+    }
+
+    fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        // Delegate to shared implementation that returns a 'static file handle.
+        self.open_inner(path, opts)
+    }
+
+    fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+        let full = self.full_path(path)?;
+        fs::remove_file(&full).map_err(|error| file_op_err("remove_file", &full, &error))
+    }
+
+    /// Creates missing directories durably: each new entry's parent is
+    /// fsynced before this returns (#519).
+    fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+        let full = self.full_path(path)?;
+        super::durable_dir::create_dir_all_durably(&self.base_path, &full)
+            .map_err(|e| io_err("create_dir_all", &full, &e))
     }
 
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
@@ -336,17 +448,24 @@ impl Fs for RealFs {
                     // write-through fast path above for ordinary WAL sealing;
                     // staged replacements also sync their parent directory.
                     return fs::rename(&from_full, &to_full)
-                        .map_err(|error| io_err("rename", &to_full, &error));
+                        .map_err(|error| rename_err(&from_full, &to_full, &error));
                 }
-                return Err(io_err("rename", &to_full, &error));
+                return Err(rename_err(&from_full, &to_full, &error));
             }
             Ok(())
         }
 
         #[cfg(not(windows))]
         {
-            fs::rename(&from_full, &to_full).map_err(|e| io_err("rename", &to_full, &e))
+            fs::rename(&from_full, &to_full)
+                .map_err(|error| rename_err(&from_full, &to_full, &error))
         }
+    }
+}
+
+impl super::PersistentHandleFs for RealFs {
+    fn open_persistent(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File>> {
+        self.open_inner(path, opts)
     }
 }
 
@@ -360,7 +479,7 @@ impl RealFile {
     }
 }
 
-impl File for RealFile {
+impl crate::io::ReadFile for RealFile {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
         let len = Self::len_usize_u64(len)?;
         let mut buf = vec![0u8; len];
@@ -391,6 +510,16 @@ impl File for RealFile {
         }
     }
 
+    fn len(&self) -> FsResult<u64> {
+        let meta = self
+            .file
+            .metadata()
+            .map_err(|e| io_error("metadata(len)", &e))?;
+        Ok(meta.len())
+    }
+}
+
+impl File for RealFile {
     fn write_at(&mut self, offset: u64, data: bytes::Bytes) -> FsResult<()> {
         let bytes = data.as_ref();
 
@@ -442,14 +571,6 @@ impl File for RealFile {
         Ok(pos)
     }
 
-    fn len(&self) -> FsResult<u64> {
-        let meta = self
-            .file
-            .metadata()
-            .map_err(|e| io_error("metadata(len)", &e))?;
-        Ok(meta.len())
-    }
-
     fn sync(&mut self, dur: Durability) -> FsResult<()> {
         match dur {
             Durability::Unsafe => Ok(()),
@@ -471,6 +592,38 @@ fn file_op_err(op: &str, path: &Path, error: &io::Error) -> FsError {
         io::ErrorKind::NotFound => FsError::NotFound(message),
         io::ErrorKind::AlreadyExists => FsError::AlreadyExists(message),
         _ => io_error(format!("{op} {}", path.display()), error),
+    }
+}
+
+fn rename_err(from: &Path, to: &Path, error: &io::Error) -> FsError {
+    if error.kind() != io::ErrorKind::NotFound {
+        return file_op_err("rename", to, error);
+    }
+
+    let destination_parent = to.parent().unwrap_or_else(|| Path::new("."));
+    match fs::metadata(destination_parent) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return FsError::Io(format!(
+                "rename destination parent is not a directory: {}",
+                destination_parent.display()
+            ));
+        }
+        Err(parent_error) => {
+            return io_err(
+                "rename destination parent",
+                destination_parent,
+                &parent_error,
+            );
+        }
+    }
+
+    match fs::symlink_metadata(from) {
+        Err(source_error) if source_error.kind() == io::ErrorKind::NotFound => {
+            FsError::NotFound(format!("rename source {}: {source_error}", from.display()))
+        }
+        Err(source_error) => io_err("inspect rename source", from, &source_error),
+        Ok(_) => io_err("rename", to, error),
     }
 }
 
@@ -610,6 +763,41 @@ mod tests {
     use super::*;
     use crate::io::OpenMode;
     use tempfile::TempDir;
+
+    #[test]
+    fn should_use_portable_lock_fallback_when_os_lock_is_unsupported() {
+        // Arrange
+        let error = io::Error::new(io::ErrorKind::Unsupported, "lock operation unsupported");
+
+        // Act
+        let mapped = lock_error(Path::new(".midge_writer_effect.v2.lock"), &error);
+
+        // Assert
+        assert!(matches!(mapped, FsError::Unsupported(_)), "{mapped:?}");
+    }
+
+    #[test]
+    fn should_keep_process_lock_held_when_another_real_fs_view_contends() -> FsResult<()> {
+        // Arrange: two independently opened roots point at the same lock file.
+        let temp = TempDir::new().map_err(|error| FsError::Io(error.to_string()))?;
+        let first = RealFs::new(temp.path())?;
+        let second = RealFs::new(temp.path())?;
+        let path = FsPath::new(".midge_writer_effect.v2.lock");
+        let held = first.try_lock_exclusive(&path)?;
+
+        // Act: a contending view must not open and close another descriptor.
+        let contention = second.try_lock_exclusive(&path);
+
+        // Assert: the first view still owns the lock until its guard drops.
+        assert!(matches!(contention, Err(FsError::AlreadyExists(_))));
+        assert!(matches!(
+            second.try_lock_exclusive(&path),
+            Err(FsError::AlreadyExists(_))
+        ));
+        drop(held);
+        second.try_lock_exclusive(&path)?;
+        Ok(())
+    }
 
     #[test]
     fn should_create_real_fs() -> FsResult<()> {
@@ -801,6 +989,34 @@ mod tests {
         assert_eq!(contents, b"new");
         assert!(!temp.path().join("source.tmp").exists());
         Ok(())
+    }
+
+    #[test]
+    fn should_distinguish_missing_rename_source_from_destination_parent() {
+        // Arrange
+        let temp = TempDir::new().expect("temp dir");
+        let source = temp.path().join("source.tmp");
+        std::fs::write(&source, b"source").expect("write source");
+        let missing_destination_parent = temp.path().join("missing/target");
+        let not_found = io::Error::new(io::ErrorKind::NotFound, "component missing");
+
+        // Act
+        let missing_parent = rename_err(&source, &missing_destination_parent, &not_found);
+        let missing_source = rename_err(
+            &temp.path().join("missing-source"),
+            &temp.path().join("target"),
+            &not_found,
+        );
+
+        // Assert
+        assert!(
+            matches!(missing_parent, FsError::Io(_)),
+            "{missing_parent:?}"
+        );
+        assert!(
+            matches!(missing_source, FsError::NotFound(_)),
+            "{missing_source:?}"
+        );
     }
 
     #[test]

@@ -7,11 +7,11 @@ pub(crate) enum WalTransitionBoundary {
     BeforeFsync,
     AfterFsync,
     AfterAppendBeforeAccounting,
-    BeforeRename,
-    AfterRename,
-    BeforeWriterCreate,
-    AfterWriterCreate,
-    AfterReplacementDirectorySync,
+    AfterSealDigest,
+    BeforeSegmentCreate,
+    AfterSegmentCreate,
+    AfterFooter,
+    AfterLedgerRotate,
     BeforeCoordinatorCommit,
     AfterCoordinatorCommit,
     BeforeSegmentRegistration,
@@ -39,11 +39,11 @@ impl WalTransitionBoundary {
     /// event-loop level).
     #[cfg(all(test, feature = "failpoints"))]
     pub(crate) const LOCAL_ROTATION_BOUNDARIES: [Self; 5] = [
-        Self::BeforeRename,
-        Self::AfterRename,
-        Self::BeforeWriterCreate,
-        Self::AfterWriterCreate,
-        Self::AfterReplacementDirectorySync,
+        Self::AfterSealDigest,
+        Self::BeforeSegmentCreate,
+        Self::AfterSegmentCreate,
+        Self::AfterFooter,
+        Self::AfterLedgerRotate,
     ];
 
     /// Boundaries exercised by the durable append matrix.
@@ -54,11 +54,11 @@ impl WalTransitionBoundary {
     /// (`event_loop::cloud_integration::tests`).
     #[cfg(all(test, feature = "failpoints"))]
     pub(crate) const CLOUD_SEAL_BOUNDARIES: [Self; 11] = [
-        Self::BeforeRename,
-        Self::AfterRename,
-        Self::BeforeWriterCreate,
-        Self::AfterWriterCreate,
-        Self::AfterReplacementDirectorySync,
+        Self::AfterSealDigest,
+        Self::BeforeSegmentCreate,
+        Self::AfterSegmentCreate,
+        Self::AfterFooter,
+        Self::AfterLedgerRotate,
         Self::BeforeCoordinatorCommit,
         Self::AfterCoordinatorCommit,
         Self::BeforeSegmentRegistration,
@@ -81,11 +81,11 @@ impl WalTransitionBoundary {
         Self::BeforeFsync,
         Self::AfterFsync,
         Self::AfterAppendBeforeAccounting,
-        Self::BeforeRename,
-        Self::AfterRename,
-        Self::BeforeWriterCreate,
-        Self::AfterWriterCreate,
-        Self::AfterReplacementDirectorySync,
+        Self::AfterSealDigest,
+        Self::BeforeSegmentCreate,
+        Self::AfterSegmentCreate,
+        Self::AfterFooter,
+        Self::AfterLedgerRotate,
         Self::BeforeCoordinatorCommit,
         Self::AfterCoordinatorCommit,
         Self::BeforeSegmentRegistration,
@@ -103,13 +103,11 @@ impl WalTransitionBoundary {
             Self::AfterAppendBeforeAccounting => {
                 "midge::wal_transition::after_append_before_accounting"
             }
-            Self::BeforeRename => "midge::wal_transition::before_rename",
-            Self::AfterRename => "midge::wal_transition::after_rename",
-            Self::BeforeWriterCreate => "midge::wal_transition::before_writer_create",
-            Self::AfterWriterCreate => "midge::wal_transition::after_writer_create",
-            Self::AfterReplacementDirectorySync => {
-                "midge::wal_transition::after_replacement_directory_sync"
-            }
+            Self::AfterSealDigest => "midge::wal_transition::after_seal_digest",
+            Self::BeforeSegmentCreate => "midge::wal_transition::before_segment_create",
+            Self::AfterSegmentCreate => "midge::wal_transition::after_segment_create",
+            Self::AfterFooter => "midge::wal_transition::after_footer",
+            Self::AfterLedgerRotate => "midge::wal_transition::after_ledger_rotate",
             Self::BeforeCoordinatorCommit => "midge::wal_transition::before_coordinator_commit",
             Self::AfterCoordinatorCommit => "midge::wal_transition::after_coordinator_commit",
             Self::BeforeSegmentRegistration => "midge::wal_transition::before_segment_registration",

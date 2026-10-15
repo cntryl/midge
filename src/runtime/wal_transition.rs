@@ -8,7 +8,7 @@
 //! - the filesystem actor (`WalActor`): writer ownership, fsync, rename;
 //! - the durability coordinator: the generation or segment key that new
 //!   waiters join and the inflight `CloudAsync` frontier;
-//! - runtime state: `current_segment_id`, `local_durable_seq`,
+//! - runtime state: the ledger's open segment, `local_durable_seq`,
 //!   `last_synced_seq`, `pending_writes`;
 //! - cloud upload tracking: the upload backlog and acknowledged segments;
 //! - durability waiters: every waiter receives exactly one terminal outcome.
@@ -118,7 +118,9 @@ enum SegmentObligationState {
     Sealed,
     /// The segment is owned by the upload backlog or inflight frontier.
     Queued,
-    /// Cloud storage acknowledged the upload; the frontier has not moved yet.
+    /// A readback verified the upload. The catalog publishes it only once
+    /// every earlier segment is uploaded too, and the frontier moves after
+    /// that.
     Acknowledged,
     /// The cloud durability frontier covers the segment.
     CloudDurable,

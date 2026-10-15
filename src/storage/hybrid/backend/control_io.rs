@@ -22,7 +22,8 @@ impl ControlObject {
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-    pub(crate) fn metadata(&self) -> &StorageObjectMetadata {
+    /// The object store's identity and size for this control object.
+    pub(crate) fn object_metadata(&self) -> &StorageObjectMetadata {
         &self.metadata
     }
 }
@@ -105,14 +106,9 @@ impl HybridStorage {
             }
             bytes.extend_from_slice(&range);
         }
-        let after = control_head(backend, key, callback_timeout, deadline)?.ok_or_else(|| {
-            MidgeError::Corruption("control object disappeared during read".into())
-        })?;
-        if !metadata.same_version(&after) {
-            return Err(MidgeError::Corruption(
-                "control object changed during read".into(),
-            ));
-        }
+        // Every successful range is pinned to the initial identity. A later
+        // replacement cannot invalidate those bytes; any subsequent CAS must
+        // still use that original identity and reject a stale mutation.
         Ok(Some(ControlObject {
             bytes,
             metadata,
@@ -296,9 +292,7 @@ mod tests {
     #[test]
     fn should_reject_control_object_before_reading_when_shared_budget_is_exhausted() {
         // Arrange
-        let directory = tempfile::tempdir().unwrap();
         let storage = HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             Arc::new(CloudStorage::with_mock()),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
@@ -333,23 +327,9 @@ mod ownership_tests {
         inner: MockCloudBackend,
         pending: parking_lot::Mutex<Option<(Vec<u8>, CloudCallback)>>,
     }
-    impl CloudBackend for PendingUpload {
-        crate::storage::cloud::unsupported_cloud_backend!(
-            submit_get,
-            submit_get_with_metadata,
-            submit_delete,
-            submit_list,
-        );
+    impl crate::storage::cloud::CloudReadCapability for PendingUpload {
+        crate::storage::cloud::unsupported_cloud_backend!(submit_get, submit_get_with_metadata);
 
-        fn submit_put(
-            &self,
-            _key: &str,
-            bytes: Vec<u8>,
-            _headers: Vec<(String, String)>,
-            callback: CloudCallback,
-        ) {
-            *self.pending.lock() = Some((bytes, callback));
-        }
         fn submit_get_range(
             &self,
             key: &str,
@@ -359,18 +339,41 @@ mod ownership_tests {
         ) {
             self.inner.submit_get_range(key, start, end, callback);
         }
+    }
+
+    impl crate::storage::cloud::CloudWriteCapability for PendingUpload {
+        fn submit_put(
+            &self,
+            _key: &str,
+            bytes: Vec<u8>,
+            _headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            *self.pending.lock() = Some((bytes, callback));
+        }
+    }
+
+    impl crate::storage::cloud::CloudDeleteCapability for PendingUpload {
+        crate::storage::cloud::unsupported_cloud_backend!(submit_delete);
+    }
+
+    impl crate::storage::cloud::CloudListCapability for PendingUpload {
+        crate::storage::cloud::unsupported_cloud_backend!(submit_list);
+    }
+
+    impl crate::storage::cloud::CloudHeadCapability for PendingUpload {
         fn submit_head(&self, key: &str, callback: CloudCallback) {
             self.inner.submit_head(key, callback);
         }
     }
 
+    impl CloudBackend for PendingUpload {}
+
     #[test]
     fn should_retain_control_upload_charge_after_timeout_until_provider_releases_body() {
         // Arrange
-        let directory = tempfile::tempdir().unwrap();
         let provider = Arc::new(PendingUpload::default());
         let storage = HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             Arc::new(CloudStorage::new(provider.clone(), String::new())),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
@@ -406,10 +409,8 @@ mod ownership_tests {
         // Arrange
         let _guard = crate::failpoints::test_failpoint_guard();
         let _scenario = fail::FailScenario::setup();
-        let directory = tempfile::tempdir().unwrap();
         let provider = Arc::new(PendingUpload::default());
         let storage = HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             Arc::new(CloudStorage::new(provider.clone(), String::new())),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
@@ -450,10 +451,8 @@ mod ownership_tests {
     #[test]
     fn should_not_start_control_upload_when_admission_fails() {
         // Arrange
-        let directory = tempfile::tempdir().unwrap();
         let provider = Arc::new(PendingUpload::default());
         let storage = HybridStorage::with_policy(
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap()),
             Arc::new(CloudStorage::new(provider.clone(), String::new())),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         );

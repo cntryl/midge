@@ -1,15 +1,27 @@
 use super::*;
 
+fn root_at(directory: &std::path::Path) -> Arc<dyn Fs> {
+    crate::io::real::test_root(directory)
+}
+
+/// The host file behind a spill key in a host-backed test root.
+fn host_path(root: &SpillRoot, path: &FsPath) -> std::path::PathBuf {
+    root.host_addressing()
+        .expect("host-backed test root")
+        .root
+        .join(&path.0)
+}
+
 #[test]
 fn should_reject_spill_before_creating_files_when_shared_disk_budget_is_exhausted(
 ) -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let setup = crate::storage::simulated::build_simulated_cloud_stores(dir.path(), Some(128))?;
+    let setup = crate::storage::simulated::host_simulated_cloud(dir.path(), Some(128))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(128);
     let mut writes = TransactionWriteSet::new(
         Arc::new(TransactionMemoryPool::new(0)),
-        dir.path(),
+        &root_at(dir.path()),
         false,
         1,
     )
@@ -30,16 +42,52 @@ fn should_reject_spill_before_creating_files_when_shared_disk_budget_is_exhauste
 }
 
 #[test]
+fn should_preserve_existing_spill_files_given_run_name_collision() -> MidgeResult<()> {
+    // Arrange
+    let dir = tempfile::tempdir()?;
+    let pool = Arc::new(TransactionMemoryPool::new(0));
+    for (txn_id, suffix) in [(1, "run.tmp"), (2, "run")] {
+        let name = format!("{txn_id:016x}-00000000.{suffix}");
+        let collision = dir.path().join("txn").join(&name);
+        std::fs::create_dir_all(collision.parent().expect("spill directory"))?;
+        std::fs::write(&collision, b"owned by an earlier run")?;
+        let mut writes =
+            TransactionWriteSet::new(Arc::clone(&pool), &root_at(dir.path()), false, txn_id);
+
+        // Act
+        let result = writes.push(put(b"key", b"value"));
+
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::Internal(_))),
+            "collision at {name} should be reported as an engine collision: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&collision)?,
+            b"owned by an earlier run",
+            "collision at {name} must not replace or remove the existing spill"
+        );
+        let remaining = std::fs::read_dir(dir.path().join("txn"))?
+            .map(|entry| entry.expect("spill entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(remaining.len(), 1, "failed run left its own scratch files");
+        assert_eq!(remaining[0], std::ffi::OsStr::new(&name));
+        std::fs::remove_file(collision)?;
+    }
+    Ok(())
+}
+
+#[test]
 fn should_hold_spill_disk_charge_through_commit_source_until_files_are_removed() -> MidgeResult<()>
 {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let setup = crate::storage::simulated::build_simulated_cloud_stores(dir.path(), Some(4096))?;
+    let setup = crate::storage::simulated::host_simulated_cloud(dir.path(), Some(4096))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(4096);
     let storage = &setup.hybrid_storage;
     let mut writes = TransactionWriteSet::new(
         Arc::new(TransactionMemoryPool::new(0)),
-        dir.path(),
+        &root_at(dir.path()),
         false,
         1,
     )
@@ -56,9 +104,9 @@ fn should_hold_spill_disk_charge_through_commit_source_until_files_are_removed()
     assert!(charged > 0);
     assert_eq!(storage.budget_snapshot().total_committed_bytes, charged);
     assert!(matches!(wal_admission, Err(MidgeError::NoSpace(_))));
-    assert_eq!(fs::read_dir(dir.path().join("txn"))?.count(), 2);
+    assert_eq!(std::fs::read_dir(dir.path().join("txn"))?.count(), 2);
     drop(source);
-    assert_eq!(fs::read_dir(dir.path().join("txn"))?.count(), 0);
+    assert_eq!(std::fs::read_dir(dir.path().join("txn"))?.count(), 0);
     assert_eq!(storage.budget_snapshot().total_committed_bytes, 0);
     storage.admit_local_wal_bytes(4096)?;
     Ok(())
@@ -71,7 +119,7 @@ fn should_reject_oversized_range_before_staging_or_spilling() -> MidgeResult<()>
     let limit = crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
     for (start_len, end_len) in [(limit, 1), (1, limit), (limit / 2, limit / 2)] {
         let pool = Arc::new(TransactionMemoryPool::new(1024));
-        let mut writes = TransactionWriteSet::new(pool.clone(), dir.path(), false, 1);
+        let mut writes = TransactionWriteSet::new(pool.clone(), &root_at(dir.path()), false, 1);
         writes.push(put(b"safe", b"value"))?;
         let reserved = pool.resident.load(Ordering::Acquire);
         // Act
@@ -99,8 +147,7 @@ fn should_reject_oversized_range_before_staging_or_spilling() -> MidgeResult<()>
 fn should_cover_range_tree_endpoint_duplication_with_spill_disk_reservation() -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let setup =
-        crate::storage::simulated::build_simulated_cloud_stores(dir.path(), Some(1024 * 1024))?;
+    let setup = crate::storage::simulated::host_simulated_cloud(dir.path(), Some(1024 * 1024))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(1024 * 1024);
     let budget = SpillDiskBudget(Arc::clone(&setup.hybrid_storage));
     let mut ops = (0_u64..64)
@@ -116,14 +163,15 @@ fn should_cover_range_tree_endpoint_duplication_with_spill_disk_reservation() ->
     // Act
     let pool = Arc::new(TransactionMemoryPool::new(usize::MAX));
     let run = write_run_with_budget(
-        &dir.path().join("txn"),
+        &SpillRoot(root_at(dir.path())),
         1,
         0,
         &mut ops,
         Some(&budget),
         &pool,
     )?;
-    let bytes = fs::metadata(&run.path)?.len() + fs::metadata(&run.range_path)?.len();
+    let bytes = std::fs::metadata(host_path(&run.root, &run.path))?.len()
+        + std::fs::metadata(host_path(&run.root, &run.range_path))?.len();
 
     // Assert
     assert!(setup.hybrid_storage.budget_snapshot().total_committed_bytes >= bytes);
@@ -139,20 +187,20 @@ fn should_cover_range_tree_endpoint_duplication_with_spill_disk_reservation() ->
 fn should_retain_spill_disk_charge_when_run_cleanup_fails() -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let setup = crate::storage::simulated::build_simulated_cloud_stores(dir.path(), Some(4096))?;
+    let setup = crate::storage::simulated::host_simulated_cloud(dir.path(), Some(4096))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(4096);
     let mut writes = TransactionWriteSet::new(
         Arc::new(TransactionMemoryPool::new(0)),
-        dir.path(),
+        &root_at(dir.path()),
         false,
         1,
     )
     .with_storage_budget(Some(Arc::clone(&setup.hybrid_storage)));
     writes.push(put(b"key", b"value"))?;
-    let run_path = writes.runs[0].path.clone();
+    let run_path = host_path(&writes.runs[0].root, &writes.runs[0].path);
     let charged = setup.hybrid_storage.budget_snapshot().total_committed_bytes;
-    fs::remove_file(&run_path)?;
-    fs::create_dir(&run_path)?;
+    std::fs::remove_file(&run_path)?;
+    std::fs::create_dir(&run_path)?;
 
     // Act
     drop(writes);
@@ -208,7 +256,7 @@ fn should_distinguish_absent_ttl_from_maximum_ttl_when_spilling_transaction_ops(
             },
         },
     ];
-    let run = write_run(temp.path(), 1, 0, &mut ops)?;
+    let run = write_run(&SpillRoot(root_at(temp.path())), 1, 0, &mut ops)?;
 
     // Act
     let mut decoded = Vec::new();
@@ -232,10 +280,10 @@ fn should_reject_corrupt_data_frame_when_reading_spill_run() -> MidgeResult<()> 
         ordinal: 0,
         op: put(b"key", b"value"),
     }];
-    let run = write_run(temp.path(), 1, 0, &mut ops)?;
-    let mut bytes = fs::read(&run.path)?;
+    let run = write_run(&SpillRoot(root_at(temp.path())), 1, 0, &mut ops)?;
+    let mut bytes = std::fs::read(host_path(&run.root, &run.path))?;
     bytes[RUN_HEADER_LEN + 8] ^= 0x55;
-    fs::write(&run.path, bytes)?;
+    std::fs::write(host_path(&run.root, &run.path), bytes)?;
 
     // Act
     let result = for_each_run_ordinal(&run, |_| Ok(()));
@@ -253,16 +301,16 @@ fn should_reject_corrupt_sparse_index_when_reading_spill_run() -> MidgeResult<()
         ordinal: 0,
         op: put(b"key", b"value"),
     }];
-    let run = write_run(temp.path(), 1, 0, &mut ops)?;
-    let mut file = RunFile::open(&run.path)?;
+    let run = write_run(&SpillRoot(root_at(temp.path())), 1, 0, &mut ops)?;
+    let mut file = RunFile::open(&*run.root, &run.path)?;
     let header = read_header(&mut file)?;
     drop(file);
-    let mut bytes = fs::read(&run.path)?;
+    let mut bytes = std::fs::read(host_path(&run.root, &run.path))?;
     let corrupt_at = usize::try_from(header.sparse_index_offset)
         .map_err(|_| MidgeError::Corruption("index offset exceeds usize".to_string()))?
         + 8;
     bytes[corrupt_at] ^= 0x55;
-    fs::write(&run.path, bytes)?;
+    std::fs::write(host_path(&run.root, &run.path), bytes)?;
 
     // Act
     let result = for_each_run_ordinal(&run, |_| Ok(()));
@@ -290,7 +338,7 @@ fn should_resolve_range_tombstone_before_ordinal_ceiling() -> MidgeResult<()> {
             op: put(b"middle", b"after"),
         },
     ];
-    let run = write_run(temp.path(), 1, 0, &mut ops)?;
+    let run = write_run(&SpillRoot(root_at(temp.path())), 1, 0, &mut ops)?;
 
     // Act
     let mut before_final_put = None;
@@ -315,16 +363,16 @@ fn should_reject_corrupt_range_index_when_reading_spill_run() -> MidgeResult<()>
         ordinal: 0,
         op: delete_range(b"alpha", b"omega"),
     }];
-    let run = write_run(temp.path(), 1, 0, &mut ops)?;
-    let mut file = RunFile::open(&run.range_path)?;
+    let run = write_run(&SpillRoot(root_at(temp.path())), 1, 0, &mut ops)?;
+    let mut file = RunFile::open(&*run.root, &run.range_path)?;
     let header = read_range_header(&mut file)?;
     drop(file);
-    let mut bytes = fs::read(&run.range_path)?;
+    let mut bytes = std::fs::read(host_path(&run.root, &run.range_path))?;
     let corrupt_at = usize::try_from(header.node_section_offset)
         .map_err(|_| MidgeError::Corruption("range offset exceeds usize".to_string()))?
         + 8;
     bytes[corrupt_at] ^= 0x55;
-    fs::write(&run.range_path, bytes)?;
+    std::fs::write(host_path(&run.root, &run.range_path), bytes)?;
 
     // Act
     let result = lookup_run_key(&run, b"middle", u64::MAX, &mut None);
@@ -345,7 +393,7 @@ fn should_stream_large_spill_record_with_wal_sized_bound() -> MidgeResult<()> {
     }];
 
     // Act
-    let run = write_run(temp.path(), 1, 0, &mut ops)?;
+    let run = write_run(&SpillRoot(root_at(temp.path())), 1, 0, &mut ops)?;
     let mut read_value = None;
     for_each_run_ordinal(&run, |ordinal_op| {
         if let TransactionOp::Put { value, .. } = ordinal_op.op {
@@ -369,7 +417,7 @@ fn should_scan_spill_keys_in_both_directions_across_sparse_chunks() -> MidgeResu
             op: put(format!("key-{ordinal:02}").as_bytes(), b"value"),
         })
         .collect::<Vec<_>>();
-    let run = write_run(temp.path(), 1, 0, &mut ops)?;
+    let run = write_run(&SpillRoot(root_at(temp.path())), 1, 0, &mut ops)?;
 
     // Act
     let forward = RunKeyCursor::new(&run, Some(b"key-10"), Some(b"key-20"), false)?
@@ -400,15 +448,15 @@ fn should_surface_late_spill_corruption_from_key_cursor_item() -> MidgeResult<()
             op: put(b"bravo", b"two"),
         },
     ];
-    let run = write_run(temp.path(), 1, 0, &mut ops)?;
-    let mut file = RunFile::open(&run.path)?;
+    let run = write_run(&SpillRoot(root_at(temp.path())), 1, 0, &mut ops)?;
+    let mut file = RunFile::open(&*run.root, &run.path)?;
     file.seek_to(RUN_HEADER_LEN as u64)?;
     let (_, second_offset) = read_op_frame(&mut file)?;
     drop(file);
-    let mut bytes = fs::read(&run.path)?;
+    let mut bytes = std::fs::read(host_path(&run.root, &run.path))?;
     let corrupt_at = u64_to_usize(second_offset)?.saturating_add(8);
     bytes[corrupt_at] ^= 0x55;
-    fs::write(&run.path, bytes)?;
+    std::fs::write(host_path(&run.root, &run.path), bytes)?;
     let mut scan = RunKeyCursor::new(&run, None, None, false)?;
 
     // Act
@@ -430,7 +478,7 @@ fn should_find_earliest_same_key_intent_when_key_spans_many_sparse_index_strides
     let dir = tempfile::tempdir()?;
     let mut writes = TransactionWriteSet::new(
         Arc::new(TransactionMemoryPool::new(64 * 1024)),
-        dir.path(),
+        &root_at(dir.path()),
         false,
         1,
     );
@@ -466,7 +514,7 @@ fn should_bound_live_file_handles_when_scanning_spilled_runs() -> MidgeResult<()
     let dir = tempfile::tempdir()?;
     let pool = Arc::new(TransactionMemoryPool::new(4096));
     assert!(pool.try_reserve(4096));
-    let mut writes = TransactionWriteSet::new(Arc::clone(&pool), dir.path(), false, 1);
+    let mut writes = TransactionWriteSet::new(Arc::clone(&pool), &root_at(dir.path()), false, 1);
     for index in 0_u32..32 {
         writes.push(put(format!("key-{index:04}").as_bytes(), b"value"))?;
     }
@@ -500,7 +548,7 @@ fn should_hold_no_uncharged_intents_in_memory_when_other_transactions_hold_the_p
     let dir = tempfile::tempdir()?;
     let pool = Arc::new(TransactionMemoryPool::new(64 * 1024));
     assert!(pool.try_reserve(64 * 1024));
-    let mut writes = TransactionWriteSet::new(Arc::clone(&pool), dir.path(), false, 2);
+    let mut writes = TransactionWriteSet::new(Arc::clone(&pool), &root_at(dir.path()), false, 2);
 
     // Act
     for index in 0_u32..8 {
@@ -540,7 +588,14 @@ fn should_look_up_spilled_key_when_pool_cannot_charge_sparse_index() -> MidgeRes
             op: put(format!("key-{ordinal:02}").as_bytes(), b"value"),
         })
         .collect::<Vec<_>>();
-    let run = write_run_with_budget(temp.path(), 1, 0, &mut ops, None, &pool)?;
+    let run = write_run_with_budget(
+        &SpillRoot(root_at(temp.path())),
+        1,
+        0,
+        &mut ops,
+        None,
+        &pool,
+    )?;
     reset_sparse_index_decodes();
 
     // Act
@@ -588,11 +643,11 @@ fn scan_lookup_work(writes: &TransactionWriteSet) -> MidgeResult<u64> {
 
 fn write_keys(
     pool_bytes: usize,
-    dir: &Path,
+    dir: &std::path::Path,
     count: u32,
 ) -> MidgeResult<(TransactionWriteSet, Arc<TransactionMemoryPool>)> {
     let pool = Arc::new(TransactionMemoryPool::new(pool_bytes));
-    let mut writes = TransactionWriteSet::new(Arc::clone(&pool), dir, false, 1);
+    let mut writes = TransactionWriteSet::new(Arc::clone(&pool), &root_at(dir), false, 1);
     for index in 0..count {
         // Interleave key order so runs overlap in key space.
         let scrambled = index.wrapping_mul(7919) % count;
@@ -685,7 +740,8 @@ fn should_match_model_when_point_and_scan_lookups_follow_mixed_ops_in_every_resi
             // Arrange
             let dir = tempfile::tempdir()?;
             let pool = Arc::new(TransactionMemoryPool::new(pool_bytes));
-            let mut writes = TransactionWriteSet::new(Arc::clone(&pool), dir.path(), false, 1);
+            let mut writes =
+                TransactionWriteSet::new(Arc::clone(&pool), &root_at(dir.path()), false, 1);
             let mut model: std::collections::BTreeMap<Vec<u8>, LookupView> =
                 std::collections::BTreeMap::new();
             for op_index in 0..50_u64 {
@@ -777,9 +833,9 @@ fn should_not_quadruple_range_delete_lookup_work_when_spilled_operation_count_do
 ) -> MidgeResult<()> {
     // Arrange: puts interleaved with narrow range deletes, so most spill runs
     // hold a range index that a naive scan would stab once per key.
-    let build = |count: u32, dir: &Path| -> MidgeResult<TransactionWriteSet> {
+    let build = |count: u32, dir: &std::path::Path| -> MidgeResult<TransactionWriteSet> {
         let pool = Arc::new(TransactionMemoryPool::new(8 * 1024));
-        let mut writes = TransactionWriteSet::new(pool, dir, false, 1);
+        let mut writes = TransactionWriteSet::new(pool, &root_at(dir), false, 1);
         for index in 0..count {
             let scrambled = index.wrapping_mul(7919) % count;
             writes.push(put(format!("key-{scrambled:06}").as_bytes(), b"value"))?;

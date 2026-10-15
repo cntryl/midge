@@ -1,5 +1,12 @@
 # Checkpoint Write Amplification
 
+> Historical campaign procedure: the simplified tier workflows accept only
+> `profile=smoke|standard|extended`. The checkpoint modes, investigation input,
+> and specialized workflow/readback tooling referenced here are no longer
+> available through those workflows. Existing evidence retains its original
+> qualification limits.
+
+
 **Status: measured; B and C miss the snapshot-payload target.** All nine
 release repeats pass construction and independent readback at the source
 recorded below. Checkpoint cadence remains unchanged. Catalog mapping and

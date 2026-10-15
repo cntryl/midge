@@ -1,118 +1,109 @@
-//! The manifest checkpoint horizon across the public API (#493).
-//!
-//! Every manifest persist compares the in-memory checkpoint horizon with the
-//! durable snapshot's. If a journal writer appends without advancing the
-//! horizon, every later persist takes the "stale caller" branch that is meant
-//! for a rare race. That branch only logs, so the test counts its log lines.
-//! It lives in its own binary because it installs a global subscriber: the
-//! runtime thread does not see a thread-local one.
+//! Flushed SSTs and manifest checkpoints must preserve every published row.
 
-use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
-use std::io::Write as _;
-use std::sync::{Arc, Mutex, OnceLock};
+use cntryl_midge::{Engine, MidgeResult, OpenOptions, Query, TransactionMode, WriteOptions};
+use std::path::Path;
 use std::time::Duration;
 
-#[derive(Clone, Default)]
-struct LogSink(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for LogSink {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+fn assert_rows(engine: &Engine, rounds: usize) {
+    let family = engine.get_column_family("data").expect("data family");
+    let read = engine
+        .begin_tx(family.id(), TransactionMode::ReadOnly)
+        .unwrap();
+    let rows = read
+        .scan(&Query::new())
+        .unwrap()
+        .collect::<MidgeResult<Vec<_>>>()
+        .unwrap();
+    let expected: Vec<_> = (0..rounds)
+        .flat_map(|round| {
+            (0..4).map(move |index| {
+                (
+                    format!("key-{round}-{index}").into_bytes(),
+                    format!("value-{round}-{index}").into_bytes(),
+                )
+            })
+        })
+        .collect();
+    assert_eq!(rows.len(), expected.len());
+    for ((key, value), (expected_key, expected_value)) in rows.iter().zip(expected) {
+        assert_eq!(key.as_ref(), expected_key);
+        assert_eq!(value.as_ref(), expected_value);
     }
 }
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
-    type Writer = Self;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-fn logs() -> &'static LogSink {
-    static SINK: OnceLock<LogSink> = OnceLock::new();
-    SINK.get_or_init(|| {
-        let sink = LogSink::default();
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_max_level(tracing::Level::WARN)
-            .with_writer(sink.clone())
-            .init();
-        sink
-    })
-}
-
-fn stale_caller_lines() -> usize {
-    let mut sink = logs().clone();
-    sink.flush().expect("flush log sink");
-    let bytes = sink
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    String::from_utf8_lossy(&bytes)
-        .matches("stale caller")
-        .count()
-}
-
-fn flush_and_compact(engine: &Engine, write: WriteOptions) {
-    let cf = engine.create_column_family("data").expect("column family");
-    for round in 0..3 {
-        for index in 0..4 {
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("transaction");
-            tx.put(
-                format!("key-{round}-{index}").into_bytes(),
-                b"value".to_vec(),
-                None,
-            )
-            .expect("put");
-            tx.commit(write).expect("commit");
-            engine.flush_cf(&cf).expect("flush");
-        }
-        engine.compact_all().expect("compact");
-    }
+fn checkpoint_horizon(path: &Path) -> u64 {
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path.join("manifest.snapshot.json")).unwrap())
+            .unwrap();
+    snapshot["edit_checkpoint_id"].as_u64().unwrap()
 }
 
 #[test]
-fn should_not_take_stale_caller_branch_when_compacting_after_flushes() {
-    for mode in ["local", "cloud"] {
+fn should_preserve_every_flushed_row_when_manifest_checkpoints_advance_through_compaction() {
+    for cloud in [false, true] {
         // Arrange
-        let directory = tempfile::tempdir().expect("database directory");
-        let options = match mode {
-            "local" => OpenOptions::local(directory.path()),
-            _ => OpenOptions::cloud_simulated(directory.path(), "bucket", "checkpoint"),
+        let directory = tempfile::tempdir().unwrap();
+        let options = if cloud {
+            OpenOptions::cloud_simulated(directory.path(), "bucket", "checkpoint")
+        } else {
+            OpenOptions::local(directory.path())
         }
         .background_compaction(false)
         .build()
-        .expect("options");
-        let before = stale_caller_lines();
-        let mut engine = Engine::open(options).expect("open");
-
-        // Act
-        let write = if mode == "local" {
-            WriteOptions::sync()
+        .unwrap();
+        let mut engine = Engine::open(options.clone()).unwrap();
+        let family = engine.create_column_family("data").unwrap();
+        let write = if cloud {
+            WriteOptions::cloud_strict()
         } else {
-            WriteOptions::cloud_async()
+            WriteOptions::sync()
         };
-        flush_and_compact(&engine, write);
-        engine.shutdown(Duration::from_secs(30)).expect("shutdown");
+        let mut previous_horizon = 0;
 
-        // Assert
-        let stale = stale_caller_lines() - before;
-        assert_eq!(
-            stale, 0,
-            "{mode} mode took the stale-caller branch {stale} times"
-        );
+        // Act: publish distinct SSTs, then replace them through compaction.
+        for round in 0..3 {
+            for index in 0..4 {
+                let mut transaction = engine
+                    .begin_tx(family.id(), TransactionMode::ReadWrite)
+                    .unwrap();
+                transaction
+                    .put(
+                        format!("key-{round}-{index}").into_bytes(),
+                        format!("value-{round}-{index}").into_bytes(),
+                        None,
+                    )
+                    .unwrap();
+                transaction.commit(write).unwrap();
+                engine.flush_cf(&family).unwrap();
+            }
+            let flushed_horizon = checkpoint_horizon(directory.path());
+            assert!(flushed_horizon >= previous_horizon, "cloud={cloud}");
+            let before_compactions = engine
+                .metrics()
+                .get_runtime_metrics()
+                .unwrap()
+                .compactions_run;
+            engine.compact_all().unwrap();
+
+            // Assert: every durable checkpoint advances and retains earlier publications.
+            let horizon = checkpoint_horizon(directory.path());
+            assert!(horizon > flushed_horizon, "cloud={cloud}");
+            assert!(
+                engine
+                    .metrics()
+                    .get_runtime_metrics()
+                    .unwrap()
+                    .compactions_run
+                    > before_compactions
+            );
+            previous_horizon = horizon;
+            assert_rows(&engine, round + 1);
+        }
+        engine.shutdown(Duration::from_secs(30)).unwrap();
+        drop(engine);
+        let mut reopened = Engine::open(options).unwrap();
+        assert!(checkpoint_horizon(directory.path()) >= previous_horizon);
+        assert_rows(&reopened, 3);
+        reopened.shutdown(Duration::from_secs(30)).unwrap();
     }
 }

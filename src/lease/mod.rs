@@ -24,13 +24,17 @@
 //!
 //! Lease acquisition MUST occur before engine initialization:
 
+mod clock;
 pub(crate) mod cloud;
 mod filesystem;
 pub mod fs_leader_store;
 mod heartbeat;
 mod scoped_leader_store;
 mod traits;
+mod writer_effect_groups;
 
+pub use crate::types::SharedGenerationId;
+pub(crate) use clock::LeaseClock;
 pub use cloud::{CloudLeaseConfig, CloudStorageLease};
 pub use filesystem::FileSystemLease;
 pub use heartbeat::LeaseHeartbeat;
@@ -43,9 +47,12 @@ pub use traits::{
     CloudMetadataGeneration, CloudMetadataHead, CloudMetadataObject, LeaderStore, LeaseGuard,
     PrimaryLease,
 };
+pub use writer_effect_groups::{
+    ActiveWriterEffect, WriterEffectGroup, WriterEffectGroupContext, WriterEffectGroups,
+    WriterEffectTicket,
+};
 
 use crate::config::Storage;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,7 +73,10 @@ pub(crate) enum LeaseStorageKind {
 
 impl From<&Storage> for LeaseStorageKind {
     fn from(storage: &Storage) -> Self {
-        if matches!(storage, Storage::Cloud { .. }) {
+        if matches!(
+            storage,
+            Storage::Cloud { .. } | Storage::CloudSimulated { .. }
+        ) {
             Self::Cloud
         } else {
             Self::Local
@@ -79,6 +89,7 @@ pub(crate) struct LeaseConfig {
     pub(crate) ttl: Duration,
     pub(crate) clock_skew_tolerance: Option<Duration>,
     pub(crate) loss_hook: Option<LeaseLossHook>,
+    pub(crate) clock: LeaseClock,
 }
 
 impl LeaseConfig {
@@ -91,6 +102,7 @@ impl LeaseConfig {
             ttl,
             clock_skew_tolerance,
             loss_hook,
+            clock: LeaseClock::default(),
         }
     }
 
@@ -128,8 +140,6 @@ impl LeaseConfig {
     }
 }
 
-static INMEM_LEASE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 // Keep the dependency direction common <- lease: the higher lease layer owns
 // conversion of its error into the shared public error type.
 impl From<LeaseError> for crate::common::MidgeError {
@@ -156,13 +166,31 @@ impl LeaseError {
         match self {
             LeaseError::IoError(_) | LeaseError::Indeterminate(_) => {
                 crate::common::MidgeError::Busy(format!(
-                    "{context}: writer lease authority is unknown: {self}"
+                    "{context}: writer lease authority is unavailable: {self}"
                 ))
             }
             LeaseError::Timeout(_) => {
                 crate::common::MidgeError::Timeout(format!("{context}: {self}"))
             }
             other => crate::common::MidgeError::Fenced(format!("{context}: {other}")),
+        }
+    }
+
+    /// A writer storage effect may have reached durable storage before its
+    /// authority check failed. Preserve unknown authority as a lease failure
+    /// so commit handling reports an unknown outcome instead of retryable
+    /// local I/O poisoning.
+    pub(crate) fn into_writer_effect_error(self, context: &str) -> crate::common::MidgeError {
+        match self {
+            LeaseError::IoError(_) | LeaseError::Timeout(_) => {
+                crate::common::MidgeError::LeaseUnavailable(format!(
+                    "{context}: writer lease authority is unknown: {self}"
+                ))
+            }
+            LeaseError::Indeterminate(_) => crate::common::MidgeError::LeaseIndeterminate(format!(
+                "{context}: writer lease authority is indeterminate: {self}"
+            )),
+            other => other.into_validation_error(context),
         }
     }
 }
@@ -172,84 +200,75 @@ pub(crate) struct CreatedLease {
     pub(crate) validity: Option<Arc<LeaseValidity>>,
 }
 
+/// The database root a test lease coordinates through: in memory for
+/// in-memory storage, otherwise the host directory.
+#[cfg(test)]
+pub(crate) fn test_lease_root(storage: &Storage) -> Arc<dyn crate::io::Fs> {
+    match storage {
+        Storage::InMemory => Arc::new(crate::io::MockFs::new()),
+        Storage::Local { path } => crate::io::real::test_root(path),
+        Storage::Cloud {
+            local_cache_path, ..
+        }
+        | Storage::CloudSimulated {
+            local_cache_path, ..
+        } => crate::io::real::test_root(local_cache_path),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn create_lease_with_validity(
     storage: &Storage,
     clock_skew_tolerance: std::time::Duration,
 ) -> Result<CreatedLease, LeaseError> {
-    create_lease_with_validity_and_timeout(
-        storage,
-        clock_skew_tolerance,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn create_lease_with_validity_and_timeout(
-    storage: &Storage,
-    clock_skew_tolerance: std::time::Duration,
-    storage_io_timeout: std::time::Duration,
-) -> Result<CreatedLease, LeaseError> {
     create_lease_with_validity_and_timeout_and_ttl(
         storage,
+        &test_lease_root(storage),
+        None,
         clock_skew_tolerance,
-        storage_io_timeout,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
         std::time::Duration::from_secs(30),
+        &LeaseClock::default(),
     )
 }
 
+/// Create the primary lease for `storage`. Cloud and simulated-cloud leases
+/// keep their pointer and fencing document in the shared object store. Every
+/// lease reads wall time from `clock`.
 pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
     storage: &Storage,
+    root: &Arc<dyn crate::io::Fs>,
+    object_store: Option<Arc<dyn crate::storage::cloud::CloudBackend>>,
     clock_skew_tolerance: std::time::Duration,
     storage_io_timeout: std::time::Duration,
     lease_ttl: std::time::Duration,
+    clock: &LeaseClock,
 ) -> Result<CreatedLease, LeaseError> {
     match storage {
-        Storage::InMemory => {
-            // In-memory mode: use filesystem lease on temp directory (no disk I/O)
-            // Generate a unique temp path for lease coordination without actually
-            // creating the directory (memory mode must not touch filesystem).
-            // NOTE: On some platforms (notably Windows) `SystemTime` resolution is not truly
-            // nanosecond-granular, so concurrent callers can collide. Add a counter to ensure
-            // uniqueness even under heavy parallel test load.
-            let unique = INMEM_LEASE_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let temp_path = std::env::temp_dir().join(format!(
-                "midge_inmem_{}_{}_{}",
-                std::process::id(),
-                unique,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ));
-            // Memory mode: use MockFs for lease coordination (no disk I/O)
-            Ok(CreatedLease {
-                lease: Arc::new(FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
-                    &temp_path,
-                    true,
-                    lease_ttl,
-                    clock_skew_tolerance,
-                )?),
-                validity: None,
-            })
-        }
-        Storage::Local { path } => {
-            // Local storage: use filesystem lease with RealFs
-            let lease = Arc::new(FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
-                path.as_path(),
-                false,
+        Storage::InMemory => Ok(CreatedLease {
+            lease: Arc::new(FileSystemLease::with_root_and_timeout(
+                Arc::clone(root),
                 lease_ttl,
                 clock_skew_tolerance,
-            )?);
+                clock.clone(),
+                storage_io_timeout,
+            )),
+            validity: None,
+        }),
+        Storage::Local { .. } => {
+            let lease = Arc::new(FileSystemLease::with_root_and_timeout(
+                Arc::clone(root),
+                lease_ttl,
+                clock_skew_tolerance,
+                clock.clone(),
+                storage_io_timeout,
+            ));
             Ok(CreatedLease {
                 validity: Some(lease.lease_validity()),
                 lease,
             })
         }
-        Storage::Cloud {
-            local_cache_path,
-            topology,
-        } => {
+        Storage::Cloud { topology, .. } => {
             // Cloud storage: use cloud lease with TTL-based coordination
             let control = topology.control();
             let lease_provider = control.provider();
@@ -258,19 +277,20 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
                 bucket: lease_provider.bucket_or_container().to_string(),
                 prefix: lease_prefix.to_string(),
             };
-            let cloud = crate::storage::providers::build_cloud_storage_with_timeout(
+            let cloud = crate::storage::providers::build_class_store(
                 lease_provider,
                 lease_prefix,
                 storage_io_timeout,
+                object_store,
             )
             .map_err(|error| LeaseError::IoError(format!("cloud lease backend: {error}")))?;
             let lease = Arc::new(
                 CloudStorageLease::new_provider_backed_with_clock_skew_tolerance_and_ttl(
                     config,
-                    local_cache_path.clone(),
                     cloud,
                     clock_skew_tolerance,
                     lease_ttl,
+                    clock.clone(),
                 ),
             );
             Ok(CreatedLease {
@@ -278,21 +298,33 @@ pub(crate) fn create_lease_with_validity_and_timeout_and_ttl(
                 lease,
             })
         }
-        Storage::CloudSimulated {
-            local_cache_path,
-            bucket,
-            prefix,
-        } => {
+        Storage::CloudSimulated { bucket, prefix, .. } => {
             let config = CloudLeaseConfig {
                 bucket: bucket.clone(),
                 prefix: prefix.clone(),
             };
-            let lease = Arc::new(CloudStorageLease::new_with_clock_skew_tolerance_and_ttl(
-                config,
-                local_cache_path.clone(),
-                clock_skew_tolerance,
-                lease_ttl,
+            let store = crate::storage::simulated::SimulatedCloud::locate(
+                root.as_ref(),
+                object_store,
+                storage_io_timeout,
+            )
+            .and_then(|location| location.open())
+            .map_err(|error| {
+                LeaseError::IoError(format!("simulated shared lease backend: {error}"))
+            })?;
+            let cloud = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+                store,
+                storage_io_timeout,
             ));
+            let lease = Arc::new(
+                CloudStorageLease::new_provider_backed_with_clock_skew_tolerance_and_ttl(
+                    config,
+                    cloud,
+                    clock_skew_tolerance,
+                    lease_ttl,
+                    clock.clone(),
+                ),
+            );
             Ok(CreatedLease {
                 validity: Some(lease.lease_validity()),
                 lease,
@@ -356,5 +388,73 @@ mod tests {
 
         // Assert
         assert!(created.validity.is_some());
+    }
+
+    #[test]
+    fn should_share_simulated_metadata_authority_across_distinct_cache_roots() {
+        // Arrange
+        let first_cache = tempfile::tempdir().unwrap();
+        let second_cache = tempfile::tempdir().unwrap();
+        let backend: Arc<dyn crate::storage::cloud::CloudBackend> =
+            Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let make = |directory: &std::path::Path| {
+            create_lease_with_validity_and_timeout_and_ttl(
+                &Storage::CloudSimulated {
+                    local_cache_path: directory.into(),
+                    bucket: "shared".into(),
+                    prefix: String::new(),
+                },
+                &crate::io::real::test_root(directory),
+                Some(Arc::clone(&backend)),
+                Duration::ZERO,
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+                &LeaseClock::default(),
+            )
+            .unwrap()
+        };
+        let first = make(first_cache.path());
+        let guard = Arc::clone(&first.lease).try_acquire().unwrap();
+        let first_epoch = first.lease.epoch();
+        let first_store = first.lease.get_leader_store().unwrap();
+        let generation = CloudMetadataGeneration {
+            id: SharedGenerationId::FIRST,
+            manifest_horizon: 10,
+            objects: [
+                crate::metadata::files::FORMAT,
+                crate::metadata::files::MANIFEST_SNAPSHOT,
+            ]
+            .into_iter()
+            .map(|file_name| CloudMetadataObject {
+                file_name: file_name.into(),
+                object_key: format!("metadata/generations/{}/{file_name}", uuid::Uuid::new_v4()),
+                len: 1,
+                crc32c: 1,
+            })
+            .collect(),
+        };
+        first_store
+            .publish_committed_metadata(
+                &first.lease.holder_id(),
+                first.lease.epoch(),
+                None,
+                generation.clone(),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        guard.release();
+        first.lease.release().unwrap();
+        // Act
+        let second = make(second_cache.path());
+        let _guard = Arc::clone(&second.lease).try_acquire().unwrap();
+        let current = second
+            .lease
+            .get_leader_store()
+            .unwrap()
+            .read_committed_metadata(Duration::from_secs(5))
+            .unwrap();
+        // Assert
+        assert_eq!(current, CloudMetadataHead::Committed(generation));
+        assert!(second.lease.epoch() > first_epoch);
     }
 }

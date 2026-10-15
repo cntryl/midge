@@ -1,54 +1,380 @@
 use super::RuntimeMsg;
+use crate::wal::cloud_catalog::CatalogEntry;
+use crate::wal::publish::{AckSet, OwedSegment};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-#[cfg(not(test))]
-const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const CLOUD_WAL_RUNTIME_RETRY_DELAY: Duration = Duration::from_millis(10);
-
-/// Owns cloud WAL admission, acknowledgement, pruning, and cleanup proof state.
+/// Owns cloud WAL admission, acknowledgement, retirement, and local cleanup.
 pub(crate) struct CloudWalUploadTracker {
-    pub(super) acked_segments: BTreeMap<u64, u64>,
-    pub(super) upload_backlog: BTreeMap<u64, u64>,
-    /// Earliest time at which runtime-owned WAL upload obligations may be
-    /// resubmitted after `HybridStorage` exhausts its internal attempt budget.
-    upload_retry: crate::runtime::retry_schedule::RetrySchedule,
-    pub(super) prune_inflight: HashSet<u64>,
+    /// Acknowledged segments: verified uploads, and segments the catalog
+    /// publishes. An upload waits there until every earlier segment is
+    /// acknowledged too, so they publish as one contiguous run (#841).
+    acks: AckSet,
+    /// Sealed segments the runtime still has to hand to the upload queue.
+    backlog: UploadBacklog,
+    /// Catalog prunes in flight.
+    prunes: PruneTracker,
+    /// Sealed segments whose local copies may go (#842).
+    local_retirement: LocalRetirementQueue,
 }
 
-impl CloudWalUploadTracker {
-    pub(super) fn new(acked_segments: BTreeMap<u64, u64>) -> Self {
+/// Sealed segments the runtime owes the upload queue, each with the last
+/// sequence it holds, oldest first, and when the next attempt may run.
+///
+/// A segment arrives sealed, or comes back for a fresh upload after its
+/// readback or publication failed or shared memory ran short. A failed
+/// upload attempt never comes back here; `HybridStorage` retries it itself.
+pub(crate) struct UploadBacklog {
+    queued: BTreeMap<u64, u64>,
+    /// Earliest time the backlog may be resubmitted.
+    retry: crate::runtime::retry_schedule::RetrySchedule,
+}
+
+/// A segment the WAL ledger does not hold sealed, so it has no history to
+/// upload again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NotMember {
+    /// The refused segment.
+    pub(crate) segment_id: u64,
+}
+
+impl std::fmt::Display for NotMember {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cloud WAL segment {} is not a sealed member of the WAL ledger",
+            self.segment_id
+        )
+    }
+}
+
+impl std::error::Error for NotMember {}
+
+impl UploadBacklog {
+    #[cfg(test)]
+    fn new() -> Self {
+        Self::with_retry_delay(crate::runtime::RuntimeRetryPolicy::default().cloud_wal)
+    }
+
+    fn with_retry_delay(delay: Duration) -> Self {
         Self {
-            acked_segments,
-            upload_backlog: BTreeMap::new(),
-            upload_retry: crate::runtime::retry_schedule::RetrySchedule::new(
-                CLOUD_WAL_RUNTIME_RETRY_DELAY,
-            ),
-            prune_inflight: HashSet::new(),
+            queued: BTreeMap::new(),
+            retry: crate::runtime::retry_schedule::RetrySchedule::new(delay),
         }
     }
 
-    pub(super) fn has_pending_uploads(&self) -> bool {
-        !self.upload_backlog.is_empty()
+    /// Queue a freshly sealed segment for its first upload.
+    pub(crate) fn queue_sealed(&mut self, segment_id: u64, max_sequence: u64) {
+        self.queued.insert(segment_id, max_sequence);
     }
 
-    pub(super) fn uploads_ready(&self) -> bool {
-        !self.upload_backlog.is_empty() && self.upload_retry.is_ready()
+    /// Take back `segment_id` for a fresh upload after the retry delay.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a segment `ledger` does not hold sealed: it has no history
+    /// to upload again.
+    pub(crate) fn requeue(
+        &mut self,
+        segment_id: u64,
+        max_sequence: u64,
+        ledger: &crate::wal::ledger::WalLedger,
+    ) -> Result<(), NotMember> {
+        if !ledger.is_member(segment_id) || segment_id == ledger.open_segment() {
+            return Err(NotMember { segment_id });
+        }
+        self.queued.insert(segment_id, max_sequence);
+        self.retry.defer();
+        Ok(())
     }
 
-    pub(super) fn defer_upload_retry(&mut self) {
-        self.upload_retry.defer();
+    /// Hold the next attempt for the retry delay: the upload queue has no
+    /// room for the backlog's next segment.
+    pub(crate) fn defer_for_memory(&mut self) {
+        self.retry.defer();
     }
 
-    pub(super) fn begin_upload_attempt(&mut self) {
-        self.upload_retry.clear();
+    /// Hold the next attempt for the retry delay after an attempt failed.
+    pub(crate) fn defer_after_failure(&mut self) {
+        self.retry.defer();
     }
 
-    pub(super) fn upload_retry_deadline_timeout(&self) -> Option<Duration> {
-        (!self.upload_backlog.is_empty())
-            .then(|| self.upload_retry.remaining())
+    /// The oldest queued segment, with the last sequence it holds.
+    pub(crate) fn first(&self) -> Option<(u64, u64)> {
+        self.queued
+            .first_key_value()
+            .map(|(segment_id, max_sequence)| (*segment_id, *max_sequence))
+    }
+
+    /// Stop owing `segment_id` to the upload queue, returning the last
+    /// sequence it holds.
+    pub(crate) fn remove(&mut self, segment_id: u64) -> Option<u64> {
+        self.queued.remove(&segment_id)
+    }
+
+    /// The last sequence queued segment `segment_id` holds.
+    #[cfg(test)]
+    pub(crate) fn get(&self, segment_id: u64) -> Option<u64> {
+        self.queued.get(&segment_id).copied()
+    }
+
+    /// How many segments are queued.
+    pub(crate) fn len(&self) -> usize {
+        self.queued.len()
+    }
+
+    /// Whether no segment is queued.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.queued.is_empty()
+    }
+
+    /// Whether a queued segment may be submitted now.
+    pub(crate) fn ready(&self) -> bool {
+        !self.queued.is_empty() && self.retry.is_ready()
+    }
+
+    /// Start an attempt to submit the backlog.
+    pub(crate) fn begin_attempt(&mut self) {
+        self.retry.clear();
+    }
+
+    /// How long until a queued segment may be submitted, if one is waiting
+    /// for its retry delay.
+    pub(crate) fn retry_timeout(&self) -> Option<Duration> {
+        (!self.queued.is_empty())
+            .then(|| self.retry.remaining())
             .flatten()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retry_delay(&self) -> Duration {
+        self.retry.configured_delay()
+    }
+}
+
+/// Catalog prunes in flight. A completion counts only for a prune that was
+/// admitted.
+#[derive(Debug, Default)]
+pub(crate) struct PruneTracker {
+    inflight: HashSet<u64>,
+}
+
+impl PruneTracker {
+    /// Mark the prunes of `segment_ids` in flight.
+    pub(crate) fn admit(&mut self, segment_ids: impl IntoIterator<Item = u64>) {
+        self.inflight.extend(segment_ids);
+    }
+
+    /// End `segment_id`'s prune. Returns false when it was never admitted,
+    /// so its completion is ignored.
+    pub(crate) fn release(&mut self, segment_id: u64) -> bool {
+        self.inflight.remove(&segment_id)
+    }
+
+    /// Whether `segment_id`'s prune is in flight.
+    pub(crate) fn contains(&self, segment_id: u64) -> bool {
+        self.inflight.contains(&segment_id)
+    }
+
+    /// How many prunes are in flight.
+    pub(crate) fn len(&self) -> usize {
+        self.inflight.len()
+    }
+}
+
+/// Sealed segments whose local copies may go, with what each releases once
+/// it falls below the ledger's log start. Only a prefix of the ledger
+/// retires, so a queued segment can wait for an earlier one.
+#[derive(Debug, Default)]
+pub(crate) struct LocalRetirementQueue {
+    queued: BTreeMap<u64, LocalRetirement>,
+}
+
+impl LocalRetirementQueue {
+    /// Queue `segment_id`, adding `release` to what it already releases.
+    pub(crate) fn queue(&mut self, segment_id: u64, release: LocalRetirement) {
+        let entry = self.queued.entry(segment_id).or_default();
+        *entry = entry.merge(release);
+    }
+
+    /// One past the leading run of `ledger`'s sealed members that are
+    /// queued: the log start that run retires to.
+    pub(crate) fn retire_point(&self, ledger: &crate::wal::ledger::WalLedger) -> u64 {
+        ledger
+            .sealed()
+            .find(|segment_id| !self.queued.contains_key(segment_id))
+            .unwrap_or_else(|| ledger.open_segment())
+    }
+
+    /// Remove and return every queued segment below `log_start`.
+    pub(crate) fn drain_below(&mut self, log_start: u64) -> Vec<(u64, LocalRetirement)> {
+        let kept = self.queued.split_off(&log_start);
+        std::mem::replace(&mut self.queued, kept)
+            .into_iter()
+            .collect()
+    }
+}
+
+/// What a segment's local retirement releases.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LocalRetirement {
+    /// Its cloud-durable obligation in the transition protocol.
+    pub(crate) cloud_durable: bool,
+}
+
+impl LocalRetirement {
+    pub(crate) const CLOUD_DURABLE: Self = Self {
+        cloud_durable: true,
+    };
+
+    fn merge(self, other: Self) -> Self {
+        Self {
+            cloud_durable: self.cloud_durable || other.cloud_durable,
+        }
+    }
+}
+
+impl CloudWalUploadTracker {
+    #[cfg(test)]
+    /// A tracker acknowledging the segments recovery found published, each
+    /// with the last sequence it holds.
+    pub(super) fn new(recovered: BTreeMap<u64, CatalogEntry>) -> Self {
+        Self::with_retry_policy(recovered, crate::runtime::RuntimeRetryPolicy::default())
+    }
+
+    pub(super) fn with_retry_policy(
+        recovered: BTreeMap<u64, CatalogEntry>,
+        retry_policy: crate::runtime::RuntimeRetryPolicy,
+    ) -> Self {
+        Self {
+            acks: AckSet::recovered(recovered),
+            backlog: UploadBacklog::with_retry_delay(retry_policy.cloud_wal),
+            prunes: PruneTracker::default(),
+            local_retirement: LocalRetirementQueue::default(),
+        }
+    }
+
+    /// The acknowledged segments.
+    pub(super) fn acks(&self) -> &AckSet {
+        &self.acks
+    }
+
+    pub(super) fn oldest_published_facts(&self) -> Option<&crate::wal::format::SealedFacts> {
+        self.acks.oldest_published_facts()
+    }
+
+    /// The sealed segments the runtime owes the upload queue.
+    pub(super) fn backlog(&self) -> &UploadBacklog {
+        &self.backlog
+    }
+
+    /// The catalog prunes in flight.
+    pub(super) fn prunes(&self) -> &PruneTracker {
+        &self.prunes
+    }
+
+    /// Acknowledge `segment_id` as published, as recovery would.
+    #[cfg(test)]
+    pub(super) fn acknowledge_for_test(&mut self, segment_id: u64, max_sequence: u64) {
+        self.acks.acknowledge(segment_id, max_sequence);
+    }
+
+    /// Acknowledge a verified upload. It is not published yet.
+    pub(super) fn record_upload(&mut self, upload: CatalogEntry) {
+        self.acks.record_upload(upload);
+    }
+
+    /// Withdraw `segment_id`'s verified upload, so no run publishes past it
+    /// until it is verified again. A published segment stays published.
+    pub(super) fn withdraw_upload(&mut self, segment_id: u64) {
+        self.acks.withdraw(segment_id);
+    }
+
+    /// The catalog no longer publishes `segment_id`: pruning retired it.
+    pub(super) fn retire_pruned(&mut self, segment_id: u64) {
+        self.acks.retire_pruned(segment_id);
+    }
+
+    /// The catalog now publishes `run`.
+    pub(super) fn mark_published(&mut self, run: &[OwedSegment]) {
+        self.acks.mark_published(run);
+    }
+
+    /// The verified uploads still waiting to be published: they hold local
+    /// WAL the writer owes the cloud, and count against the upload queue's
+    /// limits.
+    pub(super) fn held_uploads(&self) -> crate::storage::hybrid::backend::HeldUploads {
+        let (entries, bytes) = self.acks.held();
+        crate::storage::hybrid::backend::HeldUploads { entries, bytes }
+    }
+
+    /// Queue a freshly sealed segment for its first upload.
+    pub(super) fn queue_sealed(&mut self, segment_id: u64, max_sequence: u64) {
+        self.backlog.queue_sealed(segment_id, max_sequence);
+    }
+
+    /// Take back `segment_id` for a fresh upload after the retry delay.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a segment `ledger` does not hold sealed.
+    pub(super) fn requeue(
+        &mut self,
+        segment_id: u64,
+        max_sequence: u64,
+        ledger: &crate::wal::ledger::WalLedger,
+    ) -> Result<(), NotMember> {
+        self.backlog.requeue(segment_id, max_sequence, ledger)
+    }
+
+    /// Hold the next backlog attempt: the upload queue has no room.
+    pub(super) fn defer_uploads_for_memory(&mut self) {
+        self.backlog.defer_for_memory();
+    }
+
+    /// Hold the next backlog attempt after an attempt failed.
+    pub(super) fn defer_uploads_after_failure(&mut self) {
+        self.backlog.defer_after_failure();
+    }
+
+    /// Start an attempt to submit the backlog.
+    pub(super) fn begin_upload_attempt(&mut self) {
+        self.backlog.begin_attempt();
+    }
+
+    /// The upload queue admitted `segment_id`: the backlog no longer owes it.
+    pub(super) fn admitted_upload(&mut self, segment_id: u64) {
+        self.backlog.remove(segment_id);
+    }
+
+    /// Mark the prunes of `segment_ids` in flight.
+    pub(super) fn admit_prunes(&mut self, segment_ids: impl IntoIterator<Item = u64>) {
+        self.prunes.admit(segment_ids);
+    }
+
+    /// End `segment_id`'s prune. Returns false when it was never admitted.
+    pub(super) fn release_prune(&mut self, segment_id: u64) -> bool {
+        self.prunes.release(segment_id)
+    }
+
+    /// Queue `segment_id`'s local copy for retirement, adding `release` to
+    /// what it already releases.
+    pub(super) fn queue_local_retirement(&mut self, segment_id: u64, release: LocalRetirement) {
+        self.local_retirement.queue(segment_id, release);
+    }
+
+    /// The log start the leading run of queued local retirements retires
+    /// `ledger` to.
+    pub(super) fn local_retire_point(&self, ledger: &crate::wal::ledger::WalLedger) -> u64 {
+        self.local_retirement.retire_point(ledger)
+    }
+
+    /// Remove and return every queued local retirement below `log_start`.
+    pub(super) fn drain_local_retirements_below(
+        &mut self,
+        log_start: u64,
+    ) -> Vec<(u64, LocalRetirement)> {
+        self.local_retirement.drain_below(log_start)
     }
 }
 
@@ -309,8 +635,10 @@ impl WriteStallWaiters {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloudWalUploadTracker, ManifestPublicationGate, VerificationBarrier, WriteStallWaiters,
+        CloudWalUploadTracker, ManifestPublicationGate, NotMember, PruneTracker, UploadBacklog,
+        VerificationBarrier, WriteStallWaiters,
     };
+    use crate::runtime::wal_history::WalHistory;
     use crate::runtime::RuntimeMsg;
     use std::collections::BTreeMap;
 
@@ -321,15 +649,73 @@ mod tests {
     #[test]
     fn should_retain_cloud_wal_state_when_constructed() {
         // Arrange
-        let recovered = BTreeMap::from([(3, 41)]);
+        let record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            41,
+        );
+        let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(
+            3,
+            1,
+            crate::wal::format::ChainLink::GENESIS,
+        )
+        .record(&record)
+        .seal();
+        let entry = crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes).unwrap();
+        let recovered = BTreeMap::from([(3, entry)]);
 
         // Act
         let mut tracker = CloudWalUploadTracker::new(recovered);
-        tracker.upload_backlog.insert(4, 52);
+        tracker.queue_sealed(4, 52);
 
         // Assert
-        assert_eq!(tracker.acked_segments.get(&3), Some(&41));
-        assert!(tracker.has_pending_uploads());
+        assert_eq!(tracker.acks().published().collect::<Vec<_>>(), [(3, 41)]);
+        assert_eq!(tracker.backlog().first(), Some((4, 52)));
+        assert!(tracker.backlog().ready());
+    }
+
+    #[test]
+    fn should_refuse_requeue_of_a_segment_outside_the_ledger() {
+        // Arrange: segment 1 is retired, 2 sealed and 3 open.
+        let mut history = WalHistory::in_memory(1);
+        crate::runtime::wal_history::fixture::seal_through(&mut history, 2)
+            .expect("seal the ledger through segment 2");
+        let mut backlog = UploadBacklog::new();
+
+        // Act
+        let retired = backlog.requeue(1, 10, history.ledger());
+        let open = backlog.requeue(3, 30, history.ledger());
+        let sealed = backlog.requeue(2, 20, history.ledger());
+
+        // Assert
+        assert_eq!(retired, Err(NotMember { segment_id: 1 }));
+        assert_eq!(open, Err(NotMember { segment_id: 3 }));
+        assert_eq!(sealed, Ok(()));
+        assert_eq!(backlog.len(), 1);
+        assert_eq!(backlog.get(2), Some(20));
+        assert!(
+            backlog.retry_timeout().is_some(),
+            "a requeued segment waits for its retry"
+        );
+    }
+
+    #[test]
+    fn should_ignore_prune_completion_without_admission() {
+        // Arrange
+        let mut prunes = PruneTracker::default();
+        prunes.admit([4]);
+
+        // Act
+        let unadmitted = prunes.release(5);
+        let admitted = prunes.release(4);
+        let repeated = prunes.release(4);
+
+        // Assert
+        assert!(!unadmitted);
+        assert!(admitted);
+        assert!(!repeated);
+        assert_eq!(prunes.len(), 0);
     }
 
     #[test]

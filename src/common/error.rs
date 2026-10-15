@@ -73,6 +73,10 @@ pub enum MidgeError {
     /// The operation did not complete before its caller-provided deadline.
     Timeout(String),
 
+    /// The write may be committed even though acknowledgement failed. Do not
+    /// retry blindly; reconcile the transaction after recovery.
+    OutcomeUnknown(String),
+
     /// A bounded resource pool cannot admit more work.
     ResourceLimit(String),
 
@@ -114,6 +118,7 @@ impl fmt::Display for MidgeError {
             MidgeError::Aborted(msg) => write!(f, "Aborted: {msg}"),
             MidgeError::Busy(msg) => write!(f, "Busy: {msg}"),
             MidgeError::Timeout(msg) => write!(f, "Timeout: {msg}"),
+            MidgeError::OutcomeUnknown(msg) => write!(f, "Write outcome unknown: {msg}"),
             MidgeError::ResourceLimit(msg) => write!(f, "Resource limit: {msg}"),
             MidgeError::UnflushedDataPresent { cf_id, bytes } => write!(
                 f,
@@ -140,6 +145,8 @@ pub enum Severity {
     /// A bounded resource is temporarily full. Retry after release, and do
     /// not report as a defect.
     Backpressure,
+    /// A write may have committed, so its caller must reconcile before retrying.
+    OutcomeUnknown,
     /// This writer no longer holds, or never held, durable authority.
     Fenced,
     /// An engine invariant was violated. Durable data may still be intact, so
@@ -181,6 +188,8 @@ impl MidgeError {
             Self::NoSpace(_) | Self::WriteStall(_) | Self::Busy(_) | Self::Timeout(_) => {
                 Severity::Backpressure
             }
+
+            Self::OutcomeUnknown(_) => Severity::OutcomeUnknown,
 
             Self::Fenced(_) | Self::LeaseEpochExhausted | Self::LeaseIndeterminate(_) => {
                 Severity::Fenced
@@ -242,6 +251,7 @@ impl MidgeError {
             Self::Aborted(message) => Self::Aborted(message.clone()),
             Self::Busy(message) => Self::Busy(message.clone()),
             Self::Timeout(message) => Self::Timeout(message.clone()),
+            Self::OutcomeUnknown(message) => Self::OutcomeUnknown(message.clone()),
             Self::ResourceLimit(message) => Self::ResourceLimit(message.clone()),
             Self::UnflushedDataPresent { cf_id, bytes } => Self::UnflushedDataPresent {
                 cf_id: *cf_id,
@@ -263,6 +273,17 @@ pub(crate) fn is_no_space(kind: io::ErrorKind) -> bool {
 
 impl From<io::Error> for MidgeError {
     fn from(err: io::Error) -> Self {
+        // A filesystem error carried through `std::io` keeps its own class.
+        type Payload = dyn std::error::Error + Send + Sync;
+        if err.get_ref().is_some_and(Payload::is::<crate::io::FsError>) {
+            if let Some(Ok(error)) = err
+                .into_inner()
+                .map(Payload::downcast::<crate::io::FsError>)
+            {
+                return error.into_midge();
+            }
+            return MidgeError::Internal("filesystem error payload changed type".into());
+        }
         if is_no_space(err.kind()) {
             MidgeError::NoSpace(err.to_string())
         } else {
@@ -389,6 +410,23 @@ mod tests {
 
         // Assert
         assert_eq!(severities, [Severity::Fatal, Severity::Fatal]);
+    }
+
+    #[test]
+    fn should_preserve_unknown_write_outcome_when_replaying_error() {
+        // Arrange
+        let error = MidgeError::OutcomeUnknown("sync may have committed".into());
+
+        // Act
+        let severity = error.severity();
+        let replayed = error.replay();
+
+        // Assert
+        assert_eq!(severity, Severity::OutcomeUnknown);
+        assert!(matches!(
+            replayed,
+            MidgeError::OutcomeUnknown(message) if message == "sync may have committed"
+        ));
     }
 
     #[test]

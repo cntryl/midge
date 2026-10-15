@@ -16,6 +16,116 @@ mod startup_deadline;
 
 static TEMP_PATH_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+struct CountingLeaseReadBackend {
+    inner: crate::storage::cloud::MockCloudBackend,
+    lease_reads: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::storage::cloud::CloudReadCapability for CountingLeaseReadBackend {
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if key.ends_with(LEASE_OBJECT_KEY) {
+            self.lease_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if key.ends_with(LEASE_OBJECT_KEY) {
+            self.lease_reads
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+        crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(
+            &self.inner,
+            key,
+            callback,
+        );
+    }
+
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for CountingLeaseReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for CountingLeaseReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for CountingLeaseReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for CountingLeaseReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl crate::storage::cloud::CloudBackend for CountingLeaseReadBackend {}
+
+#[test]
+fn should_validate_per_logical_write_group_not_per_local_wal_effect() {
+    // Arrange: acquire the real provider-backed lease and then count its
+    // object reads separately from acquisition and heartbeat work.
+    let backend = Arc::new(CountingLeaseReadBackend {
+        inner: crate::storage::cloud::MockCloudBackend::new(),
+        lease_reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+        backend.clone(),
+        "midge".to_string(),
+    ));
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        cloud,
+    ));
+    let _guard = Arc::clone(&lease)
+        .try_acquire()
+        .expect("acquire provider lease");
+    let epoch = lease.epoch();
+    backend
+        .lease_reads
+        .store(0, std::sync::atomic::Ordering::Release);
+    let holder_id = lease.holder_id();
+    let mut effects_ran = 0;
+
+    // Act: one provider proof admits a logical write group; its physical WAL
+    // append and fsync effects use the bounded monotonic validity window.
+    lease
+        .leader_store
+        .validate_write_admission(&holder_id, epoch, Duration::from_secs(1))
+        .expect("provider authority admits the write group");
+    for _ in 0..2 {
+        lease
+            .leader_store
+            .with_writer_epoch(&holder_id, epoch, Duration::from_secs(1), &mut || {
+                effects_ran += 1;
+            })
+            .expect("valid monotonic authority admits a local effect");
+    }
+
+    // Assert: a standalone sync boundary refreshes authority once, while the
+    // physical append/fsync checks do not each make another provider request.
+    assert_eq!(effects_ran, 2);
+    assert_eq!(
+        backend
+            .lease_reads
+            .load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    lease
+        .leader_store
+        .validate_epoch_before_sync(&holder_id, epoch, Duration::from_secs(1))
+        .expect("standalone sync authority refresh succeeds");
+    assert_eq!(
+        backend
+            .lease_reads
+            .load(std::sync::atomic::Ordering::Acquire),
+        2
+    );
+}
+
 fn test_config() -> CloudLeaseConfig {
     CloudLeaseConfig {
         bucket: "test-bucket".to_string(),
@@ -41,7 +151,37 @@ struct ScriptedConditionalPutBackend {
     scripted_target: ScriptedPutTarget,
 }
 
-impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {
+impl crate::storage::cloud::CloudReadCapability for ScriptedConditionalPutBackend {
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(
+            &self.inner,
+            key,
+            callback,
+        );
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudReadCapability::submit_get_range(
+            &self.inner,
+            key,
+            start,
+            end,
+            callback,
+        );
+    }
+}
+
+impl crate::storage::cloud::CloudWriteCapability for ScriptedConditionalPutBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -74,7 +214,7 @@ impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {
         if scripted {
             if self.apply_before_error {
                 let (inner_callback, inner_result) = std::sync::mpsc::channel();
-                crate::storage::cloud::CloudBackend::submit_put(
+                crate::storage::cloud::CloudWriteCapability::submit_put(
                     &self.inner,
                     key,
                     data,
@@ -101,50 +241,45 @@ impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {
             });
             return;
         }
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
-    }
-
-    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
-    }
-
-    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get_with_metadata(&self.inner, key, callback);
-    }
-
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        crate::storage::cloud::CloudBackend::submit_get_range(
+        crate::storage::cloud::CloudWriteCapability::submit_put(
             &self.inner,
             key,
-            start,
-            end,
+            data,
+            headers,
             callback,
         );
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for ScriptedConditionalPutBackend {
     fn submit_delete(
         &self,
         key: &str,
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
+        crate::storage::cloud::CloudDeleteCapability::submit_delete(
+            &self.inner,
+            key,
+            headers,
+            callback,
+        );
     }
 }
+
+impl crate::storage::cloud::CloudListCapability for ScriptedConditionalPutBackend {
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudListCapability::submit_list(&self.inner, prefix, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudHeadCapability for ScriptedConditionalPutBackend {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudHeadCapability::submit_head(&self.inner, key, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for ScriptedConditionalPutBackend {}
 
 fn lease_with_scripted_conditional_put_error(
     scripted_error: crate::storage::cloud::CloudError,
@@ -249,7 +384,13 @@ impl LateCommitRenewalBackend {
             .take()
             .expect("late renewal PUT is pending");
         let (callback, result) = std::sync::mpsc::channel();
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, &key, data, headers, callback);
+        crate::storage::cloud::CloudWriteCapability::submit_put(
+            &self.inner,
+            &key,
+            data,
+            headers,
+            callback,
+        );
         let result = result.recv_timeout(Duration::from_secs(5));
         self.late_commit_complete.store(true, Ordering::Release);
         assert!(matches!(
@@ -262,7 +403,52 @@ impl LateCommitRenewalBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {
+impl crate::storage::cloud::CloudReadCapability for LateCommitRenewalBackend {
+    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        if self
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            if let Some(signal) = self
+                .old_read_seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                signal.send(()).expect("signal old reconciliation read");
+            }
+        }
+        crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(
+            &self.inner,
+            key,
+            callback,
+        );
+    }
+
+    fn submit_get_range(
+        &self,
+        key: &str,
+        start: u64,
+        end: Option<u64>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudReadCapability::submit_get_range(
+            &self.inner,
+            key,
+            start,
+            end,
+            callback,
+        );
+    }
+}
+
+impl crate::storage::cloud::CloudWriteCapability for LateCommitRenewalBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -302,30 +488,57 @@ impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {
                 std::thread::yield_now();
             }
         }
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
+        crate::storage::cloud::CloudWriteCapability::submit_put(
+            &self.inner,
+            key,
+            data,
+            headers,
+            callback,
+        );
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for LateCommitRenewalBackend {
+    fn submit_delete(
+        &self,
+        key: &str,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudDeleteCapability::submit_delete(
+            &self.inner,
+            key,
+            headers,
+            callback,
+        );
+    }
+}
+
+impl crate::storage::cloud::CloudListCapability for LateCommitRenewalBackend {
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudListCapability::submit_list(&self.inner, prefix, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudHeadCapability for LateCommitRenewalBackend {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudHeadCapability::submit_head(&self.inner, key, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {}
+
+impl crate::storage::cloud::CloudReadCapability for BlockingRenewalBackend {
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        if self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .is_some()
-        {
-            if let Some(signal) = self
-                .old_read_seen
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take()
-            {
-                signal.send(()).expect("signal old reconciliation read");
-            }
-        }
-        crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+        crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
     }
 
     fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get_with_metadata(&self.inner, key, callback);
+        crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(
+            &self.inner,
+            key,
+            callback,
+        );
     }
 
     fn submit_get_range(
@@ -335,7 +548,7 @@ impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {
         end: Option<u64>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_get_range(
+        crate::storage::cloud::CloudReadCapability::submit_get_range(
             &self.inner,
             key,
             start,
@@ -343,26 +556,9 @@ impl crate::storage::cloud::CloudBackend for LateCommitRenewalBackend {
             callback,
         );
     }
-
-    fn submit_delete(
-        &self,
-        key: &str,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
-    }
 }
 
-impl crate::storage::cloud::CloudBackend for BlockingRenewalBackend {
+impl crate::storage::cloud::CloudWriteCapability for BlockingRenewalBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -394,69 +590,54 @@ impl crate::storage::cloud::CloudBackend for BlockingRenewalBackend {
                 .recv()
                 .expect("release blocked renewal");
         }
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
-    }
-
-    fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
-    }
-
-    fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get_with_metadata(&self.inner, key, callback);
-    }
-
-    fn submit_get_range(
-        &self,
-        key: &str,
-        start: u64,
-        end: Option<u64>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        crate::storage::cloud::CloudBackend::submit_get_range(
+        crate::storage::cloud::CloudWriteCapability::submit_put(
             &self.inner,
             key,
-            start,
-            end,
+            data,
+            headers,
             callback,
         );
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for BlockingRenewalBackend {
     fn submit_delete(
         &self,
         key: &str,
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
+        crate::storage::cloud::CloudDeleteCapability::submit_delete(
+            &self.inner,
+            key,
+            headers,
+            callback,
+        );
     }
 }
 
-impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
-    fn submit_put(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
+impl crate::storage::cloud::CloudListCapability for BlockingRenewalBackend {
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudListCapability::submit_list(&self.inner, prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for BlockingRenewalBackend {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudHeadCapability::submit_head(&self.inner, key, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for BlockingRenewalBackend {}
+
+impl crate::storage::cloud::CloudReadCapability for NoCasTokenBackend {
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+        crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
     }
 
     fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        crate::storage::cloud::CloudBackend::submit_get_with_metadata(&self.inner, key, tx);
+        crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(&self.inner, key, tx);
         let event = match rx.recv() {
             Ok(crate::storage::cloud::CloudEvent::GetWithMetadata {
                 key,
@@ -486,7 +667,7 @@ impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
         end: Option<u64>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_get_range(
+        crate::storage::cloud::CloudReadCapability::submit_get_range(
             &self.inner,
             key,
             start,
@@ -494,23 +675,52 @@ impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
             callback,
         );
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for NoCasTokenBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudWriteCapability::submit_put(
+            &self.inner,
+            key,
+            data,
+            headers,
+            callback,
+        );
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for NoCasTokenBackend {
     fn submit_delete(
         &self,
         key: &str,
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
+        crate::storage::cloud::CloudDeleteCapability::submit_delete(
+            &self.inner,
+            key,
+            headers,
+            callback,
+        );
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for NoCasTokenBackend {
     fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
+        crate::storage::cloud::CloudListCapability::submit_list(&self.inner, prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for NoCasTokenBackend {
     fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         let (tx, rx) = std::sync::mpsc::channel();
-        crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, tx);
+        crate::storage::cloud::CloudHeadCapability::submit_head(&self.inner, key, tx);
         let event = match rx.recv() {
             Ok(crate::storage::cloud::CloudEvent::Head {
                 key,
@@ -528,6 +738,8 @@ impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {
         let _ = callback.send(event);
     }
 }
+
+impl crate::storage::cloud::CloudBackend for NoCasTokenBackend {}
 
 fn temp_cache_path() -> PathBuf {
     let counter = TEMP_PATH_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -686,7 +898,7 @@ fn should_not_treat_missing_cas_token_as_confirmed_contention() {
         .expect("seed initialized authority");
     let now = chrono::Utc::now();
     let expired = LeaseDocument {
-        version: LeaseDocumentVersion::V2,
+        version: LeaseDocumentVersion::V3,
         epoch: Some(1),
         holder_id: "old-holder@host".to_string(),
         owner_token: Some("old-token".to_string()),
@@ -759,19 +971,8 @@ fn should_reject_acquire_when_another_holder_active() {
     // Arrange
     let cache_path = temp_cache_path();
 
-    // Simulate another holder's lease
-    let now = chrono::Utc::now();
-    let other_doc = LeaseDocument {
-        version: LeaseDocumentVersion::Legacy,
-        epoch: None,
-        holder_id: "other_process@other_host".to_string(),
-        owner_token: None,
-        acquired_at: now.to_rfc3339(),
-        expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
-        committed_metadata: None,
-    };
-    let lease_path = cache_path.join(LEASE_OBJECT_KEY);
-    std::fs::write(&lease_path, format_lease_document(&other_doc)).unwrap();
+    let current = Arc::new(CloudStorageLease::new(test_config(), cache_path.clone()));
+    let _current_guard = Arc::clone(&current).try_acquire().unwrap();
 
     let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
 
@@ -783,34 +984,6 @@ fn should_reject_acquire_when_another_holder_active() {
     if let Err(LeaseError::AcquisitionFailed(msg)) = result {
         assert!(msg.contains("another"));
     }
-}
-
-#[test]
-fn should_acquire_lease_when_existing_lease_expired() {
-    // Arrange
-    let cache_path = temp_cache_path();
-
-    // Simulate an expired lease from another holder
-    let past = chrono::Utc::now() - chrono::Duration::seconds(120);
-    let expired_doc = LeaseDocument {
-        version: LeaseDocumentVersion::Legacy,
-        epoch: None,
-        holder_id: "old_process@old_host".to_string(),
-        owner_token: None,
-        acquired_at: (past - chrono::Duration::seconds(60)).to_rfc3339(),
-        expires_at: past.to_rfc3339(),
-        committed_metadata: None,
-    };
-    let lease_path = cache_path.join(LEASE_OBJECT_KEY);
-    std::fs::write(&lease_path, format_lease_document(&expired_doc)).unwrap();
-
-    let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
-
-    // Act
-    let result = Arc::clone(&lease).try_acquire();
-
-    // Assert
-    assert!(result.is_ok());
 }
 
 #[test]
@@ -861,7 +1034,7 @@ fn should_renew_lease_when_held() {
 }
 
 #[test]
-fn should_repair_malformed_expiry_when_current_simulated_owner_renews() {
+fn should_repair_owned_shared_expiry_when_conditional_renewal_succeeds() {
     // Arrange
     let cache_path = temp_cache_path();
     let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path));
@@ -879,7 +1052,7 @@ fn should_repair_malformed_expiry_when_current_simulated_owner_renews() {
     let result = lease.renew();
 
     // Assert
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "{result:?}");
     let repaired = lease
         .read_lease_file()
         .expect("read repaired lease")
@@ -973,7 +1146,7 @@ fn should_not_resurrect_authority_when_provider_put_lands_after_watchdog_fence()
         .expect("lease record retained for epoch history");
     assert!(
         persisted
-            .is_expired_with_tolerance(lease.clock_skew_tolerance)
+            .is_expired_with_tolerance(lease.clock_skew_tolerance, chrono::Utc::now())
             .expect("parse reconciled expiry"),
         "late provider side effect must be conditionally expired"
     );
@@ -1017,7 +1190,7 @@ fn should_eventually_expire_late_renewal_after_timeout_readback_saw_old_object()
             .expect("read eventual cleanup state")
             .expect("lease record retained");
         if current
-            .is_expired_with_tolerance(stale.clock_skew_tolerance)
+            .is_expired_with_tolerance(stale.clock_skew_tolerance, chrono::Utc::now())
             .expect("parse cleanup expiry")
         {
             break;
@@ -1054,7 +1227,7 @@ fn should_eventually_expire_late_renewal_after_timeout_readback_saw_old_object()
         Some(takeover_owner.as_str())
     );
     assert!(!after_takeover
-        .is_expired_with_tolerance(takeover.clock_skew_tolerance)
+        .is_expired_with_tolerance(takeover.clock_skew_tolerance, chrono::Utc::now())
         .expect("parse takeover expiry"));
 }
 
@@ -1088,57 +1261,10 @@ fn should_release_lease_when_held() {
 
     // Assert
     assert!(result.is_ok());
-    assert!(!lease_file_exists(&cache_path));
-}
-
-#[test]
-fn should_retry_simulated_lease_release_after_coordination_lock_collision() {
-    // Arrange
-    let cache_path = temp_cache_path();
-    let lease = Arc::new(CloudStorageLease::new(test_config(), cache_path.clone()));
-    let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
-    let epoch = lease.epoch();
-    let lock_path = cache_path.join(".midge_leader.lock");
-    std::fs::write(&lock_path, b"competing lease mutation")
-        .expect("hold coordination lock during release");
-
-    // Act
-    let blocked_release = lease.release();
-    assert_eq!(lease.epoch(), 0);
-    assert!(lease.validity.remaining(epoch).is_err());
-    assert!(matches!(
-        Arc::clone(&lease).try_acquire(),
-        Err(LeaseError::AlreadyAcquired(_))
-    ));
-    std::fs::remove_file(&lock_path).expect("release coordination lock");
-    let retried_release = lease.release();
-
-    // Assert
-    assert!(
-        matches!(blocked_release, Err(LeaseError::AcquisitionFailed(_))),
-        "coordination collision must be retryable: {blocked_release:?}"
-    );
-    retried_release.expect("retry must release the persisted lease");
-    assert!(!lease_file_exists(&cache_path));
-    let successor = Arc::new(CloudStorageLease::new(test_config(), cache_path));
-    let _successor_guard = successor
-        .clone()
-        .try_acquire()
-        .expect("successor acquires immediately after retry");
-    successor.release().expect("release successor lease");
-}
-
-#[test]
-fn should_allow_removing_missing_simulated_lease() {
-    // Arrange
-    let cache_path = temp_cache_path();
-    let lease = CloudStorageLease::new(test_config(), cache_path);
-
-    // Act
-    let result = lease.remove_lease_file();
-
-    // Assert
-    assert!(result.is_ok());
+    let released = lease.read_lease_file().unwrap().unwrap();
+    assert!(released
+        .is_expired_with_tolerance(Duration::ZERO, chrono::Utc::now())
+        .unwrap());
 }
 
 #[cfg(unix)]
@@ -1165,29 +1291,9 @@ fn should_reject_simulated_lease_read_through_symlink() {
     let result = lease.read_lease_file();
 
     // Assert
-    assert!(matches!(result, Err(LeaseError::IoError(_))));
-}
-
-#[cfg(unix)]
-#[test]
-fn should_reject_simulated_lease_removal_through_symlink() {
-    // Arrange
-    let cache_path = temp_cache_path();
-    let outside_path = temp_cache_path().join("outside-lease");
-    std::fs::write(&outside_path, "outside lease").unwrap();
-    let lease_path = cache_path.join(LEASE_OBJECT_KEY);
-    std::os::unix::fs::symlink(&outside_path, &lease_path).unwrap();
-    let lease = CloudStorageLease::new(test_config(), cache_path);
-
-    // Act
-    let result = lease.remove_lease_file();
-
-    // Assert
-    assert!(matches!(result, Err(LeaseError::IoError(_))));
-    assert!(lease_path.symlink_metadata().is_ok());
-    assert_eq!(
-        std::fs::read_to_string(outside_path).unwrap(),
-        "outside lease"
+    assert!(
+        matches!(result, Err(LeaseError::Indeterminate(_))),
+        "{result:?}"
     );
 }
 
@@ -1337,7 +1443,7 @@ fn should_not_delete_new_holder_lease_given_stale_process_release_when_releasing
 
     let now = chrono::Utc::now();
     let new_holder_doc = LeaseDocument {
-        version: LeaseDocumentVersion::V2,
+        version: LeaseDocumentVersion::V3,
         epoch: Some(lease.epoch().saturating_add(1)),
         holder_id: "new-holder@host".to_string(),
         owner_token: Some("new-holder-token".to_string()),
@@ -1456,7 +1562,7 @@ fn should_validate_provider_epoch_through_leader_store() {
         .expect("provider lease should expose its remote leader store");
     let now = chrono::Utc::now();
     let newer = LeaseDocument {
-        version: LeaseDocumentVersion::V2,
+        version: LeaseDocumentVersion::V3,
         epoch: Some(acquired_epoch + 1),
         holder_id: "new-holder@host".to_string(),
         owner_token: Some("new-holder-token".to_string()),
@@ -1541,7 +1647,7 @@ fn should_not_overwrite_newer_provider_epoch_on_stale_release() {
         .expect("acquire provider lease");
     let now = chrono::Utc::now();
     let newer = LeaseDocument {
-        version: LeaseDocumentVersion::V2,
+        version: LeaseDocumentVersion::V3,
         epoch: Some(2),
         holder_id: lease.holder_id(),
         owner_token: Some("new-owner-token".to_string()),
@@ -1570,7 +1676,7 @@ fn should_increment_remote_epoch_given_expired_provider_lease_when_reacquiring()
     put_remote_lease(
         &cloud,
         format_lease_document(&LeaseDocument {
-            version: LeaseDocumentVersion::V2,
+            version: LeaseDocumentVersion::V3,
             epoch: Some(41),
             holder_id: "old-holder@host".to_string(),
             owner_token: Some("old-token".to_string()),
@@ -1601,7 +1707,7 @@ fn should_refuse_provider_takeover_given_malformed_expiry() {
     provider_create_authority_sentinel(&cloud, Duration::from_secs(1))
         .expect("seed initialized authority");
     let document = format_lease_document(&LeaseDocument {
-        version: LeaseDocumentVersion::V2,
+        version: LeaseDocumentVersion::V3,
         epoch: Some(41),
         holder_id: "ambiguous-holder@host".to_string(),
         owner_token: Some("ambiguous-token".to_string()),
@@ -1722,7 +1828,7 @@ fn should_report_provider_ownership_change_when_owner_token_changes() {
         .expect("acquire provider lease");
     let now = chrono::Utc::now();
     let successor = LeaseDocument {
-        version: LeaseDocumentVersion::V2,
+        version: LeaseDocumentVersion::V3,
         epoch: Some(lease.epoch()),
         holder_id: lease.holder_id(),
         owner_token: Some("successor-owner-token".to_string()),
@@ -1872,9 +1978,11 @@ fn should_delay_takeover_until_clock_skew_tolerance_elapses() {
     };
 
     // Act
-    let without_tolerance = document.is_expired_with_tolerance(Duration::ZERO).unwrap();
+    let without_tolerance = document
+        .is_expired_with_tolerance(Duration::ZERO, chrono::Utc::now())
+        .unwrap();
     let with_tolerance = document
-        .is_expired_with_tolerance(Duration::from_secs(15))
+        .is_expired_with_tolerance(Duration::from_secs(15), chrono::Utc::now())
         .unwrap();
 
     // Assert
@@ -2151,7 +2259,7 @@ fn should_reject_pending_marker_with_committed_lease_pointer() {
     provider_create_authority_sentinel(&cloud, Duration::from_secs(1))
         .expect("create pending marker");
     let old = LeaseDocument {
-        version: LeaseDocumentVersion::V2,
+        version: LeaseDocumentVersion::V3,
         epoch: Some(7),
         holder_id: "previous@host".into(),
         owner_token: Some("previous-token".into()),
@@ -2208,15 +2316,15 @@ fn should_reject_malformed_authority_marker_before_first_lease_create() {
 }
 
 #[test]
-fn should_refuse_v2_lease_when_permanent_authority_sentinel_is_missing() {
-    // Arrange: a V2 lease without its durable marker could lose the pointer
+fn should_refuse_v3_lease_when_permanent_authority_sentinel_is_missing() {
+    // Arrange: a V3 lease without its durable marker could lose the pointer
     // undetectably if the lease object were later deleted.
     let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
     let now = chrono::Utc::now();
     put_remote_lease(
         &cloud,
         format_lease_document(&LeaseDocument {
-            version: LeaseDocumentVersion::V2,
+            version: LeaseDocumentVersion::V3,
             epoch: Some(5),
             holder_id: "previous-holder@host".into(),
             owner_token: Some("previous-token".into()),
@@ -2246,7 +2354,8 @@ fn test_metadata_generation(sequence: u64) -> CloudMetadataGeneration {
     let manifest_name = crate::metadata::files::MANIFEST_SNAPSHOT;
     let format_name = crate::metadata::files::FORMAT;
     CloudMetadataGeneration {
-        manifest_sequence: sequence,
+        id: crate::lease::SharedGenerationId::FIRST,
+        manifest_horizon: sequence,
         objects: vec![
             CloudMetadataObject {
                 file_name: manifest_name.to_string(),
@@ -2268,6 +2377,54 @@ fn test_metadata_generation(sequence: u64) -> CloudMetadataGeneration {
             },
         ],
     }
+}
+
+#[test]
+fn should_refuse_skipped_shared_generation_ordinals_when_publishing_metadata() {
+    // Arrange: journal/data sequences are not a shared publication clock.
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        cloud,
+    ));
+    let _guard = Arc::clone(&lease).try_acquire().unwrap();
+    let store = lease.get_leader_store().unwrap();
+    let first = test_metadata_generation(1);
+    store
+        .publish_committed_metadata(
+            &lease.holder_id(),
+            lease.epoch(),
+            None,
+            first.clone(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+    // Act
+    let result = store.publish_committed_metadata(
+        &lease.holder_id(),
+        lease.epoch(),
+        Some(&first),
+        {
+            let mut skipped = test_metadata_generation(50);
+            skipped.id = crate::lease::SharedGenerationId::new(50).unwrap();
+            skipped
+        },
+        Duration::from_secs(1),
+    );
+
+    // Assert
+    assert!(
+        result.is_err(),
+        "a changed pointer must commit exactly the next shared ordinal"
+    );
+    assert_eq!(
+        store
+            .read_committed_metadata(Duration::from_secs(1))
+            .unwrap(),
+        CloudMetadataHead::Committed(first)
+    );
 }
 
 #[test]
@@ -2326,8 +2483,8 @@ fn should_preserve_committed_metadata_pointer_when_provider_lease_renews() {
         CloudMetadataHead::Committed(generation)
     );
     let wire = read_remote_lease(&cloud);
-    assert!(wire.starts_with("lease_version: 2\n"), "{wire}");
-    assert!(!wire.contains("holder_id: "), "old readers must reject V2");
+    assert!(wire.starts_with("lease_version: 3\n"), "{wire}");
+    assert!(!wire.contains("holder_id: "), "old readers must reject V3");
 }
 
 #[test]
@@ -2359,7 +2516,8 @@ fn should_fence_stale_metadata_pointer_publication_after_new_provider_epoch() {
     first.release().expect("release first");
     let _second_guard = Arc::clone(&second).try_acquire().expect("acquire second");
     let new_store = second.get_leader_store().expect("second store");
-    let second_generation = test_metadata_generation(2);
+    let mut second_generation = test_metadata_generation(2);
+    second_generation.id = crate::lease::SharedGenerationId::new(2).unwrap();
     new_store
         .publish_committed_metadata(
             &second.holder_id(),
@@ -2402,7 +2560,8 @@ fn should_reject_stale_snapshot_when_same_epoch_pointer_advanced_during_upload()
     let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
     let store = lease.get_leader_store().expect("leader store");
     let first = test_metadata_generation(12);
-    let newer = test_metadata_generation(12);
+    let mut newer = test_metadata_generation(12);
+    newer.id = crate::lease::SharedGenerationId::new(2).unwrap();
     let stale = test_metadata_generation(12);
     store
         .publish_committed_metadata(
@@ -2741,7 +2900,7 @@ fn should_retry_provider_release_when_same_epoch_pointer_cas_wins() {
     let persisted = provider_read_doc(&cloud).unwrap().expect("lease document");
     assert_eq!(persisted.committed_metadata, Some(generation));
     assert!(persisted
-        .is_expired_with_tolerance(lease.clock_skew_tolerance)
+        .is_expired_with_tolerance(lease.clock_skew_tolerance, chrono::Utc::now())
         .unwrap());
 }
 
@@ -2775,7 +2934,7 @@ fn should_deactivate_local_validity_when_provider_release_fails() {
     lease.release().expect("retry provider lease release");
     let persisted = provider_read_doc(&cloud).unwrap().expect("lease document");
     assert!(persisted
-        .is_expired_with_tolerance(lease.clock_skew_tolerance)
+        .is_expired_with_tolerance(lease.clock_skew_tolerance, chrono::Utc::now())
         .expect("released lease expiry"));
 }
 
@@ -2786,10 +2945,10 @@ fn should_release_provider_lease_after_terminal_renewal_failure() {
     let lease = Arc::new(
         CloudStorageLease::new_provider_backed_with_clock_skew_tolerance_and_ttl(
             test_config(),
-            temp_cache_path(),
             Arc::clone(&cloud),
             Duration::from_secs(1),
             Duration::from_secs(10),
+            LeaseClock::default(),
         ),
     );
     let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
@@ -2809,15 +2968,15 @@ fn should_release_provider_lease_after_terminal_renewal_failure() {
     released.expect("release must conditionally expire the old lease");
     let persisted = provider_read_doc(&cloud).unwrap().expect("lease document");
     assert!(persisted
-        .is_expired_with_tolerance(lease.clock_skew_tolerance)
+        .is_expired_with_tolerance(lease.clock_skew_tolerance, chrono::Utc::now())
         .expect("released lease expiry"));
 }
 
 #[test]
-fn should_reject_noncanonical_v2_lease_documents() {
+fn should_reject_noncanonical_v3_lease_documents() {
     // Arrange
     let document = LeaseDocument {
-        version: LeaseDocumentVersion::V2,
+        version: LeaseDocumentVersion::V3,
         epoch: Some(8),
         holder_id: "holder@host".to_string(),
         owner_token: Some("owner-token".to_string()),
@@ -2838,7 +2997,7 @@ fn should_reject_noncanonical_v2_lease_documents() {
         "owner: owner-token\nunknown: value\n",
         1,
     );
-    let altered_version = wire.replacen("lease_version: 2", "lease_version: 3", 1);
+    let altered_version = wire.replacen("lease_version: 3", "lease_version: 2", 1);
 
     // Assert
     assert_eq!(parse_lease_document(&wire), Some(document));
@@ -2910,12 +3069,20 @@ fn should_persist_expiry_not_before_local_validity_when_ttl_has_fractional_secon
     // take over while this one still accepts writes.
     let dir = tempfile::tempdir().expect("lease dir");
     let ttl = Duration::from_millis(1500);
-    let lease = Arc::new(CloudStorageLease::new_with_clock_skew_tolerance_and_ttl(
-        test_config(),
-        dir.path(),
-        Duration::ZERO,
-        ttl,
+    let store = Arc::new(crate::storage::filesystem::FileSystem::new(dir.path()).unwrap());
+    let cloud = Arc::new(CloudStorage::from_object_store(
+        store,
+        Duration::from_secs(5),
     ));
+    let lease = Arc::new(
+        CloudStorageLease::new_provider_backed_with_clock_skew_tolerance_and_ttl(
+            test_config(),
+            cloud,
+            Duration::ZERO,
+            ttl,
+            LeaseClock::default(),
+        ),
+    );
 
     // Act
     let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
@@ -2955,26 +3122,16 @@ impl FlakyGetBackend {
     }
 }
 
-impl crate::storage::cloud::CloudBackend for FlakyGetBackend {
-    fn submit_put(
-        &self,
-        key: &str,
-        data: Vec<u8>,
-        headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
-    ) {
-        crate::storage::cloud::CloudBackend::submit_put(&self.inner, key, data, headers, callback);
-    }
-
+impl crate::storage::cloud::CloudReadCapability for FlakyGetBackend {
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if !self.take_failure(key, &callback) {
-            crate::storage::cloud::CloudBackend::submit_get(&self.inner, key, callback);
+            crate::storage::cloud::CloudReadCapability::submit_get(&self.inner, key, callback);
         }
     }
 
     fn submit_get_with_metadata(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         if !self.take_failure(key, &callback) {
-            crate::storage::cloud::CloudBackend::submit_get_with_metadata(
+            crate::storage::cloud::CloudReadCapability::submit_get_with_metadata(
                 &self.inner,
                 key,
                 callback,
@@ -2989,7 +3146,7 @@ impl crate::storage::cloud::CloudBackend for FlakyGetBackend {
         end: Option<u64>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_get_range(
+        crate::storage::cloud::CloudReadCapability::submit_get_range(
             &self.inner,
             key,
             start,
@@ -2997,24 +3154,55 @@ impl crate::storage::cloud::CloudBackend for FlakyGetBackend {
             callback,
         );
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for FlakyGetBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        crate::storage::cloud::CloudWriteCapability::submit_put(
+            &self.inner,
+            key,
+            data,
+            headers,
+            callback,
+        );
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for FlakyGetBackend {
     fn submit_delete(
         &self,
         key: &str,
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        crate::storage::cloud::CloudBackend::submit_delete(&self.inner, key, headers, callback);
-    }
-
-    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_list(&self.inner, prefix, callback);
-    }
-
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        crate::storage::cloud::CloudBackend::submit_head(&self.inner, key, callback);
+        crate::storage::cloud::CloudDeleteCapability::submit_delete(
+            &self.inner,
+            key,
+            headers,
+            callback,
+        );
     }
 }
+
+impl crate::storage::cloud::CloudListCapability for FlakyGetBackend {
+    fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudListCapability::submit_list(&self.inner, prefix, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudHeadCapability for FlakyGetBackend {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        crate::storage::cloud::CloudHeadCapability::submit_head(&self.inner, key, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for FlakyGetBackend {}
 
 #[test]
 fn should_keep_cloud_lease_active_when_renewal_read_fails_transiently() {

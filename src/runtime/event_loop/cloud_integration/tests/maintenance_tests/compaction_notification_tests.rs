@@ -42,7 +42,7 @@ impl NotificationFixture {
         let input_bytes = std::fs::read(if cloud {
             remote_sst_path_for_test(&el, &input)
         } else {
-            el.state.sst_dir.join(&input)
+            el.state.host_sst_dir().join(&input)
         })?;
         Ok(Self {
             el,
@@ -57,6 +57,7 @@ impl NotificationFixture {
     fn launch(&mut self) -> MidgeResult<()> {
         let plan = self
             .el
+            .actors
             .compaction_actor
             .check_manual_compaction(&self.el.state)?
             .expect("actual seeded SST needs compaction");
@@ -79,7 +80,7 @@ impl NotificationFixture {
             panic!("unexpected worker message: {message:?}")
         };
         assert!(
-            self.el.router.registered_at(*request_id).is_none(),
+            self.el.routing.router.registered_at(*request_id).is_none(),
             "the actor-generated notification never registered a caller"
         );
         Receipt {
@@ -96,8 +97,8 @@ impl NotificationFixture {
     }
 
     fn register_manual(&mut self) -> crossbeam::channel::Receiver<RuntimeResponse> {
-        let response = self.el.router.register(MANUAL_ID, "CompactAll");
-        self.el.cloud_coordinator.cloud_maintenance.next =
+        let response = self.el.routing.router.register(MANUAL_ID, "CompactAll");
+        self.el.actors.cloud_coordinator.cloud_maintenance.next =
             crate::runtime::event_loop::cloud_maintenance::MaintenanceTask::Compaction;
         CompactionCoordinator::compact_all(&mut self.el, MANUAL_ID);
         response
@@ -109,7 +110,7 @@ impl NotificationFixture {
             std::fs::read(if self.cloud {
                 remote_sst_path_for_test(&self.el, &self.input)
             } else {
-                self.el.state.sst_dir.join(&self.input)
+                self.el.state.host_sst_dir().join(&self.input)
             })?,
             self.input_bytes
         );
@@ -120,12 +121,12 @@ impl NotificationFixture {
         assert_eq!(outputs.len(), 1, "one genuine row produces one output");
         let name = &outputs[0];
         assert!(self.el.state.manifest_has_file(name));
-        let path = if self.cloud {
-            Path::new("sst").join(name)
-        } else {
-            PathBuf::from(name)
-        };
-        let reader = self.el.compaction_actor.open_sst_reader(&path)?;
+        // Both factories are rooted at `sst/`, so the SST name is its path.
+        let reader = self
+            .el
+            .actors
+            .compaction_actor
+            .open_sst_reader(Path::new(name))?;
         let rows = reader.scan_range_raw_state(None, None)?;
         assert_eq!(rows.len(), 1);
         let expected_key: &[u8] = if self.cloud {
@@ -144,25 +145,24 @@ impl NotificationFixture {
     fn assert_settled(&mut self) {
         assert_eq!(self.el.state.active_compactions.load(Ordering::Acquire), 0);
         assert!(self.el.state.pending_compaction_waits.is_empty());
-        assert!(self.el.compaction_publication.get().is_none());
-        if self.el.publication_gate.is_active() {
-            assert!(self.el.publication_gate.is_owned_by(
+        assert!(self.el.publication.compaction_publication.get().is_none());
+        if self.el.publication.publication_gate.is_active() {
+            assert!(self.el.publication.publication_gate.is_owned_by(
                 &crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune
             ));
             assert!(
-                self.el.cloud_coordinator.cloud_wal_prune_worker.is_some()
-                    || !self
-                        .el
-                        .cloud_coordinator
-                        .cloud_wal
-                        .prune_inflight
-                        .is_empty(),
+                self.el
+                    .actors
+                    .cloud_coordinator
+                    .cloud_wal_prune_worker
+                    .is_some()
+                    || self.el.actors.cloud_coordinator.cloud_wal.prunes().len() > 0,
                 "the remaining gate must belong to actual accepted WAL prune work"
             );
             drain_prune_completion_for_test(&mut self.el);
         }
-        assert!(!self.el.publication_gate.is_active());
-        if let Some(storage) = &self.el.cloud_coordinator.hybrid_storage {
+        assert!(!self.el.publication.publication_gate.is_active());
+        if let Some(storage) = &self.el.actors.cloud_coordinator.hybrid_storage {
             assert_eq!(storage.budget_snapshot().usage.reservations, 0);
         }
     }
@@ -170,9 +170,10 @@ impl NotificationFixture {
 
 impl Drop for NotificationFixture {
     fn drop(&mut self) {
-        let _ = self.el.compaction_publish_actor.shutdown_and_join();
+        let _ = self.el.actors.compaction_publish_actor.shutdown_and_join();
         let storage = self
             .el
+            .actors
             .cloud_coordinator
             .hybrid_storage
             .as_ref()
@@ -181,9 +182,10 @@ impl Drop for NotificationFixture {
                     as Arc<dyn crate::runtime::actors::compaction::CompactionStorage>
             });
         self.el
+            .actors
             .compaction_actor
             .cancel_and_join_worker(&mut self.el.state, storage.as_ref());
-        self.el.gc_actor.shutdown_workers();
+        self.el.actors.gc_actor.shutdown_workers();
         if let Some(lease) = self.lease.take() {
             let _ = lease.release();
         }
@@ -217,17 +219,22 @@ fn should_publish_background_compaction_without_routing_its_notification() -> Mi
 
         // Act
         fixture.dispatch(receipt);
-        fixture.el.gc_actor.shutdown_workers();
+        fixture.el.actors.gc_actor.shutdown_workers();
 
         // Assert: real immutable publication and GC precede the routing check.
         fixture.assert_output_row(&outputs)?;
         assert!(!fixture.el.state.manifest_has_file(&fixture.input));
         assert!(!remote_sst_path_for_test(&fixture.el, &fixture.input).exists());
         fixture.assert_settled();
-        assert!(!fixture.el.compaction_fence.is_degraded());
-        assert!(fixture.el.router.registered_at(notification_id).is_none());
-        assert_eq!(fixture.el.router.pending_len(), 0);
-        assert_eq!(fixture.el.router.late_responses_total(), 0);
+        assert!(!fixture.el.authority.compaction_fence.is_degraded());
+        assert!(fixture
+            .el
+            .routing
+            .router
+            .registered_at(notification_id)
+            .is_none());
+        assert_eq!(fixture.el.routing.router.pending_len(), 0);
+        assert_eq!(fixture.el.routing.router.late_responses_total(), 0);
         Ok(())
     })
 }
@@ -252,8 +259,8 @@ fn should_complete_registered_manual_caller_once_after_real_compaction() -> Midg
             RuntimeResponse::Ok { .. }
         ));
         fixture.assert_settled();
-        assert_eq!(fixture.el.router.pending_len(), 0);
-        assert_eq!(fixture.el.router.late_responses_total(), 0);
+        assert_eq!(fixture.el.routing.router.pending_len(), 0);
+        assert_eq!(fixture.el.routing.router.late_responses_total(), 0);
         Ok(())
     })
 }
@@ -268,7 +275,7 @@ fn should_fail_manual_caller_once_when_real_compute_detects_corrupt_input() -> M
         assert!(payload >= 4 && trailer < fixture.input_bytes.len());
         fixture.input_bytes[trailer] ^= 0xff;
         std::fs::write(
-            fixture.el.state.sst_dir.join(&fixture.input),
+            fixture.el.state.host_sst_dir().join(&fixture.input),
             &fixture.input_bytes,
         )?;
         fixture.el.state.manifest.test_mut().files[0].content_crc32c =
@@ -292,7 +299,7 @@ fn should_fail_manual_caller_once_when_real_compute_detects_corrupt_input() -> M
         ));
         assert!(fixture.el.state.intent_log.is_empty());
         fixture.assert_settled();
-        assert_eq!(fixture.el.router.late_responses_total(), 0);
+        assert_eq!(fixture.el.routing.router.late_responses_total(), 0);
         Ok(())
     })
 }
@@ -312,7 +319,7 @@ fn should_retain_inputs_without_routing_notification_when_publication_validation
 
         // Act
         fixture.dispatch(receipt);
-        fixture.el.gc_actor.shutdown_workers();
+        fixture.el.actors.gc_actor.shutdown_workers();
 
         // Assert
         fixture.assert_input_retained()?;
@@ -326,7 +333,7 @@ fn should_retain_inputs_without_routing_notification_when_publication_validation
         );
         assert!(fixture.el.state.intent_log.is_empty());
         fixture.assert_settled();
-        assert_eq!(fixture.el.router.late_responses_total(), 0);
+        assert_eq!(fixture.el.routing.router.late_responses_total(), 0);
         Ok(())
     })
 }
@@ -352,7 +359,7 @@ fn mirror_failure_case(fail_first: bool) -> MidgeResult<()> {
     let outputs = receipt.outputs.clone();
 
     fixture.dispatch(receipt);
-    fixture.el.gc_actor.shutdown_workers();
+    fixture.el.actors.gc_actor.shutdown_workers();
     let result = assert_one_manual_response(&response);
     assert!(
         matches!(
@@ -395,11 +402,11 @@ fn mirror_failure_case(fail_first: bool) -> MidgeResult<()> {
             if error.to_string().contains("failed to mirror cleared compaction publication intent")));
     }
     fixture.assert_settled();
-    assert!(fixture.el.compaction_fence.is_degraded());
+    assert!(fixture.el.authority.compaction_fence.is_degraded());
     lease.release()?;
     fixture.lease = None;
-    assert_eq!(fixture.el.router.pending_len(), 0);
-    assert_eq!(fixture.el.router.late_responses_total(), 0);
+    assert_eq!(fixture.el.routing.router.pending_len(), 0);
+    assert_eq!(fixture.el.routing.router.late_responses_total(), 0);
     Ok(())
 }
 
@@ -430,13 +437,25 @@ fn should_fail_real_shutdown_caller_without_routing_deferred_compute_notificatio
         let receipt = fixture.receive();
         assert!(receipt.succeeded && !receipt.outputs.is_empty());
         let id = receipt.notification_id;
-        fixture.el.publication_gate.defer(receipt.message);
-        assert_eq!(fixture.el.publication_gate.deferred_messages_len(), 1);
+        fixture
+            .el
+            .publication
+            .publication_gate
+            .defer(receipt.message);
+        assert_eq!(
+            fixture
+                .el
+                .publication
+                .publication_gate
+                .deferred_messages_len(),
+            1
+        );
 
         // Act
         fixture.el.fail_shutdown_held_work();
         fixture
             .el
+            .actors
             .compaction_actor
             .cancel_and_join_worker(&mut fixture.el.state, None);
 
@@ -446,11 +465,15 @@ fn should_fail_real_shutdown_caller_without_routing_deferred_compute_notificatio
             matches!(assert_one_manual_response(&response), RuntimeResponse::Error {
             error: MidgeError::Busy(message), .. } if message == "runtime is shutting down")
         );
-        assert!(fixture.el.publication_gate.deferred_messages_is_empty());
+        assert!(fixture
+            .el
+            .publication
+            .publication_gate
+            .deferred_messages_is_empty());
         fixture.assert_settled();
-        assert!(fixture.el.router.registered_at(id).is_none());
-        assert_eq!(fixture.el.router.pending_len(), 0);
-        assert_eq!(fixture.el.router.late_responses_total(), 0);
+        assert!(fixture.el.routing.router.registered_at(id).is_none());
+        assert_eq!(fixture.el.routing.router.pending_len(), 0);
+        assert_eq!(fixture.el.routing.router.late_responses_total(), 0);
         Ok(())
     })
 }
@@ -462,10 +485,10 @@ fn should_count_real_late_response_when_metrics_caller_has_abandoned_its_route()
         // Arrange
         let mut fixture = NotificationFixture::new(false)?;
         let id = 96_002;
-        let response = fixture.el.router.register(id, "GetRuntimeMetrics");
+        let response = fixture.el.routing.router.register(id, "GetRuntimeMetrics");
         let message = RuntimeMsg::GetRuntimeMetrics { request_id: id };
         assert_eq!(message.request_id(), Some(id));
-        assert!(fixture.el.router.abandon(id, Duration::ZERO));
+        assert!(fixture.el.routing.router.abandon(id, Duration::ZERO));
         assert!(response.try_recv().is_err());
         let (_, messages) = crossbeam::channel::unbounded();
 
@@ -474,8 +497,8 @@ fn should_count_real_late_response_when_metrics_caller_has_abandoned_its_route()
 
         // Assert
         fixture.assert_input_retained()?;
-        assert_eq!(fixture.el.router.pending_len(), 0);
-        assert_eq!(fixture.el.router.late_responses_total(), 1);
+        assert_eq!(fixture.el.routing.router.pending_len(), 0);
+        assert_eq!(fixture.el.routing.router.late_responses_total(), 1);
         Ok(())
     })
 }

@@ -6,14 +6,9 @@
 use crate::runtime::keyed_group_commit::KeyedGroupCommit;
 #[cfg(test)]
 use crate::types::ReadDurability;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-
-#[cfg(not(test))]
-const CLOUD_SEAL_RETRY_DELAY: Duration = Duration::from_secs(1);
-#[cfg(test)]
-const CLOUD_SEAL_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Single `CloudAsync` segment being uploaded
 #[derive(Debug, Clone)]
@@ -111,10 +106,25 @@ pub struct DurabilityCoordinator {
 
 impl DurabilityCoordinator {
     /// Create a new coordinator with initial durability key.
+    #[cfg(test)]
     pub fn new(
         initial_durability_key: u64,
         is_cloud_async: bool,
         cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
+    ) -> Self {
+        Self::new_with_retry_policy(
+            initial_durability_key,
+            is_cloud_async,
+            cloud_runtime_policy,
+            crate::runtime::RuntimeRetryPolicy::default(),
+        )
+    }
+
+    pub(crate) fn new_with_retry_policy(
+        initial_durability_key: u64,
+        is_cloud_async: bool,
+        cloud_runtime_policy: crate::runtime::CloudRuntimePolicy,
+        retry_policy: crate::runtime::RuntimeRetryPolicy,
     ) -> Self {
         Self {
             waiters: Some(KeyedGroupCommit::new(initial_durability_key)),
@@ -122,12 +132,17 @@ impl DurabilityCoordinator {
             last_cloud_flush: Instant::now(),
             cloud_seal_retry_needed: false,
             cloud_seal_retry: crate::runtime::retry_schedule::RetrySchedule::new(
-                CLOUD_SEAL_RETRY_DELAY,
+                retry_policy.cloud_seal,
             ),
             is_cloud_async,
             cloud_runtime_policy,
             waiters_fanned_out: AtomicU64::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cloud_seal_retry_delay(&self) -> Duration {
+        self.cloud_seal_retry.configured_delay()
     }
 
     /// Check if a sequence number is durable at the requested level.
@@ -297,29 +312,18 @@ impl DurabilityCoordinator {
     /// inflight segment. A later segment ack never makes earlier gaps durable.
     pub fn contiguous_acked_cloud_segments(
         &self,
-        acked_segments: &BTreeMap<u64, u64>,
-    ) -> Result<Vec<(u64, u64)>, String> {
-        let mut inflight: Vec<(u64, u64)> = self
+        acks: &crate::wal::publish::AckSet,
+    ) -> Result<Vec<crate::wal::publish::OwedSegment>, crate::wal::publish::Refusal> {
+        let mut owed: Vec<crate::wal::publish::OwedSegment> = self
             .inflight
             .iter()
-            .map(|(segment_id, info)| (*segment_id, info.max_sequence))
+            .map(|(segment_id, info)| crate::wal::publish::OwedSegment {
+                segment_id: *segment_id,
+                max_sequence: info.max_sequence,
+            })
             .collect();
-        inflight.sort_unstable_by_key(|(segment_id, _)| *segment_id);
-
-        let mut ready = Vec::new();
-        for (segment_id, expected_max_sequence) in inflight {
-            let Some(acked_max_sequence) = acked_segments.get(&segment_id) else {
-                break;
-            };
-            if *acked_max_sequence != expected_max_sequence {
-                return Err(format!(
-                    "cloud WAL segment {segment_id} ack max sequence {acked_max_sequence} does not match inflight max sequence {expected_max_sequence}"
-                ));
-            }
-            ready.push((segment_id, expected_max_sequence));
-        }
-
-        Ok(ready)
+        owed.sort_unstable_by_key(|segment| segment.segment_id);
+        crate::wal::publish::uploaded_run(&owed, acks)
     }
 
     /// Retire a cloud segment only after its frontier and waiter commit has
@@ -335,11 +339,11 @@ impl DurabilityCoordinator {
     #[cfg(test)]
     pub fn take_contiguous_acked_cloud_segments(
         &mut self,
-        acked_segments: &BTreeMap<u64, u64>,
-    ) -> Result<Vec<(u64, u64)>, String> {
-        let ready = self.contiguous_acked_cloud_segments(acked_segments)?;
-        for (segment_id, _) in &ready {
-            self.inflight.remove(segment_id);
+        acks: &crate::wal::publish::AckSet,
+    ) -> Result<Vec<crate::wal::publish::OwedSegment>, crate::wal::publish::Refusal> {
+        let ready = self.contiguous_acked_cloud_segments(acks)?;
+        for segment in &ready {
+            self.inflight.remove(&segment.segment_id);
         }
         Ok(ready)
     }
@@ -353,6 +357,12 @@ impl DurabilityCoordinator {
     /// skipping the failed segment while that retry is outstanding.
     pub fn cloud_segment_max_sequence(&self, segment_id: u64) -> Option<u64> {
         self.inflight.get(&segment_id).map(|info| info.max_sequence)
+    }
+
+    /// The newest inflight segment: the last whose acknowledgement the
+    /// contiguous cloud frontier waits for.
+    pub fn newest_inflight_segment(&self) -> Option<u64> {
+        self.inflight.keys().max().copied()
     }
 
     pub fn inflight_segment_for_sequence(&self, sequence: u64) -> Option<u64> {
@@ -450,6 +460,13 @@ impl DurabilityCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn acknowledgements(entries: &[(u64, u64)]) -> crate::wal::publish::AckSet {
+        let mut set = crate::wal::publish::AckSet::default();
+        for &(id, sequence) in entries {
+            set.acknowledge(id, sequence);
+        }
+        set
+    }
 
     fn cloud_coordinator() -> DurabilityCoordinator {
         DurabilityCoordinator::new(0, true, crate::runtime::CloudRuntimePolicy::default())
@@ -461,20 +478,32 @@ mod tests {
         let mut coordinator = cloud_coordinator();
         coordinator.record_cloud_segment_inflight(1, 10);
         coordinator.record_cloud_segment_inflight(2, 20);
-        let mut acknowledgements = BTreeMap::from([(2, 20)]);
+        let later = acknowledgements(&[(2, 20)]);
+        let both = acknowledgements(&[(1, 10), (2, 20)]);
 
         // Act
         let blocked = coordinator
-            .take_contiguous_acked_cloud_segments(&acknowledgements)
+            .take_contiguous_acked_cloud_segments(&later)
             .expect("buffer later acknowledgement");
-        acknowledgements.insert(1, 10);
         let ready = coordinator
-            .take_contiguous_acked_cloud_segments(&acknowledgements)
+            .take_contiguous_acked_cloud_segments(&both)
             .expect("drain contiguous acknowledgements");
 
         // Assert
         assert_eq!(blocked.len(), 0);
-        assert_eq!(ready, vec![(1, 10), (2, 20)]);
+        assert_eq!(
+            ready,
+            vec![
+                crate::wal::publish::OwedSegment {
+                    segment_id: 1,
+                    max_sequence: 10,
+                },
+                crate::wal::publish::OwedSegment {
+                    segment_id: 2,
+                    max_sequence: 20,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -482,13 +511,20 @@ mod tests {
         // Arrange
         let mut coordinator = cloud_coordinator();
         coordinator.record_cloud_segment_inflight(7, 70);
-        let acknowledgements = BTreeMap::from([(7, 71)]);
+        let acknowledgements = acknowledgements(&[(7, 71)]);
 
         // Act
         let result = coordinator.take_contiguous_acked_cloud_segments(&acknowledgements);
 
         // Assert
-        assert!(matches!(result, Err(message) if message.contains("does not match")));
+        assert_eq!(
+            result,
+            Err(crate::wal::publish::Refusal::SequenceMismatch {
+                segment_id: 7,
+                sealed: 70,
+                uploaded: 71,
+            })
+        );
         assert_eq!(coordinator.cloud_segment_max_sequence(7), Some(70));
     }
 

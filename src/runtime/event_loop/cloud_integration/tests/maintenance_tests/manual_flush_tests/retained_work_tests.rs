@@ -10,16 +10,16 @@ fn canonical_identity(el: &EventLoop, flush_id: u64) -> (String, u64) {
 }
 
 fn replace_flush_worker(el: &mut EventLoop, memory_bytes: usize) -> MidgeResult<()> {
-    el.flush_actor.shutdown_and_join()?;
+    el.actors.flush_actor.shutdown_and_join()?;
     let (tx, rx) = crossbeam::channel::unbounded();
-    el.flush_actor = FlushActor::new_with_memory_limit(
-        &el.state.sst_dir,
+    el.actors.flush_actor = FlushActor::new_with_memory_limit(
+        Arc::clone(&el.state.fs),
         false,
         crate::codec::CompressionPolicy::default(),
         tx,
         memory_bytes,
     )?;
-    el.flush_worker_result_rx = rx;
+    el.pipeline.flush_worker_result_rx = rx;
     Ok(())
 }
 
@@ -30,7 +30,7 @@ fn receive_build_after_owned_work(
     let (_, messages) = crossbeam::channel::unbounded();
     let deadline = Instant::now() + TEST_WAIT;
     loop {
-        if let Ok(completion) = el.flush_worker_result_rx.try_recv() {
+        if let Ok(completion) = el.pipeline.flush_worker_result_rx.try_recv() {
             return Ok(completion);
         }
         if let Ok(reply) = response.try_recv() {
@@ -42,7 +42,7 @@ fn receive_build_after_owned_work(
         el.tick_hybrid_storage();
         el.drain_hybrid_storage_events();
         el.reap_cloud_wal_prune_worker();
-        if let Some(message) = el.pending_msg.take() {
+        if let Some(message) = el.routing.pending_msg.take() {
             el.process_restored_one(message, &messages);
         }
         el.schedule_next_flush_worker();
@@ -60,32 +60,34 @@ fn receive_build_after_owned_work(
 fn should_wait_for_owned_retirement_before_starting_manual_cloud_flush() -> MidgeResult<()> {
     // Arrange
     let (mut el, worker, _) = cloud_debt(1)?;
-    el.state.sequence = el.state.manifest.last_persisted_sequence;
+    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
     el.state.set_compaction_enabled(false);
     let (_, mut release, reached) = controlled_storage::install(&mut el, true, false)?;
     let sequence = acknowledge_put(&mut el, 0, 91_321)?;
-    el.cloud_coordinator.cloud_maintenance.next =
+    el.actors.cloud_coordinator.cloud_maintenance.next =
         crate::runtime::event_loop::cloud_maintenance::MaintenanceTask::WalRetirement;
     el.schedule_cloud_maintenance();
     reached
         .recv_timeout(TEST_WAIT)
-        .expect("actual owned preflight WAL range");
+        .expect("actual owned retirement WAL identity request");
     let journal_before = journal_len(&el)?;
     let cursor_before = el.state.sst_names.cursor.clone();
 
     // Act
     let response = submit_manual_flush(&mut el, 0, 91_322);
-    let still_owned = el.cloud_coordinator.cloud_wal_prune_worker.is_some();
-    let no_flush = !el.flush_actor.is_inflight();
+    let still_owned = el.actors.cloud_coordinator.cloud_wal_prune_worker.is_some();
+    let no_flush = !el.actors.flush_actor.is_inflight();
     let accepted = el.state.get_cf(0).is_some_and(|cf| {
         cf.immutable_flushes.len() == 1
             && cf.immutable_flushes[0].sst_name.is_none()
             && cf.immutable_flushes[0].sst_seq.is_none()
     }) && el
+        .publication
         .flush_barrier_waiters
         .get(&0)
         .is_some_and(|waiters| waiters.iter().any(|waiter| waiter.request_id == 91_322));
     let prune_owner = el
+        .publication
         .publication_gate
         .is_owned_by(&crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
     let no_reply = response.try_recv().is_err();
@@ -110,7 +112,7 @@ fn should_wait_for_owned_retirement_before_starting_manual_cloud_flush() -> Midg
 fn should_preserve_reserved_flush_identity_when_actual_build_retries() -> MidgeResult<()> {
     // Arrange
     let (mut el, worker, _) = cloud_debt(1)?;
-    el.state.sequence = el.state.manifest.last_persisted_sequence;
+    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
     el.state.set_compaction_enabled(false);
     replace_flush_worker(&mut el, 1)?;
     let sequence = acknowledge_put(&mut el, 0, 91_331)?;
@@ -167,7 +169,7 @@ fn should_preserve_reserved_flush_identity_when_actual_build_retries() -> MidgeR
 fn should_preserve_built_flush_identity_when_actual_upload_retries() -> MidgeResult<()> {
     // Arrange
     let (mut el, worker, _) = cloud_debt(1)?;
-    el.state.sequence = el.state.manifest.last_persisted_sequence;
+    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
     el.state.set_compaction_enabled(false);
     let (cloud, _release, _) = controlled_storage::install(&mut el, false, true)?;
     let sequence = acknowledge_put(&mut el, 0, 91_341)?;
@@ -178,6 +180,7 @@ fn should_preserve_built_flush_identity_when_actual_upload_retries() -> MidgeRes
     let cursor = el.state.sst_names.cursor.clone();
     el.handle_flush_worker_result(build);
     let publish = el
+        .pipeline
         .flush_worker_result_rx
         .recv_timeout(TEST_WAIT)
         .expect("real failed Publish");

@@ -22,7 +22,7 @@ struct HeldRenewalReadBackend {
     renewal_puts: AtomicUsize,
 }
 
-impl CloudBackend for HeldRenewalReadBackend {
+impl crate::storage::cloud::CloudReadCapability for HeldRenewalReadBackend {
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
         if key.ends_with(LEASE_OBJECT_KEY) && self.armed.swap(false, Ordering::AcqRel) {
             self.renewal_gets.fetch_add(1, Ordering::AcqRel);
@@ -38,6 +38,10 @@ impl CloudBackend for HeldRenewalReadBackend {
         self.inner.submit_get_with_metadata(key, callback);
     }
 
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_range);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for HeldRenewalReadBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -74,12 +78,21 @@ impl CloudBackend for HeldRenewalReadBackend {
             }
         }
     }
-
-    crate::storage::cloud::forward_cloud_backend!(
-        inner;
-        submit_get, submit_get_range, submit_delete, submit_list, submit_head
-    );
 }
+
+impl crate::storage::cloud::CloudDeleteCapability for HeldRenewalReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for HeldRenewalReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for HeldRenewalReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl CloudBackend for HeldRenewalReadBackend {}
 
 #[test]
 fn should_retry_real_heartbeat_when_first_renewal_get_callback_times_out() {
@@ -157,7 +170,7 @@ struct DelayedSubmissionReadBackend {
     reads: AtomicUsize,
 }
 
-impl CloudBackend for DelayedSubmissionReadBackend {
+impl crate::storage::cloud::CloudReadCapability for DelayedSubmissionReadBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.reads.fetch_add(1, Ordering::AcqRel);
         std::thread::sleep(self.delay);
@@ -170,11 +183,26 @@ impl CloudBackend for DelayedSubmissionReadBackend {
         self.inner.submit_get_with_metadata(key, callback);
     }
 
-    crate::storage::cloud::forward_cloud_backend!(
-        inner;
-        submit_put, submit_get_range, submit_delete, submit_list, submit_head
-    );
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range);
 }
+
+impl crate::storage::cloud::CloudWriteCapability for DelayedSubmissionReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for DelayedSubmissionReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for DelayedSubmissionReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for DelayedSubmissionReadBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl CloudBackend for DelayedSubmissionReadBackend {}
 
 type LeaseRead = fn(&crate::storage::cloud::CloudStorage, Duration) -> Result<(), LeaseError>;
 

@@ -18,7 +18,7 @@ impl SeededInputs {
         let directory = tempfile::tempdir()?;
         let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
         let factory = Arc::new(crate::sst::FsSstFactoryIo::new(
-            Arc::new(crate::io::RealFs::new(&state.sst_dir).map_err(FsError::into_midge)?),
+            Arc::new(crate::io::RealFs::new(state.host_sst_dir()).map_err(FsError::into_midge)?),
             4096,
         ));
         let mut plan = crate::compaction::CompactionPlan::new(0, source_level, target_level)
@@ -28,7 +28,7 @@ impl SeededInputs {
             let name = format!("input-{index}.sst");
             let key = format!("key-{index}");
             let value = format!("value-{index}");
-            let path = state.sst_dir.join(&name);
+            let path = state.host_sst_dir().join(&name);
             let mut writer = factory.create()?;
             writer.add_with_meta(
                 key.as_bytes(),
@@ -79,14 +79,14 @@ impl SeededInputs {
             "actual first block contains its CRC"
         );
         bytes[trailer] ^= 0xff;
-        std::fs::write(self.state.sst_dir.join(name), bytes.as_slice())?;
+        std::fs::write(self.state.host_sst_dir().join(name), bytes.as_slice())?;
         self.state.manifest.test_mut().files[0].content_crc32c = Some(crc32c::crc32c(bytes));
         Ok(())
     }
 
     fn assert_inputs_retained(&self) -> MidgeResult<()> {
         for (name, bytes) in &self.originals {
-            assert_eq!(std::fs::read(self.state.sst_dir.join(name))?, *bytes);
+            assert_eq!(std::fs::read(self.state.host_sst_dir().join(name))?, *bytes);
         }
         assert_eq!(self.state.active_compactions.load(Ordering::Acquire), 0);
         Ok(())
@@ -242,7 +242,7 @@ fn healthy_repair_case() -> MidgeResult<()> {
             if value.as_ref() == format!("value-{index}").as_bytes())
         );
     }
-    let scratch = fixture.state.sst_dir.join(".compaction-repair");
+    let scratch = fixture.state.host_sst_dir().join(".compaction-repair");
     assert!(
         scratch.exists(),
         "three inputs and fan-in two exercise real scratch repair"

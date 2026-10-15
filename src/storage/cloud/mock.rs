@@ -1,10 +1,13 @@
 //! Deterministic, synchronous in-memory `CloudBackend` for tests.
 
+use super::error::cloud_outcome_from_result;
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use crate::common::MidgeError;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 
+#[cfg(test)]
 fn usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
@@ -22,6 +25,7 @@ pub struct MockCloudBackend {
     range_downloads: Arc<Mutex<Vec<String>>>,
 }
 impl MockCloudBackend {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             storage: Arc::new(Mutex::new(HashMap::new())),
@@ -33,14 +37,17 @@ impl MockCloudBackend {
         }
     }
 
+    #[must_use]
     pub fn get_uploads(&self) -> Vec<(String, u64)> {
         self.uploads.lock().clone()
     }
 
+    #[must_use]
     pub fn get_downloads(&self) -> Vec<String> {
         self.downloads.lock().clone()
     }
 
+    #[must_use]
     pub fn get_range_downloads(&self) -> Vec<String> {
         self.range_downloads.lock().clone()
     }
@@ -58,7 +65,7 @@ impl Default for MockCloudBackend {
     }
 }
 
-impl CloudBackend for MockCloudBackend {
+impl crate::storage::cloud::CloudReadCapability for MockCloudBackend {
     fn submit_get_range_with_identity(
         &self,
         key: &str,
@@ -102,6 +109,69 @@ impl CloudBackend for MockCloudBackend {
         });
     }
 
+    fn submit_get(&self, key: &str, callback: CloudCallback) {
+        let key = key.to_string();
+        let result = self
+            .storage
+            .lock()
+            .get(&key)
+            .cloned()
+            .ok_or(MidgeError::NotFound);
+        self.downloads.lock().push(key.clone());
+        let event = CloudEvent::Get {
+            key,
+            result: cloud_outcome_from_result(result),
+        };
+        let _ = callback.send(event);
+    }
+
+    fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
+        self.downloads.lock().push(key.to_string());
+        let _guard = self.mutation_lock.lock();
+        let data = self.storage.lock().get(key).cloned();
+        let generation = self.gens.lock().get(key).copied();
+        let result = match (data, generation) {
+            (Some(data), Some(generation)) => CloudOutcome::Ok((
+                data.clone(),
+                ObjectMetadata {
+                    size: data.len() as u64,
+                    etag: format!("mock-gen-{generation}"),
+                    generation: None,
+                },
+            )),
+            _ => CloudOutcome::Err(CloudError::NotFound(key.to_string())),
+        };
+        let _ = callback.send(CloudEvent::GetWithMetadata {
+            key: key.to_string(),
+            result,
+        });
+    }
+
+    #[cfg(test)]
+    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
+        let key = key.to_string();
+        let result = self
+            .storage
+            .lock()
+            .get(&key)
+            .map(|data| {
+                let end_idx =
+                    usize::try_from(end.unwrap_or(usize_to_u64(data.len()))).unwrap_or(usize::MAX);
+                let start_idx = usize::try_from(start).unwrap_or(usize::MAX);
+                data[start_idx..end_idx].to_vec()
+            })
+            .ok_or(MidgeError::NotFound);
+        let event = CloudEvent::GetRange {
+            key,
+            start,
+            end,
+            result: cloud_outcome_from_result(result),
+        };
+        let _ = callback.send(event);
+    }
+}
+
+impl crate::storage::cloud::CloudWriteCapability for MockCloudBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -193,64 +263,9 @@ impl CloudBackend for MockCloudBackend {
         };
         let _ = callback.send(event);
     }
+}
 
-    fn submit_get(&self, key: &str, callback: CloudCallback) {
-        let key = key.to_string();
-        let result = self
-            .storage
-            .lock()
-            .get(&key)
-            .cloned()
-            .ok_or(MidgeError::NotFound);
-        self.downloads.lock().push(key.clone());
-        let event = CloudEvent::Get {
-            key,
-            result: cloud_outcome_from_result(result),
-        };
-        let _ = callback.send(event);
-    }
-
-    fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
-        self.downloads.lock().push(key.to_string());
-        let _guard = self.mutation_lock.lock();
-        let data = self.storage.lock().get(key).cloned();
-        let generation = self.gens.lock().get(key).copied();
-        let result = match (data, generation) {
-            (Some(data), Some(generation)) => CloudOutcome::Ok((
-                data.clone(),
-                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{generation}")),
-            )),
-            _ => CloudOutcome::Err(CloudError::NotFound(key.to_string())),
-        };
-        let _ = callback.send(CloudEvent::GetWithMetadata {
-            key: key.to_string(),
-            result,
-        });
-    }
-
-    #[cfg(any(test, feature = "cloud-common"))]
-    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
-        let key = key.to_string();
-        let result = self
-            .storage
-            .lock()
-            .get(&key)
-            .map(|data| {
-                let end_idx =
-                    usize::try_from(end.unwrap_or(usize_to_u64(data.len()))).unwrap_or(usize::MAX);
-                let start_idx = usize::try_from(start).unwrap_or(usize::MAX);
-                data[start_idx..end_idx].to_vec()
-            })
-            .ok_or(MidgeError::NotFound);
-        let event = CloudEvent::GetRange {
-            key,
-            start,
-            end,
-            result: cloud_outcome_from_result(result),
-        };
-        let _ = callback.send(event);
-    }
-
+impl crate::storage::cloud::CloudDeleteCapability for MockCloudBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         let key = key.to_string();
         let _mutation = self.mutation_lock.lock();
@@ -309,7 +324,9 @@ impl CloudBackend for MockCloudBackend {
         };
         let _ = callback.send(event);
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for MockCloudBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         let prefix = prefix.to_string();
         let results: Vec<_> = self
@@ -325,7 +342,9 @@ impl CloudBackend for MockCloudBackend {
         };
         let _ = callback.send(event);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for MockCloudBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         let key = key.to_string();
         let result = self
@@ -335,7 +354,11 @@ impl CloudBackend for MockCloudBackend {
             .map(|data| {
                 // ETag is generation based and independent from content length.
                 let gen = self.gens.lock().get(&key).copied().unwrap_or(0);
-                ObjectMetadata::new(data.len() as u64, format!("mock-gen-{gen}"))
+                ObjectMetadata {
+                    size: data.len() as u64,
+                    etag: format!("mock-gen-{gen}"),
+                    generation: None,
+                }
             })
             .ok_or(MidgeError::NotFound);
         let event = CloudEvent::Head {
@@ -345,3 +368,5 @@ impl CloudBackend for MockCloudBackend {
         let _ = callback.send(event);
     }
 }
+
+impl CloudBackend for MockCloudBackend {}

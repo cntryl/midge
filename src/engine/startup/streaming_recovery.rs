@@ -2,7 +2,7 @@
 
 use super::RuntimeStorageMaterialization;
 use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Fs, FsPath};
+use crate::io::ReadFs;
 use crate::memtable::SkipListMemtable;
 use crate::metadata::accounting::Origin;
 use crate::runtime::actors::flush::{
@@ -16,17 +16,51 @@ use crate::wal::recovery::streaming::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::runtime::cloud_startup::replay_coverage as coverage;
 mod names;
 #[cfg(test)]
 mod tests;
 
 pub(super) struct CloudReplay {
-    pub fs: Arc<dyn Fs>,
+    pub fs: Arc<dyn ReadFs>,
+    /// The planned WAL files in `fs`, in replay order.
+    pub segments: crate::wal::recovery::ReplaySegments,
     pub limits: StreamingReplayLimits,
     /// Sequences at or below this belong to WAL salvage set aside unreplayed.
     pub sequence_floor: u64,
     pub scope: Option<crate::common::DeadlineScope>,
+    pub substituted_wal: Option<SubstitutedWal>,
+}
+
+/// A damaged catalog suffix replayed through verified local members. Its
+/// original immutable keys must never be uploaded again.
+pub(super) struct SubstitutedWal {
+    entries: Vec<crate::wal::cloud_catalog::CatalogEntry>,
+    anchor: crate::wal::format::ChainLink,
+}
+
+impl SubstitutedWal {
+    pub(super) fn from_plan(
+        plan: &crate::wal::planner::RecoveryPlan,
+        catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    ) -> Option<Self> {
+        let first = plan
+            .local_segments
+            .keys()
+            .filter(|id| plan.retire_catalog_from.is_none_or(|from| **id < from))
+            .find_map(|id| catalog.entries().iter().position(|entry| entry.id() == *id))?;
+        let end = catalog
+            .entries()
+            .iter()
+            .position(|entry| plan.retire_catalog_from == Some(entry.id()))
+            .unwrap_or(catalog.entries().len());
+        if first >= end {
+            return None;
+        }
+        Some(Self {
+            entries: catalog.entries()[first..end].to_vec(),
+            anchor: catalog.entries()[first].prev(),
+        })
+    }
 }
 
 impl CloudReplay {
@@ -79,31 +113,14 @@ impl CloudReplay {
                 crate::wal::recovery::ReplayPolicy::SalvageValidPrefix
             }
         };
-        let known_cfs: std::collections::HashSet<_> =
-            materialized.state.column_families.keys().copied().collect();
-        let coverage = coverage::ReplayCoverage::new(
-            materialized.state.manifest.clone(),
-            materialized
-                .runtime_config
-                .sst_read_fs
-                .clone()
-                .unwrap_or_else(|| Arc::clone(&materialized.state.fs)),
-            self.limits.max_frame_bytes,
-        );
+        let frontiers = materialized.state.manifest.flush_frontiers().clone();
         let scope = self
             .scope
             .clone()
             .or_else(|| materialized.state.startup_scope.clone());
-        let should_apply = |record: &crate::wal::WalRecord| {
-            let covered = match scope.as_ref() {
-                Some(scope) => coverage.contains_within(record, scope)?,
-                None => coverage.contains(record),
-            };
-            Ok(known_cfs.contains(&record.cf_id) && !covered)
-        };
         let (tx, rx) = crossbeam::channel::bounded(1);
         let mut actor = FlushActor::new_with_memory_limit(
-            &materialized.state.sst_dir,
+            Arc::clone(&materialized.state.fs),
             false,
             materialized.runtime_config.compression_policy.clone(),
             tx,
@@ -113,24 +130,58 @@ impl CloudReplay {
         let mut names = names::Names::new(self.limits);
         let replay_result = replay_wal_with_options(
             self.fs.as_ref(),
-            &FsPath::new("wal"),
+            &self.segments,
             &mut memtables,
             policy,
-            None,
             self.limits,
             ReplayOptions {
                 scope: scope.as_ref(),
-                fallible_should_apply: Some(&should_apply),
-                ..ReplayOptions::default()
+                ..ReplayOptions::new(crate::wal::replay::ReplaySelection::Frontiers(&frontiers))
             },
-            &mut |tables, _stats| {
-                coverage.release_reader();
-                checkpoint(materialized, &mut actor, &rx, tables, &mut names)
+            &mut |tables, boundary| {
+                checkpoint(
+                    materialized,
+                    &mut actor,
+                    &rx,
+                    tables,
+                    &mut names,
+                    boundary.through_sequence,
+                )
             },
         );
         // Accepted worker work stays owned while the outer startup worker holds its lease.
+        let recovery = (|| {
+            let stats = replay_result?;
+            // Planning sets aside what it finds unreadable and covers it with
+            // the sequence floor. A break only replay sees has neither, so
+            // do not seal and upload what follows it (#821).
+            if let Some(stop) = &stats.salvage_stop {
+                return Err(crate::common::MidgeError::RecoveryFailed(format!(
+                    "cloud WAL replay stopped at segment {} after planning; salvage cannot set it aside",
+                    stop.segment
+                )));
+            }
+            if let Some(substitute) = &self.substituted_wal {
+                let boundary = stats.max_sequence.unwrap_or(0).max(self.sequence_floor);
+                checkpoint(
+                    materialized,
+                    &mut actor,
+                    &rx,
+                    &mut memtables,
+                    &mut names,
+                    boundary,
+                )?;
+                crate::failpoints::fail_point!(
+                    "midge::startup::substituted_wal_after_checkpoint_before_catalog_retire"
+                );
+                substitute.retire_after_checkpoint(materialized, boundary)?;
+            }
+            Ok(stats)
+        })();
+        #[cfg(test)]
+        super::test_control::actor_join_started();
         let shutdown = actor.shutdown_and_join();
-        let stats = replay_result?;
+        let stats = recovery?;
         shutdown?;
         self.install_recovered_tables(materialized, &stats, memtables)
     }
@@ -145,10 +196,7 @@ impl CloudReplay {
             .state
             .check_startup_scope("cloud WAL replay installation")?;
         let runtime = &mut materialized.state;
-        runtime.sequence = runtime
-            .sequence
-            .max(stats.max_sequence.unwrap_or(0))
-            .max(self.sequence_floor);
+        runtime.raise_sequence_to(stats.max_sequence.unwrap_or(0).max(self.sequence_floor));
         runtime.wal.frontiers.advance_local_to(runtime.sequence);
         runtime.compaction_output_generation = runtime
             .compaction_output_generation
@@ -184,12 +232,70 @@ impl CloudReplay {
     }
 }
 
+impl SubstitutedWal {
+    /// Publish recovered rows and frontiers first; only then withdraw the
+    /// damaged suffix in a fenced CAS and replace local history. A crash at
+    /// any boundary retains either the original local WAL or authoritative SSTs.
+    fn retire_after_checkpoint(
+        &self,
+        materialized: &mut RuntimeStorageMaterialization,
+        floor: u64,
+    ) -> MidgeResult<()> {
+        let config = &materialized.runtime_config;
+        let storage = config
+            .hybrid_storage
+            .as_ref()
+            .ok_or_else(|| MidgeError::Internal("substituted WAL without cloud storage".into()))?;
+        let scope = materialized.state.startup_scope.clone().unwrap_or_else(|| {
+            crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded())
+        });
+        let first = self
+            .entries
+            .first()
+            .expect("substituted suffix is nonempty")
+            .id();
+        crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::clone(storage))
+            .set_aside_catalog_suffix_with_authority_within(
+                config.writer_epoch,
+                Some(first),
+                &self.entries,
+                floor,
+                &|| validate_lease(config),
+                &scope.deadline(),
+            )?;
+        crate::failpoints::fail_point!(
+            "midge::startup::substituted_wal_after_catalog_retire_before_local_rebase"
+        );
+        scope.check("substituted WAL local history")?;
+        let history = &mut materialized.state.wal.history;
+        let floor = floor.max(history.ledger().seq_reserved_through());
+        if floor > history.ledger().seq_reserved_through() {
+            history.reserve(floor)?;
+        }
+        history.rebase(self.anchor, history.ledger().next_segment_id())?;
+        let config = &mut materialized.runtime_config;
+        config
+            .recovered_cloud_wal_entries
+            .retain(|id, _| *id < first);
+        config
+            .recovered_cloud_wal_segments
+            .retain(|id, _| *id < first);
+        config
+            .recovered_cloud_wal_segment_epochs
+            .retain(|id, _| *id < first);
+        config.recovered_local_wal_segments.clear();
+        config.recovered_local_wal_segment_epochs.clear();
+        Ok(())
+    }
+}
+
 fn checkpoint(
     materialized: &mut RuntimeStorageMaterialization,
     actor: &mut FlushActor,
     rx: &crossbeam::channel::Receiver<FlushWorkerResult>,
     tables: &mut HashMap<u32, Arc<SkipListMemtable>>,
     names: &mut names::Names,
+    through_sequence: u64,
 ) -> MidgeResult<()> {
     let mut families: Vec<_> = tables.keys().copied().collect();
     families.sort_unstable();
@@ -203,7 +309,15 @@ fn checkpoint(
             continue;
         }
         super::timing::measure("recovery_checkpoint", || {
-            checkpoint_family(materialized, actor, rx, cf_id, table, names)
+            checkpoint_family(
+                materialized,
+                actor,
+                rx,
+                cf_id,
+                table,
+                names,
+                through_sequence,
+            )
         })?;
         // Release replay memory only after the existing publication protocol
         // has made the new SST authoritative. Remote WAL remains retained.
@@ -219,6 +333,7 @@ fn checkpoint_family(
     cf_id: u32,
     table: Arc<SkipListMemtable>,
     names: &mut names::Names,
+    through_sequence: u64,
 ) -> MidgeResult<()> {
     materialized
         .state
@@ -234,12 +349,12 @@ fn checkpoint_family(
         flush_id: state.next_flush_id,
         writer_epoch: config.writer_epoch,
         cf_id,
-        sequence: 0,
+        sequence: through_sequence,
     };
     state.next_flush_id = state.next_flush_id.checked_add(1).ok_or_else(|| {
         MidgeError::ResourceLimit("flush identity space exhausted during recovery".into())
     })?;
-    let staging_path = state.sst_dir.join(".flush-staging").join(format!(
+    let staging_path = std::path::Path::new(crate::sst::fs::FLUSH_STAGING_DIR).join(format!(
         "recovery-{}-{}.tmp",
         config.writer_epoch, identity.flush_id
     ));
@@ -255,10 +370,6 @@ fn checkpoint_family(
         Ok(completion)
     })?;
     let file_meta = completion.result?;
-    let identity = FlushIdentity {
-        sequence: file_meta.largest_seq.unwrap_or(0),
-        ..identity
-    };
     let accounting = state.metadata_accounting().clone();
     let medium = state.metadata_medium();
     let started = std::time::Instant::now();
@@ -303,7 +414,6 @@ fn publish_checkpoint_output(
             build,
             sst_name: name.clone(),
             sst_seq,
-            sst_dir: state.sst_dir.clone(),
             fs: Arc::clone(&state.fs),
             storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
                 config.hybrid_storage.clone(),
@@ -314,6 +424,8 @@ fn publish_checkpoint_output(
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),
         })?;
+        #[cfg(test)]
+        super::test_control::before_publish_receive();
         let FlushWorkerResult::Publish(completion) =
             receive_completion(rx, state.startup_scope.as_ref(), "recovery flush publish")?
         else {
@@ -376,7 +488,6 @@ fn commit_and_mirror_checkpoint(
         lease_healthy: config.lease_healthy.clone(),
         leader_store: config.leader_store.clone(),
         leader_holder_id: config.leader_holder_id.clone(),
-        manifest_sequence: state.manifest.last_persisted_sequence,
         runtime_response_timeout: state
             .startup_scope
             .as_ref()
@@ -428,7 +539,7 @@ fn reserve_sst_sequence(
         validate_lease(config)?;
         super::CloudStartupRecovery::mirror_cloud_metadata_within(
             cloud,
-            &state.db_path,
+            &state.fs,
             crate::config::RecoveryPolicy::Strict,
             crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
                 store: config.leader_store.as_deref().ok_or_else(|| {
@@ -474,33 +585,29 @@ fn install_checkpoint_output(
             storage.flush_completed_with_token(token, delta.file_meta.size_bytes);
         }
         if cloud_metadata_published {
-            std::fs::remove_file(state.sst_dir.join(name))?;
-            storage.evict_local_object_cache(&crate::cloud_layout::object_key(name))?;
-            storage.reconcile_local_disk_usage(
-                super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
-                    &state.sst_dir,
-                    state.startup_scope.as_ref(),
-                )?
-                .saturating_add(
-                    super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
-                        &state.db_path.join("hybrid_local/sst"),
-                        state.startup_scope.as_ref(),
-                    )?,
-                ),
-                super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
-                    &state.wal_dir,
-                    state.startup_scope.as_ref(),
-                )?
-                .saturating_add(
-                    super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
-                        &state.db_path.join("hybrid_local/wal"),
-                        state.startup_scope.as_ref(),
-                    )?,
-                ),
-            );
+            state
+                .fs
+                .remove_file(&crate::io::FsPath::new(crate::cloud_layout::object_key(
+                    name,
+                )))
+                .map_err(crate::io::FsError::into_midge)?;
+            let (sst_bytes, wal_bytes) = local_storage_bytes(state)?;
+            storage.reconcile_local_disk_usage(sst_bytes, wal_bytes);
         }
     }
     Ok(())
+}
+
+/// Local SST and WAL bytes below the database root.
+pub(super) fn local_storage_bytes(state: &crate::runtime::RuntimeState) -> MidgeResult<(u64, u64)> {
+    let bytes = |directory: &str| {
+        super::RuntimeRecoveryMaterialization::local_directory_bytes_within(
+            state.fs.as_ref(),
+            directory,
+            state.startup_scope.as_ref(),
+        )
+    };
+    Ok((bytes(crate::sst::fs::SST_DIR)?, bytes(crate::wal::WAL_DIR)?))
 }
 
 pub(super) fn validate_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResult<()> {

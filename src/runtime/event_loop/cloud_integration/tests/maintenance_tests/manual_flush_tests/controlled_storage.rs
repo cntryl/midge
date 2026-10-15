@@ -51,11 +51,7 @@ pub(super) fn install(
         fail_upload: AtomicBool::new(fail_upload),
         uploads: Mutex::new(Vec::new()),
     });
-    let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-        el.state.db_path.join("hybrid_local"),
-    )?);
     let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-        local,
         cloud.clone(),
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
@@ -80,7 +76,7 @@ impl StorageBackend for ControlledStorage {
             if let Some(gate) = gate {
                 assert!(std::thread::current()
                     .name()
-                    .is_some_and(|name| name.starts_with("midge-wal-prune-preflight-")));
+                    .is_some_and(|name| name.starts_with("midge-wal-retirement-")));
                 let _ = gate.reached.send(());
                 let _ = gate.release.recv();
             }

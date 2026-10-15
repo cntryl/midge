@@ -46,15 +46,16 @@ fn should_create_multiple_column_families_given_unique_names_when_engine_open() 
         assert_eq!(cf3.name(), "cf3");
         assert_ne!(cf1.id(), cf2.id());
         assert_ne!(cf2.id(), cf3.id());
+        assert_ne!(cf1.id(), cf3.id());
     });
 }
 
 #[test]
-fn should_reject_duplicate_column_family_name_given_existing_active_column_family_when_creating() {
+fn should_return_existing_column_family_given_duplicate_name_when_creating() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));
-        engine.create_column_family("test_cf").unwrap();
+        let existing = engine.create_column_family("test_cf").unwrap();
 
         // Act
         let result = engine.create_column_family("test_cf");
@@ -63,6 +64,8 @@ fn should_reject_duplicate_column_family_name_given_existing_active_column_famil
         assert!(result.is_ok());
         let cf = result.unwrap();
         assert_eq!(cf.name(), "test_cf");
+        assert_eq!(cf.id(), existing.id());
+        assert_eq!(engine.list_column_families().unwrap().len(), 2);
     });
 }
 
@@ -558,6 +561,11 @@ fn should_allocate_monotonic_column_family_ids_given_deleted_column_family_when_
         tx2.commit(buffered_write_options(mode)).unwrap();
 
         // Assert - should not see old data
+        assert!(cf2.id() > cf1.id(), "dropped family IDs must not be reused");
+        assert!(matches!(
+            engine.begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadOnly),
+            Err(MidgeError::InvalidArgument(_))
+        ));
         let tx_read = engine
             .begin_tx(cf2.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();
@@ -639,7 +647,7 @@ fn should_isolate_keys_given_same_key_in_different_cfs_when_reading() {
     for_each_storage_mode(&all_storage_modes_new(), |mode, opts| {
         // Arrange
         let engine = Arc::new(open_with_mode(&opts, mode));
-        let default_cf = engine.create_column_family("test").expect("create cf");
+        let default_cf = engine.get_column_family("default").expect("default cf");
         let cf1 = engine.create_column_family("cf1").unwrap();
 
         // Act
@@ -924,6 +932,8 @@ fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
                 .unwrap();
             tx2.put(b"key2".to_vec(), b"value2".to_vec(), None).unwrap();
             tx2.commit(buffered_write_options(mode)).unwrap();
+            engine.flush_cf(&cf1).expect("flush first family");
+            engine.flush_cf(&cf2).expect("flush second family");
             engine
                 .shutdown(std::time::Duration::from_secs(5))
                 .expect("shutdown before reopen");
@@ -934,6 +944,16 @@ fn should_persist_multiple_cfs_given_restart_when_all_flushed() {
             let engine = open_with_mode(&opts, mode);
             let cfs = engine.list_column_families().unwrap();
             assert_eq!(cfs.len(), 3); // default + cf1 + cf2
+            for (name, key, value) in [
+                ("cf1", b"key1".as_slice(), b"value1".as_slice()),
+                ("cf2", b"key2".as_slice(), b"value2".as_slice()),
+            ] {
+                let cf = engine.get_column_family(name).expect("recovered family");
+                let read = engine
+                    .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+                    .expect("recovered read");
+                assert_eq!(read.get(key).unwrap().as_deref(), Some(value));
+            }
         }
     });
 }
@@ -1166,7 +1186,7 @@ fn should_handle_operations_on_default_cf_given_custom_cfs_exist_when_operating(
         let engine = Arc::new(open_with_mode(&opts, mode));
         let _cf1 = engine.create_column_family("cf1").unwrap();
         let _cf2 = engine.create_column_family("cf2").unwrap();
-        let default_cf = engine.create_column_family("test").expect("create cf");
+        let default_cf = engine.get_column_family("default").expect("default cf");
 
         // Act
         let mut tx = engine

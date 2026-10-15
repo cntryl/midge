@@ -10,6 +10,7 @@ use crate::lease::{CloudMetadataHead, LeaseGuard, PrimaryLease as _};
 use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use crate::runtime::RuntimeState;
 use crate::sst::SstFactory as _;
+use crate::storage::cloud::CloudReadCapability;
 use crate::storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
@@ -90,7 +91,7 @@ impl DelayedAuthorityBackend {
     }
 }
 
-impl CloudBackend for DelayedAuthorityBackend {
+impl crate::storage::cloud::CloudReadCapability for DelayedAuthorityBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_get(key, callback);
     }
@@ -111,7 +112,9 @@ impl CloudBackend for DelayedAuthorityBackend {
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
         self.inner.submit_get_range(key, start, end, callback);
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for DelayedAuthorityBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -135,19 +138,27 @@ impl CloudBackend for DelayedAuthorityBackend {
         });
         let _ = callback.send(event);
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for DelayedAuthorityBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for DelayedAuthorityBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
+}
 
+impl crate::storage::cloud::CloudHeadCapability for DelayedAuthorityBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_head(key, callback);
     }
 }
+
+impl CloudBackend for DelayedAuthorityBackend {}
 
 struct NameFixture {
     el: EventLoop,
@@ -165,11 +176,11 @@ fn seed_actual_sst(el: &mut EventLoop) -> MidgeResult<(String, Vec<u8>)> {
     let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&el.state.fs), 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(KEY, Some(VALUE), 7, EntryType::Put, None)?;
-    let path = el.state.sst_dir.join(&name);
+    let path = el.state.host_sst_dir().join(&name);
     writer.finish_to_path(&path)?;
     let bytes = std::fs::read(path)?;
     let manifest = el.state.manifest.test_mut();
-    manifest.files.push(crate::metadata::FileMeta {
+    let file = crate::metadata::FileMeta {
         name: name.clone(),
         level: 0,
         cf_id: 0,
@@ -181,9 +192,20 @@ fn seed_actual_sst(el: &mut EventLoop) -> MidgeResult<(String, Vec<u8>)> {
         largest_seq: Some(7),
         key_bounds_complete: true,
         ..Default::default()
-    });
-    manifest.next_sst_seqs.insert(0, 2);
-    manifest.last_persisted_sequence = 7;
+    };
+    manifest
+        .apply_edit(&crate::metadata::ManifestEdit::Batch(vec![
+            crate::metadata::ManifestEdit::BumpNextSstSeq {
+                cf_id: 0,
+                next_seq: 2,
+            },
+            crate::metadata::ManifestEdit::AddSst(file),
+            crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                cf_id: 0,
+                freeze_sequence: 7,
+            },
+        ]))
+        .unwrap();
     el.state.sequence = 7;
     crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
         .map_err(MidgeError::Internal)?;
@@ -214,12 +236,12 @@ impl NameFixture {
         let guard = Arc::clone(&lease)
             .try_acquire()
             .map_err(|error| error.into_validation_error("name fixture lease acquisition"))?;
-        el.fencing.writer_epoch = lease.epoch();
-        el.fencing.leader_holder_id = Some(lease.holder_id());
-        el.fencing.leader_store = lease.get_leader_store();
-        el.fencing.lease_validity = Some(lease.lease_validity());
-        el.fencing.lease_healthy = Some(Arc::new(AtomicBool::new(true)));
-        el.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&cloud));
+        el.authority.fencing.writer_epoch = lease.epoch();
+        el.authority.fencing.leader_holder_id = Some(lease.holder_id());
+        el.authority.fencing.leader_store = lease.get_leader_store();
+        el.authority.fencing.lease_validity = Some(lease.lease_validity());
+        el.authority.fencing.lease_healthy = Some(Arc::new(AtomicBool::new(true)));
+        el.actors.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&cloud));
         let fixture = Self {
             el,
             cloud,
@@ -253,6 +275,7 @@ impl NameFixture {
         crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
             &self.cloud,
             store.as_ref(),
+            &crate::io::real::test_root(directory.path()),
             directory.path(),
             crate::config::RecoveryPolicy::Strict,
         )?;
@@ -260,9 +283,10 @@ impl NameFixture {
     }
 
     fn exact_data(&self) -> MidgeResult<DataEvidence> {
-        let bytes = std::fs::read(self.el.state.sst_dir.join(&self.sst_name))?;
+        let bytes = std::fs::read(self.el.state.host_sst_dir().join(&self.sst_name))?;
         let reader = self
             .el
+            .actors
             .compaction_actor
             // The actor factory's Fs is rooted at sst_dir. Reader paths are
             // FsPath addresses; only the writer accepts a host destination.
@@ -275,8 +299,11 @@ impl NameFixture {
             return Ok(());
         }
         self.backend.release.store(true, Ordering::Release);
-        self.el.compaction_publish_actor.shutdown_and_join()?;
-        self.el.gc_actor.shutdown_workers();
+        self.el
+            .actors
+            .compaction_publish_actor
+            .shutdown_and_join()?;
+        self.el.actors.gc_actor.shutdown_workers();
         self.el.join_cloud_wal_prune_worker();
         self.stopped = true;
         self.lease

@@ -36,17 +36,17 @@ fn observe_failed_completion(kind: PayloadKind, seal_while_held: bool) -> Eviden
     );
     let view = account_fs(observed, operation.ledger());
     let mut operation = Some(operation);
-    let mut file = view
-        .open_persistent_handle(
-            &path,
-            OpenOptions {
-                mode: OpenMode::ReadWrite,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        )
-        .expect("genuine persistent file");
+    let mut file = crate::io::open_persistent_handle(
+        view.as_ref(),
+        &path,
+        OpenOptions {
+            mode: OpenMode::ReadWrite,
+            create: false,
+            create_new: false,
+            truncate: false,
+        },
+    )
+    .expect("genuine persistent file");
     let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
     let (release_tx, release_rx) = crossbeam::channel::bounded(1);
     oracle.hold_next_successful_payload_then_error(kind, entered_tx, release_rx);

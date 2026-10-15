@@ -14,6 +14,7 @@ const CATALOG: &str = "/wal/publication-catalog.v1.json";
 const MIRROR: &str = "/wal/publication-catalog.v1.mirror.json";
 const LEASE: &str = "/midge_primary_lease.json";
 const SOCKET_WAIT: Duration = Duration::from_secs(4);
+const POST_OPEN_WAL_DELAY: Duration = Duration::from_millis(1_600);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DelayMode {
@@ -115,7 +116,7 @@ impl Control {
                 && std::path::Path::new(path).extension() == Some(std::ffi::OsStr::new("wal"))
                 && self.delayed_count.fetch_add(1, Ordering::AcqRel) == 0
             {
-                Duration::from_millis(800)
+                POST_OPEN_WAL_DELAY
             } else {
                 Duration::ZERO
             };

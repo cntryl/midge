@@ -238,8 +238,8 @@ unavailable, source archives may supply `MIDGE_DISCOVERY_SOURCE_REVISION` (a
 full forty-character hexadecimal SHA) and `MIDGE_DISCOVERY_SOURCE_DIRTY`
 (`true` or `false`). Artifacts identify this source as `archive`; the supplied
 SHA is caller-provided provenance, not a Git verification performed inside
-the image. Docker Qualification checks that the checkout is clean and passes
-its actual HEAD through build arguments. `.git` remains outside the image.
+the image. Local Docker builds can pass their checkout's actual HEAD and dirty
+state through those build arguments. `.git` remains outside the image.
 
 Unversioned archives default to `unversioned-archive` and dirty/unqualified.
 They may run ordinary smoke histories; discovery/release/provider campaigns

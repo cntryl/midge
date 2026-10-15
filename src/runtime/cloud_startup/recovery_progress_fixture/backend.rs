@@ -22,7 +22,6 @@ pub(super) struct ObservationSnapshot {
     pub(super) maximum_range_bytes: u64,
     local_wal_bytes: u64,
     staged_wal_count: u64,
-    pub(super) coverage_checks: u64,
     pub(super) mismatches: u64,
     pub(super) expected_inventory_entries: u64,
     pub(super) retained_inventory_entries: u64,
@@ -56,7 +55,6 @@ impl FixtureObservations {
                 maximum_range_bytes: 0,
                 local_wal_bytes: 0,
                 staged_wal_count: 0,
-                coverage_checks: 0,
                 mismatches: 0,
                 expected_inventory_entries: 0,
                 retained_inventory_entries: 0,
@@ -129,14 +127,6 @@ impl FixtureObservations {
                 "recovery fixture evidence persistence failed: {failure}"
             )))
         })
-    }
-
-    pub(super) fn record_coverage(&self, mismatch: bool) {
-        let mut snapshot = self.snapshot.lock();
-        snapshot.coverage_checks += 1;
-        snapshot.mismatches += u64::from(mismatch);
-        drop(snapshot);
-        self.remember_persistence();
     }
 
     fn hold_request(&self) -> MidgeResult<()> {
@@ -245,7 +235,7 @@ impl InventoryCloudBackend {
                 .is_some_and(|size| *size == metadata.size)
         });
         if expected_size.is_some() {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(250));
         }
         let delivered = callback
             .send(CloudEvent::Head {
@@ -278,11 +268,7 @@ impl InventoryCloudBackend {
 }
 
 #[cfg(any(test, feature = "cloud-common"))]
-impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {
-    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        self.head(key, callback);
-    }
-
+impl crate::storage::cloud::CloudReadCapability for InventoryCloudBackend {
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
         let _ = callback.send(crate::storage::cloud::CloudEvent::Get {
             key: key.to_string(),
@@ -318,7 +304,9 @@ impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {
             )),
         });
     }
+}
 
+impl crate::storage::cloud::CloudWriteCapability for InventoryCloudBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -333,7 +321,9 @@ impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {
             )),
         });
     }
+}
 
+impl crate::storage::cloud::CloudDeleteCapability for InventoryCloudBackend {
     fn submit_delete(
         &self,
         key: &str,
@@ -347,7 +337,9 @@ impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {
             )),
         });
     }
+}
 
+impl crate::storage::cloud::CloudListCapability for InventoryCloudBackend {
     fn submit_list(&self, prefix: &str, callback: crate::storage::cloud::CloudCallback) {
         let _ = callback.send(crate::storage::cloud::CloudEvent::List {
             prefix: prefix.to_string(),
@@ -357,6 +349,14 @@ impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {
         });
     }
 }
+
+impl crate::storage::cloud::CloudHeadCapability for InventoryCloudBackend {
+    fn submit_head(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
+        self.head(key, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudBackend for InventoryCloudBackend {}
 
 pub(super) struct ObservedBackend {
     inner: crate::storage::filesystem::FileSystem,

@@ -44,10 +44,7 @@ pub(crate) trait FlushStorage: Send + Sync {
 
     fn publish_sst(
         &self,
-        key: &str,
-        path: &Path,
-        size_bytes: u64,
-        checksum: u32,
+        source: crate::storage::hybrid::backend::ImmutableFileSource<'_>,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<()>;
 
@@ -55,7 +52,6 @@ pub(crate) trait FlushStorage: Send + Sync {
         &self,
         fs: &dyn crate::io::Fs,
         publication_lock: &crate::runtime::MetadataPublicationLock,
-        manifest_sequence: u64,
         deadline: &crate::common::OperationDeadline,
         authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
         validate_lease: &mut dyn FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
@@ -87,14 +83,11 @@ impl FlushStorage for HybridFlushStorage {
 
     fn publish_sst(
         &self,
-        key: &str,
-        path: &Path,
-        size_bytes: u64,
-        checksum: u32,
+        source: crate::storage::hybrid::backend::ImmutableFileSource<'_>,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<()> {
         if let Some(hybrid) = &self.hybrid {
-            hybrid.publish_immutable_file(key, path, size_bytes, checksum, budget)?;
+            hybrid.publish_immutable_file(source, budget)?;
         }
         Ok(())
     }
@@ -103,7 +96,6 @@ impl FlushStorage for HybridFlushStorage {
         &self,
         fs: &dyn crate::io::Fs,
         publication_lock: &crate::runtime::MetadataPublicationLock,
-        manifest_sequence: u64,
         deadline: &crate::common::OperationDeadline,
         authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
         validate_lease: &mut dyn FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
@@ -120,7 +112,6 @@ impl FlushStorage for HybridFlushStorage {
                 fs,
                 publication_lock,
                 lock_wait_budget: cloud.callback_timeout(),
-                local_manifest_sequence: manifest_sequence,
                 deadline,
                 authority,
             },
@@ -144,7 +135,7 @@ pub(crate) struct FlushPublishTask {
     pub build: FlushBuildOutput,
     pub sst_name: String,
     pub sst_seq: u64,
-    pub sst_dir: PathBuf,
+    /// The database root; staging and final SSTs are root-relative in it.
     pub fs: Arc<dyn crate::io::Fs>,
     pub storage: Arc<dyn FlushStorage>,
     pub lease_healthy: Option<Arc<AtomicBool>>,
@@ -177,7 +168,6 @@ pub(crate) struct FlushMirrorTask {
     pub lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
-    pub manifest_sequence: u64,
     pub runtime_response_timeout: std::time::Duration,
 }
 
@@ -220,13 +210,13 @@ pub struct FlushActor {
 impl FlushActor {
     #[cfg(test)]
     pub fn new(
-        sst_dir: &Path,
+        fs: Arc<dyn crate::io::Fs>,
         memory_mode: bool,
         compression_policy: crate::codec::CompressionPolicy,
         completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
     ) -> MidgeResult<Self> {
         Self::new_with_memory_limit(
-            sst_dir,
+            fs,
             memory_mode,
             compression_policy,
             completion_tx,
@@ -234,8 +224,10 @@ impl FlushActor {
         )
     }
 
+    /// Start the worker. It builds SSTs through `fs`, the database root, so
+    /// staging, scratch and final outputs are all root-relative paths in it.
     pub(crate) fn new_with_memory_limit(
-        sst_dir: &Path,
+        fs: Arc<dyn crate::io::Fs>,
         memory_mode: bool,
         compression_policy: crate::codec::CompressionPolicy,
         completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
@@ -250,11 +242,12 @@ impl FlushActor {
             });
         }
 
-        let fs = Arc::new(crate::io::RealFs::new(sst_dir).map_err(FsError::into_midge)?);
         let sst_factory = Arc::new(
             crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
                 .with_compression_policy(compression_policy)
-                .with_compaction_scratch_directory(sst_dir.join(".flush-staging")),
+                .with_compaction_scratch_directory(PathBuf::from(
+                    crate::sst::fs::FLUSH_STAGING_DIR,
+                )),
         );
         let (task_tx, task_rx) =
             crossbeam::channel::bounded::<FlushWorkerTask>(FLUSH_WORKER_CHANNEL_CAPACITY);
@@ -515,7 +508,7 @@ impl FlushActor {
         budget: &crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<FlushPublicationDelta> {
         validate_task_lease(task)?;
-        let final_path = task.sst_dir.join(&task.sst_name);
+        let final_path = crate::sst::fs::sst_location(&task.sst_name);
         finalize_staged_sst(task, &final_path, budget)?;
         crate::failpoints::fail_point!("midge::flush_worker::after_sst_finalization");
         crate::failpoints::fail_point!("midge::flush::after_sst_write_before_publish");
@@ -551,10 +544,13 @@ fn upload(
         .content_crc32c
         .ok_or_else(|| MidgeError::Corruption("flush output lacks checksum".into()))?;
     task.storage.publish_sst(
-        &crate::cloud_layout::object_key(&task.sst_name),
-        final_path,
-        task.build.file_meta.size_bytes,
-        checksum,
+        crate::storage::hybrid::backend::ImmutableFileSource {
+            key: &crate::cloud_layout::object_key(&task.sst_name),
+            fs: task.fs.as_ref(),
+            path: &db_relative_fs_path(task, final_path)?,
+            size: task.build.file_meta.size_bytes,
+            checksum,
+        },
         budget,
     )
 }
@@ -628,7 +624,6 @@ fn mirror_after_local_commit(task: &FlushMirrorTask) -> MidgeResult<bool> {
     let mirrored = task.storage.mirror_control_metadata(
         task.fs.as_ref(),
         &task.metadata_publication_lock,
-        task.manifest_sequence,
         &deadline,
         task.leader_store.as_deref().map(|store| {
             crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
@@ -656,7 +651,7 @@ fn finalize_staged_sst(
     {
         validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
         task.fs
-            .create_dir_all(&crate::io::FsPath::new("sst"))
+            .create_dir_all(&crate::io::FsPath::new(crate::sst::fs::SST_DIR))
             .map_err(FsError::into_midge)?;
         let staging_fs_path = db_relative_fs_path(task, &task.build.staging_path)?;
         validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
@@ -668,7 +663,7 @@ fn finalize_staged_sst(
     validate_monotonic_lease(task.build.identity, task.lease_validity.as_ref())?;
     task.fs
         .sync_dir(
-            &crate::io::FsPath::new("sst"),
+            &crate::io::FsPath::new(crate::sst::fs::SST_DIR),
             crate::io::Durability::Durable,
         )
         .map_err(FsError::into_midge)?;
@@ -685,7 +680,9 @@ fn cleanup_non_authoritative_staging(task: &FlushPublishTask) {
     let Some(staging_dir) = task.build.staging_path.parent() else {
         return;
     };
-    if staging_dir.file_name().and_then(|name| name.to_str()) != Some(".flush-staging") {
+    if staging_dir.file_name().and_then(|name| name.to_str())
+        != Some(crate::sst::fs::STAGING_DIR_NAME)
+    {
         return;
     }
     let Ok(staging_path) = db_relative_fs_path(task, &task.build.staging_path) else {
@@ -709,7 +706,7 @@ fn validate_final_sst(
 ) -> MidgeResult<()> {
     // A freshly written SST always carries both proofs, so anything missing
     // here is a defect in the writer rather than an older manifest.
-    crate::sst::identity::SstIdentity::of_path(path)?
+    crate::sst::fs::identity_with_fs(&task.fs, path)?
         .verify_against(
             expected.expected_sst(),
             None,
@@ -748,7 +745,58 @@ mod tests {
         }
     }
 
+    impl crate::io::ReadFs for PublicationTestFs {
+        fn open_read(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
+        }
+
+        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+            crate::io::ReadFs::exists(&self.inner, path)
+        }
+
+        fn metadata(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+            crate::io::ReadFs::metadata(&self.inner, path)
+        }
+
+        fn list_dir(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+            crate::io::ReadFs::list_dir(&self.inner, path)
+        }
+    }
+
+    impl crate::io::PersistentHandleFs for PublicationTestFs {
+        fn open_persistent(
+            &self,
+            path: &crate::io::FsPath,
+            options: crate::io::OpenOptions,
+        ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+            crate::io::open_persistent_handle(&self.inner, path, options)
+        }
+    }
+
     impl crate::io::Fs for PublicationTestFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &crate::io::FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
+        fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+            self.inner
+                .persistent_handle_capability()
+                .map(|_| self as &dyn crate::io::PersistentHandleFs)
+        }
+
         fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
             crate::io::Fs::host_addressing(&self.inner)
         }
@@ -765,38 +813,12 @@ mod tests {
             crate::io::Fs::open(&self.inner, path, options)
         }
 
-        fn open_persistent_handle(
-            &self,
-            path: &crate::io::FsPath,
-            options: crate::io::OpenOptions,
-        ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
-            crate::io::Fs::open_persistent_handle(&self.inner, path, options)
-        }
-
         fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
             crate::io::Fs::remove_file(&self.inner, path)
         }
 
-        fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
-            crate::io::Fs::exists(&self.inner, path)
-        }
-
-        fn metadata(
-            &self,
-            path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<crate::io::traits::Metadata> {
-            crate::io::Fs::metadata(&self.inner, path)
-        }
-
         fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
             crate::io::Fs::create_dir_all(&self.inner, path)
-        }
-
-        fn list_dir(
-            &self,
-            path: &crate::io::FsPath,
-        ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
-            crate::io::Fs::list_dir(&self.inner, path)
         }
 
         fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
@@ -878,7 +900,10 @@ mod tests {
     fn publication_fixture(fail_at_validation: usize) -> MidgeResult<PublicationFixture> {
         let directory = tempfile::tempdir()?;
         let db_path = directory.path().join("db");
-        crate::metadata::ensure_or_create_format_marker(&db_path)?;
+        crate::metadata::ensure_or_create_format_marker(
+            &crate::io::real::test_root(&db_path),
+            &db_path,
+        )?;
         let sst_dir = db_path.join("sst");
         std::fs::create_dir_all(&sst_dir)?;
         let staging_path = db_path.join("staging").join("flush-1.sst");
@@ -907,16 +932,12 @@ mod tests {
         );
         let file_meta = FlushActor::write_memtable_to_staging(&sst_factory, &mut build_task)?;
 
-        let local = Arc::new(crate::storage::filesystem::FileSystem::new(
-            directory.path().join("local"),
-        )?);
         let sst_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
         let sst_cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
             sst_backend.clone(),
             String::new(),
         ));
         let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
-            local,
             sst_cloud,
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
@@ -941,7 +962,6 @@ mod tests {
             },
             sst_name: crate::cloud_layout::file_name(identity.cf_id, 0, 1),
             sst_seq: 1,
-            sst_dir,
             fs: publication_fs,
             storage: Arc::new(HybridFlushStorage::new(
                 Some(Arc::clone(&hybrid)),
@@ -974,7 +994,6 @@ mod tests {
             lease_healthy: fixture.task.lease_healthy.clone(),
             leader_store: fixture.task.leader_store.clone(),
             leader_holder_id: fixture.task.leader_holder_id.clone(),
-            manifest_sequence: 1,
             runtime_response_timeout: crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
         }
     }
@@ -1068,7 +1087,7 @@ mod tests {
     fn should_reject_conflicting_remote_bytes_without_publishing_flush_metadata() -> MidgeResult<()>
     {
         // Arrange
-        use crate::storage::cloud::CloudBackend;
+        use crate::storage::cloud::CloudWriteCapability;
         let fixture = publication_fixture(usize::MAX)?;
         let bytes = std::fs::read(&fixture.task.build.staging_path)?;
         let mut corrupted = bytes.clone();
@@ -1093,7 +1112,11 @@ mod tests {
         assert_eq!(fixture.sst_backend.get_uploads().len(), 0);
         assert_eq!(fixture.control_backend.get_uploads().len(), 0);
         assert_eq!(
-            std::fs::read(fixture.task.sst_dir.join(&fixture.task.sst_name))?,
+            std::fs::read(
+                fixture
+                    .db_path
+                    .join(crate::sst::fs::sst_location(&fixture.task.sst_name))
+            )?,
             bytes
         );
         Ok(())
@@ -1113,7 +1136,10 @@ mod tests {
 
         // Assert
         assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
-        assert!(fixture.task.sst_dir.join(&fixture.task.sst_name).exists());
+        assert!(fixture
+            .db_path
+            .join(crate::sst::fs::sst_location(&fixture.task.sst_name))
+            .exists());
         assert_eq!(fixture.sst_backend.get_uploads().len(), 0);
         assert_eq!(fixture.control_backend.get_uploads().len(), 0);
         assert_eq!(budget.used(), 0);
@@ -1242,7 +1268,9 @@ mod tests {
         });
         sync_fs.set_sync_dir_failure(true);
         fixture.task.fs = sync_fs.clone();
-        let final_path = fixture.task.sst_dir.join(&fixture.task.sst_name);
+        let final_path = fixture
+            .db_path
+            .join(crate::sst::fs::sst_location(&fixture.task.sst_name));
 
         // Act
         let error = finalize_staged_sst(
@@ -1291,7 +1319,9 @@ mod tests {
             fail_sync: AtomicBool::new(false),
             sync_dir_calls: parking_lot::Mutex::new(Vec::new()),
         });
-        let final_path = fixture.task.sst_dir.join(&fixture.task.sst_name);
+        let final_path = fixture
+            .db_path
+            .join(crate::sst::fs::sst_location(&fixture.task.sst_name));
 
         // Act
         let error = finalize_staged_sst(
@@ -1316,7 +1346,7 @@ mod tests {
 
         // Act
         let mut actor = FlushActor::new(
-            directory.path(),
+            crate::io::real::test_root(directory.path()),
             false,
             crate::codec::CompressionPolicy::default(),
             completion_tx,
@@ -1336,7 +1366,7 @@ mod tests {
 
         // Act
         let actor = FlushActor::new(
-            Path::new("/unused"),
+            Arc::new(crate::io::MockFs::new()),
             true,
             crate::codec::CompressionPolicy::default(),
             completion_tx,

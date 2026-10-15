@@ -1,10 +1,10 @@
 use super::{CloudStartupRecovery, RuntimeRecoveryMaterialization, RuntimeStorageMaterialization};
 use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::config::RecoveryPolicy;
+use crate::io::FsError;
 use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority;
 use crate::runtime::RuntimeState;
-use std::path::Path;
 use std::sync::Arc;
 
 impl RuntimeRecoveryMaterialization {
@@ -15,9 +15,9 @@ impl RuntimeRecoveryMaterialization {
             return Ok(());
         };
         let fs = crate::telemetry::recovery_progress::observe_reads(Arc::clone(fs));
-        let Some(storage) = &materialized.runtime_config.hybrid_storage else {
+        if materialized.runtime_config.hybrid_storage.is_none() {
             return Ok(());
-        };
+        }
         let mut salvaged = Vec::new();
         for meta in &materialized.state.manifest.files {
             materialized
@@ -26,13 +26,9 @@ impl RuntimeRecoveryMaterialization {
             if materialized.state.salvaged_local_ssts.contains(&meta.name) {
                 continue;
             }
-            let path = materialized.state.sst_dir.join(&meta.name);
-            let secondary = materialized
-                .state
-                .db_path
-                .join("hybrid_local/sst")
-                .join(&meta.name);
-            if !path.exists() && !secondary.exists() {
+            let root = Arc::clone(&materialized.state.fs);
+            let path = crate::sst::fs::sst_key(&meta.name);
+            if !root.exists(&path).map_err(FsError::into_midge)? {
                 continue;
             }
             // This migration path reads only objects which already have a
@@ -62,16 +58,13 @@ impl RuntimeRecoveryMaterialization {
                 }
                 return Err(error);
             }
-            if path.exists() {
-                materialized
-                    .state
-                    .check_startup_scope("resident SST eviction")?;
-                std::fs::remove_file(path)?;
-                materialized
-                    .state
-                    .check_startup_scope("resident SST eviction")?;
-            }
-            storage.evict_local_object_cache(&crate::cloud_layout::object_key(&meta.name))?;
+            materialized
+                .state
+                .check_startup_scope("resident SST eviction")?;
+            root.remove_file(&path).map_err(FsError::into_midge)?;
+            materialized
+                .state
+                .check_startup_scope("resident SST eviction")?;
         }
         if !salvaged.is_empty() {
             materialized.state.salvaged_local_ssts.extend(salvaged);
@@ -81,27 +74,28 @@ impl RuntimeRecoveryMaterialization {
         Ok(())
     }
 
+    /// Bytes held by every file below `directory` in `root`; a missing
+    /// directory holds none.
     pub(super) fn local_directory_bytes_within(
-        path: &Path,
+        root: &dyn crate::io::Fs,
+        directory: &str,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<u64> {
         check_scope(scope, "startup storage accounting")?;
-        let entries = match std::fs::read_dir(path) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => return Err(error.into()),
-        };
+        let path = crate::io::FsPath::new(directory);
+        if !root.exists(&path).map_err(FsError::into_midge)? {
+            return Ok(0);
+        }
         let mut total = 0_u64;
-        for entry in entries {
+        for entry in root.list_dir(&path).map_err(FsError::into_midge)? {
             check_scope(scope, "startup storage accounting entry")?;
-            let entry = entry?;
-            let kind = entry.file_type()?;
-            let bytes = if kind.is_dir() {
-                Self::local_directory_bytes_within(&entry.path(), scope)?
-            } else if kind.is_file() {
-                entry.metadata()?.len()
+            let child = format!("{directory}/{}", entry.name);
+            let bytes = if entry.is_dir {
+                Self::local_directory_bytes_within(root, &child, scope)?
             } else {
-                0
+                root.metadata(&crate::io::FsPath::new(&child))
+                    .map_err(FsError::into_midge)?
+                    .len
             };
             total = total.checked_add(bytes).ok_or_else(|| {
                 crate::common::MidgeError::ResourceLimit("local storage accounting overflow".into())
@@ -113,7 +107,6 @@ impl RuntimeRecoveryMaterialization {
 
     fn prepare_storage_for_wal_replay(
         materialized: &mut RuntimeStorageMaterialization,
-        db_path: &Path,
     ) -> MidgeResult<()> {
         materialized
             .state
@@ -139,24 +132,9 @@ impl RuntimeRecoveryMaterialization {
             }
         }
         if let Some(storage) = &materialized.runtime_config.hybrid_storage {
-            storage.reconcile_local_disk_usage(
-                Self::local_directory_bytes_within(
-                    &materialized.state.sst_dir,
-                    materialized.state.startup_scope.as_ref(),
-                )?
-                .saturating_add(Self::local_directory_bytes_within(
-                    &db_path.join("hybrid_local/sst"),
-                    materialized.state.startup_scope.as_ref(),
-                )?),
-                Self::local_directory_bytes_within(
-                    &materialized.state.wal_dir,
-                    materialized.state.startup_scope.as_ref(),
-                )?
-                .saturating_add(Self::local_directory_bytes_within(
-                    &db_path.join("hybrid_local/wal"),
-                    materialized.state.startup_scope.as_ref(),
-                )?),
-            );
+            let (sst_bytes, wal_bytes) =
+                super::streaming_recovery::local_storage_bytes(&materialized.state)?;
+            storage.reconcile_local_disk_usage(sst_bytes, wal_bytes);
             storage.reconcile_startup_scratch_residue(
                 materialized.state.retained_startup_scratch_bytes()?,
             )?;
@@ -166,7 +144,6 @@ impl RuntimeRecoveryMaterialization {
 
     pub(super) fn replay_and_repair(
         materialized: RuntimeStorageMaterialization,
-        db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<Self> {
         let scope = materialized
@@ -174,12 +151,11 @@ impl RuntimeRecoveryMaterialization {
             .startup_scope
             .clone()
             .unwrap_or_else(|| DeadlineScope::new(OperationDeadline::unbounded()));
-        Self::replay_and_repair_within(materialized, db_path, recovery_policy, &scope)
+        Self::replay_and_repair_within(materialized, recovery_policy, &scope)
     }
 
     pub(super) fn replay_and_repair_within(
         mut materialized: RuntimeStorageMaterialization,
-        db_path: &Path,
         recovery_policy: RecoveryPolicy,
         scope: &DeadlineScope,
     ) -> MidgeResult<Self> {
@@ -219,20 +195,17 @@ impl RuntimeRecoveryMaterialization {
         reconcile_cloud_ddl_within(&mut materialized, scope)?;
 
         materialized.state.replay_intent_log()?;
-        if let Some(root) = materialized.cloud_root.as_deref() {
-            CloudStartupRecovery::ensure_local_sst_cache_from_cloud(&mut materialized.state, root)?;
-        }
-        if let Some(cloud_storage) = materialized.cloud_storage_for_restore.as_deref() {
-            CloudStartupRecovery::ensure_local_sst_cache_from_cloud_storage(
+        if let Some(store) = materialized.sst_inventory.clone() {
+            CloudStartupRecovery::validate_manifest_ssts_in_store(
                 &mut materialized.state,
-                cloud_storage,
+                store.as_ref(),
             )?;
         }
         if let Some(metadata_storage) = materialized.cloud_metadata_storage_for_mirror.as_deref() {
             let config = &materialized.runtime_config;
             CloudStartupRecovery::mirror_cloud_metadata_within(
                 metadata_storage,
-                db_path,
+                &materialized.state.fs,
                 recovery_policy,
                 CloudMetadataMirrorAuthority {
                     store: config.leader_store.as_deref().ok_or_else(|| {
@@ -258,17 +231,16 @@ impl RuntimeRecoveryMaterialization {
         {
             materialized
                 .state
-                .reset_cloud_durable_sequence_for_recovery();
+                .reset_cloud_durable_sequence_for_recovery(
+                    materialized
+                        .runtime_config
+                        .recovered_cloud_wal_anchor_sequence,
+                );
         }
 
-        Self::prepare_storage_for_wal_replay(&mut materialized, db_path)?;
+        Self::prepare_storage_for_wal_replay(&mut materialized)?;
         if let Some(replay) = materialized.streaming_wal.take() {
             super::timing::measure("wal_replay", || replay.replay(&mut materialized))?;
-        }
-        // Legacy hybrid_local SST copies have been swept above. Replay may
-        // publish new SSTs, so retire the secondary backend only afterward.
-        if let Some(storage) = &materialized.runtime_config.hybrid_storage {
-            storage.retire_legacy_local_store();
         }
         let recovered_sequence = materialized.state.sequence;
         let recovered_cf_metas = materialized.state.manifest.column_families.clone();

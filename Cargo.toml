@@ -1,6 +1,6 @@
 [package]
 name = "cntryl-midge"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 resolver = "2"
 rust-version = "1.97"
@@ -178,14 +178,6 @@ name = "fault_injection"
 path = "tests/fault_injection.rs"
 test = false
 required-features = ["failpoints"]
-
-# A real stress harness runs in a child so its process::exit cannot terminate
-# Cargo's test process. Its only watchdog is cntryl-stress's configured one.
-[[test]]
-name = "stress_workload_watchdog"
-path = "tests/stress_workload_watchdog.rs"
-harness = false
-required-features = ["stress-soak"]
 
 # Exploratory measurement example; not a public engine configuration surface.
 [[example]]
@@ -422,3 +414,6 @@ required-features = ["stress-soak"]
 name = "checkpoint_campaign_readback"
 path = "examples/checkpoint_campaign_readback.rs"
 required-features = ["internal-testing"]
+
+[lints.clippy]
+too_many_lines = "forbid"

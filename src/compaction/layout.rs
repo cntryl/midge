@@ -27,8 +27,8 @@ fn connect(parents: &mut [usize], left: usize, right: usize) {
 
 /// Return the complete connected repair components in key order. Pairwise
 /// equality alone remains legal; strict overlap or three files covering one
-/// endpoint connects the files. Incomplete legacy bounds are maintained by the
-/// separate bound-backfill path.
+/// endpoint connects the files. Files without complete, ordered bounds are
+/// left out.
 pub(crate) fn repair_components(files: &[&FileMeta]) -> Vec<Vec<usize>> {
     let mut order: Vec<_> = (0..files.len())
         .filter(|&index| {

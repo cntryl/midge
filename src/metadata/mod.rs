@@ -8,6 +8,7 @@ pub(crate) mod accounting;
 pub(crate) mod checkpoint_policy_probe;
 pub mod files;
 pub mod format;
+pub mod frontiers;
 pub mod journal;
 mod key_bounds;
 pub mod manifest;
@@ -18,6 +19,7 @@ pub(crate) mod recovery_progress_fixture;
 pub(crate) mod store;
 
 pub use format::{ensure_or_create_format_marker, validate_format_marker};
+pub use frontiers::FamilyFrontier;
 #[cfg(test)]
 pub use journal::append_edit;
 pub use journal::ManifestEdit;

@@ -25,8 +25,9 @@ impl super::EventLoop {
     /// waiter (both refuse through `ensure_ready`), so failing them promptly
     /// is the only outcome that avoids stranding them until shutdown.
     pub(super) fn fence_wal_transition(&mut self, error: &MidgeError, sealed_segment: Option<u64>) {
-        let sealed_segment = sealed_segment.or_else(|| self.wal_actor.fenced_sealed_segment());
-        self.wal_actor.fence_with_cause(
+        let sealed_segment =
+            sealed_segment.or_else(|| self.actors.wal_actor.fenced_sealed_segment());
+        self.actors.wal_actor.fence_with_cause(
             &mut self.state,
             error.to_string(),
             error.severity() == crate::common::Severity::Fenced,
@@ -34,12 +35,16 @@ impl super::EventLoop {
         // Read the cause back from the actor: it may already have fenced
         // itself as authority-lost (an epoch check that could not reach the
         // leader store), and both views must report the same cause.
-        let authority_lost = self.wal_actor.authority_lost();
-        self.wal_transition
+        let authority_lost = self.actors.wal_actor.authority_lost();
+        self.pipeline
+            .wal_transition
             .fence(error.to_string(), sealed_segment, authority_lost);
         self.state.mark_persistence_anomaly();
-        let generation = self.durability.current_key();
-        let waiters = self.durability.drain_all_waiters_and_reset(generation);
+        let generation = self.pipeline.durability.current_key();
+        let waiters = self
+            .pipeline
+            .durability
+            .drain_all_waiters_and_reset(generation);
         self.fail_durability_waiters(waiters, error);
     }
 
@@ -51,43 +56,42 @@ impl super::EventLoop {
     /// retried. Consuming the ticket prevents the caller from continuing the
     /// actor side of a transition the protocol no longer tracks.
     pub(super) fn settle_failed_seal_step(&mut self, ticket: WalSealTicket, error: &MidgeError) {
-        if self.wal_actor.is_fenced() {
+        if self.actors.wal_actor.is_fenced() {
             // The actor records a sealed segment only once the rename happened,
             // so `None` here defers to its bookkeeping instead of guessing.
             self.fence_wal_transition(error, None);
         } else {
-            self.wal_transition.abandon_prepared_seal(ticket);
+            self.pipeline.wal_transition.abandon_prepared_seal(ticket);
         }
     }
 
     /// Rotate a local WAL only through the paired lifecycle protocol.
     pub(super) fn rotate_local_wal_transition(&mut self) -> MidgeResult<WalRotationReceipt> {
-        self.wal_transition.ensure_ready()?;
-        let segment_id = self.state.wal.current_segment_id;
-        let next_segment_id = segment_id.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("WAL segment identity space exhausted".to_string())
-        })?;
-        let max_sequence = self.wal_actor.current_segment_max_sequence();
-        let ticket = self
-            .wal_transition
-            .begin_seal(segment_id, next_segment_id, max_sequence)?;
+        self.pipeline.wal_transition.ensure_ready()?;
+        let segment_id = self.state.wal.open_segment();
+        let next_segment_id = self.state.wal.history.ledger().next_segment_id();
+        let max_sequence = self.actors.wal_actor.open_segment_max_sequence();
+        let ticket =
+            self.pipeline
+                .wal_transition
+                .begin_seal(segment_id, next_segment_id, max_sequence)?;
 
-        let receipt = match self.wal_actor.rotate(&mut self.state, &ticket) {
+        let receipt = match self.actors.wal_actor.rotate(&mut self.state, &ticket) {
             Ok(receipt) => receipt,
             Err(error) => {
                 self.settle_failed_seal_step(ticket, &error);
                 return Err(error);
             }
         };
-        if let Err(error) = self.wal_transition.note_sealed(&ticket, receipt) {
+        if let Err(error) = self.pipeline.wal_transition.note_sealed(&ticket, receipt) {
             self.fence_wal_transition(&error, Some(segment_id));
             return Err(error);
         }
-        if let Err(error) = self.wal_transition.finish_seal(ticket, receipt) {
+        if let Err(error) = self.pipeline.wal_transition.finish_seal(ticket, receipt) {
             self.fence_wal_transition(&error, Some(segment_id));
             return Err(error);
         }
-        if let Err(error) = self.wal_transition.retire_local_seal(segment_id) {
+        if let Err(error) = self.pipeline.wal_transition.retire_local_seal(segment_id) {
             self.fence_wal_transition(&error, Some(segment_id));
             return Err(error);
         }
@@ -99,16 +103,16 @@ impl super::EventLoop {
     /// bookkeeping.
     #[cfg(test)]
     pub(super) fn seal_cloud_wal_without_enqueue_for_test(&mut self) -> MidgeResult<(u64, u64)> {
-        self.wal_transition.ensure_ready()?;
-        let segment_id = self.state.wal.current_segment_id;
-        let next_segment_id = segment_id.checked_add(1).ok_or_else(|| {
-            MidgeError::ResourceLimit("WAL segment identity space exhausted".to_string())
-        })?;
-        let max_sequence = self.wal_actor.current_segment_max_sequence();
-        let ticket = self
-            .wal_transition
-            .begin_seal(segment_id, next_segment_id, max_sequence)?;
+        self.pipeline.wal_transition.ensure_ready()?;
+        let segment_id = self.state.wal.open_segment();
+        let next_segment_id = self.state.wal.history.ledger().next_segment_id();
+        let max_sequence = self.actors.wal_actor.open_segment_max_sequence();
+        let ticket =
+            self.pipeline
+                .wal_transition
+                .begin_seal(segment_id, next_segment_id, max_sequence)?;
         let flushed = match self
+            .actors
             .wal_actor
             .flush_for_cloud_upload(&mut self.state, &ticket)
         {
@@ -125,31 +129,37 @@ impl super::EventLoop {
             self.fence_wal_transition(&error, None);
             return Err(error);
         }
-        let receipt = match self.wal_actor.rotate(&mut self.state, &ticket) {
+        let receipt = match self.actors.wal_actor.rotate(&mut self.state, &ticket) {
             Ok(receipt) => receipt,
             Err(error) => {
                 self.settle_failed_seal_step(ticket, &error);
                 return Err(error);
             }
         };
-        if let Err(error) = self.wal_transition.note_sealed(&ticket, receipt) {
+        if let Err(error) = self.pipeline.wal_transition.note_sealed(&ticket, receipt) {
             self.finish_failed_cloud_seal_transition(receipt, &error);
             return Err(error);
         }
-        if let Err(error) = self.durability.rotate_from_to(segment_id, next_segment_id) {
+        if let Err(error) = self
+            .pipeline
+            .durability
+            .rotate_from_to(segment_id, next_segment_id)
+        {
             self.finish_failed_cloud_seal_transition(receipt, &error);
             return Err(error);
         }
-        self.durability
+        self.pipeline
+            .durability
             .record_cloud_segment_inflight(segment_id, max_sequence);
-        if let Err(error) = self.wal_transition.note_queued(segment_id) {
+        if let Err(error) = self.pipeline.wal_transition.note_queued(segment_id) {
             self.finish_failed_cloud_seal_transition(receipt, &error);
             return Err(error);
         }
-        self.wal_actor
+        self.actors
+            .wal_actor
             .complete_cloud_upload_seal(&mut self.state, receipt);
-        self.durability.record_cloud_flush();
-        if let Err(error) = self.wal_transition.finish_seal(ticket, receipt) {
+        self.pipeline.durability.record_cloud_flush();
+        if let Err(error) = self.pipeline.wal_transition.finish_seal(ticket, receipt) {
             self.finish_failed_cloud_seal_transition(receipt, &error);
             return Err(error);
         }
@@ -166,7 +176,6 @@ mod tests {
     #[cfg(feature = "failpoints")]
     use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
     use crate::runtime::{ResponseRouter, RuntimeConfig};
-    use crate::wal::{FsWalFactoryIo, ACTIVE_FILE_NAME};
     use std::sync::Arc;
 
     fn create_local_event_loop() -> EventLoop {
@@ -180,15 +189,34 @@ mod tests {
             state,
             false,
             router,
-            config,
+            config.clone(),
             crate::runtime::event_loop::FlushWorkerMode::Inline,
         )
         .expect("create event loop");
+        // A file-backed WAL over a mock directory, so rotations go through
+        // its segment ledger without touching the host.
         let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
-        let writer = FsWalFactoryIo::new(Arc::clone(&fs))
-            .create_writer(ACTIVE_FILE_NAME)
-            .expect("create mock WAL writer");
-        event_loop.wal_actor.install_filesystem_for_test(fs, writer);
+        event_loop.state.wal.history = crate::runtime::wal_history::WalHistory::open(
+            Arc::clone(&fs),
+            event_loop.state.wal.open_segment(),
+            0,
+        )
+        .expect("start the mock WAL ledger");
+        let mut wal_actor = crate::runtime::actors::WalActor::open(
+            &event_loop.state,
+            config.wal_durability_policy,
+            config.wal_batch_config,
+            config.writer_epoch,
+            config.storage_io_timeout,
+        )
+        .expect("open the mock WAL");
+        EventLoop::configure_wal_actor(
+            &event_loop.state,
+            &mut wal_actor,
+            &config,
+            event_loop.authority.read_resources.as_ref(),
+        );
+        event_loop.actors.wal_actor = wal_actor;
         event_loop
     }
 
@@ -202,9 +230,12 @@ mod tests {
         event_loop.fence_wal_transition(&error, Some(3));
 
         // Assert
-        assert!(event_loop.wal_actor.is_fenced());
-        assert!(event_loop.wal_transition.is_fenced());
-        assert_eq!(event_loop.wal_transition.fenced_sealed_segment(), Some(3));
+        assert!(event_loop.actors.wal_actor.is_fenced());
+        assert!(event_loop.pipeline.wal_transition.is_fenced());
+        assert_eq!(
+            event_loop.pipeline.wal_transition.fenced_sealed_segment(),
+            Some(3)
+        );
         assert!(event_loop.state.persistence_anomaly_detected());
         assert!(matches!(
             event_loop.rotate_local_wal_transition(),
@@ -217,6 +248,7 @@ mod tests {
         // Arrange
         let mut event_loop = create_local_event_loop();
         let ticket = event_loop
+            .pipeline
             .wal_transition
             .begin_seal(1, 2, 0)
             .expect("prepare seal");
@@ -226,10 +258,11 @@ mod tests {
         event_loop.settle_failed_seal_step(ticket, &error);
 
         // Assert
-        assert!(!event_loop.wal_actor.is_fenced());
-        assert!(!event_loop.wal_transition.is_fenced());
-        assert!(!event_loop.wal_transition.segment_is_tracked(1));
+        assert!(!event_loop.actors.wal_actor.is_fenced());
+        assert!(!event_loop.pipeline.wal_transition.is_fenced());
+        assert!(!event_loop.pipeline.wal_transition.segment_is_tracked(1));
         event_loop
+            .pipeline
             .wal_transition
             .ensure_ready()
             .expect("rolled back seal must leave the protocol ready");
@@ -239,7 +272,7 @@ mod tests {
     fn should_commit_local_rotation_as_one_protocol_transition() {
         // Arrange
         let mut event_loop = create_local_event_loop();
-        let segment_id = event_loop.state.wal.current_segment_id;
+        let segment_id = event_loop.state.wal.open_segment();
 
         // Act
         let receipt = event_loop
@@ -248,9 +281,13 @@ mod tests {
 
         // Assert
         assert_eq!(receipt.sealed_segment(), segment_id);
-        assert_eq!(event_loop.state.wal.current_segment_id, segment_id + 1);
-        assert!(!event_loop.wal_transition.segment_is_tracked(segment_id));
+        assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
+        assert!(!event_loop
+            .pipeline
+            .wal_transition
+            .segment_is_tracked(segment_id));
         event_loop
+            .pipeline
             .wal_transition
             .ensure_ready()
             .expect("committed rotation must leave the protocol ready");
@@ -266,7 +303,7 @@ mod tests {
 
         for boundary in WalTransitionBoundary::LOCAL_ROTATION_BOUNDARIES {
             let mut event_loop = create_local_event_loop();
-            let segment_id = event_loop.state.wal.current_segment_id;
+            let segment_id = event_loop.state.wal.open_segment();
             fail::cfg(boundary.failpoint_name(), "return")
                 .expect("configure local rotation boundary");
 
@@ -278,15 +315,25 @@ mod tests {
 
             // Assert
             assert!(matches!(error, MidgeError::Internal(_)), "{boundary:?}");
-            assert_eq!(event_loop.state.wal.current_segment_id, segment_id);
-            let irreversible = boundary != WalTransitionBoundary::BeforeRename;
+            // The footer is the first irreversible step (#843); only the
+            // ledger's rotation moves the open segment.
+            let irreversible = matches!(
+                boundary,
+                WalTransitionBoundary::AfterFooter | WalTransitionBoundary::AfterLedgerRotate
+            );
+            let rotated = boundary == WalTransitionBoundary::AfterLedgerRotate;
             assert_eq!(
-                event_loop.wal_actor.is_fenced(),
+                event_loop.state.wal.open_segment(),
+                segment_id + u64::from(rotated),
+                "{boundary:?}: only a rotation the ledger recorded moves the open segment"
+            );
+            assert_eq!(
+                event_loop.actors.wal_actor.is_fenced(),
                 irreversible,
                 "{boundary:?}"
             );
             assert_eq!(
-                event_loop.wal_transition.is_fenced(),
+                event_loop.pipeline.wal_transition.is_fenced(),
                 irreversible,
                 "{boundary:?}"
             );
@@ -297,21 +344,27 @@ mod tests {
             );
             if irreversible {
                 assert_eq!(
-                    event_loop.wal_transition.fenced_sealed_segment(),
+                    event_loop.pipeline.wal_transition.fenced_sealed_segment(),
                     Some(segment_id),
                     "{boundary:?}: the sealed file must be recorded for restart recovery"
                 );
-                assert!(event_loop.wal_transition.segment_is_tracked(segment_id));
+                assert!(event_loop
+                    .pipeline
+                    .wal_transition
+                    .segment_is_tracked(segment_id));
                 assert!(matches!(
                     event_loop.rotate_local_wal_transition(),
                     Err(MidgeError::RecoveryFailed(_))
                 ));
             } else {
-                assert!(!event_loop.wal_transition.segment_is_tracked(segment_id));
+                assert!(!event_loop
+                    .pipeline
+                    .wal_transition
+                    .segment_is_tracked(segment_id));
                 event_loop
                     .rotate_local_wal_transition()
                     .expect("reversible failure must be retryable");
-                assert_eq!(event_loop.state.wal.current_segment_id, segment_id + 1);
+                assert_eq!(event_loop.state.wal.open_segment(), segment_id + 1);
             }
         }
 

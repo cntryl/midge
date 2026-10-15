@@ -28,51 +28,51 @@ fn options(path: &std::path::Path, budget: u64) -> OpenOptions {
 }
 
 fn publish_wal(path: &std::path::Path, records: u64) -> Vec<u8> {
-    publish_records(path, |epoch| {
-        (1..=records).map(|seq| record(seq, epoch)).collect()
-    })
+    publish_records(path, || (1..=records).map(record).collect())
 }
 
-fn record(sequence: u64, epoch: u64) -> crate::wal::WalRecord {
+fn record(sequence: u64) -> crate::wal::WalRecord {
     crate::wal::WalRecord::new(
         crate::wal::WalOpKind::Put,
         bytes::Bytes::from(sequence.to_be_bytes().to_vec()),
         Some(bytes::Bytes::from(value(sequence))),
         sequence,
-        epoch,
     )
 }
 
-fn publish_records(
-    path: &std::path::Path,
-    make_records: impl FnOnce(u64) -> Vec<crate::wal::WalRecord>,
-) -> Vec<u8> {
+/// Publish sealed segments `(id, bytes, last sequence)`, written by the
+/// catalog's epoch, and drop the local WAL cache.
+fn publish_segments(path: &std::path::Path, segments: &[(u64, Vec<u8>, u64)]) {
     let catalog_path = path.join("cloud_store/wal/publication-catalog.v1.json");
     let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(&catalog_path).expect("read catalog"),
     )
     .expect("decode catalog");
-    let records = make_records(catalog.fencing_epoch);
-    let maximum = records
-        .iter()
-        .map(|record| record.seq)
-        .max()
-        .expect("records");
-    let mut bytes = Vec::new();
-    for record in &records {
-        let payload = crate::wal::encoding::encode(record).expect("encode record");
-        crate::wal::frame::append_frame(&mut bytes, &payload).expect("frame record");
+    for (id, bytes, maximum) in segments {
+        // The catalog chains each entry onto its head, whatever the object's
+        // own header links.
+        let link = crate::wal::format::segment::footer_link(bytes)
+            .expect("scan a published segment")
+            .expect("a published segment is sealed");
+        assert_eq!((link.id, link.last_seq), (*id, *maximum));
+        let publication = crate::wal::cloud_catalog::CatalogEntry::describing(
+            &crate::wal::cloud_segment::SegmentValidation {
+                writer_epoch: catalog.fencing_epoch(),
+                prev: catalog.head(),
+                facts: crate::wal::format::segment::sealed_footer(bytes)
+                    .unwrap()
+                    .unwrap()
+                    .sealed_facts(),
+            },
+            bytes,
+        );
+        let object = path.join("cloud_store").join(publication.object_key());
+        std::fs::create_dir_all(object.parent().expect("parent")).expect("object directory");
+        std::fs::write(object, bytes).expect("publish WAL");
+        catalog
+            .append_run(catalog.fencing_epoch(), &[publication])
+            .expect("publish to the catalog");
     }
-    let publication = crate::wal::cloud_catalog::PublishedWalSegment::from_validated_bytes(
-        1,
-        maximum,
-        catalog.fencing_epoch,
-        &bytes,
-    );
-    let object = path.join("cloud_store").join(&publication.object_key);
-    std::fs::create_dir_all(object.parent().expect("parent")).expect("object directory");
-    std::fs::write(object, &bytes).expect("publish WAL");
-    catalog.segments.insert(1, publication);
     let encoded = catalog.encode().expect("encode catalog");
     std::fs::write(catalog_path, &encoded).expect("publish catalog");
     std::fs::write(
@@ -80,6 +80,109 @@ fn publish_records(
         &encoded,
     )
     .expect("publish catalog mirror");
+    std::fs::remove_dir_all(path.join("wal")).expect("drop the local WAL cache");
+}
+
+#[test]
+fn should_set_aside_cataloged_segment_that_breaks_the_chain_when_salvaging() {
+    // Arrange: the catalog chains segment 2 onto segment 1, but segment 2's
+    // object links another segment 1. Planning admits the chain before
+    // anything replays (#844), so salvage never replays past the break.
+    let dir = tempfile::tempdir().expect("database directory");
+    let opts = options(dir.path(), 1024 * 1024);
+    let mut engine = Engine::open(opts).expect("initialize metadata");
+    engine
+        .shutdown(std::time::Duration::from_secs(10))
+        .expect("shutdown");
+    drop(engine);
+    let epoch = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+        &std::fs::read(
+            dir.path()
+                .join("cloud_store/wal/publication-catalog.v1.json"),
+        )
+        .expect("read catalog"),
+    )
+    .expect("decode catalog")
+    .fencing_epoch();
+    let (first, link) = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        epoch,
+        crate::wal::format::ChainLink::GENESIS,
+    )
+    .record(&record(1))
+    .seal();
+    let forged = crate::wal::format::ChainLink {
+        digest: [0x42; 16],
+        ..link
+    };
+    let (second, _) = crate::wal::format::segment::SegmentBuilder::new(2, epoch, forged)
+        .record(&record(2))
+        .seal();
+    publish_segments(dir.path(), &[(1, first, 1), (2, second, 2)]);
+    let salvage = OpenOptions::cloud_simulated(dir.path(), "bucket", "streaming-recovery")
+        .local_storage_budget(1024 * 1024)
+        .with_memtable_size_limit(64 * 1024)
+        .background_compaction(false)
+        .recovery_policy(crate::RecoveryPolicy::Salvage)
+        .build()
+        .expect("salvage options");
+
+    // Act
+    let result = Engine::open(salvage);
+
+    // Assert: segment 1 replays; segment 2 is set aside, not replayed.
+    let engine = result.expect("salvage sets the break aside");
+    let cf = engine.get_column_family("default").expect("default family");
+    let tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("read transaction");
+    assert!(tx.get(&1_u64.to_be_bytes()).expect("read 1").is_some());
+    assert!(tx.get(&2_u64.to_be_bytes()).expect("read 2").is_none());
+}
+
+fn publish_records(
+    path: &std::path::Path,
+    make_records: impl FnOnce() -> Vec<crate::wal::WalRecord>,
+) -> Vec<u8> {
+    let catalog_path = path.join("cloud_store/wal/publication-catalog.v1.json");
+    let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+        &std::fs::read(&catalog_path).expect("read catalog"),
+    )
+    .expect("decode catalog");
+    let records = make_records();
+    let maximum = records
+        .iter()
+        .map(|record| record.seq)
+        .max()
+        .expect("records");
+    let mut segment = crate::wal::format::segment::SegmentBuilder::new(
+        1,
+        catalog.fencing_epoch(),
+        crate::wal::format::ChainLink::GENESIS,
+    );
+    for record in &records {
+        segment = segment.record(record);
+    }
+    let (bytes, _) = segment.seal();
+    let publication =
+        crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes).expect("sealed WAL");
+    assert_eq!(publication.max_sequence(), maximum);
+    let object = path.join("cloud_store").join(publication.object_key());
+    std::fs::create_dir_all(object.parent().expect("parent")).expect("object directory");
+    std::fs::write(object, &bytes).expect("publish WAL");
+    catalog
+        .append_run(catalog.fencing_epoch(), &[publication])
+        .expect("publish to the catalog");
+    let encoded = catalog.encode().expect("encode catalog");
+    std::fs::write(catalog_path, &encoded).expect("publish catalog");
+    std::fs::write(
+        path.join("cloud_store/wal/publication-catalog.v1.mirror.json"),
+        &encoded,
+    )
+    .expect("publish catalog mirror");
+    // The segment comes from a writer whose cache is not this one, so this
+    // cache starts its WAL history again, past the published segment.
+    std::fs::remove_dir_all(path.join("wal")).expect("drop the local WAL cache");
     bytes
 }
 
@@ -225,14 +328,15 @@ fn should_recover_entire_wal_after_process_exits_between_checkpoints() {
     )
     .expect("decode");
     assert_eq!(
-        before.segments, after.segments,
+        before.entries(),
+        after.entries(),
         "checkpoints cannot retire source WAL"
     );
     assert_eq!(
         std::fs::read(
             dir.path()
                 .join("cloud_store")
-                .join(&after.segments[&1].object_key)
+                .join(after.entry(1).unwrap().object_key())
         )
         .expect("source WAL"),
         source
@@ -264,15 +368,16 @@ fn should_recover_entire_wal_after_process_exits_between_checkpoints() {
 
 #[cfg(feature = "failpoints")]
 fn expire_child_lease(path: &std::path::Path) {
-    let lease = path.join("midge_primary_lease.json");
+    let lease = crate::storage::simulated::simulated_cloud_root(path)
+        .join(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY);
     let text = std::fs::read_to_string(&lease).expect("crashed lease record");
     let text = text
         .lines()
         .map(|line| {
-            if line.starts_with("acquired_at: ") {
-                "acquired_at: 1970-01-01T00:00:00Z"
-            } else if line.starts_with("expires_at: ") {
-                "expires_at: 1970-01-01T00:00:00Z"
+            if line.starts_with("acquired: ") {
+                "acquired: 1970-01-01T00:00:00Z"
+            } else if line.starts_with("expires: ") {
+                "expires: 1970-01-01T00:00:00Z"
             } else {
                 line
             }
@@ -281,11 +386,6 @@ fn expire_child_lease(path: &std::path::Path) {
         .join("\n")
         + "\n";
     std::fs::write(lease, text).expect("expire crashed lease");
-    match std::fs::remove_file(path.join(".midge_leader.lock")) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => panic!("remove crashed lease acquisition lock: {error}"),
-    }
 }
 
 #[cfg(feature = "failpoints")]
@@ -401,33 +501,37 @@ fn should_bound_working_disk_at_publication_boundaries_when_recovering_large_wal
 }
 
 #[cfg(feature = "failpoints")]
-fn publish_cross_family_records(path: &std::path::Path, second_id: u32) -> Vec<u8> {
-    publish_records(path, |epoch| {
-        let mut operations = vec![record(2, epoch), record(3, epoch)];
-        for operation in &mut operations {
-            operation.txn_id = Some(1);
-            operation.key = bytes::Bytes::from_static(b"atomic");
-        }
-        operations[1].cf_id = second_id;
-        let payload = crate::wal::encoding::encode_txn_batch_payload(1, 1, 4, epoch, &operations)
-            .expect("transaction payload");
+fn publish_two_family_records(path: &std::path::Path, second_id: u32) -> Vec<u8> {
+    publish_records(path, || {
+        // A transaction is single-family (#843): the default family's write
+        // stands alone and the second family's commits as its own batch.
+        let mut first = record(1);
+        first.key = bytes::Bytes::from_static(b"atomic");
+        let mut operation = record(3);
+        operation.txn_id = Some(1);
+        operation.key = bytes::Bytes::from_static(b"atomic");
+        operation.cf_id = second_id;
+        let payload =
+            crate::wal::encoding::encode_txn_batch_payload(1, 2, 4, second_id, &[operation])
+                .expect("transaction payload");
         let mut batch = crate::wal::WalRecord::new(
             crate::wal::WalOpKind::TxnBatch,
             bytes::Bytes::from_static(b"txn"),
             Some(payload),
             4,
-            epoch,
         );
         batch.txn_id = Some(1);
-        std::iter::once(batch)
-            .chain((5..=384).map(|seq| record(seq, epoch)))
+        batch.cf_id = second_id;
+        [first, batch]
+            .into_iter()
+            .chain((5..=384).map(record))
             .collect()
     })
 }
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_recover_atomic_cross_family_write_after_only_first_family_checkpoint_is_published() {
+fn should_recover_every_family_after_only_first_family_checkpoint_is_published() {
     // Arrange
     let dir = tempfile::tempdir().expect("database directory");
     let budget = 256 * 1024;
@@ -441,7 +545,7 @@ fn should_recover_atomic_cross_family_write_after_only_first_family_checkpoint_i
         .shutdown(std::time::Duration::from_secs(10))
         .expect("shutdown");
     drop(engine);
-    let source = publish_cross_family_records(dir.path(), second_id);
+    let source = publish_two_family_records(dir.path(), second_id);
     let catalog_path = dir
         .path()
         .join("cloud_store/wal/publication-catalog.v1.json");
@@ -468,21 +572,22 @@ fn should_recover_atomic_cross_family_write_after_only_first_family_checkpoint_i
     )
     .expect("decode catalog");
     assert_eq!(
-        before.segments, after.segments,
+        before.entries(),
+        after.entries(),
         "partial family checkpoint cannot retire source WAL"
     );
     assert_eq!(
         std::fs::read(
             dir.path()
                 .join("cloud_store")
-                .join(&after.segments[&1].object_key)
+                .join(after.entry(1).unwrap().object_key())
         )
         .expect("source WAL"),
         source
     );
     expire_child_lease(dir.path());
     let mut recovered = Engine::open(opts).expect("recover unfinished family");
-    for (family, sequence) in [(0, 2), (second_id, 3)] {
+    for (family, sequence) in [(0, 1), (second_id, 3)] {
         let tx = recovered
             .begin_tx(family, TransactionMode::ReadOnly)
             .expect("read transaction");
@@ -572,7 +677,7 @@ fn should_recover_accepted_spilled_transaction_above_configured_spill_threshold(
     )
     .expect("decode catalog");
     assert!(
-        !catalog.segments.is_empty(),
+        !catalog.entries().is_empty(),
         "accepted transaction must have replayable remote WAL"
     );
     let manifest = crate::metadata::ManifestPersistence::load(dir.path()).expect("manifest");

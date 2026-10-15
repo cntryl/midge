@@ -276,7 +276,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::traits::{DirEntry, File, FsError, FsResult, Metadata};
+    use crate::io::traits::{DirEntry, File, FsError, FsResult, Metadata, ReadFs};
     use parking_lot::Mutex;
 
     struct RecordingFile<'a> {
@@ -284,11 +284,17 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
     }
 
-    impl File for RecordingFile<'_> {
+    impl crate::io::ReadFile for RecordingFile<'_> {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             self.inner.read_at(offset, len)
         }
 
+        fn len(&self) -> FsResult<u64> {
+            self.inner.len()
+        }
+    }
+
+    impl File for RecordingFile<'_> {
         fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
             self.inner.write_at(offset, data)?;
             self.events.lock().push("write".to_string());
@@ -297,10 +303,6 @@ mod tests {
 
         fn append(&mut self, data: Bytes) -> FsResult<u64> {
             self.inner.append(data)
-        }
-
-        fn len(&self) -> FsResult<u64> {
-            self.inner.len()
         }
 
         fn sync(&mut self, durability: Durability) -> FsResult<()> {
@@ -326,7 +328,33 @@ mod tests {
         }
     }
 
+    impl ReadFs for RecordingFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
     impl Fs for RecordingFs {
+        fn try_lock_exclusive(
+            &self,
+            path: &FsPath,
+        ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+
         fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
             Ok(Box::new(RecordingFile {
                 inner: self.inner.open(path, options)?,
@@ -338,20 +366,8 @@ mod tests {
             self.inner.remove_file(path)
         }
 
-        fn exists(&self, path: &FsPath) -> FsResult<bool> {
-            self.inner.exists(path)
-        }
-
-        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-            self.inner.metadata(path)
-        }
-
         fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
             self.inner.create_dir_all(path)
-        }
-
-        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-            self.inner.list_dir(path)
         }
 
         fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {

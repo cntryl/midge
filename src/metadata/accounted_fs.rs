@@ -3,7 +3,7 @@
 
 use super::accounting::{Ledger, Payload};
 use crate::io::traits::{DirEntry, Metadata, ReadObserver};
-use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions};
+use crate::io::{Durability, File, Fs, FsPath, FsResult, HostAddressing, OpenOptions, ReadFs};
 use bytes::Bytes;
 use parking_lot::Mutex;
 use std::sync::Arc;
@@ -49,7 +49,36 @@ fn payload(path: &FsPath) -> Payload {
     }
 }
 
+impl ReadFs for AccountedFs {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.open(path, OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &FsPath) -> FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
 impl Fs for AccountedFs {
+    fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::traits::PersistentHandleFs> {
+        self.inner
+            .persistent_handle_capability()
+            .map(|_| self as &dyn crate::io::traits::PersistentHandleFs)
+    }
+
     fn local_output_view(&self) -> Option<Arc<dyn Fs>> {
         self.inner
             .local_output_view()
@@ -83,38 +112,11 @@ impl Fs for AccountedFs {
             payload: payload(path),
         }))
     }
-    fn open_persistent_handle(
-        &self,
-        path: &FsPath,
-        options: OpenOptions,
-    ) -> FsResult<Box<dyn File>> {
-        let inner = if mutating_open(options) {
-            observe_mutation(&self.ledger, || {
-                self.inner.open_persistent_handle(path, options)
-            })
-        } else {
-            self.inner.open_persistent_handle(path, options)
-        }?;
-        Ok(Box::new(AccountedFile {
-            inner,
-            ledger: Arc::clone(&self.ledger),
-            payload: payload(path),
-        }))
-    }
     fn remove_file(&self, path: &FsPath) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.remove_file(path))
     }
-    fn exists(&self, path: &FsPath) -> FsResult<bool> {
-        self.inner.exists(path)
-    }
-    fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
-        self.inner.metadata(path)
-    }
     fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.create_dir_all(path))
-    }
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
-        self.inner.list_dir(path)
     }
     fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.remove_dir_all(path))
@@ -127,10 +129,34 @@ impl Fs for AccountedFs {
     }
 }
 
-impl File for AccountedFile<'_> {
+impl crate::io::traits::PersistentHandleFs for AccountedFs {
+    fn open_persistent(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File>> {
+        let inner = if mutating_open(options) {
+            observe_mutation(&self.ledger, || {
+                crate::io::open_persistent_handle(self.inner.as_ref(), path, options)
+            })
+        } else {
+            crate::io::open_persistent_handle(self.inner.as_ref(), path, options)
+        }?;
+        Ok(Box::new(AccountedFile {
+            inner,
+            ledger: Arc::clone(&self.ledger),
+            payload: payload(path),
+        }))
+    }
+}
+
+impl crate::io::ReadFile for AccountedFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
+
+    fn len(&self) -> FsResult<u64> {
+        self.inner.len()
+    }
+}
+
+impl File for AccountedFile<'_> {
     fn write_at(&mut self, offset: u64, data: Bytes) -> FsResult<()> {
         let bytes = data.len();
         self.ledger.lock().issued(self.payload, bytes);
@@ -156,9 +182,7 @@ impl File for AccountedFile<'_> {
         }
         result
     }
-    fn len(&self) -> FsResult<u64> {
-        self.inner.len()
-    }
+
     fn sync(&mut self, durability: Durability) -> FsResult<()> {
         observe_mutation(&self.ledger, || self.inner.sync(durability))
     }

@@ -1,5 +1,14 @@
 # Repository Guidelines
 
+## Agent Task Scope
+
+These rules apply to every agent, including delegated agents:
+
+- Stay focused on the user's requested task. Keep changes directly related to that task; do not expand into unrelated cleanup, refactoring, or infrastructure work.
+- Do not create scripts, custom runners, tools, or automation unless the user explicitly requests them. Use the existing Cargo, `cntryl-tools`, and `cntryl-stress` commands and facilities.
+- Do not modify GitHub Actions, CI, release, benchmark, or other workflows unless the user explicitly requests workflow changes.
+- Use existing test fixtures and framework facilities. Keep any necessary Rust test helpers scoped to the invariant or behavior being tested; do not turn task work into a tooling or framework project.
+
 ## Project Structure & Module Organization
 
 Midge is a Rust embedded LSM key-value engine. Core code lives under `src/`, with major subsystems split by responsibility: `storage/` for local/cloud backends, `wal/` for write-ahead logging, `sst/` for table format and readers, `metadata/` for manifests, `runtime/` for actor/event-loop coordination, and `engine/` for the public API. Integration tests live in `tests/`; benchmarks live in `benches/`; design and operations docs live in `docs/`; fuzz targets live in `fuzz/`.
@@ -19,9 +28,21 @@ Midge is a Rust embedded LSM key-value engine. Core code lives under `src/`, wit
 
 Use Rust 2021 style and `rustfmt` defaults. Prefer clear subsystem boundaries; lower layers should not depend on higher layers. Keep storage/WAL/SST durability code conservative: retain data when unsure. Test names should follow `should_{action}_when_{context}` or similarly descriptive `should_...` patterns. Use explicit `// Arrange`, `// Act`, and `// Assert` sections for non-trivial tests.
 
+Never suppress `clippy::too_many_lines` with `#[allow]`, `#[expect]`, configuration, or command-line overrides. Split oversized functions into focused helpers while preserving behavior and assertions.
+
 ## Testing Guidelines
 
+Keep engine tests and test runners in Rust and run them through Cargo. Do not add Python files to this repository. Use `cntryl-tools` as the first choice for additional static analysis rather than adding repository-specific analysis scripts.
+
 All new behavior should include tests. Put public API coverage in `tests/`; use inline `#[cfg(test)] mod tests` for focused internal logic. Use deterministic failpoints and crash/recovery tests for durability-sensitive changes. For cloud, WAL, SST, and manifest changes, prefer TDD regression tests that first demonstrate unsafe deletion, corrupt recovery, stale metadata, or incorrect frontier movement.
+
+Tests must cover real invariants and observable behavior through the production code paths they protect. Assert the contract and failure outcome, including restart or recovery when relevant. Tests that merely inspect source text, exercise runner bookkeeping, or mirror implementation details are not substitutes for invariant and behavior coverage.
+
+Do not use `#[ignore]` on tests. Unresolved bugs must have active failing regression tests until they are fixed; do not skip them, invert their assertions, or hide them behind a feature flag. Feature selection may separate genuine environment dependencies such as Sqrzl, provided the corresponding workflow runs those tests and fails if the dependency is unavailable.
+
+## Benchmark Guidelines
+
+Write idiomatic Rust benchmarks using `cntryl-stress`, registered and run through the repository's existing `cargo bench` integration. Follow the established `cntryl-stress` patterns for workloads, measurements, and reporting. Keep each benchmark focused on the performance behavior being measured; do not add bespoke benchmark runners, scripts, reporting tools, or workflow changes.
 
 ## Commit & Pull Request Guidelines
 

@@ -304,7 +304,7 @@ fn mirror_observation(scope: &DeadlineScope) -> MirrorObservation {
     let mut deadlines = Vec::new();
     let outcome = crate::runtime::cloud_startup::CloudStartupRecovery::mirror_cloud_metadata_within(
         &cloud,
-        directory.path(),
+        &crate::io::real::test_root(directory.path()),
         crate::config::RecoveryPolicy::Strict,
         crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
             store: store.as_ref(),
@@ -372,7 +372,7 @@ fn assert_successful_native_mirror(observed: &MirrorObservation) {
             observed.committed
         );
     };
-    assert_eq!(generation.manifest_sequence, 0);
+    assert_eq!(generation.manifest_horizon, 0);
     assert_eq!(generation.objects.len(), observed.expected_objects.len());
     for object in &generation.objects {
         let expected = &observed.expected_objects[&object.file_name];
