@@ -1544,52 +1544,6 @@ mod compatibility_fixtures {
         temp
     }
 
-    /// Copy the populated release fixture as a database of the current
-    /// format, for tests whose subject is its manifest and SST rather than
-    /// its format. Its empty pre-ledger `wal.log` goes with the old marker,
-    /// and its manifests' byte-array key bounds become hex strings.
-    fn copy_populated_fixture_as_current_format() -> tempfile::TempDir {
-        let temp = copy_fixture_dir("v3_populated_v4_sst_db");
-        fs::write(temp.path().join("FORMAT"), "midge-format-version=8\n")
-            .expect("mark fixture copy as the current format");
-        fs::remove_file(temp.path().join("wal").join("wal.log"))
-            .expect("drop the pre-ledger active WAL");
-        for name in ["manifest.json", "manifest.snapshot.json"] {
-            hex_encode_key_bounds(&temp.path().join(name));
-        }
-        temp
-    }
-
-    /// Rewrite the manifest at `path` with hex key bounds, the only encoding
-    /// FORMAT 8 decodes.
-    fn hex_encode_key_bounds(path: &Path) {
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(path).expect("read fixture manifest"))
-                .expect("decode fixture manifest");
-        let through = manifest
-            .as_object_mut()
-            .unwrap()
-            .remove("last_persisted_sequence")
-            .unwrap();
-        manifest["flushed_through"] =
-            serde_json::json!([{"cf_id": 0, "through_sequence": through}]);
-        for file in manifest["files"]
-            .as_array_mut()
-            .expect("fixture SST metadata")
-        {
-            for bound in ["smallest_key", "largest_key"] {
-                let bytes: Option<Vec<u8>> =
-                    serde_json::from_value(file[bound].take()).expect("byte-array key bound");
-                file[bound] = serde_json::json!(bytes.map(hex::encode));
-            }
-        }
-        fs::write(
-            path,
-            serde_json::to_vec(&manifest).expect("encode manifest"),
-        )
-        .expect("write fixture manifest");
-    }
-
     fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> {
         fs::create_dir_all(destination)?;
 
@@ -1617,6 +1571,50 @@ mod compatibility_fixtures {
                 );
             }
             other => panic!("expected CompatibilityError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn should_preserve_populated_v8_fixture_given_strict_recovery_when_reopening() {
+        // Arrange
+        let temp = copy_fixture_dir("v8_populated_v4_sst_db");
+        let before = fs::read(temp.path().join("FORMAT")).expect("read fixture marker");
+
+        for _ in 0..2 {
+            // Act
+            let report = cntryl_midge::StorageVerifier::verify_path(temp.path())
+                .expect("verify format 8 fixture");
+            let mut engine = Engine::open(
+                OpenOptions::local(temp.path())
+                    .recovery_policy(RecoveryPolicy::Strict)
+                    .build()
+                    .expect("build fixture options"),
+            )
+            .expect("open format 8 fixture");
+            let cf = engine
+                .get_column_family("default")
+                .expect("fixture column family");
+            let read = engine
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                .expect("begin fixture read");
+
+            // Assert
+            assert_eq!(report.health, EngineHealth::Healthy);
+            assert_eq!(report.sst_files_verified, 1);
+            assert_eq!(
+                read.get(b"fixture/alpha")
+                    .expect("read persisted point")
+                    .as_deref(),
+                Some(b"value-alpha".as_slice())
+            );
+            drop(read);
+            engine
+                .shutdown(Duration::from_secs(5))
+                .expect("shutdown fixture engine");
+            assert_eq!(
+                fs::read(temp.path().join("FORMAT")).expect("reread fixture marker"),
+                before
+            );
         }
     }
 
@@ -1652,7 +1650,7 @@ mod compatibility_fixtures {
     #[test]
     fn should_reject_manifest_bounds_when_valid_sst_summary_disagrees() {
         // Arrange: the release fixture has a valid SST and a readable point value.
-        let baseline = copy_populated_fixture_as_current_format();
+        let baseline = copy_fixture_dir("v8_populated_v4_sst_db");
         let baseline_report = cntryl_midge::StorageVerifier::verify_path(baseline.path())
             .expect("verify unmodified fixture");
         assert_eq!(baseline_report.health, EngineHealth::Healthy);
@@ -1681,7 +1679,7 @@ mod compatibility_fixtures {
             .expect("shutdown baseline engine");
 
         for wrong_key_bounds in [true, false] {
-            let temp = copy_populated_fixture_as_current_format();
+            let temp = copy_fixture_dir("v8_populated_v4_sst_db");
             for name in ["manifest.json", "manifest.snapshot.json"] {
                 let path = temp.path().join(name);
                 let mut manifest: serde_json::Value =
@@ -1724,7 +1722,7 @@ mod compatibility_fixtures {
         for complete in [true, false] {
             // Arrange: complete bounds agree with the SST; older advisory bounds
             // may disagree without hiding a point key from readers.
-            let temp = copy_populated_fixture_as_current_format();
+            let temp = copy_fixture_dir("v8_populated_v4_sst_db");
             for name in ["manifest.json", "manifest.snapshot.json"] {
                 let path = temp.path().join(name);
                 let mut manifest: serde_json::Value =
