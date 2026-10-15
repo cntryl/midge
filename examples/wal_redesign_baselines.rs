@@ -54,7 +54,7 @@ fn options() -> ToolResult<Options> {
     let mut options = Options {
         baseline: false,
         sqrzl: false,
-        timeout: Duration::from_secs(300),
+        timeout: Duration::from_mins(5),
         output: PathBuf::new(),
     };
     while let Some(arg) = args.next() {

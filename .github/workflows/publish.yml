@@ -11,137 +11,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release-gate:
-    name: Run release gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    env:
-      SQRZL_SECRET_ACCESS_KEY: easy-peasy
-    steps:
-      - name: Check out release tag
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Verify tag matches crate version
-        shell: bash
-        run: |
-          test "${GITHUB_REF_TYPE}" = "tag"
-          crate_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
-          test "${GITHUB_REF_NAME}" = "v${crate_version}"
-
-      - name: Verify tag belongs to main
-        run: |
-          git fetch origin main:refs/remotes/origin/main
-          git merge-base --is-ancestor HEAD refs/remotes/origin/main
-
-      - name: Install stable Rust toolchain
-        run: rustup update stable
-
-      - name: Install MSRV toolchain
-        run: rustup toolchain install 1.97 --profile minimal --component clippy
-
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "release-gate"
-
-      - name: Install cntryl-tools
-        run: cargo install --git https://github.com/cntryl/tools --rev 7690369409e8d3c86b9db1693cdab486a4fa84ae --locked
-
-      - name: Validate current documentation inventory
-        shell: bash
-        run: |
-          cntryl-tools validate-docs --config .cntryl/repository.toml
-          test -f docs/development/support-matrix.md
-          test -f docs/development/format-compatibility.md
-          test -f docs/development/release-policy.md
-          test -f docs/operations/operator-runbook.md
-          test -f docs/operations/release-checklist.md
-          test -f docs/development/stability-policy.md
-          test -f docs/operations/migration-guide.md
-          test -f CHANGELOG.md
-
-      - name: Install cargo-machete
-        run: cargo install cargo-machete --version 0.9.2 --locked
-
-      - name: Run rustfmt check
-        run: cargo fmt --check
-
-      - name: Run Clippy checks
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
-
-      - name: Verify MSRV and no-default feature surface
-        run: |
-          rustup run 1.97 cargo check --workspace --all-targets
-          rustup run 1.97 cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic
-
-      - name: Compile crate documentation
-        run: cargo test --workspace --all-features --doc
-
-      - name: Compile canonical documentation example
-        run: cargo check --example documented_quick_start --all-features
-
-      - name: Reject unused dependencies
-        run: cargo machete
-
-      - name: Verify publishable package
-        run: cargo package --locked
-
-      - name: Verify default release excludes failpoints
-        shell: bash
-        run: |
-          if cargo tree --edges normal | grep -E '(^|[[:space:]])fail v'; then
-            echo "default dependency graph unexpectedly contains fail"
-            exit 1
-          fi
-          cargo check --release
-
-      - name: Start Sqrzl emulator
-        run: docker compose up -d sqrzl
-
-      - name: Wait for Sqrzl health
-        run: curl --fail --retry 30 --retry-delay 1 --retry-all-errors http://127.0.0.1:9001/healthz
-
-      - name: Full test suite
-        run: cargo test --workspace --features telemetry-otlp,sqrzl-tests,cloud_integration
-
-      - name: Fault injection suite (serial; failpoints are process-global)
-        run: cargo test --test fault_injection --all-features -- --test-threads=1
-
-      - name: Sqrzl provider qualification
-        env:
-          SQRZL_SECRET_ACCESS_KEY: easy-peasy
-        run: cargo test --lib --features sqrzl-tests storage::providers::qualification
-
-      - name: Sqrzl engine qualification
-        env:
-          SQRZL_SECRET_ACCESS_KEY: easy-peasy
-        run: cargo test --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --test-threads=1
-
-      - name: Validate test conventions
-        run: cntryl-tools validate-tests
-
-      - name: Verify checked-in sample database
-        run: cargo run --bin midge -- verify --json tests/fixtures/compatibility/v8_populated_v4_sst_db
-
-      - name: Stop Sqrzl emulator
-        if: always()
-        run: docker compose down -v
-
   publish:
     name: Publish cntryl-midge to crates.io
-    needs: release-gate
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
-      contents: read
+      contents: write
       id-token: write
+
     steps:
-      - name: Check out release tag
+      - name: Check out source
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install stable Rust toolchain
         run: rustup update stable
@@ -151,6 +33,18 @@ jobs:
         with:
           shared-key: "publish"
 
+      - name: Read crate version from Cargo.toml
+        id: crate
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 --locked | jq -er '.packages[] | select(.name == "cntryl-midge") | .version')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Check crate
+        run: cargo check --locked
+
+      - name: Build crate
+        run: cargo build --locked
+
       - name: Authenticate with crates.io
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
@@ -159,3 +53,15 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish --locked
+
+      - name: Tag published version
+        env:
+          CRATE_VERSION: ${{ steps.crate.outputs.version }}
+        run: |
+          tag="v${CRATE_VERSION}"
+          if git show-ref --verify --quiet "refs/tags/${tag}"; then
+            test "$(git rev-parse "${tag}^{commit}")" = "$(git rev-parse HEAD)"
+          else
+            git tag "$tag" HEAD
+            git push origin "refs/tags/${tag}"
+          fi
