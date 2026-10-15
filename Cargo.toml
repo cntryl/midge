@@ -49,7 +49,7 @@ zstd = "0.14"
 bytes = { version = "1.12", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-uuid = { version = "1.26", features = ["v4"] }
+uuid = { version = "1.28", features = ["v4"] }
 
 # Error Handling
 thiserror = "2.0"
@@ -98,7 +98,7 @@ libc = "0.2"
 winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 
 [dev-dependencies]
-proptest = "1.11"
+proptest = "1.12"
 cntryl-stress = "0.5.1"
 sha2 = "0.11"
 # Self dev-dependency: turns on `internal-testing` for tests/ and benches/ so

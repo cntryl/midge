@@ -4,22 +4,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "47 2 * * *"
-  push:
-    branches: [develop, main]
-    paths:
-      - 'src/**'
-      - 'tests/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'build.rs'
-      - 'rust-toolchain*'
-      - '.cargo/**'
-      - 'compose.yml'
-      - '.github/workflows/integration-azure.yml'
-      - '!src/storage/providers/s3.rs'
-      - '!src/storage/providers/s3_resolver.rs'
-      - '!src/storage/providers/gcs.rs'
-      - '!src/storage/providers/gcs_resolver.rs'
   pull_request:
     branches: [develop, main]
     paths:
