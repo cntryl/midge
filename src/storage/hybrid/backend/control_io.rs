@@ -106,14 +106,9 @@ impl HybridStorage {
             }
             bytes.extend_from_slice(&range);
         }
-        let after = control_head(backend, key, callback_timeout, deadline)?.ok_or_else(|| {
-            MidgeError::Corruption("control object disappeared during read".into())
-        })?;
-        if !metadata.same_version(&after) {
-            return Err(MidgeError::Corruption(
-                "control object changed during read".into(),
-            ));
-        }
+        // Every successful range is pinned to the initial identity. A later
+        // replacement cannot invalidate those bytes; any subsequent CAS must
+        // still use that original identity and reject a stale mutation.
         Ok(Some(ControlObject {
             bytes,
             metadata,

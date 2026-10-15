@@ -45,6 +45,9 @@ Midge is currently in the 0.4 release line. Compatibility expectations for pre-1
 
 ### Fixed
 
+- Preserve coherent, version-pinned control reads when a concurrent writer
+  replaces the object afterward, avoiding spurious corruption during cold-cache
+  takeover. Stale compare-and-swap attempts remain rejected (#880).
 - Recovery seals and syncs the WAL tail it replayed before serving any read,
   so a power loss after a process crash no longer loses values recovery
   already returned (#843).
