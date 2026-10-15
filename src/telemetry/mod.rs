@@ -106,7 +106,7 @@ impl Telemetry {
         let metrics = Metrics::new(config);
 
         #[cfg(feature = "telemetry")]
-        if enabled {
+        if enabled && (config.features.enable_logging || config.features.enable_tracing) {
             Self::setup_tracing(config)?;
         }
 
