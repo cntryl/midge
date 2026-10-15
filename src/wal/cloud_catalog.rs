@@ -529,10 +529,11 @@ impl WalPublicationCatalog {
                 });
             }
         }
-        let retired: Vec<CatalogEntry> = self.segments.drain(..pending.len()).collect();
-        if let Some(last) = retired.last() {
-            self.anchor = last.facts.link;
+        // The anchor needs only the last retired link; the rows drop in place.
+        if let Some(last) = pending.len().checked_sub(1) {
+            self.anchor = self.segments[last].facts.link;
             self.retired_by = generation;
+            self.segments.drain(..pending.len());
         }
         Ok(pending)
     }
