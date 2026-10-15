@@ -1338,6 +1338,11 @@ impl crate::storage::cloud::CloudReadCapability for S3Backend {
 }
 
 impl crate::storage::cloud::CloudWriteCapability for S3Backend {
+    fn write_workspace_bytes(&self, payload_bytes: usize) -> usize {
+        // Vec becomes shared Bytes; retries and reqwest clone the handle.
+        // Retain a second payload allowance for preparation/ownership transfer.
+        payload_bytes.saturating_mul(2)
+    }
     fn write_with_receipt(
         &self,
         key: &str,

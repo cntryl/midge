@@ -497,6 +497,11 @@ pub trait CloudReadCapability: Send + Sync {
 /// impl CloudWriteCapability for MissingWrite {}
 /// ```
 pub trait CloudWriteCapability: Send + Sync {
+    /// Variable payload-copy workspace. A provider may lower the conservative
+    /// default only when its retained payload and transport copies are bounded.
+    fn write_workspace_bytes(&self, payload_bytes: usize) -> usize {
+        payload_bytes.saturating_mul(4)
+    }
     /// Request a checksum-validated write receipt when supported. The default
     /// emits the ordinary PUT completion, requiring the caller's readback.
     fn write_with_receipt(

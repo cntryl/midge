@@ -15,7 +15,8 @@ pub(super) struct CatalogAuthority {
 #[derive(Debug)]
 pub(crate) struct AdmittedCatalog {
     catalog: WalPublicationCatalog,
-    _memory: ResourceReservation,
+    memory: Vec<ResourceReservation>,
+    charged_bytes: usize,
 }
 
 impl std::ops::Deref for AdmittedCatalog {
@@ -32,27 +33,66 @@ impl std::ops::DerefMut for AdmittedCatalog {
 impl AdmittedCatalog {
     pub(super) fn empty(storage: &HybridStorage, epoch: u64) -> MidgeResult<Self> {
         Ok(Self {
-            _memory: catalog_budget(storage).reserve(4096, "empty WAL catalog")?,
+            memory: vec![catalog_budget(storage).reserve(4096, "empty WAL catalog")?],
+            charged_bytes: 4096,
             catalog: WalPublicationCatalog::empty(epoch).map_err(MidgeError::Internal)?,
         })
     }
     fn decode(bytes: &[u8], budget: &ResourceBudget) -> MidgeResult<Self> {
-        // Covers the decoded tree, keys, serde scratch, and one inserted entry.
-        // Allocation is admitted before serde visits attacker-controlled lengths.
-        let memory = budget.reserve(
-            bytes.len().saturating_mul(16).saturating_add(4096),
-            "decoded WAL catalog",
-        )?;
+        // Admit potentially malformed JSON scratch before the non-allocating
+        // structural pass. It validates all field names and scalar types, so
+        // the real decoder then needs only bounded schema-identifier scratch.
+        let bound = {
+            let _scratch = budget.reserve(
+                bytes.len().saturating_mul(2).saturating_add(4096),
+                "catalog preflight scratch",
+            )?;
+            WalPublicationCatalog::decode_allocation_bound(bytes)
+                .map_err(|error| decode_error(&error))?
+        };
+        let memory = budget.reserve(bound, "decoded WAL catalog")?;
         Ok(Self {
-            catalog: WalPublicationCatalog::decode(bytes).map_err(|error| match error {
-                // Another format is no damage a mirror could repair (#844).
-                CatalogDecodeError::Incompatible(_) => {
-                    MidgeError::CompatibilityError(error.to_string())
-                }
-                CatalogDecodeError::Invalid(_) => MidgeError::Corruption(error.to_string()),
-            })?,
-            _memory: memory,
+            catalog: WalPublicationCatalog::decode(bytes).map_err(|error| decode_error(&error))?,
+            memory: vec![memory],
+            charged_bytes: bound,
         })
+    }
+
+    pub(super) fn append_run(
+        &mut self,
+        epoch: u64,
+        run: &[crate::wal::cloud_catalog::CatalogEntry],
+    ) -> Result<bool, super::PublicationError> {
+        let retained = self.catalog.append_retained_allocation_bound(run);
+        if retained > self.charged_bytes {
+            self.memory.push(
+                self.memory[0]
+                    .reserve_related(
+                        retained - self.charged_bytes,
+                        "retained catalog append storage",
+                    )
+                    .map_err(super::PublicationError::Retriable)?,
+            );
+            self.charged_bytes = retained;
+        }
+        // Reallocation overlap and the additions vector end with append. They
+        // must not remain charged during the later primary/mirror uploads.
+        let _working = self.memory[0]
+            .reserve_related(
+                self.catalog.append_allocation_bound(run),
+                "catalog append working storage",
+            )
+            .map_err(super::PublicationError::Retriable)?;
+        self.catalog
+            .append_run(epoch, run)
+            .map_err(super::PublicationError::from)
+    }
+}
+
+fn decode_error(error: &CatalogDecodeError) -> MidgeError {
+    match error {
+        CatalogDecodeError::Incompatible(_) => MidgeError::CompatibilityError(error.to_string()),
+        CatalogDecodeError::Invalid(_) => MidgeError::Corruption(error.to_string()),
     }
 }
 
@@ -257,7 +297,7 @@ pub(super) fn mutate_wal_catalog_within<T, R>(
     deadline: &crate::common::OperationDeadline,
     validate: &dyn Fn() -> MidgeResult<()>,
     missing: Missing,
-    mutate: impl FnOnce(&mut WalPublicationCatalog) -> Result<Mutation<T>, R>,
+    mutate: impl FnOnce(&mut AdmittedCatalog) -> Result<Mutation<T>, R>,
 ) -> MidgeResult<Result<(T, AdmittedCatalog), R>> {
     validate()?;
     let _catalog_mutation = storage.lock_wal_catalog_mutation_within(deadline, label)?;
@@ -290,7 +330,7 @@ pub(super) fn mutate_wal_catalog_within<T, R>(
     };
     // Even an unchanged cached result crosses the CAS boundary: a successor
     // may have fenced this epoch since the cached response was received.
-    match commit_catalog_with_authority(storage, expected.as_ref(), mirror.as_ref(), &catalog, deadline, validate) {
+    match commit_catalog_with_authority(storage, expected, mirror, &catalog, deadline, validate) {
         Ok((primary, mirror)) => {
             storage.cache_wal_catalog(primary, mirror);
             Ok(Ok((value, catalog)))
@@ -335,19 +375,22 @@ pub(crate) fn refusal_error(refusal: CatalogRefusal) -> MidgeError {
 
 fn commit_catalog_with_authority(
     storage: &HybridStorage,
-    expected_primary: Option<&ControlObject>,
-    expected_mirror: Option<&ControlObject>,
+    expected_primary: Option<ControlObject>,
+    expected_mirror: Option<ControlObject>,
     catalog: &WalPublicationCatalog,
     deadline: &crate::common::OperationDeadline,
     validate: &dyn Fn() -> MidgeResult<()>,
 ) -> MidgeResult<(ControlObject, ControlObject)> {
     let budget = catalog_budget(storage);
+    // CAS needs the pinned identities, not both obsolete encoded bodies.
+    let expected_primary = expected_primary.map(ControlObject::into_metadata);
+    let expected_mirror = expected_mirror.map(ControlObject::into_metadata);
     let encoded = AdmittedEncoding::new(catalog, &budget)?;
     validate()?;
     let primary = storage
         .write_control_object_with_authority(
             crate::wal::cloud_catalog::OBJECT_KEY,
-            expected_primary.map(ControlObject::object_metadata),
+            expected_primary.as_ref(),
             &encoded.bytes,
             &budget,
             deadline,
@@ -359,7 +402,7 @@ fn commit_catalog_with_authority(
         storage
             .write_control_object_with_authority(
                 crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
-                Some(expected.object_metadata()),
+                Some(&expected),
                 &encoded.bytes,
                 &budget,
                 deadline,
@@ -397,10 +440,11 @@ fn sync_catalog_copy_with_authority(
     {
         return Ok(existing.expect("matching copy"));
     }
+    let expected = existing.map(ControlObject::into_metadata);
     storage
         .write_control_object_with_authority(
             key,
-            existing.as_ref().map(ControlObject::object_metadata),
+            expected.as_ref(),
             bytes,
             &budget,
             deadline,

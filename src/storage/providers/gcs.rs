@@ -1433,6 +1433,10 @@ impl crate::storage::cloud::CloudReadCapability for GcsBackend {
 }
 
 impl crate::storage::cloud::CloudWriteCapability for GcsBackend {
+    fn write_workspace_bytes(&self, payload_bytes: usize) -> usize {
+        // Native HTTP bodies and retries share Bytes; error replies are bounded.
+        payload_bytes.saturating_mul(2)
+    }
     fn submit_put(
         &self,
         key: &str,

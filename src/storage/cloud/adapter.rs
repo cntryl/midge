@@ -162,6 +162,9 @@ impl CloudStorage {
 }
 
 impl StorageBackend for CloudStorage {
+    fn write_workspace_bytes(&self, payload_bytes: usize) -> usize {
+        self.writes.write_workspace_bytes(payload_bytes)
+    }
     fn submit_write_receipt_request(
         &self,
         request: crate::storage::StorageRequest,

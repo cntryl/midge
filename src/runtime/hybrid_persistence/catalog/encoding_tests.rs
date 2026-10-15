@@ -3,9 +3,13 @@ use crate::wal::cloud_catalog::CatalogEntry;
 use crate::wal::format::ChainLink;
 
 fn populated_catalog() -> WalPublicationCatalog {
+    populated_catalog_with_segments(4096)
+}
+
+fn populated_catalog_with_segments(count: u64) -> WalPublicationCatalog {
     let mut catalog = WalPublicationCatalog::empty(7).unwrap();
     let mut prev = ChainLink::GENESIS;
-    let entries: Vec<CatalogEntry> = (1..=4096_u64)
+    let entries: Vec<CatalogEntry> = (1..=count)
         .map(|segment_id| {
             let record = crate::wal::WalRecord::new(
                 crate::wal::WalOpKind::Put,
@@ -25,6 +29,86 @@ fn populated_catalog() -> WalPublicationCatalog {
     catalog.append_run(7, &entries).unwrap();
     catalog.set_aside_suffix(7, None, &[], 123).unwrap();
     catalog
+}
+
+#[test]
+fn should_fence_incident_sized_catalog_within_fitz_maintenance_budget() {
+    // Arrange
+    let (_directory, storage) = storage_fixture();
+    let catalog = populated_catalog_with_segments(32_768);
+    let original = catalog.encode().unwrap();
+    assert!(original.len() >= 8_702_002);
+    let primary = crate::wal::cloud_catalog::OBJECT_KEY;
+    let mirror = crate::wal::cloud_catalog::MIRROR_OBJECT_KEY;
+    storage
+        .compare_exchange_remote_object(primary, None, original.clone())
+        .unwrap();
+    storage
+        .compare_exchange_remote_object(mirror, None, original)
+        .unwrap();
+    let budget = storage.configure_maintenance_memory(53_687_091);
+    let mut expected = catalog;
+    expected.fence_to(8).unwrap();
+
+    // Act
+    let fenced = storage.fence_cloud_wal_catalog(8).unwrap();
+
+    // Assert
+    assert_eq!(*fenced, expected);
+    assert_eq!(
+        WalPublicationCatalog::decode(storage.remote_object_proof(primary).unwrap().bytes())
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        WalPublicationCatalog::decode(storage.remote_object_proof(mirror).unwrap().bytes())
+            .unwrap(),
+        expected
+    );
+    assert!(budget.peak() <= budget.limit());
+}
+
+#[test]
+fn should_publish_after_incident_sized_fencing_within_fitz_maintenance_budget() {
+    // Arrange
+    let (_directory, storage) = storage_fixture();
+    let catalog = populated_catalog_with_segments(32_768);
+    let original = catalog.encode().unwrap();
+    for key in [
+        crate::wal::cloud_catalog::OBJECT_KEY,
+        crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+    ] {
+        storage
+            .compare_exchange_remote_object(key, None, original.clone())
+            .unwrap();
+    }
+    let budget = storage.configure_maintenance_memory(53_687_091);
+    drop(storage.fence_cloud_wal_catalog(8).unwrap());
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        bytes::Bytes::from_static(b"new"),
+        Some(bytes::Bytes::from_static(b"value")),
+        32_769,
+    );
+    let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(32_769, 8, catalog.head())
+        .record(&record)
+        .seal();
+    let entry = CatalogEntry::from_sealed_bytes(&bytes).unwrap();
+    let deadline = crate::common::OperationDeadline::unbounded();
+
+    // Act
+    storage
+        .publish_wal_segments(&[entry], 8, &deadline)
+        .unwrap();
+
+    // Assert
+    let proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .unwrap();
+    let published = WalPublicationCatalog::decode(proof.bytes()).unwrap();
+    assert_eq!(published.head().id, 32_769);
+    assert_eq!(published.fencing_epoch(), 8);
+    assert!(budget.peak() <= budget.limit());
 }
 
 #[test]
@@ -57,6 +141,78 @@ fn storage_fixture() -> (tempfile::TempDir, super::super::CloudPersistence) {
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
     (directory, storage)
+}
+
+fn catalog_with_family_frontiers() -> WalPublicationCatalog {
+    let mut builder = crate::wal::format::segment::SegmentBuilder::new(1, 7, ChainLink::GENESIS);
+    for family in 1..=512_u32 {
+        let mut record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            u64::from(family),
+        );
+        record.cf_id = family;
+        builder = builder.record(&record);
+    }
+    let (bytes, _) = builder.seal();
+    let entry = CatalogEntry::from_sealed_bytes(&bytes).unwrap();
+    let mut catalog = WalPublicationCatalog::empty(7).unwrap();
+    catalog.append_run(7, &[entry]).unwrap();
+    catalog
+}
+
+#[test]
+fn should_retain_admission_for_every_decoded_family_frontier() {
+    // Arrange
+    let original = catalog_with_family_frontiers();
+    let bytes = original.encode().unwrap();
+    let budget = ResourceBudget::new(1024 * 1024);
+
+    // Act
+    let decoded = AdmittedCatalog::decode(&bytes, &budget).unwrap();
+
+    // Assert
+    assert_eq!(*decoded, original);
+    let frontier_bytes =
+        decoded.entries()[0].facts().max_seq_per_cf.capacity() * std::mem::size_of::<(u32, u64)>();
+    assert!(budget.used() >= frontier_bytes + std::mem::size_of::<CatalogEntry>());
+    drop(decoded);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn should_release_preflight_scratch_when_frontiers_exceed_admission() {
+    // Arrange
+    let bytes = catalog_with_family_frontiers().encode().unwrap();
+    let bound = WalPublicationCatalog::decode_allocation_bound(&bytes).unwrap();
+    assert!(bound > bytes.len() * 2 + 4096);
+    let budget = ResourceBudget::new(bound - 1);
+
+    // Act
+    let result = AdmittedCatalog::decode(&bytes, &budget);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn should_preserve_catalog_authority_with_escaped_schema_identifiers() {
+    // Arrange
+    let original = populated_catalog();
+    let bytes = String::from_utf8(original.encode().unwrap())
+        .unwrap()
+        .replace("\"segments\"", "\"\\u0073egments\"");
+    let budget = ResourceBudget::new(8 * 1024 * 1024);
+
+    // Act
+    let decoded = AdmittedCatalog::decode(bytes.as_bytes(), &budget).unwrap();
+
+    // Assert
+    assert_eq!(*decoded, original);
+    drop(decoded);
+    assert_eq!(budget.used(), 0);
 }
 
 #[test]
