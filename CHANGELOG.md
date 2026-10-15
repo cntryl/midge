@@ -45,6 +45,8 @@ Midge is currently in the 0.4 release line. Compatibility expectations for pre-1
 
 ### Fixed
 
+- Honor metrics-only telemetry configuration so benchmark and qualification
+  callers can install their own tracing subscribers (#882).
 - Preserve coherent, version-pinned control reads when a concurrent writer
   replaces the object afterward, avoiding spurious corruption during cold-cache
   takeover. Stale compare-and-swap attempts remain rejected (#880).

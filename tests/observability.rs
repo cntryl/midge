@@ -16,8 +16,10 @@ mod telemetry_integration {
     use cntryl_midge::TransactionMode;
 
     #[test]
-    fn should_initialize_global_telemetry_once_given_repeated_init_calls_when_starting() {
+    fn should_preserve_host_subscriber_given_concurrent_metrics_only_initialization() {
         // Arrange
+        tracing::subscriber::set_global_default(tracing_subscriber::registry())
+            .expect("the caller owns its tracing subscriber");
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
         let callers = (0..2)
             .map(|_| {
