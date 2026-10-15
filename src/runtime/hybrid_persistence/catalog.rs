@@ -16,6 +16,7 @@ pub(super) struct CatalogAuthority {
 pub(crate) struct AdmittedCatalog {
     catalog: WalPublicationCatalog,
     memory: Vec<ResourceReservation>,
+    charged_bytes: usize,
 }
 
 impl std::ops::Deref for AdmittedCatalog {
@@ -33,6 +34,7 @@ impl AdmittedCatalog {
     pub(super) fn empty(storage: &HybridStorage, epoch: u64) -> MidgeResult<Self> {
         Ok(Self {
             memory: vec![catalog_budget(storage).reserve(4096, "empty WAL catalog")?],
+            charged_bytes: 4096,
             catalog: WalPublicationCatalog::empty(epoch).map_err(MidgeError::Internal)?,
         })
     }
@@ -52,19 +54,38 @@ impl AdmittedCatalog {
         Ok(Self {
             catalog: WalPublicationCatalog::decode(bytes).map_err(|error| decode_error(&error))?,
             memory: vec![memory],
+            charged_bytes: bound,
         })
     }
 
-    pub(super) fn admit_append(
+    pub(super) fn append_run(
         &mut self,
+        epoch: u64,
         run: &[crate::wal::cloud_catalog::CatalogEntry],
-    ) -> MidgeResult<()> {
-        let bytes = self.catalog.append_allocation_bound(run);
-        if bytes != 0 {
-            self.memory
-                .push(self.memory[0].reserve_related(bytes, "catalog append working storage")?);
+    ) -> Result<bool, super::PublicationError> {
+        let retained = self.catalog.append_retained_allocation_bound(run);
+        if retained > self.charged_bytes {
+            self.memory.push(
+                self.memory[0]
+                    .reserve_related(
+                        retained - self.charged_bytes,
+                        "retained catalog append storage",
+                    )
+                    .map_err(super::PublicationError::Retriable)?,
+            );
+            self.charged_bytes = retained;
         }
-        Ok(())
+        // Reallocation overlap and the additions vector end with append. They
+        // must not remain charged during the later primary/mirror uploads.
+        let _working = self.memory[0]
+            .reserve_related(
+                self.catalog.append_allocation_bound(run),
+                "catalog append working storage",
+            )
+            .map_err(super::PublicationError::Retriable)?;
+        self.catalog
+            .append_run(epoch, run)
+            .map_err(super::PublicationError::from)
     }
 }
 

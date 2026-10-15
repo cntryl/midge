@@ -177,4 +177,26 @@ impl WalPublicationCatalog {
             .saturating_add(vector_peak(count, std::mem::size_of::<CatalogEntry>()))
             .saturating_add(nested)
     }
+
+    pub(crate) fn append_retained_allocation_bound(&self, run: &[CatalogEntry]) -> usize {
+        let head = self.head().id;
+        let added = run.iter().filter(|entry| entry.id() > head);
+        let count = added.clone().count();
+        let rows = self
+            .segments
+            .capacity()
+            .max(self.segments.len().saturating_add(count));
+        let current_frontiers = self
+            .segments
+            .iter()
+            .map(|entry| entry.facts.max_seq_per_cf.capacity());
+        let added_frontiers = added.map(|entry| entry.facts.max_seq_per_cf.len());
+        current_frontiers.chain(added_frontiers).fold(
+            rows.saturating_mul(std::mem::size_of::<CatalogEntry>())
+                .saturating_add(4096),
+            |bytes, count| {
+                bytes.saturating_add(count.saturating_mul(std::mem::size_of::<(u32, u64)>()))
+            },
+        )
+    }
 }

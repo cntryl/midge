@@ -381,11 +381,7 @@ impl CloudPersistence {
             Missing::Refuse,
             |catalog| {
                 catalog
-                    .admit_append(run)
-                    .map_err(PublicationError::Retriable)?;
-                catalog
                     .append_run(fencing_epoch, run)
-                    .map_err(PublicationError::from)
                     .map(|changed| Mutation::of(changed, ()))
             },
         );

@@ -69,6 +69,49 @@ fn should_fence_incident_sized_catalog_within_fitz_maintenance_budget() {
 }
 
 #[test]
+fn should_publish_after_incident_sized_fencing_within_fitz_maintenance_budget() {
+    // Arrange
+    let (_directory, storage) = storage_fixture();
+    let catalog = populated_catalog_with_segments(32_768);
+    let original = catalog.encode().unwrap();
+    for key in [
+        crate::wal::cloud_catalog::OBJECT_KEY,
+        crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+    ] {
+        storage
+            .compare_exchange_remote_object(key, None, original.clone())
+            .unwrap();
+    }
+    let budget = storage.configure_maintenance_memory(53_687_091);
+    drop(storage.fence_cloud_wal_catalog(8).unwrap());
+    let record = crate::wal::WalRecord::new(
+        crate::wal::WalOpKind::Put,
+        bytes::Bytes::from_static(b"new"),
+        Some(bytes::Bytes::from_static(b"value")),
+        32_769,
+    );
+    let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(32_769, 8, catalog.head())
+        .record(&record)
+        .seal();
+    let entry = CatalogEntry::from_sealed_bytes(&bytes).unwrap();
+    let deadline = crate::common::OperationDeadline::unbounded();
+
+    // Act
+    storage
+        .publish_wal_segments(&[entry], 8, &deadline)
+        .unwrap();
+
+    // Assert
+    let proof = storage
+        .remote_object_proof(crate::wal::cloud_catalog::OBJECT_KEY)
+        .unwrap();
+    let published = WalPublicationCatalog::decode(proof.bytes()).unwrap();
+    assert_eq!(published.head().id, 32_769);
+    assert_eq!(published.fencing_epoch(), 8);
+    assert!(budget.peak() <= budget.limit());
+}
+
+#[test]
 fn should_admit_compact_catalog_without_reserving_pretty_print_padding() {
     // Arrange
     let catalog = populated_catalog();
