@@ -49,7 +49,7 @@ zstd = "0.14"
 bytes = { version = "1.12", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-uuid = { version = "1.26", features = ["v4"] }
+uuid = { version = "1.28", features = ["v4"] }
 
 # Error Handling
 thiserror = "2.0"
@@ -83,6 +83,7 @@ hmac = { version = "0.13", optional = true }
 percent-encoding = { version = "2.3", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"], optional = true }
 sha2 = { version = "0.11", optional = true }
+md-5 = { version = "0.11", optional = true }
 sha1 = { version = "0.11", optional = true }
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros"], optional = true }
 ring = { version = "0.17", optional = true }
@@ -98,7 +99,7 @@ libc = "0.2"
 winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 
 [dev-dependencies]
-proptest = "1.11"
+proptest = "1.12"
 cntryl-stress = "0.5.1"
 sha2 = "0.11"
 # Self dev-dependency: turns on `internal-testing` for tests/ and benches/ so
@@ -130,6 +131,7 @@ cloud-common = [
 ]
 cloud-aws = [
     "cloud-common",
+    "dep:base64",
     "dep:hmac",
     "dep:sha2",
     "dep:percent-encoding",
@@ -146,6 +148,7 @@ cloud-azure = [
     "cloud-common",
     "dep:base64",
     "dep:hmac",
+    "dep:md-5",
     "dep:sha2",
     "dep:percent-encoding",
     "dep:urlencoding",
@@ -162,6 +165,7 @@ cloud-gcp = [
 ]
 cloud-oci = [
     "cloud-common",
+    "dep:base64",
     "dep:hmac",
     "dep:sha2",
     "dep:percent-encoding",

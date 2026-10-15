@@ -104,6 +104,46 @@ Use `WriteOptions::cloud_async()` when local acknowledgement may precede remote
 upload, or `WriteOptions::cloud_strict()` when the commit must wait for the
 cloud upload. These choices are meaningful only with cloud-backed storage.
 
+## Cloud request volume
+
+Each upload asks the provider to prove what it stored, and keeps the stored
+identity from the response:
+
+| Provider | Upload check | Identity |
+|---|---|---|
+| AWS S3 | `x-amz-checksum-crc32c`, validated by S3 | `ETag` |
+| Azure Blob | `Content-MD5`, validated by Put Blob | `ETag` |
+| GCS (JSON and XML) | CRC32C GCS computes over the stored object | generation |
+| S3-compatible, OCI | opt-in, see below | `ETag` |
+
+With a receipt, the engine skips reading the upload back. Once the WAL
+catalog is warm, publishing one segment normally makes three requests: the
+immutable WAL PUT and conditional PUTs of the primary catalog and its mirror.
+Catalog identities are reused only after confirmed writes; conflicts, missing
+receipts, and uncertain outcomes require fresh reads. A response without a
+checksum falls back to verified readback, and a checksum that names other
+bytes fails the upload. Startup, lease renewal, SST publication, and WAL
+retirement add their own requests.
+
+Generic S3-compatible endpoints and OCI keep verified readback by default,
+because an endpoint may echo `x-amz-checksum-crc32c` without validating it.
+After confirming an endpoint rejects a PUT whose body does not match that
+header, enable receipts with `S3CompatibleConfig::with_checksum_receipts(true)`
+or `OciObjectStorageConfig::with_checksum_receipts(true)`.
+
+Sealing, upload admission, and acknowledgement check the writer's monotonic
+lease window. The heartbeat renews that window, and conditional catalog
+publication rejects an epoch superseded by another writer. WAL write-group
+admission still checks remote ownership before applying writes, so a stale
+writer is rejected before a local WAL effect. This check is separate from
+the three publication requests above.
+
+The default WAL seal delay remains 500 ms, with size and write-count limits
+also triggering seals. `OpenOptions::cloud_write_policy` can change that delay;
+a longer delay increases the time before asynchronous writes become cloud
+durable and can increase strict-commit latency. Request reduction does not
+require changing this durability timing.
+
 ## Object versioning and lifecycle rules
 
 Provider lifecycle policy is bucket/container provisioning, not a Midge data

@@ -148,6 +148,8 @@ pub struct HybridStorage {
     ephemeral_sst_cache: std::sync::atomic::AtomicBool,
     /// Pending WAL segment uploads (`CloudAsync` mode)
     upload_queue: Arc<Mutex<UploadQueue>>,
+    /// Bounded confirmations waiting for the runtime's publication phase.
+    verified_uploads: Arc<Mutex<HashMap<u64, uploads::VerifiedUpload>>>,
     /// Completed events ready for polling
     event_queue: Arc<Mutex<BoundedEventQueue>>,
 
@@ -168,6 +170,8 @@ pub struct HybridStorage {
     /// Serializes in-process WAL catalog publication and retirement updates.
     /// Provider compare-exchange remains the cross-process authority boundary.
     wal_catalog_mutation: Mutex<()>,
+    /// Provider-confirmed copies, consumed before a possibly ambiguous CAS.
+    wal_catalog_cache: Mutex<Option<(ControlObject, ControlObject)>>,
     maintenance_memory: std::sync::OnceLock<crate::common::resource_budget::ResourceBudget>,
     write_authority: std::sync::OnceLock<StorageWriteAuthority>,
 
@@ -307,6 +311,7 @@ impl HybridStorage {
         let (wal_upload_tx, wal_upload_rx) =
             mpsc::sync_channel::<UploadState>(limits.worker_entries.max(1));
         let counters = crate::telemetry::CounterSink::default();
+        let verified_uploads = Arc::new(Mutex::new(HashMap::new()));
         let (upload_worker_handle, upload_worker_failed) = Self::spawn_wal_upload_worker(
             &counters,
             wal_upload_rx,
@@ -314,6 +319,7 @@ impl HybridStorage {
             event_queue.clone(),
             external_event_tx.clone(),
             limits.callback_timeout,
+            Arc::clone(&verified_uploads),
         );
 
         Self {
@@ -326,6 +332,7 @@ impl HybridStorage {
             budget_actor: Arc::new(Mutex::new(budget_actor)),
             ephemeral_sst_cache: std::sync::atomic::AtomicBool::new(false),
             upload_queue,
+            verified_uploads,
             event_queue,
             external_event_tx,
             wal_upload_worker: Mutex::new(WalUploadWorker {
@@ -335,6 +342,7 @@ impl HybridStorage {
             callback_timeout: limits.callback_timeout,
             upload_worker_failed,
             wal_catalog_mutation: Mutex::new(()),
+            wal_catalog_cache: Mutex::new(None),
             maintenance_memory: std::sync::OnceLock::new(),
             write_authority: std::sync::OnceLock::new(),
             prune_workers: Arc::new(Mutex::new(PruneWorkerRegistry::new(
@@ -357,6 +365,17 @@ impl HybridStorage {
         self.write_authority
             .get()
             .map_or(Ok(()), |validate| validate())
+    }
+
+    /// The caller holds the WAL catalog mutation lock across take and commit.
+    pub(crate) fn take_wal_catalog_cache(&self) -> Option<(ControlObject, ControlObject)> {
+        self.wal_catalog_cache.lock().take()
+    }
+
+    pub(crate) fn cache_wal_catalog(&self, primary: ControlObject, mirror: ControlObject) {
+        if primary.has_write_receipt() && mirror.has_write_receipt() {
+            *self.wal_catalog_cache.lock() = Some((primary, mirror));
+        }
     }
 
     pub(crate) fn configure_maintenance_memory(

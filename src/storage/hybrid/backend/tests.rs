@@ -961,6 +961,7 @@ fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
         &storage.event_queue,
         Some(&external_event_tx),
         storage.callback_timeout,
+        &storage.verified_uploads,
     );
     let terminal_events = external_event_rx.try_iter().collect::<Vec<_>>();
     fail::remove("midge::cloud::in_wal_upload_ack_log");

@@ -216,12 +216,13 @@ impl WalHistory {
 
     /// Open the existing ledger in `wal` for writing and sweep the files it
     /// does not name; `None` when there is none.
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn load(wal: Arc<dyn Fs>, epoch: u64) -> MidgeResult<Option<Self>> {
         Self::load_inner(wal, epoch, None)
     }
 
-    /// [`Self::load`] bound to the acquired writer lease while it republishes
-    /// the ledger and sweeps orphan files.
+    /// Open the existing ledger bound to the acquired writer lease while it
+    /// republishes the ledger and sweeps orphan files.
     pub(crate) fn load_with_fence(
         wal: Arc<dyn Fs>,
         epoch: u64,

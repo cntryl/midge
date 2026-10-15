@@ -68,6 +68,7 @@ fn head(store: &SimulatedObjectStore, key: &str) -> CloudOutcome<ObjectMetadata>
 #[allow(clippy::match_same_arms)] // The arms bind results of different types.
 fn class(answer: &CloudEvent) -> &'static str {
     let outcome = match answer {
+        CloudEvent::PutReceipt { result, .. } => result.as_ref().err(),
         CloudEvent::Put { result, .. } | CloudEvent::Delete { result, .. } => result.as_ref().err(),
         CloudEvent::Get { result, .. } => result.as_ref().err(),
         CloudEvent::GetWithMetadata { result, .. } => result.as_ref().err(),

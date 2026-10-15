@@ -261,25 +261,40 @@ pub(super) fn mutate_wal_catalog_within<T, R>(
 ) -> MidgeResult<Result<(T, AdmittedCatalog), R>> {
     validate()?;
     let _catalog_mutation = storage.lock_wal_catalog_mutation_within(deadline, label)?;
-    let (mut catalog, expected) =
+    let cached = storage.take_wal_catalog_cache();
+    let (mut catalog, expected, mirror) = if let Some((primary, mirror)) = cached {
+        (
+            AdmittedCatalog::decode(primary.bytes(), &catalog_budget(storage))?,
+            Some(primary),
+            Some(mirror),
+        )
+    } else {
         match load_and_repair_catalog_with_authority(storage, deadline, validate)? {
-            Some(authority) => (authority.catalog, Some(authority.primary)),
+            Some(authority) => (authority.catalog, Some(authority.primary), None),
             None => match missing {
-                Missing::Create(epoch) => (AdmittedCatalog::empty(storage, epoch)?, None),
+                Missing::Create(epoch) => (AdmittedCatalog::empty(storage, epoch)?, None, None),
                 Missing::Refuse => {
                     return Err(MidgeError::Internal(
                         "cloud WAL publication catalog is missing".to_string(),
                     ))
                 }
             },
-        };
+        }
+    };
     let value = match mutate(&mut catalog) {
         Err(refusal) => return Ok(Err(refusal)),
-        Ok(Mutation::Unchanged(value)) if expected.is_some() => return Ok(Ok((value, catalog))),
+        Ok(Mutation::Unchanged(value)) if expected.is_some() && mirror.is_none() => {
+            return Ok(Ok((value, catalog)))
+        }
         Ok(Mutation::Unchanged(value) | Mutation::Changed(value)) => value,
     };
-    match commit_catalog_with_authority(storage, expected.as_ref(), &catalog, deadline, validate) {
-        Ok(_) => Ok(Ok((value, catalog))),
+    // Even an unchanged cached result crosses the CAS boundary: a successor
+    // may have fenced this epoch since the cached response was received.
+    match commit_catalog_with_authority(storage, expected.as_ref(), mirror.as_ref(), &catalog, deadline, validate) {
+        Ok((primary, mirror)) => {
+            storage.cache_wal_catalog(primary, mirror);
+            Ok(Ok((value, catalog)))
+        }
         Err(MidgeError::Busy(conflict)) => match current_fencing_epoch(storage, deadline)? {
             Some(winner) if winner > catalog.fencing_epoch() => Err(MidgeError::Fenced(format!(
                 "cloud WAL catalog advanced to fencing epoch {winner}, writer epoch {} rejected during {label}",
@@ -321,10 +336,11 @@ pub(crate) fn refusal_error(refusal: CatalogRefusal) -> MidgeError {
 fn commit_catalog_with_authority(
     storage: &HybridStorage,
     expected_primary: Option<&ControlObject>,
+    expected_mirror: Option<&ControlObject>,
     catalog: &WalPublicationCatalog,
     deadline: &crate::common::OperationDeadline,
     validate: &dyn Fn() -> MidgeResult<()>,
-) -> MidgeResult<ControlObject> {
+) -> MidgeResult<(ControlObject, ControlObject)> {
     let budget = catalog_budget(storage);
     let encoded = AdmittedEncoding::new(catalog, &budget)?;
     validate()?;
@@ -339,14 +355,27 @@ fn commit_catalog_with_authority(
         )
         .map_err(crate::storage::hybrid::backend::ControlWriteFailure::into_error)?;
     crate::failpoints::fail_point!("midge::cloud::after_catalog_primary_before_mirror");
-    sync_catalog_copy_with_authority(
-        storage,
-        crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
-        &encoded.bytes,
-        deadline,
-        validate,
-    )?;
-    Ok(primary)
+    let mirror = if let Some(expected) = expected_mirror {
+        storage
+            .write_control_object_with_authority(
+                crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+                Some(expected.object_metadata()),
+                &encoded.bytes,
+                &budget,
+                deadline,
+                validate,
+            )
+            .map_err(crate::storage::hybrid::backend::ControlWriteFailure::into_error)?
+    } else {
+        sync_catalog_copy_with_authority(
+            storage,
+            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            &encoded.bytes,
+            deadline,
+            validate,
+        )?
+    };
+    Ok((primary, mirror))
 }
 
 fn sync_catalog_copy_with_authority(

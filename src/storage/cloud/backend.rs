@@ -51,7 +51,7 @@ impl CloudRequestOptions {
         self.deadline.map(|deadline| deadline.remaining())
     }
 
-    fn headers_with_deadline(&self) -> Vec<(String, String)> {
+    pub(crate) fn headers_with_deadline(&self) -> Vec<(String, String)> {
         let mut headers = self.headers.clone();
         if let Some(deadline) = self
             .deadline
@@ -497,6 +497,21 @@ pub trait CloudReadCapability: Send + Sync {
 /// impl CloudWriteCapability for MissingWrite {}
 /// ```
 pub trait CloudWriteCapability: Send + Sync {
+    /// Request a checksum-validated write receipt when supported. The default
+    /// emits the ordinary PUT completion, requiring the caller's readback.
+    fn write_with_receipt(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        options: CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        if reject_exhausted_receipt(key, &options, &callback) {
+            return;
+        }
+        self.write(key, data, options, callback);
+    }
+
     /// Submit a PUT with typed deadline, conditional headers and payload
     /// reservation controls.
     fn write(
@@ -650,4 +665,21 @@ pub trait CloudHeadCapability: Send + Sync {
     ) {
         self.submit_head(key, callback);
     }
+}
+
+/// Answer a receipt write whose deadline is already spent without sending
+/// it. Returns whether the callback was answered.
+pub(crate) fn reject_exhausted_receipt(
+    key: &str,
+    options: &CloudRequestOptions,
+    callback: &CloudCallback,
+) -> bool {
+    if !options.timeout().is_some_and(|timeout| timeout.is_zero()) {
+        return false;
+    }
+    let _ = callback.send(CloudEvent::PutReceipt {
+        key: key.into(),
+        result: Err(operation_timeout_error("PUT receipt")),
+    });
+    true
 }

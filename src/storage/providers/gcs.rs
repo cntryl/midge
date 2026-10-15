@@ -1452,12 +1452,92 @@ impl crate::storage::cloud::CloudWriteCapability for GcsBackend {
         callback: CloudCallback,
     ) {
         let key = key.to_string();
+        let mode = self.mode;
+        let (request, conditional_mutation) =
+            match self.prepare_put_request(&key, data, headers, reservation) {
+                Ok(parts) => parts,
+                Err(error) => {
+                    let _ = callback.send(CloudEvent::Put {
+                        key,
+                        result: CloudOutcome::Err(CloudError::Protocol(error)),
+                    });
+                    return;
+                }
+            };
+        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Put {
+            key: ctx,
+            result: map_response(
+                result,
+                |status| GcsDialect(mode).put_ok(status),
+                |_| Ok(()),
+                |resp| gcs_response_error(resp, "GCS PUT", mode, conditional_mutation),
+            ),
+        };
+        self.executor.spawn_request(request, key, callback, mapper);
+    }
+
+    fn write_with_receipt(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        use base64::Engine as _;
+        if crate::storage::cloud::reject_exhausted_receipt(key, &options, &callback) {
+            return;
+        }
+        let size = data.len() as u64;
+        let checksum = crc32c::crc32c(&data);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(checksum.to_be_bytes());
+        // GCS rejects a body whose CRC32C differs from this hash, and reports
+        // the CRC32C it computed over the stored object either way.
+        let mut headers = options.headers_with_deadline();
+        headers.retain(|(name, _)| !name.eq_ignore_ascii_case("x-goog-hash"));
+        headers.push(("x-goog-hash".into(), format!("crc32c={encoded}")));
+        let mode = self.mode;
+        let (request, conditional_mutation) =
+            match self.prepare_put_request(key, data, headers, options.reservation) {
+                Ok(parts) => parts,
+                Err(error) => {
+                    let _ = callback.send(CloudEvent::PutReceipt {
+                        key: key.into(),
+                        result: Err(CloudError::Protocol(error)),
+                    });
+                    return;
+                }
+            };
+        self.executor
+            .spawn_request(request, key.into(), callback, move |key, response| {
+                CloudEvent::PutReceipt {
+                    key,
+                    result: map_response(
+                        response,
+                        |status| GcsDialect(mode).put_ok(status),
+                        |response| gcs_write_receipt(&response, mode, size, &encoded, checksum),
+                        |response| {
+                            gcs_response_error(response, "GCS PUT", mode, conditional_mutation)
+                        },
+                    ),
+                }
+            });
+    }
+}
+
+impl GcsBackend {
+    fn prepare_put_request(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+    ) -> Result<(CloudRequest, bool), String> {
         let method = match self.mode {
             GcsBackendMode::Json => Method::POST,
             GcsBackendMode::Xml => Method::PUT,
         };
         let mode = self.mode;
-        let mut url = self.upload_url(&key);
+        let mut url = self.upload_url(key);
         let content_length = data.len();
         let request = CloudRequest::new(method, String::new())
             .with_body(data)
@@ -1467,7 +1547,7 @@ impl crate::storage::cloud::CloudWriteCapability for GcsBackend {
         // JSON uploads express mutation preconditions as query parameters. The
         // standard ETag headers are read-only in GCS JSON mode, so never forward
         // them on a write where they could be ignored.
-        let (mut request, conditional_mutation) = match super::rest::apply_caller_headers(
+        let (mut request, conditional_mutation) = super::rest::apply_caller_headers(
             request,
             headers,
             |name, value| {
@@ -1507,28 +1587,66 @@ impl crate::storage::cloud::CloudWriteCapability for GcsBackend {
                     Ok(request.with_header(name, value))
                 }
             },
-        ) {
-            Ok(parts) => parts,
-            Err(error) => {
-                let _ = callback.send(CloudEvent::Put {
-                    key,
-                    result: CloudOutcome::Err(CloudError::Protocol(error)),
-                });
-                return;
-            }
-        };
+        )?;
         request.url = url;
-        let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Put {
-            key: ctx,
-            result: map_response(
-                result,
-                |status| GcsDialect(mode).put_ok(status),
-                |_| Ok(()),
-                |resp| gcs_response_error(resp, "GCS PUT", mode, conditional_mutation),
-            ),
-        };
-        self.executor.spawn_request(request, key, callback, mapper);
+        Ok((request, conditional_mutation))
     }
+}
+
+/// The receipt for a GCS upload: the CRC32C GCS computed over the stored
+/// object, which must equal the local one, and the generation it created.
+/// A response without both yields `None`, leaving the caller's readback.
+fn gcs_write_receipt(
+    response: &CloudResponse,
+    mode: GcsBackendMode,
+    size: u64,
+    encoded_checksum: &str,
+    checksum: u32,
+) -> CloudOutcome<Option<crate::storage::StorageWriteReceipt>> {
+    let (stored_checksum, metadata) = match mode {
+        GcsBackendMode::Json => {
+            let Ok(resource) = serde_json::from_slice::<serde_json::Value>(&response.body) else {
+                return Ok(None);
+            };
+            let stored = resource
+                .get("crc32c")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+            (stored, parse_gcs_json_object_metadata(&response.body).ok())
+        }
+        GcsBackendMode::Xml => {
+            let stored = response
+                .headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case("x-goog-hash"))
+                .flat_map(|(_, value)| value.split(','))
+                .find_map(|hash| hash.trim().strip_prefix("crc32c="))
+                .map(str::to_owned);
+            let identity = response
+                .header("etag")
+                .zip(response.header("x-goog-generation"));
+            let metadata = identity
+                .filter(|(etag, generation)| !etag.is_empty() && generation.parse::<u64>().is_ok())
+                .map(|(etag, generation)| {
+                    ObjectMetadata::with_generation(size, etag.to_owned(), generation)
+                });
+            (stored, metadata)
+        }
+    };
+    let Some(stored_checksum) = stored_checksum else {
+        return Ok(None);
+    };
+    if stored_checksum != encoded_checksum {
+        return Err(CloudError::Protocol(
+            "GCS upload CRC32C differs from the sent bytes".into(),
+        ));
+    }
+    Ok(metadata
+        .filter(|metadata| metadata.size == size)
+        .map(|metadata| crate::storage::StorageWriteReceipt {
+            metadata,
+            content_crc32c: checksum,
+        }))
 }
 
 impl crate::storage::cloud::CloudDeleteCapability for GcsBackend {

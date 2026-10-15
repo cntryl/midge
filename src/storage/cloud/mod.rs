@@ -156,6 +156,8 @@ pub(crate) use event::object_match_precondition_headers;
 pub use event::{CloudCallback, CloudEvent, ObjectMetadata};
 
 mod backend;
+#[cfg(feature = "cloud-common")]
+pub(crate) use backend::reject_exhausted_receipt;
 pub use backend::{
     CloudBackend, CloudDeleteCapability, CloudHeadCapability, CloudListCapability,
     CloudReadCapability, CloudReadOptions, CloudRequestOptions, CloudWriteCapability,

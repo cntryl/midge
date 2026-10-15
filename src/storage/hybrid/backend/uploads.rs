@@ -7,7 +7,29 @@ use super::{
 };
 use crate::storage::CloudUploadFailureKind;
 
+#[derive(Debug)]
+pub(super) struct VerifiedUpload {
+    key: String,
+    size: usize,
+    checksum: u32,
+}
+
+type VerifiedUploads = Arc<Mutex<super::HashMap<u64, VerifiedUpload>>>;
+
 impl HybridStorage {
+    /// Consume an upload's confirmation once. Missing or evicted confirmations
+    /// fall back to remote readback; this cache never grants catalog authority.
+    pub(crate) fn take_verified_upload(&self, id: u64, key: &str, bytes: &[u8]) -> bool {
+        self.verified_uploads
+            .lock()
+            .remove(&id)
+            .is_some_and(|proof| {
+                proof.key == key
+                    && proof.size == bytes.len()
+                    && proof.checksum == crc32c::crc32c(bytes)
+            })
+    }
+
     pub(crate) fn queue_cloud_wal_prune_complete(
         &self,
         segment_id: u64,
@@ -343,6 +365,7 @@ impl HybridStorage {
         event_queue: Arc<Mutex<BoundedEventQueue>>,
         external_event_tx: Option<cb::Sender<StorageEvent>>,
         callback_timeout: Duration,
+        verified_uploads: VerifiedUploads,
     ) -> (Option<JoinHandle<()>>, bool) {
         let worker_counters = counters.clone();
         let spawn_result = thread::Builder::new()
@@ -356,6 +379,7 @@ impl HybridStorage {
                         &event_queue,
                         external_event_tx.as_ref(),
                         callback_timeout,
+                        &verified_uploads,
                     );
                 }
             });
@@ -379,9 +403,10 @@ impl HybridStorage {
         event_queue: &Arc<Mutex<BoundedEventQueue>>,
         external_event_tx: Option<&cb::Sender<StorageEvent>>,
         callback_timeout: Duration,
+        verified_uploads: &VerifiedUploads,
     ) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::process_wal_upload(counters, upload, cloud, callback_timeout)
+            Self::process_wal_upload(counters, upload, cloud, callback_timeout, verified_uploads)
         }));
         let terminal_event = if let Ok(event) = result {
             event
@@ -406,6 +431,7 @@ impl HybridStorage {
         upload: &UploadState,
         cloud: &Arc<dyn StorageBackend>,
         callback_timeout: Duration,
+        verified_uploads: &VerifiedUploads,
     ) -> StorageEvent {
         let upload_start = Instant::now();
         counters.record(|m| {
@@ -440,7 +466,7 @@ impl HybridStorage {
         let expected_data = data.clone();
         let object_key = upload.object_key.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_write_request(
+        cloud.submit_write_receipt_request(
             crate::storage::StorageRequest::new(
                 &upload.object_key,
                 crate::common::OperationDeadline::from_budget(callback_timeout),
@@ -451,13 +477,25 @@ impl HybridStorage {
             tx,
         );
 
-        Self::handle_wal_upload_result(
+        let mut provider_confirmed = false;
+        let result = Self::handle_wal_upload_result(
             counters,
             upload,
             upload_start,
             &rx,
             callback_timeout,
-            |_, _| {
+            |receipt| {
+                if let Some(receipt) = receipt {
+                    return if receipt.matches(&expected_data) {
+                        provider_confirmed = true;
+                        Ok(())
+                    } else {
+                        Err(crate::storage::StorageError::new(
+                            crate::storage::StorageErrorKind::Corruption,
+                            "WAL write receipt differs from uploaded bytes",
+                        ))
+                    };
+                }
                 let proof =
                     Self::stable_object_proof_from_backend(cloud, &object_key, callback_timeout)
                         .map_err(crate::storage::StorageError::from)?;
@@ -472,7 +510,25 @@ impl HybridStorage {
                     ))
                 }
             },
-        )
+        );
+        if provider_confirmed && matches!(result, StorageEvent::CloudAck { .. }) {
+            let mut confirmed = verified_uploads.lock();
+            // Retained events and delayed acknowledgements cannot grow this
+            // optimization without bound. Overflow simply uses readback.
+            if confirmed.len() < super::MAX_PENDING_WAL_UPLOADS
+                || confirmed.contains_key(&upload.segment_id)
+            {
+                confirmed.insert(
+                    upload.segment_id,
+                    VerifiedUpload {
+                        key: object_key,
+                        size: expected_data.len(),
+                        checksum: crc32c::crc32c(&expected_data),
+                    },
+                );
+            }
+        }
+        result
     }
 }
 
@@ -557,42 +613,45 @@ impl HybridStorage {
         counters: &crate::telemetry::CounterSink,
         upload: &UploadState,
         upload_start: Instant,
-        rx: &std::sync::mpsc::Receiver<StorageEvent>,
+        rx: &std::sync::mpsc::Receiver<
+            Result<Option<crate::storage::StorageWriteReceipt>, crate::storage::StorageError>,
+        >,
         callback_timeout: Duration,
-        mut verify_remote: impl FnMut(u64, u64) -> Result<(), crate::storage::StorageError>,
+        mut verify_remote: impl FnMut(
+            Option<crate::storage::StorageWriteReceipt>,
+        ) -> Result<(), crate::storage::StorageError>,
     ) -> StorageEvent {
-        let (write_reported_success, write_error, write_failure_kind) =
+        let (write_reported_success, write_error, write_failure_kind, receipt) =
             match rx.recv_timeout(callback_timeout) {
-                Ok(StorageEvent::WriteComplete { key, result }) => {
-                    let _ = key;
-                    match result {
-                        StorageOutcome::Ok(()) => (true, None, CloudUploadFailureKind::Other),
-                        StorageOutcome::Err(error) => {
-                            let failure_kind = if error.is_timeout() {
-                                CloudUploadFailureKind::Timeout
-                            } else {
-                                CloudUploadFailureKind::Other
-                            };
-                            (false, Some(error.to_string()), failure_kind)
-                        }
+                Ok(result) => match result {
+                    Ok(receipt) => (true, None, CloudUploadFailureKind::Other, receipt),
+                    Err(error) => {
+                        let failure_kind = if error.is_timeout() {
+                            CloudUploadFailureKind::Timeout
+                        } else {
+                            CloudUploadFailureKind::Other
+                        };
+                        (false, Some(error.to_string()), failure_kind, None)
                     }
-                }
+                },
                 Err(mpsc::RecvTimeoutError::Timeout) => (
                     false,
                     Some("cloud WAL upload callback timed out".to_string()),
                     CloudUploadFailureKind::Timeout,
+                    None,
                 ),
-                Err(mpsc::RecvTimeoutError::Disconnected) | Ok(_) => (
+                Err(mpsc::RecvTimeoutError::Disconnected) => (
                     false,
                     Some(
                         "cloud WAL upload callback channel closed or returned an unexpected event"
                             .to_string(),
                     ),
                     CloudUploadFailureKind::Other,
+                    None,
                 ),
             };
 
-        match verify_remote(upload.segment_id, upload.max_sequence) {
+        match verify_remote(receipt) {
             Ok(()) => {
                 let upload_latency_us = Self::duration_micros_to_u64(upload_start.elapsed());
                 Self::log_wal_upload_ack(upload);

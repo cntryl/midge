@@ -337,6 +337,9 @@ impl CloudPersistence {
                 ),
             });
         }
+        if self.take_verified_upload(segment_id, &entry.object_key(), &local_bytes) {
+            return Ok(entry);
+        }
         let remote = validate_remote_wal(self, &entry, deadline)?;
         if remote.proof.bytes() != local_bytes {
             return Err(PublicationError::Mismatch {

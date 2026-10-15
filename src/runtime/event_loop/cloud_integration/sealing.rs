@@ -321,12 +321,10 @@ impl EventLoop {
             .cloud_coordinator
             .cloud_wal
             .begin_upload_attempt();
-        // Validate once per drain pass, not once per segment. Under a provider
-        // leader store each validation is a cloud GET, and the durable guarantee
-        // is not this poll: `WalPublicationCatalog::require_epoch` plus the
-        // catalog compare-exchange reject a fenced writer's publish at the object
-        // store regardless. This check is a fast-fail, so paying for it per
-        // segment buys nothing and multiplies the stall on a deep backlog.
+        // Check authority once per drain pass. Provider stores use the local
+        // monotonic lease window; `WalPublicationCatalog::require_epoch` and
+        // the catalog CAS enforce cross-process fencing at publication. A
+        // deep backlog does not require a lease-object GET per segment.
         self.validate_runtime_writer_lease_within(deadline)?;
 
         loop {

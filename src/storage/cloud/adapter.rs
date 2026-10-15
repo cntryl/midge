@@ -162,6 +162,16 @@ impl CloudStorage {
 }
 
 impl StorageBackend for CloudStorage {
+    fn submit_write_receipt_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::WriteReceiptCallback,
+    ) {
+        let result = self.write_receipt_within(request, data);
+        let _ = callback.send(result);
+    }
+
     fn submit_range_read_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -295,6 +305,43 @@ impl StorageBackend for CloudStorage {
 }
 
 impl CloudStorage {
+    fn write_receipt_within(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+    ) -> Result<Option<crate::storage::StorageWriteReceipt>, crate::storage::StorageError> {
+        let timeout = self.scoped_timeout(request.remaining_timeout());
+        if timeout.is_zero() {
+            return Err(crate::storage::storage_timeout_error(
+                "cloud PUT has no remaining budget",
+            ));
+        }
+        let deadline = crate::common::OperationDeadline::from_budget(timeout);
+        let headers = request.precondition.headers()?;
+        let full_key = self.full_path(&request.key);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.writes.write_with_receipt(
+            &full_key,
+            data,
+            CloudRequestOptions::default()
+                .with_deadline(deadline)
+                .with_headers(headers)
+                .with_reservation(request.reservation),
+            tx,
+        );
+        match await_cloud_event(self, &rx, &deadline, "PUT receipt")? {
+            CloudEvent::PutReceipt { key, result } if key == full_key => {
+                result.map_err(storage_error_from_cloud)
+            }
+            CloudEvent::Put { key, result } if key == full_key => {
+                result.map(|()| None).map_err(storage_error_from_cloud)
+            }
+            event => Err(crate::storage::StorageError::protocol(format!(
+                "unexpected PUT receipt response: {event:?}"
+            ))),
+        }
+    }
+
     fn head_with_timeout(
         &self,
         key: &str,

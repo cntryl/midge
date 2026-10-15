@@ -848,6 +848,9 @@ pub struct S3Config {
     pub region: String,
     pub endpoint: Option<String>,
     pub path_style: bool,
+    /// Trust validated `x-amz-checksum-crc32c` PUT receipts instead of
+    /// reading uploads back. On for AWS; opt-in for compatible endpoints.
+    pub checksum_receipts: bool,
 }
 
 impl S3Config {
@@ -858,6 +861,7 @@ impl S3Config {
             region,
             endpoint: None,
             path_style: false,
+            checksum_receipts: true,
         }
     }
 
@@ -868,7 +872,16 @@ impl S3Config {
             region,
             endpoint: Some(endpoint),
             path_style,
+            checksum_receipts: false,
         }
+    }
+
+    /// Trust the endpoint's validated checksum receipts. See
+    /// [`crate::config::S3CompatibleConfig::with_checksum_receipts`].
+    #[must_use]
+    pub fn with_checksum_receipts(mut self, enabled: bool) -> Self {
+        self.checksum_receipts = enabled;
+        self
     }
 }
 
@@ -1325,6 +1338,51 @@ impl crate::storage::cloud::CloudReadCapability for S3Backend {
 }
 
 impl crate::storage::cloud::CloudWriteCapability for S3Backend {
+    fn write_with_receipt(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        use base64::Engine as _;
+        if !self.config.checksum_receipts {
+            self.write(key, data, options, callback);
+            return;
+        }
+        if crate::storage::cloud::reject_exhausted_receipt(key, &options, &callback) {
+            return;
+        }
+        let size = data.len() as u64;
+        let checksum = crc32c::crc32c(&data);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(checksum.to_be_bytes());
+        let mut headers = options.headers_with_deadline();
+        headers.retain(|(name, _)| !name.eq_ignore_ascii_case("x-amz-checksum-crc32c"));
+        headers.push(("x-amz-checksum-crc32c".into(), encoded.clone()));
+        let request = match self.prepare_put_request(key, data, headers, options.reservation) {
+            Ok(request) => request,
+            Err(error) => {
+                let _ = callback.send(CloudEvent::PutReceipt {
+                    key: key.into(),
+                    result: Err(CloudError::Protocol(error)),
+                });
+                return;
+            }
+        };
+        self.executor
+            .spawn_request(request.0, key.into(), callback, move |key, response| {
+                CloudEvent::PutReceipt {
+                    key,
+                    result: map_response(
+                        response,
+                        |status| S3Dialect.put_ok(status),
+                        |response| s3_write_receipt(&response, size, checksum, &encoded),
+                        |response| s3_put_response_error(response, request.1),
+                    ),
+                }
+            });
+    }
+
     fn submit_put(
         &self,
         key: &str,
@@ -1344,32 +1402,17 @@ impl crate::storage::cloud::CloudWriteCapability for S3Backend {
         callback: CloudCallback,
     ) {
         let key = key.to_string();
-        let url = self.object_url(&key);
-        let content_length = data.len();
-        let request = CloudRequest::new(Method::PUT, url)
-            .with_body(data)
-            .with_reservation(reservation)
-            .with_header("Content-Length", content_length.to_string());
-        let (mut request, conditional_mutation) = match super::rest::apply_caller_headers(
-            request,
-            headers,
-            |name, _| {
-                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
-            },
-            |request, name, value| Ok(request.with_header(name, value)),
-        ) {
-            Ok(parts) => parts,
-            Err(error) => {
-                let _ = callback.send(CloudEvent::Put {
-                    key,
-                    result: CloudOutcome::Err(CloudError::Protocol(error)),
-                });
-                return;
-            }
-        };
-        if conditional_mutation {
-            request = request.with_conditional_conflict_retries();
-        }
+        let (request, conditional_mutation) =
+            match self.prepare_put_request(&key, data, headers, reservation) {
+                Ok(parts) => parts,
+                Err(error) => {
+                    let _ = callback.send(CloudEvent::Put {
+                        key,
+                        result: CloudOutcome::Err(CloudError::Protocol(error)),
+                    });
+                    return;
+                }
+            };
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Put {
             key: ctx,
             result: map_response(
@@ -1381,6 +1424,63 @@ impl crate::storage::cloud::CloudWriteCapability for S3Backend {
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
+}
+
+impl S3Backend {
+    fn prepare_put_request(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+    ) -> Result<(CloudRequest, bool), String> {
+        let content_length = data.len();
+        let request = CloudRequest::new(Method::PUT, self.object_url(key))
+            .with_body(data)
+            .with_reservation(reservation)
+            .with_header("Content-Length", content_length.to_string());
+        let (request, conditional) = super::rest::apply_caller_headers(
+            request,
+            headers,
+            |name, _| {
+                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
+            },
+            |request, name, value| Ok(request.with_header(name, value)),
+        )?;
+        Ok((
+            if conditional {
+                request.with_conditional_conflict_retries()
+            } else {
+                request
+            },
+            conditional,
+        ))
+    }
+}
+
+fn s3_write_receipt(
+    response: &CloudResponse,
+    size: u64,
+    checksum: u32,
+    encoded_checksum: &str,
+) -> CloudOutcome<Option<crate::storage::StorageWriteReceipt>> {
+    // Compatible providers may omit checksum receipts. Keep their verified
+    // readback path; never treat an ETag as a content checksum.
+    let Some(actual_checksum) = response.header("x-amz-checksum-crc32c") else {
+        return Ok(None);
+    };
+    if actual_checksum != encoded_checksum {
+        return Err(CloudError::Protocol(
+            "S3 PUT receipt checksum mismatch".into(),
+        ));
+    }
+    let Some(etag) = response.header("etag").filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    Ok(Some(crate::storage::StorageWriteReceipt {
+        metadata: crate::storage::StorageObjectMetadata::new(size, etag.into()),
+        content_crc32c: checksum,
+    }))
 }
 
 impl crate::storage::cloud::CloudDeleteCapability for S3Backend {
