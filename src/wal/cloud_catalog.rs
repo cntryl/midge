@@ -17,6 +17,7 @@
 use crate::types::SharedGenerationId;
 use crate::wal::format::{ChainLink, SealedFacts, SegmentId, SegmentIdentity};
 use serde::{Deserialize, Serialize};
+mod allocation;
 
 /// The catalog format this build reads and writes. Any other version is a
 /// compatibility error; nothing migrates it.
@@ -322,17 +323,7 @@ impl WalPublicationCatalog {
     /// [`CatalogDecodeError::Invalid`] for anything else that is not a valid
     /// catalog.
     pub fn decode(bytes: &[u8]) -> Result<Self, CatalogDecodeError> {
-        let probe: VersionProbe = serde_json::from_slice(bytes)
-            .map_err(|error| CatalogDecodeError::Invalid(format!("JSON: {error}")))?;
-        match probe.format_version {
-            Some(FORMAT_VERSION) => {}
-            Some(version) => return Err(CatalogDecodeError::Incompatible(version)),
-            None => {
-                return Err(CatalogDecodeError::Invalid(
-                    "the document names no format version".into(),
-                ))
-            }
-        }
+        Self::validate_format(bytes)?;
         let catalog: Self = serde_json::from_slice(bytes)
             .map_err(|error| CatalogDecodeError::Invalid(format!("JSON: {error}")))?;
         catalog.validate().map_err(CatalogDecodeError::Invalid)?;
@@ -486,6 +477,7 @@ impl WalPublicationCatalog {
             });
         }
         let next = self.next_segment_id.max(last.id().saturating_add(1));
+        self.segments.reserve_exact(added.len());
         self.segments.extend(added);
         self.next_segment_id = next;
         Ok(true)

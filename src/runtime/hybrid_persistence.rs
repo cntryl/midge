@@ -381,13 +381,17 @@ impl CloudPersistence {
             Missing::Refuse,
             |catalog| {
                 catalog
+                    .admit_append(run)
+                    .map_err(PublicationError::Retriable)?;
+                catalog
                     .append_run(fencing_epoch, run)
+                    .map_err(PublicationError::from)
                     .map(|changed| Mutation::of(changed, ()))
             },
         );
         match publication {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(refusal)) => Err(refusal.into()),
+            Ok(Err(refusal)) => Err(refusal),
             Err(error @ MidgeError::Fenced(_)) => Err(PublicationError::Fenced(error)),
             Err(error) => Err(PublicationError::Retriable(contextualize_cloud_error(
                 error,
@@ -464,6 +468,7 @@ impl CloudPersistence {
         if expected.is_empty() {
             return Ok(results);
         }
+        drop(catalog);
         // Reserve bounded physical cleanup ownership before switching authority.
         // Worker exhaustion can delay deletion, but cannot lose the retired target.
         let deletes = targets

@@ -658,6 +658,12 @@ pub(crate) fn dispatch_head_request(
 ///   content hash for HEAD, and stamps each new version with a later modified
 ///   time so a reused inode cannot repeat an old identity (#557).
 pub trait StorageBackend: Send + Sync + 'static {
+    /// Variable payload-copy workspace, excluding the caller's source encoding
+    /// and the transport's fixed, bounded request/response buffers.
+    /// Unknown backends retain the conservative four-buffer bound.
+    fn write_workspace_bytes(&self, payload_bytes: usize) -> usize {
+        payload_bytes.saturating_mul(4)
+    }
     /// Read an exact range from the version named by `IfMatch`.
     fn submit_range_read_request(
         &self,

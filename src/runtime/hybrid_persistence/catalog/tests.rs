@@ -307,13 +307,7 @@ impl CatalogExpiryFixture {
                 &deadline,
             ),
             "mirror-after-commit" | "prepared-primary" | "prepared-mirror" => {
-                commit_expiring_catalog(
-                    &storage,
-                    expected.as_ref(),
-                    &mut catalog,
-                    &deadline,
-                    &validate,
-                )
+                commit_expiring_catalog(&storage, expected, &mut catalog, &deadline, &validate)
             }
             _ => load_and_repair_catalog_with_authority(&storage, &deadline, &validate).map(|_| ()),
         };
@@ -335,7 +329,7 @@ impl CatalogExpiryFixture {
 
 fn commit_expiring_catalog(
     storage: &HybridStorage,
-    expected: Option<&ControlObject>,
+    expected: Option<ControlObject>,
     catalog: &mut WalPublicationCatalog,
     deadline: &crate::common::OperationDeadline,
     validate: &dyn Fn() -> MidgeResult<()>,
