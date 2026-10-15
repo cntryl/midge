@@ -17,60 +17,6 @@ fn parse_stdout(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("parse verify JSON")
 }
 
-/// Copy the populated release fixture into `destination` as a database of
-/// the current format: its manifest and SST are what the report verifies.
-/// Its empty pre-ledger `wal.log` goes with the old marker, and its
-/// manifests' byte-array key bounds become hex strings.
-fn copy_populated_fixture_as_current_format(destination: &Path) {
-    let source = fixture_path("tests/fixtures/compatibility/v3_populated_v4_sst_db");
-    for directory in ["", "sst", "wal"] {
-        std::fs::create_dir_all(destination.join(directory)).expect("create fixture directory");
-    }
-    for file in [
-        "intent_log.json",
-        "manifest.journal",
-        "manifest.json",
-        "manifest.snapshot.json",
-        "sst/000000_00_00000000000000000001.sst",
-    ] {
-        std::fs::copy(source.join(file), destination.join(file)).expect("copy fixture file");
-    }
-    std::fs::write(destination.join("FORMAT"), "midge-format-version=8\n")
-        .expect("write format marker");
-    for manifest in ["manifest.json", "manifest.snapshot.json"] {
-        hex_encode_key_bounds(&destination.join(manifest));
-    }
-}
-
-/// Rewrite the manifest at `path` with hex key bounds, the only encoding
-/// FORMAT 8 decodes.
-fn hex_encode_key_bounds(path: &Path) {
-    let mut manifest: Value =
-        serde_json::from_slice(&std::fs::read(path).expect("read fixture manifest"))
-            .expect("decode fixture manifest");
-    let through = manifest
-        .as_object_mut()
-        .unwrap()
-        .remove("last_persisted_sequence")
-        .unwrap();
-    manifest["flushed_through"] = serde_json::json!([{"cf_id": 0, "through_sequence": through}]);
-    for file in manifest["files"]
-        .as_array_mut()
-        .expect("fixture SST metadata")
-    {
-        for bound in ["smallest_key", "largest_key"] {
-            let bytes: Option<Vec<u8>> =
-                serde_json::from_value(file[bound].take()).expect("byte-array key bound");
-            file[bound] = json!(bytes.map(hex::encode));
-        }
-    }
-    std::fs::write(
-        path,
-        serde_json::to_vec(&manifest).expect("encode manifest"),
-    )
-    .expect("write fixture manifest");
-}
-
 fn write_empty_database(path: &Path) {
     std::fs::create_dir_all(path).expect("create database directory");
     std::fs::write(path.join("FORMAT"), "midge-format-version=8\n").expect("write format marker");
@@ -89,11 +35,9 @@ fn write_empty_database(path: &Path) {
 }
 
 #[test]
-fn should_emit_v1_json_given_healthy_database_when_midge_verify_runs() {
+fn should_emit_v1_json_given_populated_release_fixture_when_midge_verify_runs() {
     // Arrange
-    let temp = tempfile::tempdir().expect("create temporary directory");
-    copy_populated_fixture_as_current_format(temp.path());
-    let path = temp.path();
+    let path = fixture_path("tests/fixtures/compatibility/v8_populated_v4_sst_db");
     let expected: Value =
         serde_json::from_str(include_str!("fixtures/verification/healthy_v1.json"))
             .expect("parse healthy report golden");
@@ -104,6 +48,30 @@ fn should_emit_v1_json_given_healthy_database_when_midge_verify_runs() {
     // Assert
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(parse_stdout(&output), expected);
+    assert_eq!(output.stderr, [] as [u8; 0]);
+}
+
+#[test]
+fn should_reject_populated_v3_fixture_when_midge_verify_runs() {
+    // Arrange
+    let path = fixture_path("tests/fixtures/compatibility/v3_populated_v4_sst_db");
+    let before = std::fs::read(path.join("FORMAT")).expect("read fixture marker");
+
+    // Act
+    let output = run_verify(&["verify", "--json", path.to_str().expect("fixture path")]);
+
+    // Assert
+    assert_eq!(output.status.code(), Some(4));
+    let report = parse_stdout(&output);
+    assert_eq!(report["error_kind"], "corruption");
+    assert!(report["message"]
+        .as_str()
+        .expect("compatibility message")
+        .contains("Compatibility error: unsupported on-disk format version 3"));
+    assert_eq!(
+        std::fs::read(path.join("FORMAT")).expect("reread fixture marker"),
+        before
+    );
     assert_eq!(output.stderr, [] as [u8; 0]);
 }
 

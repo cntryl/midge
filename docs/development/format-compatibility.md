@@ -215,7 +215,14 @@ new database, an older binary must not open it.
 
 ## Fixture Coverage
 
-Repository gates reject the checked-in populated FORMAT 3/SST V4 fixture, a
-prior FORMAT 2 fixture and a synthetic future FORMAT 9 fixture with
-`CompatibilityError`, without rewriting their markers. Format changes must
-update these fixtures and their CI assertions together.
+The publication gate verifies the checked-in populated FORMAT 8/SST V4 fixture
+at `tests/fixtures/compatibility/v8_populated_v4_sst_db`. Compatibility tests
+also open a copy with strict recovery and read its persisted value across a
+shutdown and reopen. This fixture retains the prior fixture's SST bytes with
+current manifest key bounds and per-family flush frontiers, and omits the
+pre-ledger WAL.
+
+Repository gates reject the populated FORMAT 3/SST V4 fixture, a prior FORMAT 2
+fixture and a synthetic future FORMAT 9 fixture with `CompatibilityError`,
+without rewriting their markers. Format changes must update these fixtures and
+their CI assertions together.
