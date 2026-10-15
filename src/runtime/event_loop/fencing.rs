@@ -36,6 +36,9 @@ impl RuntimeFence {
         Ok(())
     }
 
+    /// Cloud storage mutations have their own conditional commit. Use the
+    /// lease's monotonic writer window here rather than rereading its object
+    /// around every seal and acknowledgement. Local stores retain their lock.
     pub(super) fn validate_within(
         &self,
         deadline: &crate::common::OperationDeadline,
@@ -43,17 +46,19 @@ impl RuntimeFence {
         self.check_health()?;
         if deadline.is_expired() {
             return Err(crate::common::MidgeError::Timeout(
-                "operation deadline exhausted before writer lease validation".to_string(),
+                "operation deadline exhausted before writer lease validation".into(),
             ));
         }
         let Some(store) = &self.leader_store else {
             return Ok(());
         };
-        let holder_id = self.leader_holder_id.as_deref().unwrap_or_default();
-        let result = if deadline.is_bounded() {
-            store.validate_epoch_with_timeout(holder_id, self.writer_epoch, deadline.remaining())
+        let holder = self.leader_holder_id.as_deref().unwrap_or_default();
+        let result = if deadline.is_bounded() || self.lease_validity.is_some() {
+            store.with_writer_epoch(holder, self.writer_epoch, deadline.remaining(), &mut || {})
         } else {
-            store.validate_epoch(holder_id, self.writer_epoch)
+            // Without a monotonic lease or caller budget, retain the store's
+            // own validation budget instead of passing an infinite timeout.
+            store.validate_epoch(holder, self.writer_epoch)
         };
         result.map_err(|error| {
             let error = if deadline.is_bounded() && deadline.is_expired() {
@@ -188,6 +193,52 @@ mod tests {
 #[cfg(test)]
 mod validity_tests {
     use super::*;
+
+    #[test]
+    fn should_enforce_monotonic_cloud_authority_without_remote_reads() {
+        use crate::lease::PrimaryLease;
+        // Arrange
+        let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+            backend.clone(),
+            "db".into(),
+        ));
+        let directory = tempfile::tempdir().unwrap();
+        let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
+            crate::lease::CloudLeaseConfig {
+                bucket: "bucket".into(),
+                prefix: "db".into(),
+            },
+            directory.path().into(),
+            cloud,
+        ));
+        let _guard = Arc::clone(&lease).try_acquire().unwrap();
+        let validity = lease.lease_validity();
+        let healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let fence = RuntimeFence {
+            lease_validity: Some(Arc::clone(&validity)),
+            lease_healthy: Some(Arc::clone(&healthy)),
+            ddl_authority_ambiguous: false,
+            writer_epoch: lease.epoch(),
+            leader_store: lease.get_leader_store(),
+            leader_holder_id: Some(lease.holder_id()),
+        };
+        backend.clear_history();
+        let deadline =
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+
+        // Act
+        for _ in 0..10 {
+            fence.validate_within(&deadline).unwrap();
+        }
+        validity.expire_for_test();
+        let expired = fence.validate_within(&deadline);
+
+        // Assert
+        assert_eq!(backend.get_downloads(), Vec::<String>::new());
+        assert!(matches!(expired, Err(crate::common::MidgeError::Fenced(_))));
+        assert!(!healthy.load(std::sync::atomic::Ordering::Acquire));
+    }
 
     #[test]
     fn should_reject_expired_validity_when_cached_health_is_true() {

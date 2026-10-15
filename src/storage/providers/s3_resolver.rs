@@ -44,7 +44,8 @@ fn resolve_s3_family(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn Clou
                 config.region.clone(),
                 config.endpoint.clone(),
                 config.path_style,
-            );
+            )
+            .with_checksum_receipts(config.checksum_receipts);
             let provider = super::s3::S3Provider::custom_with_credentials(config, creds)?;
             Ok(provider.backend())
         }
@@ -55,7 +56,8 @@ fn resolve_s3_family(provider: &CloudProviderConfig) -> MidgeResult<Arc<dyn Clou
                 config.region.clone(),
                 config.endpoint(),
                 true,
-            );
+            )
+            .with_checksum_receipts(config.checksum_receipts);
             Ok(super::s3::S3Provider::custom_with_credentials(s3, credentials)?.backend())
         }
         CloudProviderConfig::AzureBlob(_) | CloudProviderConfig::Gcs(_) => Err(

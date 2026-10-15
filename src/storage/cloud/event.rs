@@ -6,6 +6,11 @@ use super::*;
 /// Cloud operation completion events sent back via callback.
 #[derive(Clone, Debug)]
 pub enum CloudEvent {
+    /// Successful conditional upload with provider-validated content identity.
+    PutReceipt {
+        key: String,
+        result: CloudOutcome<Option<crate::storage::StorageWriteReceipt>>,
+    },
     #[cfg_attr(not(any(test, feature = "cloud-common")), allow(dead_code))]
     Put {
         /// The provider's key, kept for diagnostics: adapters report the

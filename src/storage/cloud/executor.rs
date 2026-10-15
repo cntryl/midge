@@ -139,6 +139,17 @@ pub struct CloudResponse {
     pub body: Vec<u8>,
 }
 
+impl CloudResponse {
+    /// The first header named `name`, case-insensitively, without surrounding
+    /// whitespace.
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.trim())
+    }
+}
+
 /// Verify every declared length against the body from the same GET response.
 /// Chunked responses may omit Content-Length; conflicting or malformed values
 /// must never be replaced with a synthesized length.

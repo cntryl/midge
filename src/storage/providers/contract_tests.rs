@@ -43,6 +43,7 @@ fn class_of<T>(outcome: &CloudOutcome<T>) -> Class {
 
 fn class_of_event(event: &CloudEvent) -> Class {
     match event {
+        CloudEvent::PutReceipt { result, .. } => class_of(result),
         CloudEvent::Put { result, .. } | CloudEvent::Delete { result, .. } => class_of(result),
         CloudEvent::Get { result, .. } | CloudEvent::GetRange { result, .. } => class_of(result),
         CloudEvent::GetWithMetadata { result, .. } => class_of(result),

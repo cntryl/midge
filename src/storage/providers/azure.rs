@@ -1129,30 +1129,17 @@ impl crate::storage::cloud::CloudWriteCapability for AzureBackend {
         callback: CloudCallback,
     ) {
         let key = key.to_string();
-        let url = self.object_url(&key);
-        let len = data.len();
-        let request = CloudRequest::new(Method::PUT, url)
-            .with_body(data)
-            .with_reservation(reservation)
-            .with_header("x-ms-blob-type", "BlockBlob")
-            .with_header("Content-Length", len.to_string());
-        let (request, conditional_mutation) = match super::rest::apply_caller_headers(
-            request,
-            headers,
-            |name, _| {
-                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
-            },
-            |request, name, value| Ok(request.with_header(name, value)),
-        ) {
-            Ok(parts) => parts,
-            Err(error) => {
-                let _ = callback.send(CloudEvent::Put {
-                    key,
-                    result: CloudOutcome::Err(CloudError::Protocol(error)),
-                });
-                return;
-            }
-        };
+        let (request, conditional_mutation) =
+            match self.prepare_put_request(&key, data, headers, reservation) {
+                Ok(parts) => parts,
+                Err(error) => {
+                    let _ = callback.send(CloudEvent::Put {
+                        key,
+                        result: CloudOutcome::Err(CloudError::Protocol(error)),
+                    });
+                    return;
+                }
+            };
         let mapper = move |ctx: String, result: MidgeResult<CloudResponse>| CloudEvent::Put {
             key: ctx,
             result: map_response(
@@ -1164,6 +1151,101 @@ impl crate::storage::cloud::CloudWriteCapability for AzureBackend {
         };
         self.executor.spawn_request(request, key, callback, mapper);
     }
+
+    fn write_with_receipt(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        use md5::Digest as _;
+        if crate::storage::cloud::reject_exhausted_receipt(key, &options, &callback) {
+            return;
+        }
+        let size = data.len() as u64;
+        let checksum = crc32c::crc32c(&data);
+        let content_md5 = BASE64.encode(md5::Md5::digest(&data));
+        // Put Blob rejects a body whose MD5 differs from Content-MD5, so a
+        // corrupted transfer is refused before anything is stored.
+        let mut headers = options.headers_with_deadline();
+        headers.retain(|(name, _)| !name.eq_ignore_ascii_case("content-md5"));
+        headers.push(("Content-MD5".into(), content_md5.clone()));
+        let (request, conditional_mutation) =
+            match self.prepare_put_request(key, data, headers, options.reservation) {
+                Ok(parts) => parts,
+                Err(error) => {
+                    let _ = callback.send(CloudEvent::PutReceipt {
+                        key: key.into(),
+                        result: Err(CloudError::Protocol(error)),
+                    });
+                    return;
+                }
+            };
+        self.executor
+            .spawn_request(request, key.into(), callback, move |key, response| {
+                CloudEvent::PutReceipt {
+                    key,
+                    result: map_response(
+                        response,
+                        |status| AzureDialect.put_ok(status),
+                        |response| azure_write_receipt(&response, size, &content_md5, checksum),
+                        |response| azure_put_response_error(response, conditional_mutation),
+                    ),
+                }
+            });
+    }
+}
+
+impl AzureBackend {
+    fn prepare_put_request(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+    ) -> Result<(CloudRequest, bool), String> {
+        let len = data.len();
+        let request = CloudRequest::new(Method::PUT, self.object_url(key))
+            .with_body(data)
+            .with_reservation(reservation)
+            .with_header("x-ms-blob-type", "BlockBlob")
+            .with_header("Content-Length", len.to_string());
+        super::rest::apply_caller_headers(
+            request,
+            headers,
+            |name, _| {
+                name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
+            },
+            |request, name, value| Ok(request.with_header(name, value)),
+        )
+    }
+}
+
+/// The receipt for a Put Blob: the Content-MD5 the service reports for the
+/// stored block blob must equal the sent one, and the new `ETag` identifies
+/// it. A response without both yields `None`, leaving the caller's readback.
+fn azure_write_receipt(
+    response: &CloudResponse,
+    size: u64,
+    content_md5: &str,
+    checksum: u32,
+) -> CloudOutcome<Option<crate::storage::StorageWriteReceipt>> {
+    let Some(echoed) = response.header("content-md5") else {
+        return Ok(None);
+    };
+    if echoed != content_md5 {
+        return Err(CloudError::Protocol(
+            "Azure Put Blob Content-MD5 differs from the sent bytes".into(),
+        ));
+    }
+    let Some(etag) = response.header("etag").filter(|etag| !etag.is_empty()) else {
+        return Ok(None);
+    };
+    Ok(Some(crate::storage::StorageWriteReceipt {
+        metadata: crate::storage::StorageObjectMetadata::new(size, etag.into()),
+        content_crc32c: checksum,
+    }))
 }
 
 impl crate::storage::cloud::CloudDeleteCapability for AzureBackend {

@@ -402,6 +402,7 @@ pub struct S3CompatibleConfig {
     pub(crate) endpoint: String,
     pub(crate) path_style: bool,
     pub(crate) credentials: S3CredentialSource,
+    pub(crate) checksum_receipts: bool,
 }
 
 impl S3CompatibleConfig {
@@ -417,6 +418,7 @@ impl S3CompatibleConfig {
             endpoint: endpoint.into(),
             path_style: true,
             credentials,
+            checksum_receipts: false,
         }
     }
     #[must_use]
@@ -459,6 +461,19 @@ impl S3CompatibleConfig {
     pub fn credentials(&self) -> &S3CredentialSource {
         &self.credentials
     }
+    /// Trust the endpoint's `x-amz-checksum-crc32c` PUT receipt instead of
+    /// reading each upload back. Enable only for an endpoint that validates
+    /// that header and rejects a mismatched body, as AWS S3 does; an endpoint
+    /// that merely echoes it would let corrupt uploads pass unverified.
+    #[must_use]
+    pub fn with_checksum_receipts(mut self, enabled: bool) -> Self {
+        self.checksum_receipts = enabled;
+        self
+    }
+    #[must_use]
+    pub fn checksum_receipts(&self) -> bool {
+        self.checksum_receipts
+    }
 }
 
 /// Oracle Cloud Infrastructure Object Storage configuration.
@@ -469,6 +484,7 @@ pub struct OciObjectStorageConfig {
     pub(crate) region: String,
     pub(crate) endpoint: Option<String>,
     pub(crate) credentials: S3CredentialSource,
+    pub(crate) checksum_receipts: bool,
 }
 
 impl OciObjectStorageConfig {
@@ -484,6 +500,7 @@ impl OciObjectStorageConfig {
             region: region.into(),
             endpoint: None,
             credentials,
+            checksum_receipts: false,
         }
     }
     #[must_use]
@@ -500,6 +517,18 @@ impl OciObjectStorageConfig {
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = Some(endpoint.into());
         self
+    }
+    /// Trust the endpoint's `x-amz-checksum-crc32c` PUT receipt instead of
+    /// reading each upload back. Enable only after confirming the endpoint
+    /// validates that header and rejects a mismatched body.
+    #[must_use]
+    pub fn with_checksum_receipts(mut self, enabled: bool) -> Self {
+        self.checksum_receipts = enabled;
+        self
+    }
+    #[must_use]
+    pub fn checksum_receipts(&self) -> bool {
+        self.checksum_receipts
     }
     #[must_use]
     pub fn namespace(&self) -> &str {
@@ -716,6 +745,7 @@ impl fmt::Debug for CloudProviderConfig {
                 .field("endpoint", &config.endpoint)
                 .field("path_style", &config.path_style)
                 .field("credentials", &config.credentials)
+                .field("checksum_receipts", &config.checksum_receipts)
                 .finish(),
             Self::AzureBlob(config) => formatter
                 .debug_struct("AzureBlob")
@@ -739,6 +769,7 @@ impl fmt::Debug for CloudProviderConfig {
                 .field("region", &config.region)
                 .field("endpoint", &config.endpoint)
                 .field("credentials", &config.credentials)
+                .field("checksum_receipts", &config.checksum_receipts)
                 .finish(),
         }
     }

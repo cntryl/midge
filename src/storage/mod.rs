@@ -72,6 +72,8 @@ pub(crate) mod filesystem;
 pub(crate) mod hybrid;
 pub(crate) mod inventory;
 pub(crate) mod providers;
+mod write_receipt;
+pub use write_receipt::{StorageWriteReceipt, WriteReceiptCallback};
 pub(crate) mod remote_sst;
 pub(crate) mod retained_callback;
 pub(crate) mod simulated;
@@ -683,6 +685,18 @@ pub trait StorageBackend: Send + Sync + 'static {
         data: Vec<u8>,
         callback: StorageCallback,
     );
+
+    /// Write with an optional provider identity and validated content checksum.
+    /// Backends without receipts still write, returning `None` on success;
+    /// callers must then verify the remote bytes before trusting the upload.
+    fn submit_write_receipt_request(
+        &self,
+        request: StorageRequest,
+        data: Vec<u8>,
+        callback: WriteReceiptCallback,
+    ) {
+        write_receipt::write_without_receipt(self, request, data, &callback);
+    }
 }
 
 #[cfg(test)]

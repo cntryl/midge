@@ -409,6 +409,10 @@ fn failed(event: CloudEvent, failure: Failure) -> CloudEvent {
         }
     };
     match event {
+        CloudEvent::PutReceipt { key, .. } => CloudEvent::PutReceipt {
+            key,
+            result: Err(error()),
+        },
         CloudEvent::Put { key, .. } => CloudEvent::Put {
             key,
             result: Err(error()),

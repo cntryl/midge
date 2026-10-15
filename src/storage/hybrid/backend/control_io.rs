@@ -14,6 +14,7 @@ const RANGE_BYTES: usize = 64 * 1024;
 pub(crate) struct ControlObject {
     bytes: Vec<u8>,
     metadata: StorageObjectMetadata,
+    confirmed_write: bool,
     // The object cannot be cloned independently of its charge.
     _memory: Arc<ResourceReservation>,
 }
@@ -25,6 +26,10 @@ impl ControlObject {
     /// The object store's identity and size for this control object.
     pub(crate) fn object_metadata(&self) -> &StorageObjectMetadata {
         &self.metadata
+    }
+
+    pub(crate) fn has_write_receipt(&self) -> bool {
+        self.confirmed_write
     }
 }
 
@@ -112,6 +117,7 @@ impl HybridStorage {
         Ok(Some(ControlObject {
             bytes,
             metadata,
+            confirmed_write: false,
             _memory: memory,
         }))
     }
@@ -173,33 +179,34 @@ impl HybridStorage {
             .map_err(ControlWriteFailure::Authority)?;
         (|| -> MidgeResult<ControlObject> {
             self.cloud_backend_for_key(key)
-                .submit_write_request(request, body, tx);
+                .submit_write_receipt_request(request, body, tx);
             match rx.recv_timeout(timeout) {
-                Ok(StorageEvent::WriteComplete {
-                    result: StorageOutcome::Ok(()),
-                    ..
-                }) => {}
-                Ok(StorageEvent::WriteComplete {
-                    result: StorageOutcome::Err(error),
-                    ..
-                }) if Self::storage_error_indicates_precondition_failure(&error) => {
+                Ok(Ok(Some(receipt))) => {
+                    if !receipt.matches(bytes) {
+                        return Err(MidgeError::Corruption(
+                            "control write receipt differs".into(),
+                        ));
+                    }
+                    // Transport retains its own upload charge until it drops
+                    // the payload. Cache only the admitted control bytes, not
+                    // an upload workspace for the rest of the engine lifetime.
+                    drop(memory);
+                    let memory = Arc::new(budget.reserve(bytes.len(), "confirmed control object")?);
+                    return Ok(ControlObject {
+                        bytes: bytes.to_vec(),
+                        metadata: receipt.metadata,
+                        confirmed_write: true,
+                        _memory: memory,
+                    });
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) if Self::storage_error_indicates_precondition_failure(&error) => {
                     return Err(MidgeError::Busy(error.to_string()))
                 }
-                Ok(StorageEvent::WriteComplete {
-                    result: StorageOutcome::Err(error),
-                    ..
-                }) if Self::storage_error_indicates_timeout(&error) => {
+                Ok(Err(error)) if Self::storage_error_indicates_timeout(&error) => {
                     return Err(MidgeError::Timeout(error.to_string()))
                 }
-                Ok(StorageEvent::WriteComplete {
-                    result: StorageOutcome::Err(error),
-                    ..
-                }) => return Err(control_error(&error)),
-                Ok(event) => {
-                    return Err(MidgeError::Internal(format!(
-                        "control CAS failed: {event:?}"
-                    )))
-                }
+                Ok(Err(error)) => return Err(control_error(&error)),
                 Err(error) => return Err(MidgeError::Timeout(format!("control CAS: {error}"))),
             }
             drop(memory);
