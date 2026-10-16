@@ -164,8 +164,9 @@ impl HybridStorage {
             };
             let memory = Arc::new(
                 budget.reserve(
-                    self.cloud_backend_for_key(key)
-                        .write_workspace_bytes(bytes.len()),
+                    bytes
+                        .len()
+                        .saturating_mul(self.cloud_backend_for_key(key).write_payload_copies()),
                     "control upload provider workspace",
                 )?,
             );

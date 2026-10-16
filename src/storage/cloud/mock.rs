@@ -172,11 +172,6 @@ impl crate::storage::cloud::CloudReadCapability for MockCloudBackend {
 }
 
 impl crate::storage::cloud::CloudWriteCapability for MockCloudBackend {
-    fn write_workspace_bytes(&self, payload_bytes: usize) -> usize {
-        // The submitted body and one stored-copy allocation. No transport
-        // staging exists in this synchronous provider fixture.
-        payload_bytes.saturating_mul(2)
-    }
     fn submit_put(
         &self,
         key: &str,

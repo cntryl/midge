@@ -56,7 +56,7 @@ impl CloudPersistence {
         segment_id: u64,
         expected_max_sequence: u64,
     ) -> Result<(), String> {
-        let (_, entry) = authoritative_wal_entry(self, segment_id)?;
+        let entry = authoritative_wal_entry(self, segment_id)?;
         if entry.max_sequence() != expected_max_sequence {
             return Err(format!(
                 "cloud WAL catalog segment {segment_id} max sequence {} does not match expected {expected_max_sequence}",
@@ -2605,7 +2605,7 @@ fn should_bound_sst_publication_with_shared_deadline_when_remote_preflight_consu
     );
 }
 
-struct SharedRetirementFixture {
+pub(crate) struct SharedRetirementFixture {
     _directory: tempfile::TempDir,
     fs: Arc<dyn crate::io::Fs>,
     cloud: Arc<CloudStorage>,
@@ -2614,7 +2614,7 @@ struct SharedRetirementFixture {
 }
 
 impl SharedRetirementFixture {
-    fn new(manifest: &Manifest) -> Self {
+    pub(crate) fn new(manifest: &Manifest) -> Self {
         use crate::lease::LeaderStore;
         let directory = tempfile::tempdir().unwrap();
         let fs = crate::io::real::test_root(directory.path());
@@ -2636,7 +2636,7 @@ impl SharedRetirementFixture {
         }
     }
 
-    fn publish(&self, manifest: &Manifest) {
+    pub(crate) fn publish(&self, manifest: &Manifest) {
         crate::metadata::ManifestPersistence::save_with_fs(&self.fs, manifest).unwrap();
         mirror_control_metadata_within(
             CloudMetadataMirrorContext {
@@ -2656,7 +2656,7 @@ impl SharedRetirementFixture {
         .unwrap();
     }
 
-    fn authority(&self) -> SharedRetirementAuthority {
+    pub(crate) fn authority(&self) -> SharedRetirementAuthority {
         SharedMetadataSnapshot::new(
             Arc::clone(&self.cloud),
             crate::common::resource_budget::ResourceBudget::new(8 * 1024 * 1024),
@@ -2669,7 +2669,7 @@ impl SharedRetirementFixture {
     }
 }
 
-fn fixture_manifest_frontier(manifest: &mut Manifest, cf_id: u32, through: u64) {
+pub(crate) fn fixture_manifest_frontier(manifest: &mut Manifest, cf_id: u32, through: u64) {
     let mut value = serde_json::to_value(&*manifest).unwrap();
     let row = value["flushed_through"]
         .as_array_mut()

@@ -9,6 +9,18 @@ Midge is currently in the 0.4 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+### Fixed
+
+- Bound cloud WAL catalog decode, publication, retirement and startup salvage
+  allocations using the retained containers and provider payload ownership
+  rather than a multiple of the encoded catalog size (#886–#888). Native S3,
+  Azure and GCS regressions cover incident-sized catalogs within Fitz's
+  unchanged maintenance pool. Temporary decode admission refusal preserves
+  receipt-confirmed cached authority; ambiguous writes still invalidate it.
+  Retirement also admits the copied rows and nested family frontiers kept
+  through conditional publication before releasing their original catalog.
+  Persisted formats, epoch fencing and conditional retirement are unchanged.
+
 ## [0.4.0] - 2026-10-14
 
 ### Changed

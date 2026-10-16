@@ -631,6 +631,13 @@ pub(crate) fn dispatch_head_request(
     submit(&request.key, timeout, callback);
 }
 
+/// Upload payload copies for a backend that does not bound its own.
+pub(crate) const CONSERVATIVE_WRITE_PAYLOAD_COPIES: usize = 4;
+/// Upload payload copies for a native provider whose request owns the
+/// submitted body as shared `Bytes`, which its retries clone by handle: that
+/// body plus one allowance for preparation and ownership transfer.
+pub(crate) const SHARED_BODY_WRITE_PAYLOAD_COPIES: usize = 2;
+
 /// Version-aware object I/O required by engine persistence paths.
 ///
 /// CRITICAL DESIGN:
@@ -658,11 +665,11 @@ pub(crate) fn dispatch_head_request(
 ///   content hash for HEAD, and stamps each new version with a later modified
 ///   time so a reused inode cannot repeat an old identity (#557).
 pub trait StorageBackend: Send + Sync + 'static {
-    /// Variable payload-copy workspace, excluding the caller's source encoding
-    /// and the transport's fixed, bounded request/response buffers.
-    /// Unknown backends retain the conservative four-buffer bound.
-    fn write_workspace_bytes(&self, payload_bytes: usize) -> usize {
-        payload_bytes.saturating_mul(4)
+    /// Copies of an upload's payload the write path may hold at once: the
+    /// submitted body and any provider or transport staging. The caller's
+    /// source bytes and fixed, bounded request/response buffers are extra.
+    fn write_payload_copies(&self) -> usize {
+        CONSERVATIVE_WRITE_PAYLOAD_COPIES
     }
     /// Read an exact range from the version named by `IfMatch`.
     fn submit_range_read_request(

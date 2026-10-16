@@ -175,7 +175,7 @@ impl CompactionStorage for crate::storage::HybridStorage {
     }
 
     fn immutable_file_partition_target(&self, pool: usize) -> usize {
-        Self::immutable_file_partition_target(pool)
+        crate::storage::HybridStorage::immutable_file_partition_target(self, pool)
     }
 
     fn stage_output_partition(

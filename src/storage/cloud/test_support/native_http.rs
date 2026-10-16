@@ -127,7 +127,8 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
         .iter()
         .find(|(name, _)| name == "content-length")
         .map_or(Some(0), |(_, value)| value.parse().ok())?;
-    assert!(length <= 1024 * 1024, "bounded test request body");
+    // Incident-sized WAL catalogs (#886) upload about 11 MB.
+    assert!(length <= 32 * 1024 * 1024, "bounded test request body");
     while bytes.len() - header_end < length {
         let count = stream.read(&mut buffer).ok()?;
         if count == 0 {
