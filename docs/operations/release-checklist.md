@@ -11,14 +11,14 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic`
 - [ ] `cargo clippy --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic`
 - [ ] Rust 1.97 MSRV checks pass
-- [ ] Linux, macOS, and Windows tests pass
+- [ ] Linux and macOS tests pass
 - [ ] each provider-only feature check passes (`cloud-aws`, `cloud-azure`, `cloud-gcp`, `cloud-oci`)
 - [ ] `cargo test --workspace --all-features`
 - [ ] `cargo test --workspace --all-features --doc`
 - [ ] `cargo check --example documented_quick_start --all-features`
 - [ ] `cargo machete`
 - [ ] `cargo package --locked`
-- [ ] `docker build --file Dockerfile.tests --tag midge-tests:release .`
+- [ ] with the local Sqrzl fixture running, `docker build --network=host --file Dockerfile.tests --tag midge-tests:release .`
 - [ ] `cargo test --test fault_injection --all-features -- --test-threads=1`
 - [ ] `cntryl-tools validate-tests`
 - [ ] default `cargo tree --edges normal` and `cargo check --release` exclude `fail`

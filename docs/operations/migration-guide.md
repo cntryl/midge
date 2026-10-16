@@ -1,6 +1,6 @@
 # Migration guide
 
-Midge is a 0.x crate. The `0.4.0` release target writes database FORMAT 8,
+Midge is a 0.x crate. The `0.4` release line writes database FORMAT 8,
 requires SST V4, and uses cloud WAL publication catalog v3. Older database
 formats are rejected without migration. Treat upgrades as application
 migrations: read the release notes, inspect
@@ -8,6 +8,25 @@ migrations: read the release notes, inspect
 compatibility and recovery tests, and keep a verified application-level
 backup before changing binaries. See [0.3.2 to 0.4.0](#032-to-040) before
 upgrading an existing database.
+
+## 0.4.0 to 0.4.1
+
+Version `0.4.1` fixes cloud WAL catalog allocation accounting during decode,
+publication, retirement and startup salvage. It preserves the supported public
+API and all persisted formats from `0.4.0`; no logical migration is required
+solely for this patch. Stop writers, complete `engine.shutdown(timeout)`,
+preserve the database and cloud prefix, and replace the binary or dependency.
+Qualify application reads, writes and restart recovery, including recovery
+after complete local-cache loss for cloud storage, at the deployment's actual
+resource limits. Engine regressions alone do not qualify a hosting application.
+
+Rollback to `0.4.0` is supported with constraints after a clean shutdown:
+preserve all committed data and metadata and let the prior binary perform
+ordinary recovery. The old catalog memory/admission failures return, so
+rollback does not provide a viable recovery path for stores affected by those
+failures. Keep a verified logical export and the prior broker/store as the
+fallback. Upgrades from pre-`0.4` stores still require the logical migration
+described below; this patch does not add an in-place format upgrade.
 
 ## `midge verify --json` schema version 1
 
