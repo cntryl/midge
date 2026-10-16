@@ -380,11 +380,16 @@ pub(super) fn mutate_wal_catalog_within<T, R>(
     let _catalog_mutation = storage.lock_wal_catalog_mutation_within(deadline, label)?;
     let cached = storage.take_wal_catalog_cache();
     let (mut catalog, expected, mirror) = if let Some((primary, mirror)) = cached {
-        (
-            AdmittedCatalog::decode(primary.bytes(), &catalog_budget(storage))?,
-            Some(primary),
-            Some(mirror),
-        )
+        let catalog = match AdmittedCatalog::decode(primary.bytes(), &catalog_budget(storage)) {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                // Decode has not attempted any write. Keep confirmed authority
+                // available when temporary admission pressure clears.
+                storage.restore_wal_catalog_cache(primary, mirror);
+                return Err(error);
+            }
+        };
+        (catalog, Some(primary), Some(mirror))
     } else {
         match load_and_repair_catalog_with_authority(storage, deadline, validate)? {
             Some(authority) => (authority.catalog, Some(authority.primary), None),

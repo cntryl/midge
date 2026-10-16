@@ -97,6 +97,48 @@ fn should_publish_incident_catalog_within_fitz_pool_when_authority_is_cached_on_
 }
 
 #[test]
+fn should_publish_repeatedly_across_incident_vector_capacity_on_every_provider() {
+    for dialect in Dialect::ALL {
+        verify_repeated_incident_publication(dialect, false);
+    }
+}
+
+#[test]
+fn should_publish_repeatedly_across_incident_vector_capacity_without_receipts() {
+    verify_repeated_incident_publication(Dialect::S3, true);
+}
+
+fn verify_repeated_incident_publication(dialect: Dialect, omit_receipts: bool) {
+    // Arrange
+    let fixture = Fixture::new(dialect);
+    fixture.state.lock().unwrap().omit_receipts = omit_receipts;
+    let catalog = incident_catalog(7);
+    fixture.seed_catalog(&catalog);
+    let storage = fixture.storage();
+    storage.configure_maintenance_memory(FITZ_MAINTENANCE_POOL);
+    drop(storage.fence_cloud_wal_catalog(8).unwrap());
+    let mut head = catalog.head();
+
+    // Act
+    for id in INCIDENT_SEGMENTS + 1..=INCIDENT_SEGMENTS + 4 {
+        let entry = next_entry(head, id, 8);
+        let result = storage.publish_wal_segments(
+            std::slice::from_ref(&entry),
+            8,
+            &OperationDeadline::unbounded(),
+        );
+        assert!(result.is_ok(), "{dialect:?}, segment {id}: {result:?}");
+        head = entry.link();
+    }
+
+    // Assert
+    let published = fixture.published_catalog();
+    assert_eq!(published.head(), head, "{dialect:?}");
+    assert_eq!(published.entries().len(), 32_772, "{dialect:?}");
+    assert_eq!(published.fencing_epoch(), 8, "{dialect:?}");
+}
+
+#[test]
 fn should_retire_incident_catalog_within_fitz_pool_when_authority_is_cached_on_every_provider() {
     for dialect in Dialect::ALL {
         // Arrange: fencing leaves both receipted copies in the catalog cache.
@@ -197,4 +239,44 @@ fn should_keep_cached_authority_when_catalog_refuses_publication_on_every_provid
             "{dialect:?}: one WAL PUT and two catalog PUTs: {requests:?}"
         );
     }
+}
+
+#[test]
+fn should_keep_cached_authority_when_decode_admission_is_temporarily_refused() {
+    // Arrange
+    let fixture = Fixture::new(Dialect::S3);
+    let storage = fixture.storage();
+    let budget = storage.configure_maintenance_memory(1024 * 1024);
+    drop(storage.fence_cloud_wal_catalog(7).unwrap());
+    let held = budget
+        .reserve(budget.limit() - budget.used(), "other maintenance")
+        .unwrap();
+    let entry = next_entry(ChainLink::GENESIS, 1, 7);
+
+    // Act
+    let refused = storage.publish_wal_segments(
+        std::slice::from_ref(&entry),
+        7,
+        &OperationDeadline::unbounded(),
+    );
+    drop(held);
+    fixture.state.lock().unwrap().requests.clear();
+    let retry = storage.publish_wal_segments(
+        std::slice::from_ref(&entry),
+        7,
+        &OperationDeadline::unbounded(),
+    );
+
+    // Assert
+    assert!(
+        matches!(
+            refused,
+            Err(crate::runtime::hybrid_persistence::PublicationError::Retriable(_))
+        ),
+        "{refused:?}"
+    );
+    assert!(retry.is_ok(), "{retry:?}");
+    let requests = fixture.state.lock().unwrap().requests.clone();
+    assert_eq!(requests.len(), 2, "only the two catalog PUTs: {requests:?}");
+    assert_eq!(fixture.published_catalog().head(), entry.link());
 }
