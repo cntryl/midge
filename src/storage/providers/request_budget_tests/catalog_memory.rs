@@ -16,9 +16,13 @@ const FITZ_MAINTENANCE_POOL: usize = 53_687_091;
 const INCIDENT_SEGMENTS: u64 = 32_768;
 
 fn incident_catalog(epoch: u64) -> WalPublicationCatalog {
+    catalog_with_segments(epoch, INCIDENT_SEGMENTS)
+}
+
+fn catalog_with_segments(epoch: u64, count: u64) -> WalPublicationCatalog {
     let mut catalog = WalPublicationCatalog::empty(epoch).unwrap();
     let mut previous = ChainLink::GENESIS;
-    let entries: Vec<CatalogEntry> = (1..=INCIDENT_SEGMENTS)
+    let entries: Vec<CatalogEntry> = (1..=count)
         .map(|id| {
             let (bytes, link) = SegmentBuilder::new(id, epoch, previous)
                 .record(&crate::wal::WalRecord::new(
@@ -67,6 +71,77 @@ fn next_entry(head: ChainLink, id: u64, epoch: u64) -> CatalogEntry {
         ))
         .seal();
     CatalogEntry::from_sealed_bytes(&bytes).unwrap()
+}
+
+fn catalog_with_many_frontiers(manifest: &mut crate::metadata::Manifest) -> WalPublicationCatalog {
+    let mut builder = SegmentBuilder::new(1, 1, ChainLink::GENESIS);
+    for sequence in 1..=512 {
+        let cf_id = manifest.create_column_family(format!("family-{sequence}"));
+        fixture_manifest_frontier(manifest, cf_id, sequence);
+        let mut record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            sequence,
+        );
+        record.cf_id = cf_id;
+        builder = builder.record(&record);
+    }
+    let (bytes, _) = builder.seal();
+    let mut catalog = WalPublicationCatalog::empty(1).unwrap();
+    catalog
+        .append_run(1, &[CatalogEntry::from_sealed_bytes(&bytes).unwrap()])
+        .unwrap();
+    catalog
+}
+
+#[test]
+fn should_admit_nested_retirement_evidence_before_changing_authority() {
+    // Arrange
+    let fixture = Fixture::new(Dialect::S3);
+    let mut manifest = crate::metadata::Manifest::default();
+    let catalog = catalog_with_many_frontiers(&mut manifest);
+    fixture.seed_catalog(&catalog);
+    let storage = fixture.storage();
+    let budget = storage.configure_maintenance_memory(1024 * 1024);
+    let fenced = storage.fence_cloud_wal_catalog(2).unwrap();
+    let bound = WalPublicationCatalog::decode_allocation_bound(&fenced.encode().unwrap()).unwrap();
+    drop(fenced);
+    let held = budget
+        .reserve(
+            budget.limit() - budget.used() - bound,
+            "competing maintenance",
+        )
+        .unwrap();
+    let retirement = SharedRetirementFixture::new(&manifest);
+    retirement.publish(&manifest);
+    let authority = retirement.authority();
+    let before = fixture.published_catalog();
+
+    // Act
+    let refused = storage.prune_cloud_wal_segments_within(
+        &[(1, 512)],
+        &authority,
+        2,
+        &OperationDeadline::unbounded(),
+    );
+    let after_refusal = fixture.published_catalog();
+    drop(held);
+    let retried = storage.prune_cloud_wal_segments_within(
+        &[(1, 512)],
+        &authority,
+        2,
+        &OperationDeadline::unbounded(),
+    );
+
+    // Assert
+    assert!(
+        matches!(refused, Err(crate::common::MidgeError::ResourceLimit(_))),
+        "{refused:?}"
+    );
+    assert_eq!(after_refusal, before);
+    assert!(retried.is_ok(), "{retried:?}");
+    assert_eq!(fixture.published_catalog().anchor().id, 1);
 }
 
 #[test]
@@ -177,31 +252,33 @@ fn should_retire_incident_catalog_within_fitz_pool_when_authority_is_cached_on_e
 fn should_set_aside_incident_suffix_within_fitz_pool_while_startup_holds_fenced_catalog_on_every_provider(
 ) {
     for dialect in Dialect::ALL {
-        // Arrange: startup keeps the fenced catalog through recovery planning.
-        let fixture = Fixture::new(dialect);
-        fixture.seed_catalog(&incident_catalog(7));
-        let storage = fixture.storage();
-        storage.configure_maintenance_memory(FITZ_MAINTENANCE_POOL);
-        let fenced = storage.fence_cloud_wal_catalog(8).unwrap();
-        let suffix = fenced.entries().last().unwrap().clone();
-        let floor = suffix.max_sequence() + 1;
+        for count in [INCIDENT_SEGMENTS, INCIDENT_SEGMENTS + 1] {
+            // Arrange: startup keeps the fenced catalog through recovery planning.
+            let fixture = Fixture::new(dialect);
+            fixture.seed_catalog(&catalog_with_segments(7, count));
+            let storage = fixture.storage();
+            storage.configure_maintenance_memory(FITZ_MAINTENANCE_POOL);
+            let fenced = storage.fence_cloud_wal_catalog(8).unwrap();
+            let suffix = fenced.entries().last().unwrap().clone();
+            let floor = suffix.max_sequence() + 1;
 
-        // Act
-        let result = storage.set_aside_catalog_suffix_with_authority_within(
-            8,
-            Some(suffix.id()),
-            std::slice::from_ref(&suffix),
-            floor,
-            &|| Ok(()),
-            &OperationDeadline::unbounded(),
-        );
+            // Act
+            let result = storage.set_aside_catalog_suffix_with_authority_within(
+                8,
+                Some(suffix.id()),
+                std::slice::from_ref(&suffix),
+                floor,
+                &|| Ok(()),
+                &OperationDeadline::unbounded(),
+            );
 
-        // Assert
-        assert!(result.is_ok(), "{dialect:?}: {result:?}");
-        let published = fixture.published_catalog();
-        assert_eq!(published.head().id, suffix.id() - 1, "{dialect:?}");
-        assert!(published.seq_floor() >= floor, "{dialect:?}");
-        assert_eq!(fenced.head(), suffix.link(), "{dialect:?}");
+            // Assert
+            assert!(result.is_ok(), "{dialect:?}, {count} segments: {result:?}");
+            let published = fixture.published_catalog();
+            assert_eq!(published.head().id, suffix.id() - 1, "{dialect:?}");
+            assert!(published.seq_floor() >= floor, "{dialect:?}");
+            assert_eq!(fenced.head(), suffix.link(), "{dialect:?}");
+        }
     }
 }
 

@@ -161,6 +161,13 @@ impl WalPublicationCatalog {
         )
     }
 
+    pub(crate) fn prefix_copy_allocation_bytes(&self, count: usize) -> usize {
+        self.segments[..count].iter().fold(
+            count.saturating_mul(std::mem::size_of::<CatalogEntry>()),
+            |bytes, entry| bytes.saturating_add(frontier_bytes(entry.facts.max_seq_per_cf.len())),
+        )
+    }
+
     /// What [`Self::extend_validated`] adds to the retained charge while it
     /// appends `added`: the new rows and their cloned frontiers, and the old
     /// rows while a reallocation copies them.

@@ -431,7 +431,6 @@ impl CloudPersistence {
         catalog
             .oldest_prefix(active.iter().copied())
             .map_err(refusal_error)?;
-        let mut expected = Vec::new();
         let mut targets = Vec::new();
         let covered_count = catalog
             .retirable_prefix(|cf, sequence| match authority.frontiers().get(cf) {
@@ -443,6 +442,7 @@ impl CloudPersistence {
             })
             .len()
             .min(active.len());
+        let expected = catalog.copy_retirement_prefix(covered_count)?;
         for (index, id) in active.into_iter().enumerate() {
             let entry = catalog.entry(id).expect("oldest prefix checked");
             if index >= covered_count {
@@ -459,9 +459,8 @@ impl CloudPersistence {
             let identity =
                 self.remote_range_metadata_optional_within(&entry.object_key(), deadline)?;
             targets.push((id, entry.object_key(), identity));
-            expected.push(entry.clone());
         }
-        if expected.is_empty() {
+        if expected.entries().is_empty() {
             return Ok(results);
         }
         drop(catalog);
@@ -489,7 +488,7 @@ impl CloudPersistence {
             Missing::Refuse,
             |catalog| {
                 catalog
-                    .retire_prefix(fencing_epoch, &expected, authority.generation_id())
+                    .retire_prefix(fencing_epoch, expected.entries(), authority.generation_id())
                     .map(|retired| Mutation::of(!retired.is_empty(), retired))
             },
         )?;

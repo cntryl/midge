@@ -8,6 +8,19 @@ use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::storage::StorageObjectMetadata;
 use crate::wal::cloud_catalog::{CatalogDecodeError, CatalogRefusal};
 
+/// The expected rows kept through retirement CAS, including their cloned
+/// family-frontier vectors. Their original catalog can be released meanwhile.
+pub(super) struct RetirementEvidence {
+    entries: Vec<crate::wal::cloud_catalog::CatalogEntry>,
+    _memory: ResourceReservation,
+}
+
+impl RetirementEvidence {
+    pub(super) fn entries(&self) -> &[crate::wal::cloud_catalog::CatalogEntry] {
+        &self.entries
+    }
+}
+
 pub(super) struct CatalogAuthority {
     pub(super) primary: ControlObject,
     pub(super) catalog: AdmittedCatalog,
@@ -68,6 +81,17 @@ impl AdmittedCatalog {
 
     pub(super) fn fence_to(&mut self, writer_epoch: u64) -> Result<bool, CatalogRefusal> {
         self.catalog.fence_to(writer_epoch)
+    }
+
+    pub(super) fn copy_retirement_prefix(&self, count: usize) -> MidgeResult<RetirementEvidence> {
+        let memory = self.memory.reserve_related(
+            self.catalog.prefix_copy_allocation_bytes(count),
+            "catalog retirement evidence",
+        )?;
+        Ok(RetirementEvidence {
+            entries: self.catalog.entries()[..count].to_vec(),
+            _memory: memory,
+        })
     }
 
     pub(super) fn set_aside_suffix(
