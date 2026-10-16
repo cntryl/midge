@@ -147,56 +147,36 @@ impl WalPublicationCatalog {
             .saturating_add(4096))
     }
 
-    pub(crate) fn append_allocation_bound(&self, run: &[CatalogEntry]) -> usize {
-        let head = self.head().id;
-        let (count, nested) = run.iter().filter(|entry| entry.id() > head).fold(
-            (0_usize, 0_usize),
-            |(count, bytes), entry| {
-                (
-                    count.saturating_add(1),
-                    bytes.saturating_add(
-                        entry
-                            .facts
-                            .max_seq_per_cf
-                            .len()
-                            .saturating_mul(std::mem::size_of::<(u32, u64)>()),
-                    ),
-                )
-            },
-        );
-        if count == 0 {
-            return 0;
-        }
-        let required = self.segments.len().saturating_add(count);
-        let growth = if required > self.segments.capacity() {
-            required.saturating_mul(std::mem::size_of::<CatalogEntry>())
-        } else {
-            0
-        };
-        growth
-            .saturating_add(vector_peak(count, std::mem::size_of::<CatalogEntry>()))
-            .saturating_add(nested)
-    }
-
-    pub(crate) fn append_retained_allocation_bound(&self, run: &[CatalogEntry]) -> usize {
-        let head = self.head().id;
-        let added = run.iter().filter(|entry| entry.id() > head);
-        let count = added.clone().count();
-        let rows = self
-            .segments
-            .capacity()
-            .max(self.segments.len().saturating_add(count));
-        let current_frontiers = self
-            .segments
-            .iter()
-            .map(|entry| entry.facts.max_seq_per_cf.capacity());
-        let added_frontiers = added.map(|entry| entry.facts.max_seq_per_cf.len());
-        current_frontiers.chain(added_frontiers).fold(
-            rows.saturating_mul(std::mem::size_of::<CatalogEntry>())
+    /// What the decoded catalog holds: its row and family-frontier
+    /// capacities, plus fixed slack for its scalars.
+    pub(crate) fn retained_allocation_bytes(&self) -> usize {
+        self.segments.iter().fold(
+            self.segments
+                .capacity()
+                .saturating_mul(std::mem::size_of::<CatalogEntry>())
                 .saturating_add(4096),
-            |bytes, count| {
-                bytes.saturating_add(count.saturating_mul(std::mem::size_of::<(u32, u64)>()))
+            |bytes, entry| {
+                bytes.saturating_add(frontier_bytes(entry.facts.max_seq_per_cf.capacity()))
             },
         )
     }
+
+    /// What [`Self::extend_validated`] adds to the retained charge while it
+    /// appends `added`: the new rows and their cloned frontiers, and the old
+    /// rows while a reallocation copies them.
+    pub(crate) fn append_growth_bytes(&self, added: &[CatalogEntry]) -> usize {
+        let capacity = self.segments.capacity();
+        let required = self.segments.len().saturating_add(added.len());
+        // Growing adds `required - capacity` rows, and the old `capacity`
+        // rows stay live while `reserve_exact` copies them.
+        let rows = if required > capacity { required } else { 0 };
+        added.iter().fold(
+            rows.saturating_mul(std::mem::size_of::<CatalogEntry>()),
+            |bytes, entry| bytes.saturating_add(frontier_bytes(entry.facts.max_seq_per_cf.len())),
+        )
+    }
+}
+
+fn frontier_bytes(families: usize) -> usize {
+    families.saturating_mul(std::mem::size_of::<(u32, u64)>())
 }

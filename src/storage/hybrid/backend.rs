@@ -170,8 +170,9 @@ pub struct HybridStorage {
     /// Serializes in-process WAL catalog publication and retirement updates.
     /// Provider compare-exchange remains the cross-process authority boundary.
     wal_catalog_mutation: Mutex<()>,
-    /// Provider-confirmed copies, consumed before a possibly ambiguous CAS.
-    wal_catalog_cache: Mutex<Option<(ControlObject, ControlObject)>>,
+    /// Provider-confirmed copies, consumed before a possibly ambiguous CAS:
+    /// the primary's bytes, and only the mirror's CAS identity.
+    wal_catalog_cache: Mutex<Option<(ControlObject, StorageObjectMetadata)>>,
     maintenance_memory: std::sync::OnceLock<crate::common::resource_budget::ResourceBudget>,
     write_authority: std::sync::OnceLock<StorageWriteAuthority>,
 
@@ -368,14 +369,23 @@ impl HybridStorage {
     }
 
     /// The caller holds the WAL catalog mutation lock across take and commit.
-    pub(crate) fn take_wal_catalog_cache(&self) -> Option<(ControlObject, ControlObject)> {
+    pub(crate) fn take_wal_catalog_cache(&self) -> Option<(ControlObject, StorageObjectMetadata)> {
         self.wal_catalog_cache.lock().take()
     }
 
     pub(crate) fn cache_wal_catalog(&self, primary: ControlObject, mirror: ControlObject) {
         if primary.has_write_receipt() && mirror.has_write_receipt() {
-            *self.wal_catalog_cache.lock() = Some((primary, mirror));
+            self.restore_wal_catalog_cache(primary, mirror.into_metadata());
         }
+    }
+
+    /// Return a taken cache entry the caller did not replace.
+    pub(crate) fn restore_wal_catalog_cache(
+        &self,
+        primary: ControlObject,
+        mirror: StorageObjectMetadata,
+    ) {
+        *self.wal_catalog_cache.lock() = Some((primary, mirror));
     }
 
     pub(crate) fn configure_maintenance_memory(

@@ -324,6 +324,11 @@ impl WalPublicationCatalog {
     /// catalog.
     pub fn decode(bytes: &[u8]) -> Result<Self, CatalogDecodeError> {
         Self::validate_format(bytes)?;
+        Self::decode_known_format(bytes)
+    }
+
+    /// [`Self::decode`] for bytes whose format version was already checked.
+    pub(crate) fn decode_known_format(bytes: &[u8]) -> Result<Self, CatalogDecodeError> {
         let catalog: Self = serde_json::from_slice(bytes)
             .map_err(|error| CatalogDecodeError::Invalid(format!("JSON: {error}")))?;
         catalog.validate().map_err(CatalogDecodeError::Invalid)?;
@@ -460,6 +465,21 @@ impl WalPublicationCatalog {
         fencing_epoch: u64,
         run: &[CatalogEntry],
     ) -> Result<bool, crate::wal::publish::Refusal> {
+        let added = self.append_additions(fencing_epoch, run)?;
+        Ok(self.extend_validated(added))
+    }
+
+    /// What [`Self::append_run`] adds: the suffix of `run` past the head.
+    /// Checks every refusal without allocating or changing the catalog.
+    ///
+    /// # Errors
+    ///
+    /// The refusal [`Self::append_run`] returns.
+    pub(crate) fn append_additions<'a>(
+        &self,
+        fencing_epoch: u64,
+        run: &'a [CatalogEntry],
+    ) -> Result<&'a [CatalogEntry], crate::wal::publish::Refusal> {
         if fencing_epoch != self.fencing_epoch {
             return Err(crate::wal::publish::Refusal::EpochMismatch {
                 catalog: self.fencing_epoch,
@@ -467,20 +487,25 @@ impl WalPublicationCatalog {
             });
         }
         let added = crate::wal::publish::additions(self.head(), &self.segments, run)?;
-        let Some(last) = added.last() else {
-            return Ok(false);
-        };
         if let Some(entry) = added.iter().find(|entry| entry.epoch > self.fencing_epoch) {
             return Err(crate::wal::publish::Refusal::EpochMismatch {
                 catalog: self.fencing_epoch,
                 writer: entry.epoch,
             });
         }
-        let next = self.next_segment_id.max(last.id().saturating_add(1));
+        Ok(added)
+    }
+
+    /// Append what [`Self::append_additions`] accepted. Returns whether the
+    /// catalog changed.
+    pub(crate) fn extend_validated(&mut self, added: &[CatalogEntry]) -> bool {
+        let Some(last) = added.last() else {
+            return false;
+        };
+        self.next_segment_id = self.next_segment_id.max(last.id().saturating_add(1));
         self.segments.reserve_exact(added.len());
-        self.segments.extend(added);
-        self.next_segment_id = next;
-        Ok(true)
+        self.segments.extend_from_slice(added);
+        true
     }
 
     /// [`Self::append_run`] for fixtures outside the crate, with the

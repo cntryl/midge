@@ -607,3 +607,5 @@ fn should_release_upload_workspace_when_control_receipt_is_retained_on_every_pro
         assert_eq!(budget.used(), 0);
     }
 }
+
+mod catalog_memory;
