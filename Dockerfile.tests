@@ -10,6 +10,10 @@ RUN apt-get update \
 
 WORKDIR /workspace
 
+# Keep concurrent test linkers within ordinary development-builder memory.
+ENV CARGO_BUILD_JOBS=2 \
+    CARGO_INCREMENTAL=0
+
 # Verify the crate in a clean Debian container.
 COPY . .
 
