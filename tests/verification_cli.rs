@@ -35,6 +35,49 @@ fn write_empty_database(path: &Path) {
 }
 
 #[test]
+fn should_verify_candidate_written_database_when_cli_runs() {
+    // Arrange
+    let directory = tempfile::tempdir().expect("create candidate database directory");
+    let mut engine = cntryl_midge::Engine::open(
+        cntryl_midge::OpenOptions::local(directory.path())
+            .build()
+            .expect("build candidate options"),
+    )
+    .expect("open candidate database");
+    let family = engine.get_column_family("default").expect("default family");
+    let mut write = engine
+        .begin_tx(family.id(), cntryl_midge::TransactionMode::ReadWrite)
+        .expect("begin candidate write");
+    write
+        .put(b"release/key".to_vec(), b"release/value".to_vec(), None)
+        .expect("write candidate record");
+    write
+        .commit(cntryl_midge::WriteOptions::sync())
+        .expect("commit candidate record");
+    engine.flush_cf(&family).expect("flush candidate SST");
+    engine
+        .shutdown(std::time::Duration::from_secs(30))
+        .expect("shut down candidate writer");
+    drop(engine);
+
+    // Act
+    let output = run_verify(&[
+        "verify",
+        "--json",
+        directory.path().to_str().expect("candidate database path"),
+    ]);
+
+    // Assert
+    assert_eq!(output.status.code(), Some(0));
+    let report = parse_stdout(&output);
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["health"], "Healthy");
+    assert_eq!(report["sst_files_verified"], 1);
+    assert_eq!(report["authoritative"], true);
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn should_emit_v1_json_given_populated_release_fixture_when_midge_verify_runs() {
     // Arrange
     let path = fixture_path("tests/fixtures/compatibility/v8_populated_v4_sst_db");
