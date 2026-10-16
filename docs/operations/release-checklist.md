@@ -18,7 +18,7 @@ Use this checklist before publishing a release candidate or stable release.
 - [ ] `cargo check --example documented_quick_start --all-features`
 - [ ] `cargo machete`
 - [ ] `cargo package --locked`
-- [ ] `docker build --file Dockerfile.tests --tag midge-tests:release .`
+- [ ] with the local Sqrzl fixture running, `docker build --network=host --file Dockerfile.tests --tag midge-tests:release .`
 - [ ] `cargo test --test fault_injection --all-features -- --test-threads=1`
 - [ ] `cntryl-tools validate-tests`
 - [ ] default `cargo tree --edges normal` and `cargo check --release` exclude `fail`
