@@ -608,4 +608,37 @@ fn should_release_upload_workspace_when_control_receipt_is_retained_on_every_pro
     }
 }
 
+#[test]
+fn should_publish_sst_within_shared_body_upload_allowance_on_every_provider() {
+    for dialect in Dialect::ALL {
+        // Arrange: the file read, the request's shared body, one allowance,
+        // and the publication's fixed 256 KiB readback workspace.
+        let fixture = Fixture::new(dialect);
+        let storage = fixture.storage();
+        let bytes = vec![7_u8; 1024 * 1024];
+        std::fs::write(fixture.directory.path().join("source"), &bytes).unwrap();
+        let fs = crate::io::RealFs::new(fixture.directory.path()).unwrap();
+        let budget = crate::common::resource_budget::ResourceBudget::new(
+            bytes.len() * (1 + crate::storage::SHARED_BODY_WRITE_PAYLOAD_COPIES) + 256 * 1024,
+        );
+
+        // Act
+        let result = storage.publish_immutable_file(
+            crate::storage::hybrid::backend::ImmutableFileSource {
+                key: "sst/000001.sst",
+                fs: &fs,
+                path: &crate::io::FsPath::new("source"),
+                size: bytes.len() as u64,
+                checksum: crc32c::crc32c(&bytes),
+            },
+            &budget,
+        );
+
+        // Assert
+        assert!(result.is_ok(), "{dialect:?}: {:?}", result.err());
+        assert_eq!(fixture.object("sst/000001.sst").0, bytes, "{dialect:?}");
+        assert_eq!(budget.used(), 0, "{dialect:?}");
+    }
+}
+
 mod catalog_memory;

@@ -32,16 +32,21 @@ fn publish_source(
 
 #[test]
 fn should_leave_three_quarters_of_maintenance_pool_for_live_compaction_inputs() {
-    // Arrange
+    // Arrange: the mock bounds no copies of its own.
+    let storage = HybridStorage::with_policy(
+        Arc::new(CloudStorage::with_mock()),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
     let pool = 32 * 1024 * 1024;
     let variable = pool - FIXED_WORKSPACE;
+    let copies = 1 + crate::storage::CONSERVATIVE_WRITE_PAYLOAD_COPIES;
 
     // Act
-    let partition = HybridStorage::immutable_file_partition_target(pool);
+    let partition = storage.immutable_file_partition_target(pool);
 
     // Assert
-    assert_eq!(partition, variable / (COPY_FACTOR * 4));
-    assert!(partition * COPY_FACTOR <= variable / 4);
+    assert_eq!(partition, variable / (copies * 4));
+    assert!(partition * copies <= variable / 4);
 }
 
 struct ChangingReadback {

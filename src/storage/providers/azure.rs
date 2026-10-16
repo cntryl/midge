@@ -1110,9 +1110,8 @@ impl crate::storage::cloud::CloudReadCapability for AzureBackend {
 }
 
 impl crate::storage::cloud::CloudWriteCapability for AzureBackend {
-    fn write_workspace_bytes(&self, payload_bytes: usize) -> usize {
-        // Native HTTP bodies and retries share Bytes; error replies are bounded.
-        payload_bytes.saturating_mul(2)
+    fn write_payload_copies(&self) -> usize {
+        crate::storage::SHARED_BODY_WRITE_PAYLOAD_COPIES
     }
     fn submit_put(
         &self,
@@ -2130,6 +2129,30 @@ impl CloudSigner for ManagedIdentitySigner {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn should_send_submitted_payload_without_copying_when_preparing_put() {
+        // Arrange: the shared-body upload allowance counts one body per request.
+        let backend = super::AzureBackend::new(
+            "account".into(),
+            "container".into(),
+            Some(super::AzureEndpoint::PathStyleBase(
+                "http://127.0.0.1:9".into(),
+            )),
+            None,
+            super::CloudExecutor::new(None).unwrap(),
+        );
+        let payload = vec![7_u8; 64 * 1024];
+        let pointer = payload.as_ptr();
+
+        // Act
+        let (request, _) = backend
+            .prepare_put_request("object", payload, Vec::new(), None)
+            .unwrap();
+
+        // Assert
+        assert_eq!(request.body.as_ref().unwrap().as_ptr(), pointer);
+    }
+
     #[test]
     fn should_enforce_native_sst_range_contract() {
         // Arrange

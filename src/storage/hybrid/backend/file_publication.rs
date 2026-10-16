@@ -7,7 +7,6 @@ use crate::io::{Fs, FsError, FsPath, OpenMode, OpenOptions};
 use std::sync::mpsc;
 
 const READBACK_BYTES: usize = 64 * 1024;
-const COPY_FACTOR: usize = 4;
 const FIXED_WORKSPACE: usize = 256 * 1024;
 
 /// A finished immutable file, read through the filesystem that wrote it.
@@ -39,12 +38,17 @@ impl PublicationAdmission {
 impl HybridStorage {
     /// Leave three quarters of the variable workspace for live merge readers,
     /// the current writer, and one indivisible key. Publication temporarily
-    /// needs four copies of the encoded partition, so using one quarter of the
-    /// remaining pool prevents a valid streaming compaction from repeatedly
-    /// failing when its input cursors retain more than half of the shared
-    /// maintenance budget.
-    pub(crate) fn immutable_file_partition_target(pool: usize) -> usize {
-        (pool.saturating_sub(FIXED_WORKSPACE) / (COPY_FACTOR * 4)).max(1)
+    /// needs [`Self::publication_copies`] of the encoded partition, so using
+    /// one quarter of the remaining pool prevents a valid streaming compaction
+    /// from repeatedly failing when its input cursors retain more than half of
+    /// the shared maintenance budget.
+    pub(crate) fn immutable_file_partition_target(&self, pool: usize) -> usize {
+        (pool.saturating_sub(FIXED_WORKSPACE) / (self.publication_copies() * 4)).max(1)
+    }
+
+    /// The bytes read from the file, plus the SST store's upload copies.
+    fn publication_copies(&self) -> usize {
+        1 + self.stores.sst.write_payload_copies()
     }
 
     pub(crate) fn publish_immutable_file(
@@ -80,16 +84,15 @@ impl HybridStorage {
         let length = usize::try_from(size).map_err(|_| {
             MidgeError::ResourceLimit("immutable upload size exceeds address space".into())
         })?;
-        // Admit input plus provider copy workspace before reading the file.
-        // Native retries share their transport body; the conservative copy
-        // envelope also covers compatibility providers. Fixed space covers
-        // range buffers; completion adapters charge their own stacks.
+        // Admit input plus provider copy workspace before reading the file,
+        // as control uploads do. Fixed space covers range buffers; completion
+        // adapters charge their own stacks.
         let admission = PublicationAdmission {
             deadline,
             memory: Arc::new(
                 budget.reserve(
                     length
-                        .saturating_mul(COPY_FACTOR)
+                        .saturating_mul(self.publication_copies())
                         .saturating_add(FIXED_WORKSPACE),
                     "immutable file upload and readback",
                 )?,
