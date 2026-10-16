@@ -123,17 +123,37 @@ impl AdmittedCatalog {
     }
 }
 
-/// Parser scratch for one pass. Strings without escapes borrow from the
-/// input. An escaped string is copied into one scratch buffer, whose growth
-/// briefly holds the old and the doubled allocation: under three times the
-/// longest string, which is under three times the input.
+/// Parser scratch for one pass, found by one scan that does not allocate.
+/// The parser keeps a single scratch buffer, and its growth briefly holds the
+/// old and the doubled allocation: under three times what it must hold. That
+/// is an escaped string, copied whole (strings without escapes borrow from
+/// the input), or one byte per open array or object while the version probe
+/// skips a value, which has no depth limit.
 fn parser_scratch_bytes(bytes: &[u8]) -> usize {
-    let copied = if bytes.contains(&b'\\') {
-        bytes.len().saturating_mul(3)
-    } else {
-        0
-    };
-    copied.saturating_add(4096)
+    let (mut depth, mut deepest, mut in_string, mut after_backslash, mut escapes) =
+        (0_usize, 0_usize, false, false, false);
+    for &byte in bytes {
+        if in_string {
+            match byte {
+                _ if after_backslash => after_backslash = false,
+                b'\\' => (after_backslash, escapes) = (true, true),
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    let held = if escapes { bytes.len() } else { deepest };
+    held.saturating_mul(3).saturating_add(4096)
 }
 
 fn decode_error(error: &CatalogDecodeError) -> MidgeError {

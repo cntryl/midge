@@ -297,30 +297,78 @@ fn chained_entry(head: ChainLink, epoch: u64) -> CatalogEntry {
     CatalogEntry::from_sealed_bytes(&bytes).unwrap()
 }
 
-#[test]
-fn should_report_fencing_and_refusal_before_admission_when_maintenance_pool_is_full() {
-    // Arrange: compaction holds the rest of the pool.
+/// A decoded catalog while compaction holds the rest of the pool.
+fn catalog_in_full_pool() -> (
+    WalPublicationCatalog,
+    crate::common::resource_budget::ResourceReservation,
+    AdmittedCatalog,
+) {
     let catalog = populated_catalog();
     let budget = ResourceBudget::new(16 * 1024 * 1024).with_contention_errors();
-    let mut admitted = AdmittedCatalog::decode(&catalog.encode().unwrap(), &budget).unwrap();
-    let _compaction = budget
+    let admitted = AdmittedCatalog::decode(&catalog.encode().unwrap(), &budget).unwrap();
+    let compaction = budget
         .reserve(budget.limit() - budget.used(), "compaction")
         .unwrap();
+    (catalog, compaction, admitted)
+}
+
+#[test]
+fn should_report_fencing_before_admission_when_maintenance_pool_is_full() {
+    // Arrange
+    let (catalog, compaction, mut admitted) = catalog_in_full_pool();
     let stale = chained_entry(catalog.head(), 6);
-    let unchained = chained_entry(ChainLink::GENESIS, 7);
 
     // Act
-    let fenced = admitted.append_run(6, &[stale]);
-    let refused = admitted.append_run(7, &[unchained]);
+    let result = admitted.append_run(6, &[stale]);
 
     // Assert
     assert!(
-        matches!(fenced, Err(super::super::PublicationError::Fenced(_))),
-        "{fenced:?}"
-    );
-    assert!(
-        matches!(refused, Err(super::super::PublicationError::Refused(_))),
-        "{refused:?}"
+        matches!(result, Err(super::super::PublicationError::Fenced(_))),
+        "{result:?}"
     );
     assert_eq!(*admitted, catalog);
+    drop(compaction);
+}
+
+#[test]
+fn should_report_refusal_before_admission_when_maintenance_pool_is_full() {
+    // Arrange
+    let (catalog, compaction, mut admitted) = catalog_in_full_pool();
+    let unchained = chained_entry(ChainLink::GENESIS, 7);
+
+    // Act
+    let result = admitted.append_run(7, &[unchained]);
+
+    // Assert
+    assert!(
+        matches!(result, Err(super::super::PublicationError::Refused(_))),
+        "{result:?}"
+    );
+    assert_eq!(*admitted, catalog);
+    drop(compaction);
+}
+
+#[test]
+fn should_refuse_deeply_nested_document_before_parsing_when_scratch_exceeds_budget() {
+    // Arrange: no escapes, but the version probe skips the unknown value
+    // with a parser stack that holds one byte per open array.
+    let depth = 1024 * 1024;
+    let version = crate::wal::cloud_catalog::FORMAT_VERSION;
+    let bytes = format!(
+        "{{\"format_version\":{version},\"x\":{}{}}}",
+        "[".repeat(depth),
+        "]".repeat(depth)
+    )
+    .into_bytes();
+    let budget = ResourceBudget::new(depth);
+
+    // Act
+    let result = AdmittedCatalog::decode(&bytes, &budget);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::ResourceLimit(_))),
+        "{result:?}"
+    );
+    assert_eq!(budget.used(), 0);
 }

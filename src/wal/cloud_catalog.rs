@@ -460,6 +460,11 @@ impl WalPublicationCatalog {
     /// Refuses a writer epoch other than the catalog's, and any run
     /// [`crate::wal::publish::additions`] refuses; the catalog is then
     /// unchanged.
+    ///
+    /// For fixtures: the engine appends through its admitted catalog, which
+    /// charges memory between [`Self::append_additions`] and
+    /// [`Self::extend_validated`].
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn append_run(
         &mut self,
         fencing_epoch: u64,
