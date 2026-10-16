@@ -9,6 +9,8 @@ Midge is currently in the 0.4 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-16
+
 ### Fixed
 
 - Bound cloud WAL catalog decode, publication, retirement and startup salvage
@@ -20,6 +22,15 @@ Midge is currently in the 0.4 release line. Compatibility expectations for pre-1
   Retirement also admits the copied rows and nested family frontiers kept
   through conditional publication before releasing their original catalog.
   Persisted formats, epoch fencing and conditional retirement are unchanged.
+
+### Compatibility and rollback
+
+- No supported public API or persisted-format change from 0.4.0. Database
+  FORMAT 8, SST V4, cloud catalog v3 and lease metadata v3 remain required.
+  Older stores still require logical export/import into a fresh prefix.
+- Rollback to 0.4.0 is supported after clean shutdown and preservation of the
+  original store, subject to its catalog memory limits. It reintroduces the
+  catalog admission failures fixed here and is unsuitable for affected stores.
 
 ## [0.4.0] - 2026-10-14
 
