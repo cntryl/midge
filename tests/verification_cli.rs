@@ -74,7 +74,7 @@ fn should_verify_candidate_written_database_when_cli_runs() {
     assert_eq!(report["health"], "Healthy");
     assert_eq!(report["sst_files_verified"], 1);
     assert_eq!(report["authoritative"], true);
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
 }
 
 #[test]
