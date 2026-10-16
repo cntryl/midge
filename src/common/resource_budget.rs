@@ -255,6 +255,42 @@ impl ResourceReservation {
     ) -> MidgeResult<Self> {
         self.budget.reserve(bytes, resource)
     }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Hold `bytes` in total. Growth is admitted like a new reservation and a
+    /// refusal leaves the charge unchanged; a smaller total releases the rest.
+    pub(crate) fn resize(&mut self, bytes: usize, resource: &'static str) -> MidgeResult<()> {
+        if bytes > self.bytes {
+            let mut growth = self.budget.reserve(bytes - self.bytes, resource)?;
+            self.absorb(&mut growth);
+        } else {
+            self.release_to(bytes);
+        }
+        Ok(())
+    }
+
+    // Both charges come from one budget, so their parent chains match level
+    // for level. The emptied reservation then releases nothing on drop.
+    fn absorb(&mut self, other: &mut Self) {
+        self.bytes += std::mem::take(&mut other.bytes);
+        if let (Some(parent), Some(other)) = (self.parent.as_mut(), other.parent.as_mut()) {
+            parent.absorb(other);
+        }
+    }
+
+    fn release_to(&mut self, bytes: usize) {
+        self.budget
+            .inner
+            .current
+            .fetch_sub(self.bytes - bytes, Ordering::AcqRel);
+        self.bytes = bytes;
+        if let Some(parent) = self.parent.as_mut() {
+            parent.release_to(bytes);
+        }
+    }
 }
 
 impl Drop for ResourceReservation {
@@ -563,5 +599,39 @@ mod tests {
         // Assert
         assert!(matches!(oversized, Err(MidgeError::ResourceLimit(_))));
         assert!(matches!(overflow, Err(MidgeError::ResourceLimit(_))));
+    }
+
+    #[test]
+    fn should_charge_every_level_when_reservation_grows_and_shrinks() {
+        // Arrange
+        let root = ResourceBudget::new(100);
+        let child = root.child(60);
+        let mut held = child.reserve(10, "catalog").unwrap();
+
+        // Act
+        held.resize(50, "catalog growth").unwrap();
+        let grown = (child.used(), root.used());
+        held.resize(20, "catalog retained").unwrap();
+
+        // Assert
+        assert_eq!(grown, (50, 50));
+        assert_eq!((held.bytes(), child.used(), root.used()), (20, 20, 20));
+        drop(held);
+        assert_eq!((child.used(), root.used()), (0, 0));
+    }
+
+    #[test]
+    fn should_keep_charge_when_reservation_growth_is_refused() {
+        // Arrange
+        let budget = ResourceBudget::new(100);
+        let mut held = budget.reserve(30, "catalog").unwrap();
+        let _other = budget.reserve(61, "compaction").unwrap();
+
+        // Act
+        let result = held.resize(40, "catalog growth");
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+        assert_eq!((held.bytes(), budget.used()), (30, 91));
     }
 }
