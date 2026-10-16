@@ -316,19 +316,21 @@ pub(crate) fn uploaded_run(
 /// Refuses a run that is not strictly ascending, a segment the catalog
 /// publishes with another object, a segment behind the catalog's head, and
 /// one that does not chain onto it.
-pub(crate) fn additions(
+pub(crate) fn additions<'a>(
     head: ChainLink,
     published: &[CatalogEntry],
-    run: &[CatalogEntry],
-) -> Result<Vec<CatalogEntry>, Refusal> {
+    run: &'a [CatalogEntry],
+) -> Result<&'a [CatalogEntry], Refusal> {
     ascending(run.iter().map(CatalogEntry::id))?;
     let mut head = head;
     let mut epoch = published.last().map(CatalogEntry::epoch);
-    let mut added = Vec::new();
-    for entry in run {
+    // Only a leading prefix can already be published: every later segment
+    // passes the head, so the additions are one suffix, borrowed in place.
+    let mut start = run.len();
+    for (position, entry) in run.iter().enumerate() {
         let segment_id = entry.id();
         match published.binary_search_by_key(&segment_id, CatalogEntry::id) {
-            Ok(index) if published[index] == *entry => continue,
+            Ok(index) if published[index] == *entry && start == run.len() => continue,
             Ok(_) => return Err(Refusal::Conflict { segment_id }),
             Err(_) => {}
         }
@@ -346,9 +348,9 @@ pub(crate) fn additions(
         }
         head = entry.link();
         epoch = Some(entry.epoch());
-        added.push(entry.clone());
+        start = start.min(position);
     }
-    Ok(added)
+    Ok(&run[start..])
 }
 
 fn ascending(segment_ids: impl Iterator<Item = u64>) -> Result<(), Refusal> {
@@ -540,7 +542,7 @@ mod tests {
         let added = additions(head(&published), &published, &run);
 
         // Assert
-        assert_eq!(added, Ok(run.to_vec()));
+        assert_eq!(added, Ok(&run[..]));
     }
 
     #[test]
@@ -553,7 +555,7 @@ mod tests {
         let added = additions(head(&published), &published, &run);
 
         // Assert
-        assert_eq!(added, Ok(Vec::new()));
+        assert_eq!(added, Ok(&[][..]));
     }
 
     #[test]
@@ -566,7 +568,7 @@ mod tests {
         let added = additions(head(&published), &published, &run);
 
         // Assert
-        assert_eq!(added, Ok(vec![segment(3)]));
+        assert_eq!(added, Ok(&[segment(3)][..]));
     }
 
     #[test]
@@ -579,7 +581,7 @@ mod tests {
         let added = additions(anchor, &[], &run);
 
         // Assert
-        assert_eq!(added, Ok(vec![segment(7)]));
+        assert_eq!(added, Ok(&[segment(7)][..]));
     }
 
     #[test]
@@ -608,7 +610,8 @@ mod tests {
         let different = chained(2, 2);
 
         // Act
-        let added = additions(head(&published), &published, &[different, segment(3)]);
+        let run = [different, segment(3)];
+        let added = additions(head(&published), &published, &run);
 
         // Assert
         assert_eq!(added, Err(Refusal::Conflict { segment_id: 2 }));

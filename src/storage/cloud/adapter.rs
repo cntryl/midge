@@ -162,6 +162,9 @@ impl CloudStorage {
 }
 
 impl StorageBackend for CloudStorage {
+    fn write_payload_copies(&self) -> usize {
+        self.writes.write_payload_copies()
+    }
     fn submit_write_receipt_request(
         &self,
         request: crate::storage::StorageRequest,

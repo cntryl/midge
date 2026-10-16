@@ -17,6 +17,7 @@
 use crate::types::SharedGenerationId;
 use crate::wal::format::{ChainLink, SealedFacts, SegmentId, SegmentIdentity};
 use serde::{Deserialize, Serialize};
+mod allocation;
 
 /// The catalog format this build reads and writes. Any other version is a
 /// compatibility error; nothing migrates it.
@@ -322,17 +323,12 @@ impl WalPublicationCatalog {
     /// [`CatalogDecodeError::Invalid`] for anything else that is not a valid
     /// catalog.
     pub fn decode(bytes: &[u8]) -> Result<Self, CatalogDecodeError> {
-        let probe: VersionProbe = serde_json::from_slice(bytes)
-            .map_err(|error| CatalogDecodeError::Invalid(format!("JSON: {error}")))?;
-        match probe.format_version {
-            Some(FORMAT_VERSION) => {}
-            Some(version) => return Err(CatalogDecodeError::Incompatible(version)),
-            None => {
-                return Err(CatalogDecodeError::Invalid(
-                    "the document names no format version".into(),
-                ))
-            }
-        }
+        Self::validate_format(bytes)?;
+        Self::decode_known_format(bytes)
+    }
+
+    /// [`Self::decode`] for bytes whose format version was already checked.
+    pub(crate) fn decode_known_format(bytes: &[u8]) -> Result<Self, CatalogDecodeError> {
         let catalog: Self = serde_json::from_slice(bytes)
             .map_err(|error| CatalogDecodeError::Invalid(format!("JSON: {error}")))?;
         catalog.validate().map_err(CatalogDecodeError::Invalid)?;
@@ -464,11 +460,31 @@ impl WalPublicationCatalog {
     /// Refuses a writer epoch other than the catalog's, and any run
     /// [`crate::wal::publish::additions`] refuses; the catalog is then
     /// unchanged.
+    ///
+    /// For fixtures: the engine appends through its admitted catalog, which
+    /// charges memory between [`Self::append_additions`] and
+    /// [`Self::extend_validated`].
+    #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn append_run(
         &mut self,
         fencing_epoch: u64,
         run: &[CatalogEntry],
     ) -> Result<bool, crate::wal::publish::Refusal> {
+        let added = self.append_additions(fencing_epoch, run)?;
+        Ok(self.extend_validated(added))
+    }
+
+    /// What [`Self::append_run`] adds: the suffix of `run` past the head.
+    /// Checks every refusal without allocating or changing the catalog.
+    ///
+    /// # Errors
+    ///
+    /// The refusal [`Self::append_run`] returns.
+    pub(crate) fn append_additions<'a>(
+        &self,
+        fencing_epoch: u64,
+        run: &'a [CatalogEntry],
+    ) -> Result<&'a [CatalogEntry], crate::wal::publish::Refusal> {
         if fencing_epoch != self.fencing_epoch {
             return Err(crate::wal::publish::Refusal::EpochMismatch {
                 catalog: self.fencing_epoch,
@@ -476,19 +492,25 @@ impl WalPublicationCatalog {
             });
         }
         let added = crate::wal::publish::additions(self.head(), &self.segments, run)?;
-        let Some(last) = added.last() else {
-            return Ok(false);
-        };
         if let Some(entry) = added.iter().find(|entry| entry.epoch > self.fencing_epoch) {
             return Err(crate::wal::publish::Refusal::EpochMismatch {
                 catalog: self.fencing_epoch,
                 writer: entry.epoch,
             });
         }
-        let next = self.next_segment_id.max(last.id().saturating_add(1));
-        self.segments.extend(added);
-        self.next_segment_id = next;
-        Ok(true)
+        Ok(added)
+    }
+
+    /// Append what [`Self::append_additions`] accepted. Returns whether the
+    /// catalog changed.
+    pub(crate) fn extend_validated(&mut self, added: &[CatalogEntry]) -> bool {
+        let Some(last) = added.last() else {
+            return false;
+        };
+        self.next_segment_id = self.next_segment_id.max(last.id().saturating_add(1));
+        self.segments.reserve_exact(added.len());
+        self.segments.extend_from_slice(added);
+        true
     }
 
     /// [`Self::append_run`] for fixtures outside the crate, with the
@@ -537,10 +559,11 @@ impl WalPublicationCatalog {
                 });
             }
         }
-        let retired: Vec<CatalogEntry> = self.segments.drain(..pending.len()).collect();
-        if let Some(last) = retired.last() {
-            self.anchor = last.facts.link;
+        // The anchor needs only the last retired link; the rows drop in place.
+        if let Some(last) = pending.len().checked_sub(1) {
+            self.anchor = self.segments[last].facts.link;
             self.retired_by = generation;
+            self.segments.drain(..pending.len());
         }
         Ok(pending)
     }

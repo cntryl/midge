@@ -387,7 +387,7 @@ impl CloudPersistence {
         );
         match publication {
             Ok(Ok(_)) => Ok(()),
-            Ok(Err(refusal)) => Err(refusal.into()),
+            Ok(Err(refusal)) => Err(refusal),
             Err(error @ MidgeError::Fenced(_)) => Err(PublicationError::Fenced(error)),
             Err(error) => Err(PublicationError::Retriable(contextualize_cloud_error(
                 error,
@@ -416,7 +416,7 @@ impl CloudPersistence {
             ));
         }
         authority.verify_current(deadline)?;
-        let (_, catalog) = authoritative_wal_catalog_within(self, deadline)?;
+        let catalog = authoritative_wal_catalog_within(self, deadline)?;
         let mut results = Vec::new();
         let active = ids
             .iter()
@@ -431,7 +431,6 @@ impl CloudPersistence {
         catalog
             .oldest_prefix(active.iter().copied())
             .map_err(refusal_error)?;
-        let mut expected = Vec::new();
         let mut targets = Vec::new();
         let covered_count = catalog
             .retirable_prefix(|cf, sequence| match authority.frontiers().get(cf) {
@@ -443,6 +442,7 @@ impl CloudPersistence {
             })
             .len()
             .min(active.len());
+        let expected = catalog.copy_retirement_prefix(covered_count)?;
         for (index, id) in active.into_iter().enumerate() {
             let entry = catalog.entry(id).expect("oldest prefix checked");
             if index >= covered_count {
@@ -459,11 +459,11 @@ impl CloudPersistence {
             let identity =
                 self.remote_range_metadata_optional_within(&entry.object_key(), deadline)?;
             targets.push((id, entry.object_key(), identity));
-            expected.push(entry.clone());
         }
-        if expected.is_empty() {
+        if expected.entries().is_empty() {
             return Ok(results);
         }
+        drop(catalog);
         // Reserve bounded physical cleanup ownership before switching authority.
         // Worker exhaustion can delay deletion, but cannot lose the retired target.
         let deletes = targets
@@ -488,7 +488,7 @@ impl CloudPersistence {
             Missing::Refuse,
             |catalog| {
                 catalog
-                    .retire_prefix(fencing_epoch, &expected, authority.generation_id())
+                    .retire_prefix(fencing_epoch, expected.entries(), authority.generation_id())
                     .map(|retired| Mutation::of(!retired.is_empty(), retired))
             },
         )?;
@@ -523,40 +523,38 @@ impl CloudPersistence {
 fn authoritative_wal_entry(
     storage: &HybridStorage,
     segment_id: u64,
-) -> Result<(ControlObject, CatalogEntry), String> {
-    authoritative_wal_entry_within(
-        storage,
-        segment_id,
-        &crate::common::OperationDeadline::unbounded(),
-    )
-    .map_err(|error| error.to_string())
+) -> Result<CatalogEntry, String> {
+    // Read both copies, never this writer's cache: callers check the store.
+    let deadline = crate::common::OperationDeadline::unbounded();
+    let _catalog_mutation = storage
+        .lock_wal_catalog_mutation_within(&deadline, "cloud WAL catalog read")
+        .map_err(|error| error.to_string())?;
+    load_and_repair_catalog_within(storage, &deadline)
+        .map_err(|error| error.to_string())?
+        .and_then(|authority| authority.catalog.entry(segment_id).cloned())
+        .ok_or_else(|| {
+            format!(
+                "cloud WAL segment {segment_id} is not authoritative in the publication catalog"
+            )
+        })
 }
 
-#[cfg(test)]
-fn authoritative_wal_entry_within(
-    storage: &HybridStorage,
-    segment_id: u64,
-    deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<(ControlObject, CatalogEntry)> {
-    let (proof, catalog) = authoritative_wal_catalog_within(storage, deadline)?;
-    let entry = catalog.entry(segment_id).cloned().ok_or_else(|| {
-        MidgeError::Internal(format!(
-            "cloud WAL segment {segment_id} is not authoritative in the publication catalog"
-        ))
-    })?;
-    Ok((proof, entry))
-}
-
+/// The catalog retirement selects from: this writer's receipt-confirmed
+/// authority when cached, else both copies, loaded and repaired. Retirement
+/// commits by compare-and-swap, so a successor's fence still refuses it.
 fn authoritative_wal_catalog_within(
     storage: &HybridStorage,
     deadline: &crate::common::OperationDeadline,
-) -> MidgeResult<(ControlObject, AdmittedCatalog)> {
+) -> MidgeResult<AdmittedCatalog> {
     let _catalog_mutation =
         storage.lock_wal_catalog_mutation_within(deadline, "cloud WAL catalog read")?;
+    if let Some(cached) = catalog::cached_wal_catalog(storage) {
+        return cached;
+    }
     let authority = load_and_repair_catalog_within(storage, deadline)?.ok_or_else(|| {
         MidgeError::Internal("cloud WAL publication catalog is missing".to_string())
     })?;
-    Ok((authority.primary, authority.catalog))
+    Ok(authority.catalog)
 }
 
 fn validate_remote_wal(
@@ -602,4 +600,4 @@ fn verify_sst_summary_matches_manifest(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

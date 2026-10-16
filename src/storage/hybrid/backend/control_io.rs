@@ -20,10 +20,14 @@ pub(crate) struct ControlObject {
 }
 
 impl ControlObject {
+    pub(crate) fn into_metadata(self) -> StorageObjectMetadata {
+        self.metadata
+    }
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
     /// The object store's identity and size for this control object.
+    #[cfg(test)]
     pub(crate) fn object_metadata(&self) -> &StorageObjectMetadata {
         &self.metadata
     }
@@ -158,10 +162,14 @@ impl HybridStorage {
                 }
                 None => crate::storage::StoragePrecondition::IfAbsent,
             };
-            let memory = Arc::new(budget.reserve(
-                bytes.len().saturating_mul(4),
-                "control upload provider workspace",
-            )?);
+            let memory = Arc::new(
+                budget.reserve(
+                    bytes
+                        .len()
+                        .saturating_mul(self.cloud_backend_for_key(key).write_payload_copies()),
+                    "control upload provider workspace",
+                )?,
+            );
             let timeout =
                 Self::deadline_timeout(key, "control CAS", self.callback_timeout, deadline)?;
             let (tx, rx) = mpsc::channel();

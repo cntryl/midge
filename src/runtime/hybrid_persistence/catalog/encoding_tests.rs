@@ -3,9 +3,13 @@ use crate::wal::cloud_catalog::CatalogEntry;
 use crate::wal::format::ChainLink;
 
 fn populated_catalog() -> WalPublicationCatalog {
+    populated_catalog_with_segments(4096)
+}
+
+fn populated_catalog_with_segments(count: u64) -> WalPublicationCatalog {
     let mut catalog = WalPublicationCatalog::empty(7).unwrap();
     let mut prev = ChainLink::GENESIS;
-    let entries: Vec<CatalogEntry> = (1..=4096_u64)
+    let entries: Vec<CatalogEntry> = (1..=count)
         .map(|segment_id| {
             let record = crate::wal::WalRecord::new(
                 crate::wal::WalOpKind::Put,
@@ -57,6 +61,78 @@ fn storage_fixture() -> (tempfile::TempDir, super::super::CloudPersistence) {
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
     (directory, storage)
+}
+
+fn catalog_with_family_frontiers() -> WalPublicationCatalog {
+    let mut builder = crate::wal::format::segment::SegmentBuilder::new(1, 7, ChainLink::GENESIS);
+    for family in 1..=512_u32 {
+        let mut record = crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"key"),
+            Some(bytes::Bytes::from_static(b"value")),
+            u64::from(family),
+        );
+        record.cf_id = family;
+        builder = builder.record(&record);
+    }
+    let (bytes, _) = builder.seal();
+    let entry = CatalogEntry::from_sealed_bytes(&bytes).unwrap();
+    let mut catalog = WalPublicationCatalog::empty(7).unwrap();
+    catalog.append_run(7, &[entry]).unwrap();
+    catalog
+}
+
+#[test]
+fn should_retain_admission_for_every_decoded_family_frontier() {
+    // Arrange
+    let original = catalog_with_family_frontiers();
+    let bytes = original.encode().unwrap();
+    let budget = ResourceBudget::new(1024 * 1024);
+
+    // Act
+    let decoded = AdmittedCatalog::decode(&bytes, &budget).unwrap();
+
+    // Assert
+    assert_eq!(*decoded, original);
+    let frontier_bytes =
+        decoded.entries()[0].facts().max_seq_per_cf.capacity() * std::mem::size_of::<(u32, u64)>();
+    assert!(budget.used() >= frontier_bytes + std::mem::size_of::<CatalogEntry>());
+    drop(decoded);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn should_release_preflight_scratch_when_frontiers_exceed_admission() {
+    // Arrange
+    let bytes = catalog_with_family_frontiers().encode().unwrap();
+    let bound = WalPublicationCatalog::decode_allocation_bound(&bytes).unwrap();
+    assert!(bound > bytes.len() * 2 + 4096);
+    let budget = ResourceBudget::new(bound - 1);
+
+    // Act
+    let result = AdmittedCatalog::decode(&bytes, &budget);
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn should_preserve_catalog_authority_with_escaped_schema_identifiers() {
+    // Arrange
+    let original = populated_catalog();
+    let bytes = String::from_utf8(original.encode().unwrap())
+        .unwrap()
+        .replace("\"segments\"", "\"\\u0073egments\"");
+    let budget = ResourceBudget::new(8 * 1024 * 1024);
+
+    // Act
+    let decoded = AdmittedCatalog::decode(bytes.as_bytes(), &budget).unwrap();
+
+    // Assert
+    assert_eq!(*decoded, original);
+    drop(decoded);
+    assert_eq!(budget.used(), 0);
 }
 
 #[test]
@@ -154,4 +230,145 @@ fn should_decode_same_catalog_when_json_whitespace_changes() {
         drop(decoded);
         assert_eq!(budget.used(), 0);
     }
+}
+
+#[test]
+fn should_decode_unescaped_catalog_without_admitting_parser_scratch() {
+    // Arrange: escape-free JSON borrows every string from the input.
+    let bytes = populated_catalog().encode().unwrap();
+    let bound = WalPublicationCatalog::decode_allocation_bound(&bytes).unwrap();
+    assert!(bound < bytes.len() * 2);
+    let budget = ResourceBudget::new(bound);
+
+    // Act
+    let decoded = AdmittedCatalog::decode(&bytes, &budget);
+
+    // Assert
+    assert_eq!(*decoded.unwrap(), populated_catalog());
+}
+
+#[test]
+fn should_refuse_escaped_document_before_parsing_when_scratch_exceeds_budget() {
+    // Arrange: a long raw prefix then one escape. The parser copies the
+    // prefix, then doubles its scratch while the old buffer is still live.
+    let key = "a".repeat(1024 * 1024);
+    let version = crate::wal::cloud_catalog::FORMAT_VERSION;
+    let bytes = format!("{{\"format_version\":{version},\"{key}\\n\":0}}").into_bytes();
+    let budget = ResourceBudget::new(bytes.len() * 2 + 8192);
+
+    // Act
+    let result = AdmittedCatalog::decode(&bytes, &budget);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::ResourceLimit(_))),
+        "{result:?}"
+    );
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn should_retain_only_decoded_capacity_when_decode_peak_is_released() {
+    // Arrange
+    let catalog = populated_catalog();
+    let bytes = catalog.encode().unwrap();
+    let peak = WalPublicationCatalog::decode_allocation_bound(&bytes).unwrap();
+    let budget = ResourceBudget::new(64 * 1024 * 1024);
+
+    // Act
+    let decoded = AdmittedCatalog::decode(&bytes, &budget).unwrap();
+
+    // Assert
+    let retained = decoded.retained_allocation_bytes();
+    assert!(retained < peak);
+    assert_eq!(budget.used(), retained);
+}
+
+fn chained_entry(head: ChainLink, epoch: u64) -> CatalogEntry {
+    let id = head.id + 1;
+    let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(id, epoch, head)
+        .record(&crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            bytes::Bytes::from_static(b"new"),
+            Some(bytes::Bytes::from_static(b"value")),
+            head.last_seq + 1,
+        ))
+        .seal();
+    CatalogEntry::from_sealed_bytes(&bytes).unwrap()
+}
+
+/// A decoded catalog while compaction holds the rest of the pool.
+fn catalog_in_full_pool() -> (
+    WalPublicationCatalog,
+    crate::common::resource_budget::ResourceReservation,
+    AdmittedCatalog,
+) {
+    let catalog = populated_catalog();
+    let budget = ResourceBudget::new(16 * 1024 * 1024).with_contention_errors();
+    let admitted = AdmittedCatalog::decode(&catalog.encode().unwrap(), &budget).unwrap();
+    let compaction = budget
+        .reserve(budget.limit() - budget.used(), "compaction")
+        .unwrap();
+    (catalog, compaction, admitted)
+}
+
+#[test]
+fn should_report_fencing_before_admission_when_maintenance_pool_is_full() {
+    // Arrange
+    let (catalog, compaction, mut admitted) = catalog_in_full_pool();
+    let stale = chained_entry(catalog.head(), 6);
+
+    // Act
+    let result = admitted.append_run(6, &[stale]);
+
+    // Assert
+    assert!(
+        matches!(result, Err(super::super::PublicationError::Fenced(_))),
+        "{result:?}"
+    );
+    assert_eq!(*admitted, catalog);
+    drop(compaction);
+}
+
+#[test]
+fn should_report_refusal_before_admission_when_maintenance_pool_is_full() {
+    // Arrange
+    let (catalog, compaction, mut admitted) = catalog_in_full_pool();
+    let unchained = chained_entry(ChainLink::GENESIS, 7);
+
+    // Act
+    let result = admitted.append_run(7, &[unchained]);
+
+    // Assert
+    assert!(
+        matches!(result, Err(super::super::PublicationError::Refused(_))),
+        "{result:?}"
+    );
+    assert_eq!(*admitted, catalog);
+    drop(compaction);
+}
+
+#[test]
+fn should_refuse_deeply_nested_document_before_parsing_when_scratch_exceeds_budget() {
+    // Arrange: no escapes, but the version probe skips the unknown value
+    // with a parser stack that holds one byte per open array.
+    let depth = 1024 * 1024;
+    let version = crate::wal::cloud_catalog::FORMAT_VERSION;
+    let bytes = format!(
+        "{{\"format_version\":{version},\"x\":{}{}}}",
+        "[".repeat(depth),
+        "]".repeat(depth)
+    )
+    .into_bytes();
+    let budget = ResourceBudget::new(depth);
+
+    // Act
+    let result = AdmittedCatalog::decode(&bytes, &budget);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::ResourceLimit(_))),
+        "{result:?}"
+    );
+    assert_eq!(budget.used(), 0);
 }

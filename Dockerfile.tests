@@ -10,6 +10,10 @@ RUN apt-get update \
 
 WORKDIR /workspace
 
+# Keep concurrent test linkers within ordinary development-builder memory.
+ENV CARGO_BUILD_JOBS=2 \
+    CARGO_INCREMENTAL=0
+
 # Verify the crate in a clean Debian container.
 COPY . .
 
@@ -18,8 +22,11 @@ COPY . .
 ARG MIDGE_DISCOVERY_SOURCE_REVISION
 ARG MIDGE_DISCOVERY_SOURCE_DIRTY=true
 
+# Start the compose.yml Sqrzl fixture first and build with --network=host.
+# This disposable emulator credential matches that fixture, not a cloud account.
 # Failpoints are process-global, so the all-features suite must run serially.
-RUN MIDGE_DISCOVERY_SOURCE_REVISION="${MIDGE_DISCOVERY_SOURCE_REVISION}" \
+RUN SQRZL_SECRET_ACCESS_KEY=easy-peasy \
+    MIDGE_DISCOVERY_SOURCE_REVISION="${MIDGE_DISCOVERY_SOURCE_REVISION}" \
     MIDGE_DISCOVERY_SOURCE_DIRTY="${MIDGE_DISCOVERY_SOURCE_DIRTY}" \
     cargo test --workspace --all-features -- --test-threads=1
 

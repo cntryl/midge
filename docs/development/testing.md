@@ -33,7 +33,8 @@ cargo test --workspace --all-features --doc
 cargo check --example documented_quick_start --all-features
 cargo machete
 cargo package --locked
-docker build --file Dockerfile.tests --tag midge-tests:local .
+docker compose up -d sqrzl
+docker build --network=host --file Dockerfile.tests --tag midge-tests:local .
 ```
 
 Pull requests into `develop` and `main` run `ci.yml` on Ubuntu. It validates

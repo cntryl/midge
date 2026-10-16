@@ -497,6 +497,11 @@ pub trait CloudReadCapability: Send + Sync {
 /// impl CloudWriteCapability for MissingWrite {}
 /// ```
 pub trait CloudWriteCapability: Send + Sync {
+    /// [`crate::storage::StorageBackend::write_payload_copies`]. A provider
+    /// lowers the conservative default only when it bounds its own copies.
+    fn write_payload_copies(&self) -> usize {
+        crate::storage::CONSERVATIVE_WRITE_PAYLOAD_COPIES
+    }
     /// Request a checksum-validated write receipt when supported. The default
     /// emits the ordinary PUT completion, requiring the caller's readback.
     fn write_with_receipt(
