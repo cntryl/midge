@@ -2,6 +2,8 @@ use super::*;
 use crate::common::{MidgeError, MidgeResult};
 use crate::types::KeyState;
 
+mod automatic_flush_tests;
+mod automatic_retry_tests;
 mod compaction_budget_tests;
 mod controlled_storage;
 mod paused_compactor;
@@ -47,6 +49,7 @@ fn acknowledge_put(el: &mut EventLoop, cf_id: u32, request_id: u64) -> MidgeResu
                 )
             })
         }
+        Ok(RuntimeResponse::Error { error, .. }) => Err(error),
         actual => Err(MidgeError::Internal(format!(
             "expected actual transaction acknowledgement: {actual:?}"
         ))),
@@ -316,7 +319,8 @@ fn should_complete_manual_cloud_flush_while_compaction_compute_waits() -> MidgeR
 }
 
 #[test]
-fn should_keep_optional_maintenance_blocked_while_compaction_computes() -> MidgeResult<()> {
+fn should_keep_optional_maintenance_blocked_when_compaction_has_no_due_immutable() -> MidgeResult<()>
+{
     // Arrange
     let (mut el, worker, _) = cloud_debt(4)?;
     el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
@@ -333,7 +337,7 @@ fn should_keep_optional_maintenance_blocked_while_compaction_computes() -> Midge
         .expect("actual compute pause");
     el.state.set_compaction_enabled(false);
     acknowledge_put(&mut el, cf_id, 91_303)?;
-    el.freeze_active_memtable(cf_id)?;
+    assert!(el.state.get_cf(cf_id).unwrap().immutable_flushes.is_empty());
     let journal_before = journal_len(&el)?;
 
     // Act

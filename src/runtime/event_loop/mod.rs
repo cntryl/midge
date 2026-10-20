@@ -430,7 +430,9 @@ impl EventLoop {
         };
         let mut actor = CompactionActor::new_with_config(sst_factory, compaction_config);
         actor.set_execution_limits(config.target_sst_size, config.compaction_memory_limit);
-        actor.configure_local_work_target(config.cloud_metadata_storage.is_none());
+        actor.configure_work_target(config.hybrid_storage.as_ref().map(|storage| {
+            storage.as_ref() as &dyn crate::runtime::actors::compaction::CompactionStorage
+        }));
         actor
     }
 
@@ -554,7 +556,7 @@ impl EventLoop {
     pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
         self.actors
             .compaction_actor
-            .configure_local_work_target(false);
+            .configure_work_target(Some(storage.as_ref()));
         storage
             .configure_maintenance_memory(self.actors.compaction_actor.compaction_memory_limit());
         self.actors
@@ -736,3 +738,6 @@ fn check_startup_scope(
 
 #[cfg(test)]
 pub(super) mod tests;
+
+#[cfg(test)]
+mod cloud_work_target_tests;

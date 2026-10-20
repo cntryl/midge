@@ -77,10 +77,14 @@ count. This is bounded diagnostic history, not a count of waiting callers.
 
 In ephemeral cloud mode, ready flush, compaction, and WAL retirement workers
 take turns at existing publication boundaries. A task waiting for its retry
-time does not hold a turn. One maintenance worker runs at a time, giving each
-task access to the shared workspace and trading build overlap for predictable
-progress. Immutable memtables retain their earliest known WAL segment until
-publication; unknown provenance conservatively prevents floor advancement.
+time does not hold a turn. WAL retirement runs without other maintenance
+workers. While compaction computes, a due immutable flush may
+use its separately admitted memory and reserved disk headroom so accepted
+memtables can publish and release memory. Manifest publication remains
+serialized; an active publication or verification barrier still blocks a new
+flush. Another compaction and WAL retirement wait for the compute owner.
+Immutable memtables retain their earliest known WAL segment until publication;
+unknown provenance conservatively prevents floor advancement.
 
 Explicit `compact_all` requests and their continuations use those same turns.
 Only a pending manual request forces compaction below ordinary background
@@ -105,6 +109,17 @@ is published. An interrupted prepublication upload may leave an unreachable
 remote object; it never authorizes deletion of an input. The existing per-CF
 SST filename allocation counter is durably advanced and mirrored before the
 worker starts, preventing a replacement process from reusing an orphan name.
+
+Inner-level compaction prefers input work covering at most four effective
+output partitions. Cloud planning uses the smallest partition allowance from
+the configured SST target, compaction memory, immutable publication workspace,
+and ephemeral staging window. An oversized source batch is reduced before
+recomputing its complete target overlap. If one source still spans too much
+target data, proven interior target boundaries permit a source-only same-level
+split that retains raw versions, expiration and tombstones. The subsequent
+merge still includes every target overlap. Indivisible or unproven layouts
+keep their conservative complete closure, so this is a work target rather than
+a hard latency bound.
 
 Cloud WAL recovery reads catalog-authorized objects through bounded ranges;
 it does not copy the backlog to local disk. Even one WAL object may exceed the

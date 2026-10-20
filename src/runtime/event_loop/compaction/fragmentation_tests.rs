@@ -48,7 +48,7 @@ impl FragmentFixture {
             },
         );
         actor.set_execution_limits(64 * 1024, 8 * 1024 * 1024);
-        actor.configure_local_work_target(true);
+        actor.configure_work_target(None);
         el.actors.compaction_actor = actor;
         el.state.set_compaction_enabled(true);
         el.state.limits.l0_compaction_trigger = 2;
