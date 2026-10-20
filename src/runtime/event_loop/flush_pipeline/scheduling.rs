@@ -136,8 +136,7 @@ impl EventLoop {
             || (!allow_during_shutdown && self.routing.pending_msg.is_some())
             || (!allow_during_shutdown
                 && self.cloud_maintenance_enabled()
-                && (self.cloud_maintenance_control_blocked()
-                    || (self.compaction_compute_owned() && !self.has_manual_flush_obligation())))
+                && self.cloud_maintenance_control_blocked())
     }
 
     pub(super) fn schedule_next_flush_worker_with_shutdown(&mut self, allow_during_shutdown: bool) {

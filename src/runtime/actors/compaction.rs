@@ -398,16 +398,30 @@ impl CompactionActor {
         self.compaction_memory_limit
     }
 
-    /// Prefer jobs covering at most four output partitions, returning to the
-    /// scheduler between publications. This is a planning target: an
-    /// indivisible overlap still uses the complete conservative input set.
-    /// Remote maintenance retains its separately admitted execution policy.
-    pub(crate) fn configure_local_work_target(&mut self, enabled: bool) {
-        let partition_target = self
+    /// Prefer input bytes within four admitted output targets, returning to
+    /// the scheduler between publications. An indivisible overlap still uses
+    /// the complete conservative input set; this is not a hard work cap.
+    pub(crate) fn configure_work_target(&mut self, storage: Option<&dyn CompactionStorage>) {
+        let mut partition_target = self
             .target_sst_size
             .min((self.compaction_memory_limit / 2).max(1));
+        if let Some(storage) = storage {
+            partition_target = partition_target.min(
+                storage
+                    .immutable_file_partition_target(self.compaction_memory_limit)
+                    .max(1),
+            );
+            if storage.ephemeral_sst_cache_enabled() {
+                // The output's hard staging cap is one quarter of local disk.
+                // Leave room for the final block and an indivisible key rather
+                // than planning around a partition already at that ceiling.
+                let staging_target =
+                    usize::try_from(storage.max_local_bytes() / 8).unwrap_or(usize::MAX);
+                partition_target = partition_target.min(staging_target.max(1));
+            }
+        }
         self.compactor
-            .set_work_target_bytes(enabled.then_some(partition_target.saturating_mul(4)));
+            .set_work_target_bytes(Some(partition_target.saturating_mul(4)));
     }
 
     #[cfg(test)]
