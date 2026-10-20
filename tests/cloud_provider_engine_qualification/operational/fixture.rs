@@ -95,7 +95,8 @@ impl Campaign {
                 |path| PathBuf::from(path).join(&id),
             ),
             artifacts,
-            bucket: "midge-sqrzl-operational".to_string(),
+            // Keep namespace-wide provider work within this campaign.
+            bucket: format!("midge-sqrzl-operational-{id}"),
             prefix: format!("operational/{id}/"),
             records: 0,
             actual_wal_bytes: 0,
