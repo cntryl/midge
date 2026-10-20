@@ -2535,7 +2535,7 @@ fn signed_azure_namespace(container: &str) -> Result<(), String> {
         .format("%a, %d %b %Y %H:%M:%S GMT")
         .to_string();
     let path = format!("/admin/{container}");
-    let canonical_headers = format!("x-ms-date:{date}\nx-ms-version:2024-11-04\n");
+    let canonical_headers = format!("x-ms-date:{date}\nx-ms-version:2025-01-05\n");
     let canonical_resource = format!("/admin{path}\nrestype:container");
     let string_to_sign =
         format!("PUT\n\n\n\n\n\n\n\n\n\n\n\n{canonical_headers}{canonical_resource}");
@@ -2548,7 +2548,7 @@ fn signed_azure_namespace(container: &str) -> Result<(), String> {
         .put(format!("{endpoint}{path}?restype=container"))
         .header("authorization", format!("SharedKey admin:{signature}"))
         .header("x-ms-date", date)
-        .header("x-ms-version", "2024-11-04")
+        .header("x-ms-version", "2025-01-05")
         .body(Vec::new())
         .send()
         .map_err(|error| error.to_string())?;
@@ -2584,7 +2584,7 @@ fn signed_gcs_xml_namespace(bucket: &str) -> Result<(), String> {
 fn signed_gcs_json_namespace(bucket: &str) -> Result<(), String> {
     let response = sqrzl_client()?
         .post(format!("{}/storage/v1/b?project=sqrzl", sqrzl_endpoint()))
-        .header("authorization", "Bearer admin")
+        .bearer_auth(sqrzl_secret()?)
         .header("content-type", "application/json")
         .body(format!("{{\"name\":\"{bucket}\"}}"))
         .send()

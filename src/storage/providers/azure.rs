@@ -47,6 +47,7 @@ const ENCODE_SET: &AsciiSet = &CONTROLS
 const AZURE_PUBLIC_AUTHORITY: &str = "https://login.microsoftonline.com";
 const AZURE_GOVERNMENT_AUTHORITY: &str = "https://login.microsoftonline.us";
 const AZURE_CHINA_AUTHORITY: &str = "https://login.chinacloudapi.cn";
+const AZURE_STORAGE_SERVICE_VERSION: &str = "2025-01-05";
 
 // ---------------------------------------------------------------------------
 // Credentials
@@ -1564,7 +1565,7 @@ impl CloudSigner for SharedKeySigner {
         request.headers.push(("x-ms-date".into(), date));
         request
             .headers
-            .push(("x-ms-version".into(), "2024-11-04".into()));
+            .push(("x-ms-version".into(), AZURE_STORAGE_SERVICE_VERSION.into()));
 
         let content_length = request.body.as_ref().map(bytes::Bytes::len);
 
@@ -1781,7 +1782,7 @@ impl CloudSigner for OAuthTokenSigner {
         request.headers.push(("x-ms-date".into(), date));
         request
             .headers
-            .push(("x-ms-version".into(), "2024-11-04".into()));
+            .push(("x-ms-version".into(), AZURE_STORAGE_SERVICE_VERSION.into()));
         Ok(())
     }
 }
@@ -2117,7 +2118,7 @@ impl CloudSigner for ManagedIdentitySigner {
         request.headers.push(("x-ms-date".into(), date));
         request
             .headers
-            .push(("x-ms-version".into(), "2024-11-04".into()));
+            .push(("x-ms-version".into(), AZURE_STORAGE_SERVICE_VERSION.into()));
 
         Ok(())
     }
@@ -3307,7 +3308,7 @@ mod tests {
                 "x-ms-date".to_string(),
                 "Sun, 10 Aug 2026 12:00:00 GMT".to_string(),
             ),
-            ("x-ms-version".to_string(), "2024-11-04".to_string()),
+            ("x-ms-version".to_string(), "2025-01-05".to_string()),
         ];
         let url = url::Url::parse("http://127.0.0.1:10000/devstoreaccount1/container/blob")
             .expect("emulator URL");
@@ -3317,9 +3318,9 @@ mod tests {
 
         // Assert
         assert!(string_to_sign.contains(
-            "x-ms-version:2024-11-04\n/devstoreaccount1/devstoreaccount1/container/blob"
+            "x-ms-version:2025-01-05\n/devstoreaccount1/devstoreaccount1/container/blob"
         ));
-        assert!(!string_to_sign.contains("x-ms-version:2024-11-04\n\n/"));
+        assert!(!string_to_sign.contains("x-ms-version:2025-01-05\n\n/"));
     }
 
     #[test]
@@ -3770,17 +3771,21 @@ mod tests {
             Method::GET,
             "https://acct.blob.core.windows.net/ctr/blob".into(),
         );
+        request
+            .headers
+            .push(("X-Ms-Version".into(), "2024-11-04".into()));
 
         // Act
-        let _ = signer.sign(&mut request);
+        signer.sign(&mut request).expect("sign Azure request");
 
         // Assert
-        let version = request
+        let versions = request
             .headers
             .iter()
-            .find(|(n, _)| n == "x-ms-version")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(version, Some("2024-11-04"));
+            .filter(|(name, _)| name.eq_ignore_ascii_case("x-ms-version"))
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(versions, vec!["2025-01-05"]);
     }
 
     // =========== Helper ===========
