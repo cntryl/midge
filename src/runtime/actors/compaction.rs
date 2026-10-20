@@ -327,6 +327,7 @@ pub struct CompactionActor {
     active_input_ssts: Vec<String>,
     active_input_metadata: Vec<crate::metadata::FileMeta>,
     active_same_level_repair: bool,
+    active_source_fragmentation: Option<Vec<u8>>,
     /// Kept through completion so failed publication can charge its residue.
     active_output_generation: Option<(u32, u32, u64)>,
     /// Captured only by the initiating manual generation; joining waiters
@@ -365,6 +366,7 @@ impl CompactionActor {
             active_input_ssts: Vec::new(),
             active_input_metadata: Vec::new(),
             active_same_level_repair: false,
+            active_source_fragmentation: None,
             active_output_generation: None,
             active_manual_deadline: None,
             worker_cancel: Arc::new(AtomicBool::new(false)),
@@ -394,6 +396,18 @@ impl CompactionActor {
 
     pub(crate) fn compaction_memory_limit(&self) -> usize {
         self.compaction_memory_limit
+    }
+
+    /// Prefer jobs covering at most four output partitions, returning to the
+    /// scheduler between publications. This is a planning target: an
+    /// indivisible overlap still uses the complete conservative input set.
+    /// Remote maintenance retains its separately admitted execution policy.
+    pub(crate) fn configure_local_work_target(&mut self, enabled: bool) {
+        let partition_target = self
+            .target_sst_size
+            .min((self.compaction_memory_limit / 2).max(1));
+        self.compactor
+            .set_work_target_bytes(enabled.then_some(partition_target.saturating_mul(4)));
     }
 
     #[cfg(test)]
@@ -735,6 +749,10 @@ impl CompactionActor {
         self.active_same_level_repair
     }
 
+    pub(crate) fn active_source_fragmentation(&self) -> Option<&[u8]> {
+        self.active_source_fragmentation.as_deref()
+    }
+
     fn retained_output_bytes(&self, output_dir: &std::path::Path) -> MidgeResult<u64> {
         let generation = self.active_output_generation.ok_or_else(|| {
             MidgeError::Internal("failed compaction output identity is unavailable".into())
@@ -911,6 +929,7 @@ impl CompactionActor {
         self.active_input_ssts.clear();
         self.active_input_metadata.clear();
         self.active_same_level_repair = false;
+        self.active_source_fragmentation = None;
         self.active_manual_deadline = None;
         self.compaction_running = false;
     }
@@ -954,7 +973,16 @@ impl CompactionActor {
             .filter(|file| plan.input_files.contains(&file.name))
             .cloned()
             .collect();
-        self.active_same_level_repair = plan.source_level == plan.target_level;
+        self.active_same_level_repair = matches!(
+            plan.purpose,
+            crate::compaction::strategy::CompactionPurpose::Repair
+        );
+        self.active_source_fragmentation = match &plan.purpose {
+            crate::compaction::strategy::CompactionPurpose::Fragment { split_key } => {
+                Some(split_key.clone())
+            }
+            _ => None,
+        };
 
         state
             .compaction

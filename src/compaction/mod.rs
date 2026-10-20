@@ -4,6 +4,9 @@ pub(crate) mod layout;
 mod repair;
 pub mod strategy;
 
+#[cfg(test)]
+mod fragment_tests;
+
 pub(crate) use config::{
     OpenCompactionConfig, DEFAULT_COMPACTION_MEMORY_LIMIT, DEFAULT_TARGET_SST_SIZE,
 };
@@ -90,6 +93,8 @@ pub(crate) fn execute_compaction_at_target(
         ));
     }
 
+    validate_compaction_purpose(plan)?;
+
     // An empty plan is a planner no-op and must not create an unreferenced
     // output. The executor separately rejects non-empty plans whose selected
     // inputs decode to no versions or range tombstones.
@@ -97,17 +102,18 @@ pub(crate) fn execute_compaction_at_target(
         return Ok(Vec::new());
     }
 
-    let same_level_repair = plan.source_level == plan.target_level;
-    if same_level_repair
-        && (plan.source_level == 0
-            || !plan.target_files.is_empty()
-            || plan.point_tombstone_gc_eligible
-            || plan.range_tombstone_gc_eligible)
-    {
-        return Err(MidgeError::Corruption(
-            "same-level repair must preserve all tombstones and use independent L1+ inputs".into(),
-        ));
+    if matches!(plan.purpose, strategy::CompactionPurpose::Fragment { .. }) {
+        return execute_fragmentation(
+            plan,
+            &resources,
+            sst_factory,
+            output_dir,
+            abort_check,
+            output_sink,
+            output_size_limit,
+        );
     }
+    let same_level_repair = matches!(plan.purpose, strategy::CompactionPurpose::Repair);
 
     // --- 1. Open bounded source streams and chained level spans ------------
     let budget = resources.budget;
@@ -183,6 +189,60 @@ pub(crate) fn execute_compaction_at_target(
         }
     }
     Ok(outputs)
+}
+
+fn validate_compaction_purpose(plan: &CompactionPlan) -> MidgeResult<()> {
+    let valid = match &plan.purpose {
+        strategy::CompactionPurpose::Merge => plan.source_level != plan.target_level,
+        strategy::CompactionPurpose::Repair | strategy::CompactionPurpose::Fragment { .. } => {
+            plan.source_level == plan.target_level
+                && plan.source_level > 0
+                && plan.target_files.is_empty()
+                && !plan.point_tombstone_gc_eligible
+                && !plan.range_tombstone_gc_eligible
+                && (!matches!(plan.purpose, strategy::CompactionPurpose::Fragment { .. })
+                    || plan.source_files.len() == 1)
+        }
+    };
+    if !valid {
+        return Err(MidgeError::Corruption(
+            "compaction purpose differs from its level, input, or tombstone retention contract"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_fragmentation(
+    plan: &CompactionPlan,
+    resources: &CompactionResources,
+    sst_factory: &dyn crate::sst::SstFactory,
+    output_dir: &Path,
+    abort_check: Option<&dyn Fn() -> bool>,
+    output_sink: Option<&CompactionOutputSink<'_>>,
+    output_size_limit: Option<usize>,
+) -> MidgeResult<Vec<String>> {
+    let inputs = executor::collect_compaction_stream_inputs(
+        sst_factory,
+        &plan.source_files,
+        &[],
+        plan.source_level,
+        true,
+        &resources.budget,
+        abort_check,
+    )?;
+    executor::write_fragmented_compaction_outputs(
+        sst_factory,
+        output_dir,
+        plan,
+        bounded_partition_target_size(resources.target_sst_size, plan.compaction_memory_limit),
+        inputs,
+        &resources.budget,
+        abort_check,
+        output_sink,
+        output_size_limit,
+    )
 }
 
 fn bounded_partition_target_size(configured_target: usize, compaction_pool: usize) -> usize {

@@ -11,9 +11,25 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::metadata::FileMeta;
 
+#[cfg(test)]
+#[path = "strategy/work_partition_tests.rs"]
+mod work_partition_tests;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactionPurpose {
+    Merge,
+    Repair,
+    /// Rewrite one source in place without selecting versions or collecting
+    /// tombstones. The interior cut reduces its next target overlap span.
+    Fragment {
+        split_key: Vec<u8>,
+    },
+}
+
 /// A compaction plan describing which SSTs to read and which level to promote into.
 #[derive(Debug, Clone)]
 pub struct CompactionPlan {
+    pub purpose: CompactionPurpose,
     /// Complete manifest replacement set. This remains the vector persisted in
     /// compaction intent and manifest edits.
     pub input_files: Vec<String>,
@@ -51,6 +67,11 @@ impl CompactionPlan {
     #[cfg(test)]
     pub fn new(cf_id: u32, source_level: u32, target_level: u32) -> Self {
         Self {
+            purpose: if source_level == target_level {
+                CompactionPurpose::Repair
+            } else {
+                CompactionPurpose::Merge
+            },
             input_files: Vec::new(),
             source_files: Vec::new(),
             target_files: Vec::new(),
@@ -131,6 +152,7 @@ impl Default for LeveledCompactionConfig {
 /// Compaction planner implementing leveled compaction.
 pub struct Compactor {
     pub config: LeveledCompactionConfig,
+    work_target_bytes: Option<usize>,
 }
 
 impl Compactor {
@@ -139,7 +161,16 @@ impl Compactor {
     }
 
     pub fn with_config(config: LeveledCompactionConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            work_target_bytes: None,
+        }
+    }
+
+    /// Set a preferred maximum for source-plus-target input bytes. A source
+    /// without a proven interior split retains its complete ordinary closure.
+    pub(crate) fn set_work_target_bytes(&mut self, work_target_bytes: Option<usize>) {
+        self.work_target_bytes = work_target_bytes;
     }
 
     /// Check if compaction should be triggered based on read amplification.
@@ -227,6 +258,7 @@ impl Compactor {
                 .map(|index| levels[level][index].name.clone())
                 .collect();
             return Ok(Some(CompactionPlan {
+                purpose: CompactionPurpose::Repair,
                 input_files: source_files.clone(),
                 source_files,
                 target_files: Vec::new(),
@@ -248,8 +280,12 @@ impl Compactor {
     ///
     /// Every L0 key interval carries mandatory debt. An inner level carries
     /// debt when overfull or when complete bounds reveal a repair component.
-    /// With finite levels and no new admissions, successful ordinary plans
-    /// lower interval rank and successful repairs remove defect components.
+    /// With finite levels and no new admissions, ordinary plans lower interval
+    /// rank and repairs remove defect components. Source fragmentation first
+    /// refines an interval at one strictly interior target boundary; the finite
+    /// boundary inventory prevents repeating the same split for a fragment.
+    /// Inseparable overlaps retain their complete conservative closure, so the
+    /// preferred work target is not a hard bound for every layout.
     pub(crate) fn compaction_debt_is_clear(
         &self,
         files: &[FileMeta],
@@ -385,6 +421,7 @@ impl Compactor {
             Self::tombstone_gc_eligibility(levels, &input_files)?;
 
         Ok(Some(CompactionPlan {
+            purpose: CompactionPurpose::Merge,
             input_files,
             source_files,
             target_files,
@@ -421,23 +458,49 @@ impl Compactor {
                 .then_with(|| left.name.cmp(&right.name))
         });
         source_files.truncate(self.config.l0_file_count_threshold.max(1));
-        let (source_files, target_files) = self.complete_overlap_span(
+        let source_level = u32::try_from(level).expect("level index fits in u32");
+        let target_level = u32::try_from(level + 1).expect("level index fits in u32");
+        let (mut source_names, mut target_files) = self.complete_overlap_span(
             &source_files,
             &levels[level + 1],
             cf_id,
-            u32::try_from(level).expect("level index fits in u32"),
-            u32::try_from(level + 1).expect("level index fits in u32"),
+            source_level,
+            target_level,
         )?;
-        let input_files = combined_input_files(&source_files, &target_files);
+        if self.exceeds_work_target(&source_files, &levels[level + 1], &target_files) {
+            source_files.truncate(1);
+            (source_names, target_files) = self.complete_overlap_span(
+                &source_files,
+                &levels[level + 1],
+                cf_id,
+                source_level,
+                target_level,
+            )?;
+            if self.exceeds_work_target(&source_files, &levels[level + 1], &target_files) {
+                if let Some(split_key) = Self::fragmentation_split_key(
+                    source_files[0],
+                    &levels[level],
+                    &levels[level + 1],
+                ) {
+                    return Ok(Some(Self::source_fragmentation_plan(
+                        source_files[0],
+                        cf_id,
+                        split_key,
+                    )));
+                }
+            }
+        }
+        let input_files = combined_input_files(&source_names, &target_files);
         let (point_tombstone_gc_eligible, range_tombstone_gc_eligible) =
             Self::tombstone_gc_eligibility(levels, &input_files)?;
 
         Ok(Some(CompactionPlan {
+            purpose: CompactionPurpose::Merge,
             input_files,
-            source_files,
+            source_files: source_names,
             target_files,
-            source_level: u32::try_from(level).expect("level index fits in u32"),
-            target_level: u32::try_from(level + 1).expect("level index fits in u32"),
+            source_level,
+            target_level,
             cf_id,
             output_seq: 0,
             target_sst_size: super::DEFAULT_TARGET_SST_SIZE,
@@ -446,6 +509,78 @@ impl Compactor {
             point_tombstone_gc_eligible,
             range_tombstone_gc_eligible,
         }))
+    }
+
+    fn exceeds_work_target(
+        &self,
+        source_files: &[&FileMeta],
+        target_files: &[&FileMeta],
+        selected_targets: &[String],
+    ) -> bool {
+        let Some(limit) = self.work_target_bytes else {
+            return false;
+        };
+        let selected: std::collections::HashSet<_> =
+            selected_targets.iter().map(String::as_str).collect();
+        let input_bytes = source_files
+            .iter()
+            .chain(
+                target_files
+                    .iter()
+                    .filter(|file| selected.contains(file.name.as_str())),
+            )
+            .try_fold(0_u64, |total, file| total.checked_add(file.size_bytes));
+        input_bytes.is_none_or(|bytes| bytes > u64::try_from(limit).unwrap_or(u64::MAX))
+    }
+
+    fn fragmentation_split_key(
+        source: &FileMeta,
+        source_level: &[&FileMeta],
+        target_level: &[&FileMeta],
+    ) -> Option<Vec<u8>> {
+        if source_level
+            .iter()
+            .chain(target_level)
+            .any(|file| !file.key_bounds_complete)
+            || !crate::compaction::layout::repair_components(source_level).is_empty()
+            || !crate::compaction::layout::repair_components(target_level).is_empty()
+        {
+            return None;
+        }
+        let (smallest, largest) = source
+            .smallest_key
+            .as_ref()
+            .zip(source.largest_key.as_ref())?;
+        let mut cuts: Vec<_> = target_level
+            .iter()
+            .filter_map(|file| file.smallest_key.as_ref())
+            .filter(|key| smallest < *key && *key < largest)
+            .collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        cuts.get(cuts.len() / 2).map(|key| (*key).clone())
+    }
+
+    fn source_fragmentation_plan(
+        source: &FileMeta,
+        cf_id: u32,
+        split_key: Vec<u8>,
+    ) -> CompactionPlan {
+        CompactionPlan {
+            purpose: CompactionPurpose::Fragment { split_key },
+            input_files: vec![source.name.clone()],
+            source_files: vec![source.name.clone()],
+            target_files: Vec::new(),
+            source_level: source.level,
+            target_level: source.level,
+            cf_id,
+            output_seq: 0,
+            target_sst_size: super::DEFAULT_TARGET_SST_SIZE,
+            compaction_memory_limit: super::DEFAULT_COMPACTION_MEMORY_LIMIT,
+            snapshot_horizon: None,
+            point_tombstone_gc_eligible: false,
+            range_tombstone_gc_eligible: false,
+        }
     }
 
     fn tombstone_gc_eligibility(
