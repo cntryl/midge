@@ -433,7 +433,8 @@ fn should_release_final_block_reservations_before_reserving_finalization_workspa
         * (std::mem::size_of::<PendingEntry>() + first_key.len() * 4 + value.len() + 64);
     let index_entry_bytes =
         std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>() + first_key.len();
-    let persistent_metadata_bytes = index_entry_bytes + ENTRY_COUNT * 16;
+    let persistent_metadata_bytes =
+        index_entry_bytes + ENTRY_COUNT * 16 + std::mem::size_of::<usize>();
     let finalization_bytes = index_entry_bytes * 4 + 16 * 1024;
     let budget = crate::common::resource_budget::ResourceBudget::new(
         finalization_bytes + persistent_metadata_bytes,

@@ -1190,6 +1190,93 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
 }
 
 #[test]
+fn should_continue_pressure_compaction_when_one_publication_leaves_l0_at_hard_ceiling() {
+    // Arrange
+    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
+    event_loop.pipeline.worker_msg_tx = Some(worker_tx);
+    event_loop.state.set_compaction_enabled(false);
+    event_loop.state.limits.l0_compaction_trigger = 2;
+    event_loop.state.limits.max_immutable_memtables = 0;
+    event_loop
+        .actors
+        .compaction_actor
+        .set_l0_file_count_threshold(2);
+    for sequence in 1..=5 {
+        let name = format!("pressure-followup-{sequence}.sst");
+        let _ = write_runtime_l0_sst_for_test(&event_loop, &name, sequence);
+        event_loop
+            .state
+            .manifest
+            .test_mut()
+            .files
+            .push(test_manifest_l0_file_meta(&name, sequence));
+    }
+    assert!(event_loop.state.l0_write_slot_unavailable(0));
+    assert!(event_loop.state.pending_compaction_waits.is_empty());
+    event_loop
+        .pipeline
+        .background_compaction_schedule
+        .mark_due();
+
+    // Act
+    event_loop.run_background_compaction_maintenance_if_due();
+    for publication in 1..=2 {
+        let completion = worker_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("critical L0 debt must launch the next worker without a periodic delay");
+        assert!(matches!(
+            completion,
+            RuntimeMsg::CompactionComplete {
+                succeeded: true,
+                ..
+            }
+        ));
+        event_loop.process_one(completion, &worker_rx);
+        assert_eq!(
+            event_loop.state.runtime_metrics_snapshot().compactions_run,
+            publication,
+            "each worker completion must publish its replacement"
+        );
+        if publication == 1 {
+            assert!(
+                event_loop.state.l0_write_slot_unavailable(0),
+                "the first publication must leave debt requiring another compaction"
+            );
+            event_loop.run_request_fairness_slot();
+            assert_eq!(
+                event_loop.state.active_compactions.load(Ordering::SeqCst),
+                1,
+                "the next fair turn must admit another compaction while L0 remains critical"
+            );
+        }
+    }
+
+    // Assert
+    assert!(!event_loop.state.l0_write_slot_unavailable(0));
+    assert_eq!(
+        event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| file.level == 0)
+            .count(),
+        1,
+        "pressure recovery must stop after restoring admission"
+    );
+    assert_eq!(
+        event_loop.state.active_compactions.load(Ordering::SeqCst),
+        0
+    );
+    assert!(!event_loop
+        .schedule_one_background_compaction_if_needed("restored admission after pressure followup")
+        .expect("check ordinary background policy"));
+    assert!(!event_loop.state.compaction_enabled());
+    assert!(event_loop.state.pending_compaction_waits.is_empty());
+}
+
+#[test]
 fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
     // Arrange
     for gate in ["ddl", "publication", "unsettled"] {
@@ -2543,9 +2630,16 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
 fn should_restore_deferred_column_family_drop_before_emergent_compaction_followup() {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+    let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
+    event_loop.pipeline.worker_msg_tx = Some(worker_tx);
+    event_loop.state.limits.l0_compaction_trigger = 2;
+    event_loop.state.limits.max_immutable_memtables = 0;
+    event_loop
+        .actors
+        .compaction_actor
+        .set_l0_file_count_threshold(2);
     let cf_id = create_event_loop_test_column_family(&mut event_loop, "drop-before-followup");
     let current_input = crate::cloud_layout::file_name(cf_id, 0, 1);
-    let current_output = crate::cloud_layout::file_name(cf_id, 1, 10);
     for (name, key, sequence) in
         std::iter::once((current_input.clone(), b'a', 1_u64)).chain((2_u8..=5).map(|index| {
             (
@@ -2568,14 +2662,12 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
             sequence,
         );
     }
-    let output_bytes = valid_sst_bytes_for_event_loop_test(b"a", b"output", 10);
-    std::fs::write(
-        event_loop.state.host_sst_dir().join(&current_output),
-        &output_bytes,
-    )
-    .expect("write completed output");
-    prepare_event_loop_test_compaction(&mut event_loop, std::slice::from_ref(&current_input))
-        .expect("prepare active compaction fixture");
+    let mut plan = crate::compaction::CompactionPlan::new(cf_id, 0, 1);
+    plan.source_files.push(current_input.clone());
+    plan.input_files.push(current_input);
+    event_loop
+        .launch_compaction(plan)
+        .expect("launch compaction");
     let drop_request_id = 8_157;
     let drop_response =
         register_event_loop_test_response(&event_loop, drop_request_id, "TestRequest");
@@ -2589,22 +2681,32 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
         &msg_rx,
     );
     assert_one_deferred_publication_message(&event_loop);
+    event_loop
+        .pipeline
+        .background_compaction_schedule
+        .defer_for(std::time::Duration::from_secs(30));
 
     // Act
-    event_loop.handle_runtime_msg(
+    let completion = worker_rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("compaction worker must complete");
+    assert!(matches!(
+        completion,
         RuntimeMsg::CompactionComplete {
-            request_id: 8_158,
-            input_ssts: vec![current_input],
-            output_ssts: vec![current_output],
-            cf_id,
-            target_level: 1,
             succeeded: true,
-        },
-        &msg_rx,
-    );
+            ..
+        }
+    ));
+    event_loop.process_one(completion, &msg_rx);
+    event_loop.run_request_fairness_slot();
 
     // Assert: four L0 files still qualify, but the waiting drop owns the next
     // serialized publication turn instead of another compaction worker.
+    assert_eq!(
+        event_loop.state.runtime_metrics_snapshot().compactions_run,
+        1
+    );
+    assert!(event_loop.state.l0_write_slot_unavailable(cf_id));
     assert_eq!(
         event_loop
             .state
@@ -2617,9 +2719,8 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
             .publication
             .publication_gate
             .deferred_messages_len(),
-        1
+        0
     );
-    event_loop.restore_publication_deferred_message();
     let deferred = event_loop
         .routing
         .pending_msg

@@ -237,7 +237,10 @@ impl EventLoop {
     }
 
     pub(super) fn run_background_compaction_maintenance_if_due(&mut self) {
-        if self.background_maintenance_timeout() != Duration::ZERO {
+        // A restored request owns the publication turn that released it.
+        if self.routing.pending_msg.is_some()
+            || self.background_maintenance_timeout() != Duration::ZERO
+        {
             return;
         }
 
@@ -304,6 +307,9 @@ mod deadline_tests;
 #[cfg(test)]
 mod name_budget_tests;
 
+#[cfg(test)]
+mod fragmentation_tests;
+
 pub(super) struct CompactionCoordinator;
 
 pub(super) struct CompactionCompleteRequest {
@@ -349,6 +355,11 @@ impl CompactionCoordinator {
         plan: CompactionPlan,
     ) -> HandleOutcome {
         let cplan = crate::compaction::CompactionPlan {
+            purpose: if plan.source_level == plan.target_level {
+                crate::compaction::strategy::CompactionPurpose::Repair
+            } else {
+                crate::compaction::strategy::CompactionPurpose::Merge
+            },
             source_files: plan.input_files.clone(),
             target_files: Vec::new(),
             input_files: plan.input_files,
@@ -708,6 +719,7 @@ impl CompactionCoordinator {
         let outputs = prepared?;
         let added =
             Self::validate_prepared_output_metadata(cf_id, target_level, output_ssts, &outputs)?;
+        Self::validate_fragment_replacement(event_loop, input_ssts, &added, cf_id, target_level)?;
         if event_loop
             .actors
             .compaction_actor
@@ -769,6 +781,59 @@ impl CompactionCoordinator {
             ));
         }
         Ok(())
+    }
+
+    fn validate_fragment_replacement(
+        event_loop: &EventLoop,
+        input_ssts: &[String],
+        added: &[crate::runtime::FileMeta],
+        cf_id: crate::types::ColumnFamilyId,
+        target_level: u32,
+    ) -> crate::common::MidgeResult<()> {
+        let Some(split_key) = event_loop
+            .actors
+            .compaction_actor
+            .active_source_fragmentation()
+        else {
+            return Ok(());
+        };
+        let source = event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .find(|file| input_ssts.first().is_some_and(|name| file.name == *name))
+            .ok_or_else(|| {
+                MidgeError::Fenced("fragment source is no longer authoritative".into())
+            })?;
+        let bounds = source
+            .smallest_key
+            .as_ref()
+            .zip(source.largest_key.as_ref());
+        let contained = bounds.is_some_and(|(smallest, largest)| {
+            added.iter().all(|file| {
+                file.smallest_key
+                    .as_ref()
+                    .zip(file.largest_key.as_ref())
+                    .is_some_and(|(start, end)| smallest <= start && start <= end && end <= largest)
+            })
+        });
+        let split_preserved = added.windows(2).any(|pair| {
+            pair[0]
+                .largest_key
+                .as_deref()
+                .is_some_and(|end| end <= split_key)
+                && pair[1]
+                    .smallest_key
+                    .as_deref()
+                    .is_some_and(|start| start >= split_key)
+        });
+        if !contained || !split_preserved {
+            return Err(MidgeError::Fenced(
+                "source fragmentation did not preserve its captured range and split".into(),
+            ));
+        }
+        Self::validate_repair_replacement_level(event_loop, input_ssts, added, cf_id, target_level)
     }
 
     fn validate_output_names(
@@ -889,6 +954,19 @@ impl CompactionCoordinator {
                 ));
             }
         }
+        if let Some(split_key) = event_loop
+            .actors
+            .compaction_actor
+            .active_source_fragmentation()
+        {
+            return Self::validate_captured_fragment_source(
+                event_loop,
+                &selected_files,
+                cf_id,
+                target_level,
+                split_key,
+            );
+        }
         if event_loop
             .actors
             .compaction_actor
@@ -901,6 +979,15 @@ impl CompactionCoordinator {
                 target_level,
             );
         }
+        Self::validate_captured_promotion_span(event_loop, &selected_files, cf_id, target_level)
+    }
+
+    fn validate_captured_promotion_span(
+        event_loop: &EventLoop,
+        selected_files: &[&crate::metadata::FileMeta],
+        cf_id: crate::types::ColumnFamilyId,
+        target_level: u32,
+    ) -> crate::common::MidgeResult<()> {
         let min_key = selected_files
             .iter()
             .filter_map(|file| file.smallest_key.as_ref())
@@ -948,6 +1035,61 @@ impl CompactionCoordinator {
         if live_target != captured_target {
             return Err(crate::common::MidgeError::Fenced(
                 "compaction target-level span changed before publication".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_captured_fragment_source(
+        event_loop: &EventLoop,
+        selected: &[&crate::metadata::FileMeta],
+        cf_id: crate::types::ColumnFamilyId,
+        level: u32,
+        split_key: &[u8],
+    ) -> crate::common::MidgeResult<()> {
+        let [source] = selected else {
+            return Err(MidgeError::Fenced(
+                "source fragmentation must replace one file".into(),
+            ));
+        };
+        if level == 0
+            || source.cf_id != cf_id
+            || source.level != level
+            || !source.key_bounds_complete
+            || !source
+                .smallest_key
+                .as_deref()
+                .zip(source.largest_key.as_deref())
+                .is_some_and(|(start, end)| start < split_key && split_key < end)
+        {
+            return Err(MidgeError::Fenced(
+                "source fragmentation bounds changed".into(),
+            ));
+        }
+        let files: Vec<_> = event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| file.cf_id == cf_id && file.level == level)
+            .collect();
+        if files.iter().any(|file| {
+            !file.key_bounds_complete
+                || file
+                    .smallest_key
+                    .as_ref()
+                    .zip(file.largest_key.as_ref())
+                    .is_none_or(|(start, end)| start > end)
+        }) || crate::compaction::layout::repair_components(&files)
+            .iter()
+            .any(|component| {
+                component
+                    .iter()
+                    .any(|&index| files[index].name == source.name)
+            })
+        {
+            return Err(MidgeError::Fenced(
+                "source fragmentation layout changed".into(),
             ));
         }
         Ok(())
@@ -1056,6 +1198,13 @@ impl CompactionCoordinator {
         Self::validate_captured_target_span(
             event_loop,
             &pending.token.input_ssts,
+            pending.token.cf_id,
+            pending.token.target_level,
+        )?;
+        Self::validate_fragment_replacement(
+            event_loop,
+            &pending.token.input_ssts,
+            &pending.added,
             pending.token.cf_id,
             pending.token.target_level,
         )?;
@@ -1279,6 +1428,15 @@ impl CompactionCoordinator {
         event_loop.schedule_next_flush_worker();
         event_loop.drain_auto_flush_memtables();
         event_loop.wake_write_stall_waiters();
+        // Stalled writers cannot produce a flush publication to wake the
+        // next pressure turn. Continue through the normal scheduler instead
+        // of waiting for the periodic check after each successful worker.
+        if !event_loop.cloud_maintenance_enabled() && event_loop.state.has_any_critical_l0_debt() {
+            event_loop
+                .pipeline
+                .background_compaction_schedule
+                .mark_due();
+        }
     }
 
     fn finish_failed_start(

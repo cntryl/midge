@@ -104,13 +104,13 @@ pub(super) fn options(root: &Path, fixture: Fixture) -> MidgeResult<OpenOptions>
         | Backend::SqrzlGcsXml
         | Backend::SqrzlGcsJson) => {
             use cntryl_midge::{CloudProviderConfig, CloudStorageLocation};
+            // Scope namespace-wide provider work to this history and reuse it on restart.
+            let namespace = format!("midge-model-{}", uuid::Uuid::new_v4());
             let provider = match backend {
-                Backend::SqrzlS3 => CloudProviderConfig::sqrzl_s3("midge-031-model-s3"),
-                Backend::SqrzlAzure => CloudProviderConfig::sqrzl_azure("midge-031-model-azure"),
-                Backend::SqrzlGcsXml => CloudProviderConfig::sqrzl_gcs("midge-031-model-gcs-xml"),
-                Backend::SqrzlGcsJson => {
-                    CloudProviderConfig::sqrzl_gcs_json("midge-031-model-gcs-json")
-                }
+                Backend::SqrzlS3 => CloudProviderConfig::sqrzl_s3(namespace),
+                Backend::SqrzlAzure => CloudProviderConfig::sqrzl_azure(namespace),
+                Backend::SqrzlGcsXml => CloudProviderConfig::sqrzl_gcs(namespace),
+                Backend::SqrzlGcsJson => CloudProviderConfig::sqrzl_gcs_json(namespace),
                 Backend::Local | Backend::CloudSimulated => unreachable!("native provider fixture"),
             };
             crate::common::prepare_sqrzl_namespace(&provider).map_err(MidgeError::Internal)?;

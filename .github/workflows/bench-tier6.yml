@@ -38,7 +38,7 @@ jobs:
         # Local workloads do not need an emulator.
         image: >-
           ${{
-            !endsWith(matrix.workload, '_local') && 'ghcr.io/sqrzl/sqrzl-emulator@sha256:bb5bf54895fcb3b9730665b48e0f7b602791c61c3d18e5e7a060a4dce5c90964'
+            !endsWith(matrix.workload, '_local') && 'ghcr.io/sqrzl/sqrzl-emulator:latest'
             || ''
           }}
         ports:

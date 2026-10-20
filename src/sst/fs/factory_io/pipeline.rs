@@ -19,9 +19,51 @@ use crate::sst::types::{
 use crate::types::{EntryType, RangeTombstone};
 use std::sync::Arc;
 
+/// Index entries own their retained key-byte total, updated only on insertion.
+#[derive(Default)]
+pub(super) struct BlockIndexEntries {
+    entries: Vec<(Vec<u8>, BlockHandle)>,
+    key_bytes: usize,
+}
+
+impl BlockIndexEntries {
+    fn push(&mut self, entry: (Vec<u8>, BlockHandle)) {
+        let key_bytes = entry.0.len();
+        self.entries.push(entry);
+        self.key_bytes = self.key_bytes.saturating_add(key_bytes);
+    }
+
+    pub(super) fn retained_bytes(&self) -> usize {
+        self.len()
+            .saturating_mul(std::mem::size_of::<(Vec<u8>, BlockHandle)>())
+            .saturating_add(self.key_bytes)
+    }
+
+    pub(super) fn encoded_bound(&self) -> usize {
+        self.len()
+            .saturating_mul(256)
+            .saturating_add(self.key_bytes.saturating_mul(8))
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = &(Vec<u8>, BlockHandle)> {
+        self.entries.iter().inspect(|_| {
+            #[cfg(test)]
+            super::size_preflight_tests::record_visit();
+        })
+    }
+}
+
+impl std::ops::Deref for BlockIndexEntries {
+    type Target = [(Vec<u8>, BlockHandle)];
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
 /// Mutable state shared by both writer entry paths before blocks are emitted.
 pub(super) struct BlockPipeline {
-    pub(super) block_index_entries: Vec<(Vec<u8>, BlockHandle)>,
+    pub(super) block_index_entries: BlockIndexEntries,
     key_profiler: KeyStructureProfiler,
     pub(super) current_block: Vec<u8>,
     pub(super) current_block_keys: Vec<Vec<u8>>,
@@ -37,7 +79,7 @@ pub(super) struct BlockPipeline {
 impl BlockPipeline {
     pub(super) fn new() -> Self {
         Self {
-            block_index_entries: Vec::new(),
+            block_index_entries: BlockIndexEntries::default(),
             key_profiler: KeyStructureProfiler::new(),
             current_block: Vec::new(),
             current_block_keys: Vec::new(),
@@ -125,11 +167,20 @@ impl BlockPipeline {
             return Ok(());
         }
 
-        let reservation = sink.prepare_block(
-            self.current_block.len(),
-            self.current_first_key.as_deref(),
-            self.current_block_keys.len(),
-        )?;
+        let retained_metadata_bytes = self
+            .current_first_key
+            .as_ref()
+            .map_or(0, |key| {
+                key.len()
+                    .saturating_add(std::mem::size_of::<(Vec<u8>, BlockHandle)>())
+            })
+            .saturating_add(self.current_block_keys.len().saturating_mul(16))
+            .saturating_add(if self.block_index_entries.is_empty() {
+                std::mem::size_of::<usize>()
+            } else {
+                0
+            });
+        let reservation = sink.prepare_block(self.current_block.len(), retained_metadata_bytes)?;
         let handle = Self::append_block(sink, &self.current_block, compression_policy)?;
         if let Some(first_key) = self.current_first_key.take() {
             self.block_index_entries.push((first_key, handle));
@@ -254,7 +305,7 @@ impl FsSstWriter {
         Self {
             fs,
             entries: Vec::new(),
-            range_tombstones: Vec::new(),
+            range_tombstones: super::RetainedRanges::default(),
             block_size,
             compression_policy,
             streaming: None,
@@ -475,5 +526,26 @@ impl FsSstWriter {
         // into place. Syncing here would write every output byte to the device
         // twice. A crash simply orphans the scratch, which cleanup handles.
         state.sink.finish()
+    }
+}
+
+#[cfg(test)]
+mod size_total_tests {
+    use super::{BlockHandle, BlockIndexEntries};
+
+    #[test]
+    fn should_saturate_index_size_totals_when_retained_keys_exceed_usize() {
+        // Arrange: the previous total is near the arithmetic limit.
+        let mut entries = BlockIndexEntries {
+            entries: Vec::new(),
+            key_bytes: usize::MAX - 1,
+        };
+
+        // Act
+        entries.push((b"key".to_vec(), BlockHandle::new(0, 1)));
+
+        // Assert
+        assert_eq!(entries.retained_bytes(), usize::MAX);
+        assert_eq!(entries.encoded_bound(), usize::MAX);
     }
 }

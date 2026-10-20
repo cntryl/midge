@@ -19,7 +19,9 @@ mod partition;
 pub(crate) use merge::{
     collect_compaction_stream_inputs, merge_repair_inputs_to_run, TombstoneGcPolicy,
 };
-pub(crate) use partition::write_partitioned_compaction_outputs;
+pub(crate) use partition::{
+    write_fragmented_compaction_outputs, write_partitioned_compaction_outputs,
+};
 
 /// A single logical version of a key observed during compaction.
 ///

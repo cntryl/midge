@@ -145,6 +145,37 @@ pub(crate) fn write_legacy_oversized_uncompressed_sst(
     super::finish_writer_to_path(Box::new(legacy), path)
 }
 
+/// Range metadata and the exact sizing bound for the retained entries.
+#[derive(Default)]
+struct RetainedRanges {
+    entries: Vec<RangeTombstone>,
+    encoded_bound: usize,
+}
+
+impl RetainedRanges {
+    fn push(&mut self, range: RangeTombstone) {
+        let growth = crate::memtable::size_bound::range_bytes(range.start.len(), range.end.len());
+        self.entries.push(range);
+        self.encoded_bound = self.encoded_bound.saturating_add(growth);
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = &RangeTombstone> {
+        self.entries.iter().inspect(|_| {
+            #[cfg(test)]
+            size_preflight_tests::record_visit();
+        })
+    }
+}
+
+impl std::ops::Deref for RetainedRanges {
+    type Target = [RangeTombstone];
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
 /// Simple in-memory SST writer that applies block-level compression.
 struct FsSstWriter {
     /// Filesystem this writer publishes through, injected by the factory so
@@ -152,7 +183,7 @@ struct FsSstWriter {
     /// the same backend the factory reads from.
     fs: Arc<dyn Fs>,
     entries: Vec<PendingEntry>,
-    range_tombstones: Vec<RangeTombstone>,
+    range_tombstones: RetainedRanges,
     block_size: usize,
     compression_policy: CompressionPolicy,
     /// Activated only by `add_sorted_with_meta`, which is the compaction
@@ -236,13 +267,10 @@ impl DynSstWriter for FsSstWriter {
         // uses fewer than 64 bytes of integer framing. Key payloads also
         // appear in the block index and the two metadata bounds. The factors
         // below allow their copies plus worst-case fixed-compressor growth.
-        let ranges = self.range_tombstones.iter().fold(0usize, |total, range| {
-            total.saturating_add(
-                self.additional_range_tombstone_size_upper_bound(&range.start, &range.end)
-                    .unwrap_or(usize::MAX),
-            )
-        });
-        let fixed = ranges.saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES);
+        let fixed = self
+            .range_tombstones
+            .encoded_bound
+            .saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES);
         let Some(streaming) = &self.streaming else {
             return Some(self.entries.iter().fold(fixed, |total, entry| {
                 total.saturating_add(crate::memtable::size_bound::point_bytes(
@@ -252,14 +280,7 @@ impl DynSstWriter for FsSstWriter {
             }));
         };
         let pipeline = &streaming.pipeline;
-        let index = pipeline
-            .block_index_entries
-            .iter()
-            .fold(0usize, |total, (key, _)| {
-                total
-                    .saturating_add(256)
-                    .saturating_add(key.len().saturating_mul(8))
-            });
+        let index = pipeline.block_index_entries.encoded_bound();
         let current_index = pipeline.current_first_key.as_ref().map_or(0, |key| {
             256usize.saturating_add(key.len().saturating_mul(8))
         });
@@ -297,15 +318,7 @@ impl DynSstWriter for FsSstWriter {
             let pipeline = &streaming.pipeline;
             let persisted =
                 usize::try_from(streaming.sink.offset().unwrap_or(u64::MAX)).unwrap_or(usize::MAX);
-            let index = pipeline.block_index_entries.iter().fold(
-                pipeline
-                    .block_index_entries
-                    .len()
-                    .saturating_mul(
-                        std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>(),
-                    ),
-                |total, (key, _)| total.saturating_add(key.len()),
-            );
+            let index = pipeline.block_index_entries.retained_bytes();
             let current_bloom = if pipeline.current_block_keys.is_empty() {
                 0
             } else {
@@ -424,7 +437,12 @@ impl DynSstWriter for FsSstWriter {
         }
         let retained_bytes = std::mem::size_of::<RangeTombstone>()
             .saturating_add(start.len())
-            .saturating_add(end.len());
+            .saturating_add(end.len())
+            .saturating_add(if self.range_tombstones.is_empty() {
+                std::mem::size_of::<usize>()
+            } else {
+                0
+            });
         let reservation = self
             .budget
             .as_ref()
@@ -555,3 +573,7 @@ mod sink;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "factory_io/tests/size_preflights.rs"]
+mod size_preflight_tests;

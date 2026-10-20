@@ -304,15 +304,15 @@ fn should_join_azure_canonical_headers_directly_to_resource() {
             "x-ms-date".to_string(),
             "Tue, 11 Aug 2026 12:00:00 GMT".to_string(),
         ),
-        ("x-ms-version".to_string(), "2024-11-04".to_string()),
+        ("x-ms-version".to_string(), "2025-01-05".to_string()),
     ];
 
     // Act
     let string_to_sign = azure_string_to_sign("GET", &headers, "/admin/container/blob", "", b"");
 
     // Assert
-    assert!(string_to_sign.contains("x-ms-version:2024-11-04\n/admin/admin/container/blob"));
-    assert!(!string_to_sign.contains("x-ms-version:2024-11-04\n\n/"));
+    assert!(string_to_sign.contains("x-ms-version:2025-01-05\n/admin/admin/container/blob"));
+    assert!(!string_to_sign.contains("x-ms-version:2025-01-05\n\n/"));
 }
 
 /// Precondition headers naming the current version of `key`.

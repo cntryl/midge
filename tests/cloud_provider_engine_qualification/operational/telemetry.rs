@@ -106,8 +106,18 @@ impl Recorder {
             .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
                 matches!(metadata.target(), "midge::cloud_io" | "midge::recovery")
             }));
+        let diagnostics = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                matches!(
+                    *metadata.level(),
+                    tracing::Level::WARN | tracing::Level::ERROR
+                ) && (metadata.target().starts_with("cntryl_midge::lease")
+                    || metadata.target().starts_with("cntryl_midge::runtime"))
+            }));
         tracing_subscriber::registry()
             .with(layer)
+            .with(diagnostics)
             .try_init()
             .expect("qualification tracing subscriber");
         recorder
