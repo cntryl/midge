@@ -237,7 +237,10 @@ impl EventLoop {
     }
 
     pub(super) fn run_background_compaction_maintenance_if_due(&mut self) {
-        if self.background_maintenance_timeout() != Duration::ZERO {
+        // A restored request owns the publication turn that released it.
+        if self.routing.pending_msg.is_some()
+            || self.background_maintenance_timeout() != Duration::ZERO
+        {
             return;
         }
 
@@ -1279,6 +1282,15 @@ impl CompactionCoordinator {
         event_loop.schedule_next_flush_worker();
         event_loop.drain_auto_flush_memtables();
         event_loop.wake_write_stall_waiters();
+        // Stalled writers cannot produce a flush publication to wake the
+        // next pressure turn. Continue through the normal scheduler instead
+        // of waiting for the periodic check after each successful worker.
+        if !event_loop.cloud_maintenance_enabled() && event_loop.state.has_any_critical_l0_debt() {
+            event_loop
+                .pipeline
+                .background_compaction_schedule
+                .mark_due();
+        }
     }
 
     fn finish_failed_start(
