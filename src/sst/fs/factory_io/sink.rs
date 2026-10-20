@@ -33,8 +33,7 @@ pub(super) trait BlockSink {
     fn prepare_block(
         &self,
         block_bytes: usize,
-        first_key: Option<&[u8]>,
-        key_count: usize,
+        retained_metadata_bytes: usize,
     ) -> MidgeResult<Self::FlushReservation>;
 
     fn finish_block(&mut self, reservation: Self::FlushReservation);
@@ -82,8 +81,7 @@ impl BlockSink for VecBlockSink {
     fn prepare_block(
         &self,
         _block_bytes: usize,
-        _first_key: Option<&[u8]>,
-        _key_count: usize,
+        _retained_metadata_bytes: usize,
     ) -> MidgeResult<Self::FlushReservation> {
         Ok(())
     }
@@ -172,8 +170,7 @@ impl BlockSink for ScratchBlockSink {
     fn prepare_block(
         &self,
         block_bytes: usize,
-        first_key: Option<&[u8]>,
-        key_count: usize,
+        retained_metadata_bytes: usize,
     ) -> MidgeResult<Self::FlushReservation> {
         let compression_workspace_bytes = block_bytes.saturating_mul(2).saturating_add(4096);
         let compression_workspace = self
@@ -181,18 +178,10 @@ impl BlockSink for ScratchBlockSink {
             .as_ref()
             .map(|budget| budget.reserve(compression_workspace_bytes, "SST compression workspace"))
             .transpose()?;
-        let persistent_bytes = first_key
-            .map_or(0, |key| {
-                key.len()
-                    .saturating_add(
-                        std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>(),
-                    )
-            })
-            .saturating_add(key_count.saturating_mul(16));
         let persistent = self
             .budget
             .as_ref()
-            .map(|budget| budget.reserve(persistent_bytes, "SST index and bloom metadata"))
+            .map(|budget| budget.reserve(retained_metadata_bytes, "SST index and bloom metadata"))
             .transpose()?;
         Ok(ScratchFlushReservation {
             _compression_workspace: compression_workspace,
