@@ -368,15 +368,6 @@ fn reject_op_specific_corruption(
         return Err(corruption("Delete record carries a VALUE tag"));
     }
 
-    // NOTE: a TxnBatch outer record carrying COMPRESSION is *not* rejected
-    // here, despite lsm-spec format/wal.md §5.4 describing it as corrupt.
-    // `runtime/actors/wal/transaction.rs` legitimately compresses a large
-    // batch payload through the same value-compression path any other
-    // record uses, so a real writer does produce this shape — rejecting it
-    // would break ordinary large-transaction WAL replay. Flagged back to
-    // the spec rather than enforced; see lsm-spec `notes/
-    // implementation-findings.md` for this kind of prose/code correction.
-
     Ok(())
 }
 
@@ -466,6 +457,10 @@ pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
         }
         Ok(())
     })?;
+
+    if compression.is_some() && value.is_none() {
+        return Err(corruption("COMPRESSION tag is present without VALUE"));
+    }
 
     let op = op.ok_or_else(|| corruption("missing OP"))?;
     reject_op_specific_corruption(op, value.is_some(), range_end.is_some())?;
@@ -1188,6 +1183,30 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_compression_tag_without_value_when_decoding() {
+        // Arrange: transaction markers have no VALUE, so COMPRESSION cannot
+        // describe any bytes even though the TLV itself is well formed.
+        let mut record = WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1);
+        record.txn_id = Some(7);
+        let mut encoded = encode(&record).unwrap().to_vec();
+        put_u8(&mut encoded, tags::COMPRESSION, 1).unwrap();
+
+        // Act
+        let view_result = decode_view(&encoded);
+        let owned_result = decode(&encoded[..]);
+
+        // Assert
+        assert!(
+            matches!(&view_result, Err(MidgeError::Corruption(message)) if message.contains("COMPRESSION")),
+            "{view_result:?}"
+        );
+        assert!(
+            matches!(&owned_result, Err(MidgeError::Corruption(message)) if message.contains("COMPRESSION")),
+            "{owned_result:?}"
+        );
+    }
+
+    #[test]
     fn should_reject_batch_member_from_another_family() {
         // Arrange: family 7's transaction holds an operation of family 3.
         let mut member = WalRecord::new_cf(
@@ -1480,13 +1499,8 @@ mod tests {
 
     #[test]
     fn should_roundtrip_txn_batch_outer_record_carrying_compression_tag() {
-        // Arrange: lsm-spec format/wal.md §5.4 describes a TxnBatch outer
-        // record carrying COMPRESSION as corrupt, but
-        // `runtime/actors/wal/transaction.rs` legitimately compresses a
-        // large batch payload through the same value-compression path any
-        // other record uses (see `encode()`'s size-threshold compression).
-        // Rejecting this shape would break ordinary large-transaction WAL
-        // replay, so it is intentionally accepted, not enforced as corrupt.
+        // Arrange: the outer TxnBatch VALUE is compressed by the same writer
+        // path as any other value; nested operation values remain raw.
         let large_value = Bytes::from(vec![b'v'; 4096]); // large enough to trigger auto-compression
         let mut inner = WalRecord::new_cf(
             0,
