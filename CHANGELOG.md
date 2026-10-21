@@ -9,6 +9,10 @@ Midge is currently in the 0.4 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject WAL records that carry a `COMPRESSION` tag without a `VALUE` field.
+
 ## [0.4.1] - 2026-10-16
 
 ### Fixed

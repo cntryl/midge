@@ -2,6 +2,13 @@
 
 This document defines the rules Midge will use to freeze and verify on-disk compatibility on the path to `1.0`.
 
+## Shared specification target
+
+Midge targets the normative FORMAT 8 profile in
+[`cntryl/lsm-spec`](https://github.com/cntryl/lsm-spec) at commit
+`111bccdd5fa6c9ea2d13d1131b17807016c770c` (`1.0.0-dev`). Keep this reference
+aligned with the commit recorded in Pants's Midge test-parity inventory.
+
 ## Covered Formats
 
 The compatibility policy applies to:
