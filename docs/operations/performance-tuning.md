@@ -50,3 +50,13 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 Measure against the system allocator on the workload that matters before
 adopting it; on the Tier 1 and YCSB A rows the result is mixed, not a uniform
 win.
+
+## File handles
+
+Each cached SST reader holds one open file descriptor for its lifetime, so the
+process's descriptor budget is the reader cache's capacity plus the WAL,
+manifest, and lease handles. The reader cache is bounded by a quarter of the
+block-cache size in reader metadata and evicts idle readers first; a reader
+evicted while a read is in flight keeps its handle until that read finishes.
+Size the block cache, and the process `ulimit -n`, so the live SST inventory
+fits with headroom.
