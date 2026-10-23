@@ -28,9 +28,12 @@ Tier 3 and Tier 4 stress benchmarks:
 - Investigate p99 latency growth greater than 20% across repeated runs.
 - Prefer at least 3 runs for normal stress checks and 5 runs when deciding
   whether to accept a meaningful change in Tier 4 results.
-- Pull requests automatically enforce the 15% throughput budget for the
-  memory-mode batched-write regression row by comparing three base and three
-  candidate reports on the same runner.
+- No workflow enforces these budgets automatically: every `bench-tier*.yml`
+  workflow is dispatched by hand (Tiers 5 and 6 also on a schedule), and
+  `ci.yml` runs no benchmarks. The 15% budget for the memory-mode batched-write
+  row is checked by comparing three base and three candidate reports from the
+  same machine in the pull request, following
+  [the baseline procedure](baseline-procedure.md).
 
 ## External LSM Comparisons
 
@@ -98,6 +101,11 @@ Hybrid:
   outcome is below; this campaign does not change the general regression budgets.
 - `tier4_system_local_throughput_regression` owns the local buffered throughput
   guard against memory mode and end-to-end local batch throughput.
+- `tier2_subsystem_baseline_matrix` owns the `db_bench`-shaped rows every
+  0.5.0 performance change is judged against: fillseq, fillrandom (buffered and
+  sync), readrandom hot and cold, and seekrandom, with 16-byte keys and
+  100-byte values on production defaults. Baselines are taken with
+  [the baseline procedure](baseline-procedure.md).
 - `tier2_subsystem_transaction_latency` owns public transaction lifecycle
   latency, commit percentile reporting, and buffered coalescing.
 - `tier2_subsystem_durability_commit_latency` owns 1-, 16-, and 64-writer local
@@ -127,14 +135,18 @@ Hybrid:
 Run focused checks before broad suites:
 
 ```bash
-cargo bench --bench tier2_subsystem_transaction_latency -- --quiet
-cargo bench --bench tier2_subsystem_durability_commit_latency -- --quiet
-cargo bench --bench tier4_system_strict_group_commit -- --quiet
-cargo bench --bench tier4_system_local_throughput_regression -- --quiet
-BENCH_RUNS=3 cargo bench --bench tier4_system_compaction_backpressure -- --quiet
-BENCH_RUNS=3 cargo bench --bench tier4_system_recovery_throughput -- --quiet
-BENCH_RUNS=3 cargo bench --bench tier4_ycsb_workload_a -- --quiet
+cargo bench --bench tier2_subsystem_baseline_matrix -- --no-progress
+cargo bench --bench tier2_subsystem_transaction_latency -- --no-progress
+cargo bench --bench tier2_subsystem_durability_commit_latency -- --no-progress
+cargo bench --bench tier4_system_strict_group_commit -- --no-progress
+cargo bench --bench tier4_system_local_throughput_regression -- --no-progress
+BENCH_RUNS=3 cargo bench --bench tier4_system_compaction_backpressure -- --no-progress
+BENCH_RUNS=3 cargo bench --bench tier4_system_recovery_throughput -- --no-progress
+BENCH_RUNS=3 cargo bench --bench tier4_ycsb_workload_a -- --no-progress
 ```
+
+The harness rejects `--quiet`; `--no-progress` suppresses the progress stream
+and `--help` lists the other options.
 
 Before merging benchmark changes, also run:
 
