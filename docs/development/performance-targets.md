@@ -103,6 +103,13 @@ Hybrid:
 - `tier2_subsystem_durability_commit_latency` owns 1-, 16-, and 64-writer local
   strict throughput, commit p50/p99, WAL append/fsync counts, and commits per
   physical fsync.
+- `tier2_subsystem_hybrid_durability_lag` owns the hybrid claim's two numbers
+  side by side on the object-store simulator: `cloud_async()` and
+  `cloud_strict()` commit p50/p99 against the cloud-durable lag sampled during
+  the run (sequences and probe wait time), provider puts per commit, and bytes
+  uploaded per committed byte, with the local `sync()` row as the floor. Rows
+  are `gate` trust; the simulator is not a provider, so Sqrzl and live-provider
+  lag are qualified separately.
 - `tier4_system_strict_group_commit` owns fixed-work complete-system strict
   throughput through flush, compaction, clean shutdown, reopen digest
   verification, and final SST footprint. The current window selection and

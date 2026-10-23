@@ -67,6 +67,15 @@ whole measured workload.
 Its row names and results start a new baseline; old simulator numbers cannot
 be compared with Engine throughput or block counts.
 
+The Tier 2 hybrid durability lag target runs one client against the in-memory
+object-store simulator and reports commit latency next to how far cloud
+durability trails it. A sampler reads `wal_local_durable_seq`,
+`wal_cloud_durable_seq`, and `current_sequence` every 10 ms for the lag in
+sequences; every 64th `cloud_async()` commit waits on `wait_cloud_durable` for
+the lag in time; provider requests and uploaded WAL bytes come from the
+simulator. A row refuses to report when the sampler managed fewer than half
+the expected ticks. The local `sync()` row is the floor.
+
 Each tier has one workflow, `bench-tier1.yml` through `bench-tier6.yml`,
 with a single `profile` dropdown defaulting to `standard`. All jobs use Ubuntu
 ARM runners. Tier 4 includes both the 25 system scenarios and 48 YCSB A–F

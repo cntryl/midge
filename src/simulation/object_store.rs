@@ -613,6 +613,28 @@ impl SimulatedObjectStore {
         self.lock().schedule = schedule;
     }
 
+    /// How many requests of each operation the store has seen, over every
+    /// key, so a benchmark can report provider requests per unit of work.
+    #[must_use]
+    pub fn request_counts(&self) -> BTreeMap<Operation, u64> {
+        let mut counts = BTreeMap::new();
+        for ((operation, _), count) in &self.lock().occurrences {
+            *counts.entry(*operation).or_insert(0) += *count;
+        }
+        counts
+    }
+
+    /// Total bytes of stored objects whose key starts with `prefix`.
+    #[must_use]
+    pub fn stored_bytes_under(&self, prefix: &str) -> u64 {
+        self.lock()
+            .objects
+            .iter()
+            .filter(|(key, _)| key.starts_with(prefix))
+            .map(|(_, bytes)| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+            .fold(0, u64::saturating_add)
+    }
+
     /// Late requests not yet landed, in arrival order.
     #[must_use]
     pub fn late_requests(&self) -> Vec<RequestId> {
