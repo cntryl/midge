@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "cloud_core/cloud_durable_wait.rs"]
+mod cloud_durable_wait;
+
 mod cloud_recovery {
     //! Reopen Consistency After Flush And Background Upload Activity
     //!

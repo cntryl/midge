@@ -490,6 +490,80 @@ impl Engine {
         self.runtime_handle.diagnostics.write_admission_snapshot()
     }
 
+    /// Highest sequence the cloud authority has acknowledged as durable.
+    ///
+    /// Every commit at or below this sequence survives loss of the local cache
+    /// and is recoverable by a successor that opens from the cloud. Commits
+    /// above it are visible and may be locally durable, but are promised to
+    /// nothing beyond the surviving local cache. The frontier only advances.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` on storage that is not
+    /// cloud-backed, where there is no cloud frontier to report, and
+    /// propagates a runtime metrics failure.
+    pub fn cloud_durable_sequence(&self) -> MidgeResult<u64> {
+        if !self.cloud_mode {
+            return Err(MidgeError::InvalidArgument(
+                "cloud durability is tracked only on cloud-backed storage".to_string(),
+            ));
+        }
+        Ok(self.metrics().get_runtime_metrics()?.wal_cloud_durable_seq)
+    }
+
+    /// Wait until the cloud durability frontier covers `sequence`.
+    ///
+    /// Pair this with [`Transaction::commit_with_sequence`](api::Transaction::commit_with_sequence):
+    /// commit at local latency with `WriteOptions::cloud_async()`, then wait
+    /// here only where the stronger guarantee is needed. Waiting may seal the
+    /// open WAL segment early so the covering upload starts, as
+    /// `cloud_strict()` does.
+    ///
+    /// Returns `Ok(true)` once the frontier covers `sequence`, and `Ok(false)`
+    /// when it does not yet: the caller's deadline passed, the runtime
+    /// exhausted its own confirmation budget, or it reported backpressure or a
+    /// transient failure. None of those is final; the runtime keeps retrying
+    /// the covering upload where one exists, and a later wait may succeed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` on storage that is not
+    /// cloud-backed, `MidgeError::Fenced` when this writer no longer holds
+    /// authority and can no longer prove cloud durability, and other
+    /// non-retryable runtime failures as reported.
+    pub fn wait_cloud_durable(&self, sequence: u64, timeout: Duration) -> MidgeResult<bool> {
+        if !self.cloud_mode {
+            return Err(MidgeError::InvalidArgument(
+                "cloud durability is tracked only on cloud-backed storage".to_string(),
+            ));
+        }
+        let request_id = next_request_id()?;
+        let msg = RuntimeMsg::SealWalForCloud {
+            request_id,
+            sequence,
+            wait_for_ack: true,
+        };
+        match self.runtime_handle.send_and_wait_timeout(msg, timeout)? {
+            Some(RuntimeResponse::Ok { .. }) => Ok(true),
+            // The caller's deadline passed, or the runtime reported a retryable
+            // condition (its own confirmation budget, upload backpressure, a
+            // transient provider failure): all mean "not covered yet".
+            None => Ok(false),
+            Some(RuntimeResponse::Error { error, .. })
+                if matches!(
+                    error.severity(),
+                    crate::common::Severity::Backpressure | crate::common::Severity::Transient
+                ) =>
+            {
+                Ok(false)
+            }
+            Some(RuntimeResponse::Error { error, .. }) => Err(error),
+            Some(other) => Err(MidgeError::Internal(format!(
+                "Unexpected response to SealWalForCloud: {other:?}"
+            ))),
+        }
+    }
+
     /// Wait for a write stall to clear for `cf_id`.
     ///
     /// Returns `Ok(true)` if the stall cleared within `timeout`, `Ok(false)` on timeout.

@@ -22,7 +22,7 @@ Midge uses explicit transactions. There is no auto-commit mode.
 
 - `TransactionMode::ReadOnly` provides snapshot-based reads
 - `TransactionMode::ReadWrite` provides snapshot-based reads plus buffered writes
-- `commit()` is the only operation that publishes a read-write transaction
+- `commit()` and `commit_with_sequence()` are the only operations that publish a read-write transaction; the latter also returns the published sequence
 - dropping an uncommitted read-write transaction rolls its writes back
 
 Within a committed transaction:
@@ -143,11 +143,52 @@ A write can cross several boundaries:
 
 1. visible: the commit has been applied to the memtable and new readers can observe it
 2. locally durable: the write survives restart from local storage
-3. cloud durable: the cloud-backed WAL segment upload has been acknowledged
+3. cloud durable: the cloud-backed WAL segment upload has been acknowledged and published in the WAL catalog
 4. SST-published: the data is represented by manifest-visible SST state instead of WAL replay
 
 `commit()` does not always wait for all of them. The selected `WriteOptions`
 define the acknowledgment boundary on a successful return.
+
+### Three frontiers
+
+Every engine tracks three monotonic sequence frontiers. A write at sequence
+`s` has crossed a frontier once the frontier is at or above `s`.
+
+| Frontier | Meaning | How to observe |
+|---|---|---|
+| visible | new readers see the write | `begin_tx` snapshots |
+| local durable | the write survives a process crash while the local disk or cache survives | `RuntimeMetricsSnapshot::wal_local_durable_seq` |
+| cloud durable | the write survives loss of the whole local cache and is recoverable by a successor opening from the cloud | `Engine::cloud_durable_sequence()`, `RuntimeMetricsSnapshot::wal_cloud_durable_seq` |
+
+What each write option guarantees at `commit()` return, and what survives
+each failure:
+
+| Write option | Frontier crossed at return | Process crash | Local disk or cache loss | Writer takeover by another process |
+|---|---|---|---|---|
+| `sync()` | local durable | kept | lost (local-only storage) | not applicable |
+| `buffered()` | visible | kept only if the later fsync ran | lost | not applicable |
+| `best_effort()` | visible | lost unless a later flush published it | lost unless a later flush published it | lost unless a later flush published it; in cloud mode the successor recovers only published state |
+| `cloud_async()` | visible (local durable follows; cloud durable follows asynchronously) | kept on same-cache restart from intact local WAL | kept only if the covering upload was acknowledged | not promised: a successor recovers the published cloud state; unpublished writes stay with the surviving cache and cannot override the shared catalog |
+| `cloud_strict()` | cloud durable | kept | kept | kept: the successor recovers it from the published WAL or SST state |
+
+To take local-latency commits and still get the cloud guarantee where it
+matters, commit with `cloud_async()` through
+`Transaction::commit_with_sequence`, which returns the commit's sequence, and
+call `Engine::wait_cloud_durable(sequence, timeout)` only where the caller
+must know the write survives cache loss. The wait returns `Ok(true)` once the
+cloud frontier covers the sequence and `Ok(false)` when it does not yet: the
+timeout elapsed, or the runtime reported backpressure or a transient failure
+while it keeps retrying the covering upload. Neither is final; call again
+later. A wait may seal the open WAL segment early so the covering upload
+starts, as `cloud_strict()` does.
+Both calls return `MidgeError::InvalidArgument` on storage that is not
+cloud-backed. A `MidgeError::Fenced` from the wait means this writer lost
+authority and can no longer prove cloud durability for anything above the
+frontier it last published.
+
+Reads do not take a durability level: a reader sees every visible write,
+including `cloud_async()` writes that are not yet cloud durable. A read
+pinned at the cloud-durable frontier is tracked as a separate feature (#958).
 
 Every synchronous runtime response also has a deadline. When the response to a
 commit with writes misses it, the runtime may already have accepted the
