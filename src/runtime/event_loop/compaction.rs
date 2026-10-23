@@ -605,6 +605,10 @@ impl CompactionCoordinator {
             .compaction_actor
             .manual_deadline_for_generation(cf_id, target_level, output_generation)?;
         Self::check_manual_deadline(manual_deadline)?;
+        let started_at = event_loop
+            .actors
+            .compaction_actor
+            .started_at_for_generation(cf_id, target_level, output_generation)?;
         let mut canonical_inputs = input_ssts.to_vec();
         let mut canonical_outputs = output_ssts.to_vec();
         canonical_inputs.sort_unstable();
@@ -617,6 +621,7 @@ impl CompactionCoordinator {
             output_generation,
             input_ssts: canonical_inputs,
             output_ssts: canonical_outputs,
+            started_at,
         };
         let publication_owner = Self::publication_owner(&token);
         if !event_loop
@@ -1402,6 +1407,7 @@ impl CompactionCoordinator {
         pending: &PendingCompactionPublication,
     ) {
         Self::record_compaction_metrics(event_loop, &pending.token.output_ssts);
+        Self::record_compaction_latency(event_loop, pending.token.started_at);
         let output_bytes = pending
             .added
             .iter()
@@ -1625,6 +1631,22 @@ impl CompactionCoordinator {
         event_loop.evict_published_sst_cache(output_ssts);
         event_loop.publish_snapshot();
         true
+    }
+
+    /// Record worker start to publication for one compaction. A missing start
+    /// time (the actor had no record of the generation) records nothing rather
+    /// than a zero.
+    fn record_compaction_latency(
+        event_loop: &mut EventLoop,
+        started_at: Option<std::time::Instant>,
+    ) {
+        if let Some(started_at) = started_at {
+            let elapsed = started_at.elapsed();
+            event_loop
+                .state
+                .diagnostics
+                .record(|m| m.record_compaction_latency(elapsed));
+        }
     }
 
     fn record_compaction_metrics(event_loop: &mut EventLoop, output_ssts: &[String]) {

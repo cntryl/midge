@@ -228,6 +228,7 @@ impl WalActor {
             // boundary so one barrier is never counted at multiple layers.
             self.counters.record(|m| {
                 m.record_wal_sync();
+                m.record_wal_fsync_latency(elapsed);
             });
 
             if std::env::var_os("MIDGE_TRACE_WAL_SYNC").is_some()

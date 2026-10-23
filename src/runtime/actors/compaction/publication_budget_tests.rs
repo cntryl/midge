@@ -198,6 +198,7 @@ impl PublicationFixture {
                 target_level: 1,
                 output_generation: 3,
                 input_ssts: vec!["accepted-input.sst".into()],
+                started_at: None,
                 output_ssts: self
                     .outputs
                     .iter()

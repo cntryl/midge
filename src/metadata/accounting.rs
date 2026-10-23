@@ -1,6 +1,7 @@
 //! Bounded metadata and publication accounting for one runtime owner.
 //! Issued payload is the size passed to a delegated filesystem write, not device I/O.
 
+use crate::common::latency_histogram::{upper_bound, HISTOGRAM_BUCKETS};
 use parking_lot::Mutex;
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,9 +11,6 @@ use std::time::{Duration, Instant};
 const ORIGINS: usize = 9;
 const MEDIA: usize = 2;
 const PAYLOADS: usize = 3;
-const HISTOGRAM_BUCKETS: usize = 80;
-const LINEAR_BUCKETS: usize = 64;
-const STEP_NS: u64 = 250_000;
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -208,18 +206,9 @@ impl Counters {
 #[derive(Clone, Debug, Serialize)]
 pub struct LatencyHistogram {
     // Exactly 80 fixed bins, regardless of operation count. Vec is serde-compatible.
+    // Bin layout is shared with the runtime latency histograms in
+    // `crate::common::latency_histogram`.
     pub counts: Vec<u64>,
-}
-
-fn upper_bound(index: usize) -> u64 {
-    if index < LINEAR_BUCKETS {
-        u64::try_from(index + 1).expect("fixed histogram index") * STEP_NS - 1
-    } else {
-        (u64::try_from(LINEAR_BUCKETS).expect("fixed histogram index") * STEP_NS)
-            .checked_shl(u32::try_from(index - LINEAR_BUCKETS + 1).expect("fixed shift"))
-            .unwrap_or(u64::MAX)
-            .saturating_sub(1)
-    }
 }
 
 impl Default for LatencyHistogram {
