@@ -603,9 +603,12 @@ impl Transaction {
     /// means the write crossed a point where it may be visible or replayed
     /// after restart, but Midge could not confirm the requested durability.
     /// Check whether it applied, for example with an application-level
-    /// idempotency key, before writing it again. A runtime response
-    /// [`MidgeError::Timeout`](crate::MidgeError::Timeout) also leaves the
-    /// outcome unknown because it does not cancel accepted work. Midge never
+    /// idempotency key, before writing it again. A runtime response timeout
+    /// for a commit with writes is reported as `OutcomeUnknown` too, because
+    /// the timeout removes the caller's response route without cancelling the
+    /// admitted transaction, which may still be applied and synced. A plain
+    /// [`MidgeError::Timeout`](crate::MidgeError::Timeout) therefore only
+    /// comes back from commits that cannot have changed state. Midge never
     /// retries a write after either response itself. `Fenced` is returned
     /// when the transaction was not applied and has no WAL record to replay.
     pub fn commit(mut self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
@@ -704,7 +707,11 @@ impl Transaction {
                             crate::diagnostics::WriteAdmissionRejection::Commit,
                         );
                 }
-                Err(error)
+                Err(if had_writes {
+                    admitted_commit_timeout_error(error)
+                } else {
+                    error
+                })
             }
         };
 
@@ -933,9 +940,53 @@ fn post_apply_durability_error(error: MidgeError, sequence: u64) -> MidgeError {
     }
 }
 
+/// Classify a response timeout for a commit with writes that the runtime had
+/// already admitted. The timeout removes the caller's response route but does
+/// not cancel the queued transaction, which may still be applied and synced.
+/// `Timeout` classifies as retry-later `Backpressure`; an admitted write must
+/// report `OutcomeUnknown` instead (#901). Every other error passes through.
+fn admitted_commit_timeout_error(error: MidgeError) -> MidgeError {
+    match error {
+        MidgeError::Timeout(message) => MidgeError::OutcomeUnknown(format!(
+            "transaction was admitted but its response timed out ({message}); the write \
+             may still apply, so treat the outcome as unknown"
+        )),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Severity;
+
+    #[test]
+    fn should_report_unknown_outcome_when_admitted_commit_response_times_out() {
+        // Arrange
+        let error = MidgeError::Timeout("runtime request ApplyTransaction".into());
+
+        // Act
+        let reported = admitted_commit_timeout_error(error);
+
+        // Assert
+        assert_eq!(reported.severity(), Severity::OutcomeUnknown);
+        assert!(
+            matches!(&reported, MidgeError::OutcomeUnknown(message) if message.contains("ApplyTransaction")),
+            "the original timeout must stay in the message: {reported:?}"
+        );
+    }
+
+    #[test]
+    fn should_keep_error_when_admitted_commit_fails_without_timeout() {
+        // Arrange
+        let error = MidgeError::WriteStall("runtime request queue is full".into());
+
+        // Act
+        let reported = admitted_commit_timeout_error(error);
+
+        // Assert
+        assert!(matches!(reported, MidgeError::WriteStall(_)));
+    }
 
     #[test]
     fn should_report_unknown_outcome_when_durability_step_fails_after_apply_with_retryable_error() {
