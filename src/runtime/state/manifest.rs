@@ -38,6 +38,45 @@ fn flush_record_is_bounded(file_meta: &crate::runtime::FileMeta) -> bool {
     record_bound <= crate::metadata::store::LOCAL_FLUSH_RECORD_BYTES
 }
 
+/// Pairs `(remaining L0 file, published deeper file)` where a file still in L0
+/// overlaps a newly published L1+ file of the same family and holds versions no
+/// newer than it (#902). Level order requires every L0 version over a key to
+/// be newer than every deeper version of that key; an edit that breaks it means
+/// the picker moved a file past an older overlapping sibling. Files without
+/// complete bounds or sequences cannot be judged and are skipped.
+fn l0_level_order_violations(
+    files: &[crate::metadata::FileMeta],
+    added: &[crate::runtime::FileMeta],
+) -> Vec<(String, String)> {
+    let mut violations = Vec::new();
+    for published in added.iter().filter(|file| file.level >= 1) {
+        let (Some(published_first), Some(published_last), Some(published_newest)) = (
+            published.smallest_key.as_deref(),
+            published.largest_key.as_deref(),
+            published.largest_seq,
+        ) else {
+            continue;
+        };
+        for remaining in files
+            .iter()
+            .filter(|file| file.level == 0 && file.cf_id == published.cf_id)
+        {
+            let (Some(remaining_first), Some(remaining_last), Some(remaining_oldest)) = (
+                remaining.smallest_key.as_deref(),
+                remaining.largest_key.as_deref(),
+                remaining.smallest_seq,
+            ) else {
+                continue;
+            };
+            let overlaps = remaining_first <= published_last && published_first <= remaining_last;
+            if overlaps && remaining_oldest <= published_newest {
+                violations.push((remaining.name.clone(), published.name.clone()));
+            }
+        }
+    }
+    violations
+}
+
 impl RuntimeState {
     #[cfg(test)]
     pub fn append_intent(&mut self, entry: crate::runtime::IntentLogEntry) -> MidgeResult<()> {
@@ -586,6 +625,16 @@ impl RuntimeState {
         for file_meta in added {
             changed |= self.insert_manifest_file_if_missing(file_meta);
         }
+        for (remaining, published) in l0_level_order_violations(&self.manifest.files, added) {
+            // The manifest is authoritative and today's reads merge every
+            // level, so the edit stands; the warning names the files so a
+            // picker regression (#902) is visible before reads rely on order.
+            tracing::warn!(
+                remaining,
+                published,
+                "L0 file holds versions no newer than a deeper file over the same keys"
+            );
+        }
 
         changed
     }
@@ -643,6 +692,80 @@ impl RuntimeState {
             .save_snapshot_for(Origin::Recovery, &self.manifest)?;
         self.manifest.adopt_checkpoint(checkpoint);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod l0_level_order_tests {
+    use super::l0_level_order_violations;
+
+    fn l0(name: &str, first: &[u8], last: &[u8], seqs: (u64, u64)) -> crate::metadata::FileMeta {
+        crate::metadata::FileMeta {
+            name: name.to_string(),
+            level: 0,
+            size_bytes: 1,
+            content_crc32c: None,
+            cf_id: 7,
+            sst_seq: seqs.0,
+            smallest_key: Some(first.to_vec()),
+            largest_key: Some(last.to_vec()),
+            smallest_seq: Some(seqs.0),
+            largest_seq: Some(seqs.1),
+            key_bounds_complete: true,
+            sublevel: 0,
+            read_count: std::sync::Arc::default(),
+        }
+    }
+
+    fn published(name: &str, first: &[u8], last: &[u8], newest: u64) -> crate::runtime::FileMeta {
+        crate::runtime::FileMeta {
+            name: name.to_string(),
+            level: 1,
+            size_bytes: 1,
+            content_crc32c: None,
+            cf_id: 7,
+            smallest_key: Some(first.to_vec()),
+            largest_key: Some(last.to_vec()),
+            smallest_seq: Some(1),
+            largest_seq: Some(newest),
+            key_bounds_complete: true,
+        }
+    }
+
+    #[test]
+    fn should_report_remaining_l0_file_given_older_overlapping_versions_when_deeper_file_published()
+    {
+        // Arrange: the deeper file holds versions up to 600; one L0 file holds
+        // older versions over the same keys, one newer, one disjoint.
+        let files = vec![
+            l0("older.sst", b"a", b"m", (200, 299)),
+            l0("newer.sst", b"a", b"m", (700, 799)),
+            l0("disjoint.sst", b"x", b"z", (100, 199)),
+        ];
+        let added = vec![published("l1.sst", b"c", b"k", 600)];
+
+        // Act
+        let violations = l0_level_order_violations(&files, &added);
+
+        // Assert
+        assert_eq!(
+            violations,
+            vec![("older.sst".to_string(), "l1.sst".to_string())]
+        );
+    }
+
+    #[test]
+    fn should_report_nothing_given_level_zero_output_when_edit_applied() {
+        // Arrange: a flush adds an L0 file; level order says nothing about it.
+        let files = vec![l0("older.sst", b"a", b"m", (200, 299))];
+        let mut added = published("l0-out.sst", b"a", b"m", 900);
+        added.level = 0;
+
+        // Act
+        let violations = l0_level_order_violations(&files, &[added]);
+
+        // Assert
+        assert!(violations.is_empty());
     }
 }
 
