@@ -21,17 +21,60 @@ struct CloudWalRecoveryMetadata<'a> {
     hydrated_generation: Option<crate::lease::SharedGenerationId>,
 }
 
+/// Local budgets below this are entirely working space: the remote block cache
+/// only appears when a quarter of the budget leaves the WAL, spill, flush and
+/// staging ledger with room for the transactions it already admitted.
+const REMOTE_BLOCK_CACHE_MIN_BUDGET: u64 = 32 * 1024 * 1024;
+
+/// The share of the local storage budget that caches remote SST ranges (#938).
+/// It is carved out before WAL, spill, flush and staging admission, so the
+/// cache can never take space those need; small budgets get no cache.
+pub(crate) fn remote_block_cache_share(local_budget_bytes: u64) -> u64 {
+    if local_budget_bytes < REMOTE_BLOCK_CACHE_MIN_BUDGET {
+        0
+    } else {
+        local_budget_bytes / 4
+    }
+}
+
+fn remote_block_cache(
+    local_budget_bytes: u64,
+    path: &StartupStoragePath,
+) -> Option<Arc<crate::storage::remote_block_cache::RemoteBlockCache>> {
+    let share = remote_block_cache_share(local_budget_bytes);
+    if share == 0 {
+        return None;
+    }
+    match crate::storage::remote_block_cache::RemoteBlockCache::open(Arc::clone(&path.root), share)
+    {
+        Ok(cache) => Some(Arc::new(cache)),
+        Err(error) => {
+            // Advisory: a database without the cache works, it just pays
+            // provider requests per miss.
+            tracing::warn!(%error, "remote SST block cache unavailable");
+            None
+        }
+    }
+}
+
 fn remote_sst_read_fs(
     opts: &OpenOptions,
     path: &StartupStoragePath,
     backend: Arc<dyn crate::storage::StorageBackend>,
     scope: Option<&DeadlineScope>,
 ) -> Arc<dyn crate::io::Fs> {
-    let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+    let mut remote = crate::storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&path.root),
         backend,
         opts.storage_io_timeout(),
-    ));
+    );
+    let budget = opts
+        .simulated_cloud_local_storage_budget_bytes()
+        .unwrap_or_else(|| opts.local_storage_budget_bytes());
+    if let Some(cache) = remote_block_cache(budget, path) {
+        remote = remote.with_block_cache(cache);
+    }
+    let fs: Arc<dyn crate::io::Fs> = Arc::new(remote);
     scope.map_or_else(
         || Arc::clone(&fs),
         |scope| crate::io::scope_fs(Arc::clone(&fs), scope.clone()),
@@ -936,10 +979,13 @@ impl RuntimeStorageMaterialization {
             Arc::clone(store),
             opts.simulated_cloud_local_storage_budget_bytes(),
         );
-        cloud.hybrid_storage.enable_ephemeral_sst_cache(
-            opts.simulated_cloud_local_storage_budget_bytes()
-                .unwrap_or_else(|| opts.local_storage_budget_bytes()),
-        );
+        let budget = opts
+            .simulated_cloud_local_storage_budget_bytes()
+            .unwrap_or_else(|| opts.local_storage_budget_bytes());
+        // The remote block cache holds its share outside this ledger (#938).
+        cloud
+            .hybrid_storage
+            .enable_ephemeral_sst_cache(budget - remote_block_cache_share(budget));
         cloud
     }
 
@@ -1075,7 +1121,9 @@ impl RuntimeStorageMaterialization {
                 opts.storage_io_timeout(),
             ),
         );
-        hybrid_storage.enable_ephemeral_sst_cache(opts.local_storage_budget_bytes());
+        // The remote block cache holds its share outside this ledger (#938).
+        let budget = opts.local_storage_budget_bytes();
+        hybrid_storage.enable_ephemeral_sst_cache(budget - remote_block_cache_share(budget));
         hybrid_storage.configure_maintenance_memory(opts.compaction_memory_pool_size());
         (hybrid_storage, rx)
     }
@@ -1085,11 +1133,15 @@ impl RuntimeStorageMaterialization {
         storage_path: &StartupStoragePath,
         sst_storage: &Arc<crate::storage::cloud::CloudStorage>,
     ) -> Arc<crate::storage::remote_sst::RemoteSstFs> {
-        Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+        let mut remote = crate::storage::remote_sst::RemoteSstFs::new(
             Arc::clone(&storage_path.root),
             sst_storage.clone(),
             opts.storage_io_timeout(),
-        ))
+        );
+        if let Some(cache) = remote_block_cache(opts.local_storage_budget_bytes(), storage_path) {
+            remote = remote.with_block_cache(cache);
+        }
+        Arc::new(remote)
     }
 
     fn materialize_cloud(

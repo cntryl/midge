@@ -16,6 +16,8 @@ use std::time::Duration;
 const VALUE_BYTES: usize = 4096;
 const KEYS_PER_SST: usize = 256;
 const SST_COUNT: usize = 4;
+/// Commits stay under the WAL replay bound of the small memory budget.
+const KEYS_PER_COMMIT: usize = 32;
 
 fn key(index: usize) -> Vec<u8> {
     format!("key:{index:06}").into_bytes()
@@ -56,8 +58,6 @@ fn provider_options(cache: &Path, store: &SimulatedObjectStore) -> OpenOptions {
 fn cold_engine(dir: &Path, store: &SimulatedObjectStore) -> Engine {
     let mut engine = Engine::open(provider_options(dir, store)).expect("seed engine");
     let cf = engine.create_column_family("data").expect("create CF");
-    // Commits stay under the WAL replay bound of the small memory budget.
-    const KEYS_PER_COMMIT: usize = 32;
     for sst in 0..SST_COUNT {
         for chunk in 0..KEYS_PER_SST / KEYS_PER_COMMIT {
             let mut tx = engine
@@ -171,7 +171,7 @@ fn cache_files(dir: &Path) -> Vec<std::path::PathBuf> {
 }
 
 #[test]
-fn should_serve_from_provider_and_replace_entries_given_corrupted_cache_files_when_read() {
+fn should_fall_through_to_provider_given_corrupted_cache_files_when_read() {
     // Arrange: a warm cache, then every cached entry is corrupted on disk.
     let dir = tempfile::tempdir().expect("database directory");
     let store = SimulatedObjectStore::eager();
@@ -210,11 +210,11 @@ fn should_serve_from_provider_and_replace_entries_given_corrupted_cache_files_wh
 
 #[test]
 fn should_bound_cache_bytes_to_its_share_given_small_local_budget_when_working_set_exceeds_it() {
-    // Arrange: a 16 MiB local budget gives the cache a 4 MiB share under 8 MiB
-    // of published data (eight 1 MiB SSTs).
-    const LOCAL_BUDGET: u64 = 16 * 1024 * 1024;
+    // Arrange: a 32 MiB local budget gives the cache an 8 MiB share under 12 MiB
+    // of published data (twelve 1 MiB SSTs).
+    const LOCAL_BUDGET: u64 = 32 * 1024 * 1024;
     const CACHE_SHARE: u64 = LOCAL_BUDGET / 4;
-    const SSTS: usize = 8;
+    const SSTS: usize = 12;
     let dir = tempfile::tempdir().expect("database directory");
     let store = SimulatedObjectStore::eager();
     let options = |cache: &Path| {
@@ -228,7 +228,7 @@ fn should_bound_cache_bytes_to_its_share_given_small_local_budget_when_working_s
         .object_store_for_testing(Arc::new(store.process()))
         .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
         .local_storage_budget(LOCAL_BUDGET)
-        // Eight L0 files plus their frozen generations would hit the L0
+        // Twelve L0 files plus their frozen generations would hit the L0
         // ceiling without compaction; the cache bound does not depend on it.
         .background_compaction(true)
         .build()

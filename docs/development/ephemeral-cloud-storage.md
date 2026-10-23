@@ -53,6 +53,16 @@ cloud-readback verification file before writing either. A failed publisher
 keeps its reservation across retries. Failed cleanup retains capacity charges,
 and startup accounts for any recovery scratch that could not be removed.
 
+When the local budget is at least 32 MiB, a quarter of it is set aside for a
+disk cache of remote SST ranges before WAL, spill, flush and staging admission
+see the budget, so the cache can never consume space they need and needs no
+eviction under their pressure; within its share it evicts least recently used
+ranges. Smaller budgets are entirely working space and get no cache. Entries are
+keyed by the object's pinned identity and byte range and carry a CRC32C; a
+corrupt or missing entry falls through to the provider. The directory is
+disposable and cleared on open. A reader open fetches the object's tail in
+one range read so the metadata blocks behind the footer come from the cache.
+
 Before WAL append, cloud transaction admission checks the complete operation
 set against a flush window of half the local disk budget, including both the
 encoded SST bound and its verification copy. Active generations are frozen
