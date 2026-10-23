@@ -12,6 +12,8 @@ mod duplicate_successor;
 struct CountingFs {
     inner: crate::io::RealFs,
     reads: Arc<Mutex<Vec<(u64, u64)>>>,
+    /// Every `open` and `open_persistent` call (#919).
+    opens: std::sync::atomic::AtomicUsize,
     persistent_handles: bool,
 }
 
@@ -20,8 +22,13 @@ impl CountingFs {
         Ok(Self {
             inner: crate::io::RealFs::new(root)?,
             reads: Arc::new(Mutex::new(Vec::new())),
+            opens: std::sync::atomic::AtomicUsize::new(0),
             persistent_handles: true,
         })
+    }
+
+    fn opens(&self) -> usize {
+        self.opens.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn without_persistent_handles(root: &std::path::Path) -> FsResult<Self> {
@@ -110,6 +117,8 @@ impl crate::io::PersistentHandleFs for CountingFs {
                 "test backend uses path-based SST reads".to_string(),
             ));
         }
+        self.opens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         crate::io::open_persistent_handle(&self.inner, path, opts)
     }
 }
@@ -133,6 +142,8 @@ impl Fs for CountingFs {
     }
 
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+        self.opens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Box::new(CountingFile {
             inner: self.inner.open(path, opts)?,
             reads: Arc::clone(&self.reads),
@@ -311,6 +322,37 @@ fn should_isolate_replaced_sst_cache_entries_by_generation_identity() -> MidgeRe
 }
 
 #[cfg(unix)]
+#[test]
+fn should_open_file_once_given_thousand_block_cache_misses_when_point_reading() -> MidgeResult<()> {
+    // Arrange: no block cache, so every point read fetches its data block.
+    let temp_dir = tempfile::tempdir()?;
+    write_unique_key_sst(&temp_dir, "handle.sst")?;
+    let (counting_fs, reader) = open_counting_reader(&temp_dir, "handle.sst")?;
+    let opens_after_open = counting_fs.opens();
+
+    // Act
+    for i in 0..1_000_u64 {
+        let key = format!("key_{:04}", i % 96);
+        assert!(matches!(
+            reader.get_state_at(key.as_bytes(), u64::MAX)?,
+            KeyState::Value(..)
+        ));
+    }
+
+    // Assert: the reader holds its handle for its lifetime (#919).
+    assert_eq!(
+        counting_fs.opens(),
+        opens_after_open,
+        "block reads reopened the file {} times",
+        counting_fs.opens() - opens_after_open
+    );
+    assert!(
+        opens_after_open <= 2,
+        "reader open used {opens_after_open} opens"
+    );
+    Ok(())
+}
+
 #[test]
 fn should_finish_scan_from_open_handle_when_backing_sst_is_unlinked_mid_scan() -> MidgeResult<()> {
     // Arrange
