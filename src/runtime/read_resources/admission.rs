@@ -154,7 +154,9 @@ mod tests {
     fn key(id: u64) -> ReaderCacheKey {
         ReaderCacheKey {
             name: format!("{id}.sst"),
-            sst_id: id,
+            cf_id: 0,
+            size_bytes: id,
+            content_crc32c: None,
         }
     }
 
@@ -165,7 +167,9 @@ mod tests {
         let admission = OpenAdmission::new(budget.limit());
         let long = ReaderCacheKey {
             name: format!("{}/table.sst", "nested/".repeat(100)),
-            sst_id: 1,
+            cf_id: 0,
+            size_bytes: 1,
+            content_crc32c: None,
         };
         let workspace = budget.reserve(budget.limit() * 7 / 8, "reader metadata")?;
 
@@ -192,11 +196,15 @@ mod tests {
         let admission = OpenAdmission::new(budget.limit());
         let first = ReaderCacheKey {
             name: format!("{}/first.sst", "nested/".repeat(100)),
-            sst_id: 1,
+            cf_id: 0,
+            size_bytes: 1,
+            content_crc32c: None,
         };
         let second = ReaderCacheKey {
             name: format!("{}/second.sst", "nested/".repeat(100)),
-            sst_id: 2,
+            cf_id: 0,
+            size_bytes: 2,
+            content_crc32c: None,
         };
         let owner = admission.begin(&first, &budget)?;
         let shared = admission.begin(&first, &budget)?;
@@ -241,7 +249,9 @@ mod tests {
         let admission = OpenAdmission::new(budget.limit());
         let oversized = ReaderCacheKey {
             name: "x".repeat(budget.limit()),
-            sst_id: 1,
+            cf_id: 0,
+            size_bytes: 1,
+            content_crc32c: None,
         };
 
         // Act
