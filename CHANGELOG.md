@@ -9,6 +9,15 @@ Midge is currently in the 0.4 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+### Changed
+
+- Range scans no longer insert the SST blocks they read into the block cache
+  unless they are bounded by a `limit` of at most
+  `Query::SMALL_SCAN_FILL_LIMIT` rows, so a one-pass scan leaves the
+  point-read working set cached; `Query::cache_fill(CacheFill::Normal)` or
+  `CacheFill::Bypass` overrides the choice (#944). `Query` gains the public
+  `cache_fill` field.
+
 ### Fixed
 
 - Reject WAL records that carry a `COMPRESSION` tag without a `VALUE` field.

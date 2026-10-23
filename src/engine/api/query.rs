@@ -20,9 +20,11 @@ pub struct Query {
     /// Iteration direction (Forward or Reverse)
     pub direction: Direction,
     /// Whether the SST blocks this scan reads are inserted into the block
-    /// cache. Scans bypass insertion by default so they do not evict the
-    /// point-read working set (#944).
-    pub cache_fill: CacheFill,
+    /// cache. `None` chooses by size: a scan bounded by a `limit` of at most
+    /// [`Self::SMALL_SCAN_FILL_LIMIT`] rows fills the cache like a point read,
+    /// so repeated seeks warm it; any other scan bypasses insertion so a
+    /// one-pass scan does not evict the point-read working set (#944).
+    pub cache_fill: Option<CacheFill>,
 }
 
 impl Default for Query {
@@ -32,6 +34,9 @@ impl Default for Query {
 }
 
 impl Query {
+    /// Largest `limit` for which a scan fills the block cache by default.
+    pub const SMALL_SCAN_FILL_LIMIT: usize = 64;
+
     /// Create a new empty query
     #[must_use]
     pub fn new() -> Self {
@@ -41,15 +46,31 @@ impl Query {
             prefix: None,
             limit: None,
             direction: Direction::Forward,
-            cache_fill: CacheFill::Bypass,
+            cache_fill: None,
         }
     }
 
-    /// Choose whether the scan's block reads fill the block cache.
+    /// Override whether the scan's block reads fill the block cache.
     #[must_use]
     pub fn cache_fill(mut self, fill: CacheFill) -> Self {
-        self.cache_fill = fill;
+        self.cache_fill = Some(fill);
         self
+    }
+
+    /// The fill mode this scan runs with: the explicit choice, or the size
+    /// rule described on [`Self::cache_fill`].
+    #[must_use]
+    pub fn effective_cache_fill(&self) -> CacheFill {
+        self.cache_fill.unwrap_or(
+            if self
+                .limit
+                .is_some_and(|limit| limit <= Self::SMALL_SCAN_FILL_LIMIT)
+            {
+                CacheFill::Normal
+            } else {
+                CacheFill::Bypass
+            },
+        )
     }
 
     /// Set the start key (inclusive)

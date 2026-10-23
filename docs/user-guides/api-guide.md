@@ -190,6 +190,11 @@ while let Some((key, value)) = rows.next().transpose()? {
 }
 ```
 
+A scan bounded by a small `limit` fills the block cache like a point read; an
+unbounded or large scan reads through it without inserting, so it cannot evict
+the point-read working set. `Query::cache_fill(CacheFill::Normal)` or
+`CacheFill::Bypass` overrides that choice.
+
 A scan iterator reports `IteratorState::Active`, `Exhausted`, or `Failed`.
 Normal end-of-stream moves it to `Exhausted`. A storage or decode error moves
 it to `Failed`, and later `next()` calls replay that same terminal error; they

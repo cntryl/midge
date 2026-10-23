@@ -16,7 +16,8 @@ fn key(index: usize) -> Vec<u8> {
 }
 
 /// A small block cache under eight SSTs whose data blocks exceed it several
-/// times over.
+/// times over. The eviction these tests observe relies on the default LRU
+/// policy; a frequency-aware policy would keep the hot block on its own.
 fn open_small_cache_engine(temp_dir: &TempDir) -> (Engine, ColumnFamilyHandle) {
     let engine = Engine::open(
         OpenOptions::local(temp_dir.path())
@@ -119,5 +120,34 @@ fn should_cache_scanned_blocks_given_normal_fill_when_scan_completes() {
     assert_eq!(
         misses_after, misses_before,
         "the scan did not fill the cache"
+    );
+}
+
+#[test]
+fn should_cache_scanned_blocks_given_small_limit_when_scan_completes() {
+    // Arrange: a bounded seek-style scan starting inside the fifth SST; its
+    // block is not cached yet.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let (engine, cf) = open_small_cache_engine(&temp_dir);
+    let first_key = 4 * KEYS_PER_SST;
+
+    // Act
+    let tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin scan");
+    let rows = tx
+        .scan(&Query::new().start_key(key(first_key).into()).limit(10))
+        .expect("scan")
+        .try_collect()
+        .expect("scan rows");
+    let misses_before = block_cache_misses(&engine);
+    point_read(&engine, &cf, first_key);
+    let misses_after = block_cache_misses(&engine);
+
+    // Assert: a small bounded scan warms the cache for the keys it visited.
+    assert_eq!(rows.len(), 10);
+    assert_eq!(
+        misses_after, misses_before,
+        "a limit-10 scan did not fill the cache"
     );
 }

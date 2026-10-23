@@ -12,20 +12,13 @@
 //! - **Metrics**: Hit/miss/eviction tracking per shard
 //!
 //! Point-read paths populate the block cache synchronously. Range scans look
-//! blocks up in the cache but by default do not insert the blocks they read
+//! blocks up in the cache; a scan bounded by a small `limit` inserts what it
+//! reads like a point read, while an unbounded or large scan does not
 //! ([`CacheFill::Bypass`]), so a one-pass scan does not evict the point-read
-//! working set; a scan opts in with [`CacheFill::Normal`] (#944).
+//! working set. `Query::cache_fill` overrides the choice (#944). Index, filter,
+//! trie and tombstone blocks are decoded once per reader and never cached here.
 
 mod config;
-
-/// Whether a block read inserts the block it fetched into the block cache.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheFill {
-    /// Look the block up, but never insert it: the default for range scans.
-    Bypass,
-    /// Insert fetched blocks: the behavior of point reads and metadata.
-    Normal,
-}
 pub mod key;
 pub mod metrics;
 pub mod policy;
@@ -34,6 +27,15 @@ pub mod value;
 
 pub use config::BlockCachePolicy;
 pub(crate) use config::CachePolicyConfig;
+
+/// Whether a data-block read inserts the block it fetched into the block cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheFill {
+    /// Look the block up, but never insert it: unbounded and large scans.
+    Bypass,
+    /// Insert fetched blocks: point reads and small bounded scans.
+    Normal,
+}
 pub use key::{CacheBlockKind, CacheKey};
 #[cfg(any(test, feature = "internal-testing"))]
 pub use metrics::CacheMetrics;

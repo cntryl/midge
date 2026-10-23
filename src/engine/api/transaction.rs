@@ -986,7 +986,7 @@ impl Transaction {
             end.clone(),
             reverse,
             self.start_sequence,
-            query.cache_fill,
+            query.effective_cache_fill(),
         );
         let intent_scan = self
             .write_set
