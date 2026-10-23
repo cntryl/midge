@@ -47,10 +47,13 @@ fn open_small_cache_engine(temp_dir: &TempDir) -> (Engine, ColumnFamilyHandle) {
     (engine, cf)
 }
 
-fn block_cache_hits(engine: &Engine) -> u64 {
+/// Block-cache misses so far. Misses are the robust signal: another test in
+/// this binary may turn on the point-read audit, whose extra full walk adds
+/// cache hits but never a miss for a block that is resident.
+fn block_cache_misses(engine: &Engine) -> u64 {
     engine
         .read_path_diagnostics_snapshot_for_benchmarks()
-        .sst_block_cache_hits
+        .sst_block_cache_misses
 }
 
 fn point_read(engine: &Engine, cf: &ColumnFamilyHandle, index: usize) {
@@ -79,15 +82,14 @@ fn should_keep_hot_block_cached_given_full_scan_when_scan_completes() {
         .expect("scan")
         .try_collect()
         .expect("scan rows");
-    let hits_before = block_cache_hits(&engine);
+    let misses_before = block_cache_misses(&engine);
     point_read(&engine, &cf, 0);
-    let hits_after = block_cache_hits(&engine);
+    let misses_after = block_cache_misses(&engine);
 
     // Assert: the scan did not evict the hot block.
     assert_eq!(rows.len(), SST_COUNT * KEYS_PER_SST);
     assert_eq!(
-        hits_after - hits_before,
-        1,
+        misses_after, misses_before,
         "the hot key's block was evicted by the scan"
     );
 }
@@ -108,15 +110,14 @@ fn should_cache_scanned_blocks_given_normal_fill_when_scan_completes() {
         .expect("scan")
         .try_collect()
         .expect("scan rows");
-    let hits_before = block_cache_hits(&engine);
+    let misses_before = block_cache_misses(&engine);
     point_read(&engine, &cf, last_key);
-    let hits_after = block_cache_hits(&engine);
+    let misses_after = block_cache_misses(&engine);
 
     // Assert: the block the scan read last is still cached.
     assert_eq!(rows.len(), SST_COUNT * KEYS_PER_SST);
     assert_eq!(
-        hits_after - hits_before,
-        1,
+        misses_after, misses_before,
         "the scan did not fill the cache"
     );
 }
