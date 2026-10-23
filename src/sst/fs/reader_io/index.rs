@@ -276,7 +276,7 @@ impl SstFileIo {
     }
 
     pub(super) fn read_cached_data_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
-        self.read_cached_data_block_from(handle, None)
+        self.read_cached_data_block_from(handle, self.handle.as_deref())
     }
 
     pub(super) fn read_cached_data_block_from(

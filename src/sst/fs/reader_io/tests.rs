@@ -119,7 +119,10 @@ impl crate::io::PersistentHandleFs for CountingFs {
         }
         self.opens
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        crate::io::open_persistent_handle(&self.inner, path, opts)
+        Ok(Box::new(CountingFile {
+            inner: crate::io::open_persistent_handle(&self.inner, path, opts)?,
+            reads: Arc::clone(&self.reads),
+        }))
     }
 }
 
