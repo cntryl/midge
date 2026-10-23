@@ -63,8 +63,9 @@ deadline; an explicit runtime timeout must be greater than
 `storage_io_timeout`.
 
 APIs that already accept a timeout, including `shutdown`, `verify_storage`,
-`wait_for_write_stall_clear`, and `get_runtime_metrics_with_timeout`, honor the
-caller's operation-specific budget. Fire-and-forget messages do not wait for a
+`wait_for_write_stall_clear`, `wait_cloud_durable`, and
+`get_runtime_metrics_with_timeout`, honor the caller's operation-specific
+budget. Fire-and-forget messages do not wait for a
 response. Engine drop hands teardown to a reaper which may continue waiting for
 durability workers so writer fencing is not released early.
 
@@ -219,7 +220,12 @@ for the exact isolation and durability boundaries.
 
 `WriteOptions::sync`, `buffered`, and `best_effort` describe local behavior.
 For cloud-backed storage, `cloud_async` returns after the local barrier while
-upload continues, and `cloud_strict` waits for the cloud upload. Cloud provider
+upload continues, and `cloud_strict` waits for the cloud upload. To pay the
+cloud wait only where it matters, commit with `cloud_async` through
+`Transaction::commit_with_sequence`, then call
+`Engine::wait_cloud_durable(sequence, timeout)` where the caller needs the
+write to survive loss of the local cache; `Engine::cloud_durable_sequence`
+reports the frontier directly. Cloud provider
 configuration is exposed through `CloudProviderConfig` and feature-specific
 credential source types; see [cloud setup](../operations/cloud-setup.md).
 Provider payloads are private-field typed configurations, so invalid

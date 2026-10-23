@@ -570,6 +570,23 @@ Preconditions: Native deadline fixtures use real local HTTP servers/backends and
 
 Uncovered boundary: Header-wait cancellation is not proof no provider mutation committed; PUT remains ambiguous where required. Selected tests do not establish every body-read/range bound/signing retry contract or external provider implementation. Compatibility defaults on custom backends may be callback-bounded only.
 
+## CLOUD-8
+
+Production: [src/engine/mod.rs:503](../../src/engine/mod.rs#L503) `Engine::cloud_durable_sequence`; [src/engine/mod.rs:532](../../src/engine/mod.rs#L532) `Engine::wait_cloud_durable`; [src/engine/api/transaction.rs:629](../../src/engine/api/transaction.rs#L629) `Transaction::commit_with_sequence`; [src/runtime/event_loop/wal.rs:332](../../src/runtime/event_loop/wal.rs#L332) `seal_for_cloud` (the wait reuses the strict seal-and-acknowledge path); [src/runtime/frontiers.rs:41](../../src/runtime/frontiers.rs#L41) `WalFrontiers::cloud_durable`.
+
+Exact evidence and assertion markers:
+
+- [tests/cloud_core/cloud_durable_wait.rs:70](../../tests/cloud_core/cloud_durable_wait.rs#L70) `should_cover_commit_sequence_given_cloud_async_write_when_its_upload_lands`: With eager uploads, `wait_cloud_durable` returns covered for the sequence `commit_with_sequence` returned, `cloud_durable_sequence` is at or above it, and the write was visible throughout. Scope: in-memory object-store simulator, simulated lease clock. Assertion markers at lines 86, 88, 92.
+- [tests/cloud_core/cloud_durable_wait.rs:100](../../tests/cloud_core/cloud_durable_wait.rs#L100) `should_report_not_covered_given_late_wal_uploads_when_wait_times_out`: With WAL object writes hung after open, the write is visible at once, the wait reports not covered, and the frontier stays below the sequence. Scope: simulator `Fate::Late` on `wal/` puts. Assertion markers at lines 120, 121, 122.
+- [tests/cloud_core/cloud_durable_wait.rs:130](../../tests/cloud_core/cloud_durable_wait.rs#L130) `should_lose_unacknowledged_cloud_async_write_given_cache_loss_when_successor_opens`: After a not-covered wait, a successor opening from the published image on a fresh cache after lease expiry does not see the write and its frontier is below the sequence. Scope: simulator image capture stands in for cache loss. Assertion markers at lines 141, 160, 162.
+- [tests/cloud_core/cloud_durable_wait.rs:172](../../tests/cloud_core/cloud_durable_wait.rs#L172) `should_keep_acknowledged_cloud_async_write_given_cache_loss_when_wait_returned_covered`: After a covered wait, the same successor path recovers the write. Assertion markers at lines 181, 198.
+- [tests/cloud_core/cloud_durable_wait.rs:208](../../tests/cloud_core/cloud_durable_wait.rs#L208) `should_reject_cloud_frontier_queries_given_local_storage_when_called`: Both calls return `InvalidArgument` on local storage. Assertion markers at lines 224, 228.
+- [tests/cloud_core/cloud_durable_wait.rs:235](../../tests/cloud_core/cloud_durable_wait.rs#L235) `should_return_increasing_assigned_sequences_given_local_writes_when_committed`: Commits with writes return increasing sequences bounded by the committed sequence; a read-only commit returns a sequence at or below it. Assertion markers at lines 274, 276, 277.
+
+Preconditions: Simulator-backed engine with `object_store_for_testing` and `lease_clock_for_testing`; `Fate::Late` answers a put with a timeout at once and never lands it unless the test lands it. Monotonic frontier advancement is CLOUD-2 and WAL-6 evidence.
+
+Uncovered boundary: The simulator stands in for a provider; Sqrzl and live-provider behavior under real upload latency are qualified separately. A read pinned at the cloud-durable frontier is not provided (#958): reads see every visible write. The wait reports not covered both on the caller's deadline and when the runtime exhausts its own upload confirmation budget; it does not distinguish the two.
+
 ## LIFE-1
 
 Production: [src/runtime/event_loop/manifest.rs:200](../../src/runtime/event_loop/manifest.rs#L200) `drop_column_family`; [src/engine/mod.rs:687](../../src/engine/mod.rs#L687) `Engine::drop_column_family`; [src/engine/mod.rs:703](../../src/engine/mod.rs#L703) `Engine::drop_column_family_discarding_unflushed`; [src/metadata/manifest.rs:357](../../src/metadata/manifest.rs#L357) `delete_column_family_with_reclamation`.

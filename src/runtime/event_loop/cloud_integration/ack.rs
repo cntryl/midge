@@ -418,18 +418,32 @@ impl EventLoop {
         )
     }
 
+    /// Add `context` to an error from the cloud acknowledgement path without
+    /// changing how callers classify it: a retryable or fencing failure stays
+    /// retryable or fencing, so a durability waiter told to retry later is not
+    /// handed a defect. Only kinds with no retry meaning become `Internal`.
     pub(super) fn cloud_ack_error(
         context: &str,
         error: crate::common::MidgeError,
     ) -> crate::common::MidgeError {
+        use crate::common::MidgeError;
         match error {
-            crate::common::MidgeError::Timeout(message) => {
-                crate::common::MidgeError::Timeout(format!("{context}: {message}"))
+            MidgeError::Timeout(message) => MidgeError::Timeout(format!("{context}: {message}")),
+            MidgeError::Fenced(message) => MidgeError::Fenced(format!("{context}: {message}")),
+            MidgeError::Busy(message) => MidgeError::Busy(format!("{context}: {message}")),
+            MidgeError::WriteStall(message) => {
+                MidgeError::WriteStall(format!("{context}: {message}"))
             }
-            crate::common::MidgeError::Fenced(message) => {
-                crate::common::MidgeError::Fenced(format!("{context}: {message}"))
+            MidgeError::NoSpace(message) => MidgeError::NoSpace(format!("{context}: {message}")),
+            MidgeError::Aborted(message) => MidgeError::Aborted(format!("{context}: {message}")),
+            MidgeError::LeaseHeld(message) => {
+                MidgeError::LeaseHeld(format!("{context}: {message}"))
             }
-            other => crate::common::MidgeError::Internal(format!("{context}: {other}")),
+            MidgeError::LeaseUnavailable(message) => {
+                MidgeError::LeaseUnavailable(format!("{context}: {message}"))
+            }
+            io @ MidgeError::Io(_) => io,
+            other => MidgeError::Internal(format!("{context}: {other}")),
         }
     }
 
@@ -576,6 +590,40 @@ mod tests {
     use super::*;
     use crate::common::MidgeError;
     use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
+
+    #[test]
+    fn should_keep_retry_classification_given_retryable_failure_when_cloud_ack_adds_context() {
+        // Arrange
+        let retryable = [
+            MidgeError::Timeout("upload budget".into()),
+            MidgeError::Busy("catalog lock".into()),
+            MidgeError::WriteStall("upload backlog".into()),
+            MidgeError::NoSpace("staging".into()),
+            MidgeError::LeaseUnavailable("provider".into()),
+        ];
+
+        // Act
+        let reported: Vec<MidgeError> = retryable
+            .into_iter()
+            .map(|error| EventLoop::cloud_ack_error("ack", error))
+            .collect();
+
+        // Assert: severity survives and the context is attached.
+        for error in &reported {
+            assert!(
+                matches!(
+                    error.severity(),
+                    crate::common::Severity::Backpressure | crate::common::Severity::Transient
+                ),
+                "retryable failure must stay retryable: {error:?}"
+            );
+            assert!(error.to_string().contains("ack: "), "{error}");
+        }
+        let fenced = EventLoop::cloud_ack_error("ack", MidgeError::Fenced("epoch".into()));
+        assert!(matches!(fenced, MidgeError::Fenced(message) if message.starts_with("ack: ")));
+        let defect = EventLoop::cloud_ack_error("ack", MidgeError::Corruption("bad".into()));
+        assert!(matches!(defect, MidgeError::Internal(message) if message.starts_with("ack: ")));
+    }
 
     #[test]
     fn should_reject_unrelated_resource_failure_when_shared_budget_is_in_use() {

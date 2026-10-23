@@ -621,12 +621,32 @@ impl Transaction {
     /// comes back from commits that cannot have changed state. Midge never
     /// retries a write after either response itself. `Fenced` is returned
     /// when the transaction was not applied and has no WAL record to replay.
+    pub fn commit(self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
+        self.commit_with_sequence(opts).map(|_sequence| ())
+    }
+
+    /// Commit and return the sequence the caller can wait on for cloud
+    /// durability through [`Engine::wait_cloud_durable`](crate::Engine::wait_cloud_durable).
+    ///
+    /// For a commit with writes this is the sequence the write was assigned.
+    /// A commit without writes allocates no sequence and returns the
+    /// transaction's start sequence: everything it read is at or below it, so
+    /// waiting on it covers what the transaction depended on. Errors and their
+    /// meaning are those of [`Self::commit`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::commit`].
     #[tracing::instrument(
+        name = "commit",
         level = "debug",
         skip_all,
         fields(sync = opts.is_sync(), cloud_strict = opts.is_cloud_strict())
     )]
-    pub fn commit(mut self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
+    pub fn commit_with_sequence(
+        mut self,
+        opts: crate::engine::api::WriteOptions,
+    ) -> MidgeResult<u64> {
         let mut timing = CommitTiming::maybe_start();
         let commit_started = Instant::now();
 
@@ -637,7 +657,7 @@ impl Transaction {
             self.unregister_snapshot();
             CommitTiming::record_unregister(&mut timing, unregister_started_at);
             CommitTiming::finish(timing, true);
-            return Ok(());
+            return Ok(self.start_sequence);
         }
 
         let had_writes = self.has_writes();
@@ -653,7 +673,7 @@ impl Transaction {
             CommitTiming::record_unregister(&mut timing, unregister_started_at);
             CommitTiming::finish(timing, sync_result.is_ok());
             self.record_commit_latency(opts, commit_started);
-            return sync_result;
+            return sync_result.map(|()| self.start_sequence);
         }
 
         let conflict_policy = match self.conflict_policy() {
@@ -714,7 +734,7 @@ impl Transaction {
                         }
                     });
                 CommitTiming::record_durability(&mut timing, durability_started_at);
-                result
+                result.map(|()| sequence)
             }
             Err(error) => {
                 if matches!(error, MidgeError::WriteStall(_)) {
