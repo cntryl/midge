@@ -16,6 +16,9 @@ mod local_wal_gc;
 #[path = "fault_injection/l0_pressure.rs"]
 mod l0_pressure;
 
+#[path = "fault_injection/commit_timeout.rs"]
+mod commit_timeout;
+
 mod failure_injection {
     use bytes::Bytes;
     use cntryl_midge::{
