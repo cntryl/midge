@@ -10,7 +10,10 @@ use tempfile::TempDir;
 
 const KEY: &[u8] = b"key:0001";
 
+/// Every read in these tests also re-walks all sources and asserts level
+/// order, so the counts below are proven against the full walk.
 fn open_local_without_compaction(temp_dir: &TempDir) -> Engine {
+    cntryl_midge::__internal::runtime::set_point_read_level_order_audit(true);
     Engine::open(
         OpenOptions::local(temp_dir.path())
             .background_compaction(false)

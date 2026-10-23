@@ -106,7 +106,7 @@ Uncovered boundary: Representative snapshots and the pin registry do not enumera
 
 ## TX-2
 
-Production: [src/runtime/read_snapshot/snapshot.rs:132](../../src/runtime/read_snapshot/snapshot.rs#L132) `ReadSnapshot::get_bytes`; [src/runtime/read_snapshot/snapshot.rs:346](../../src/runtime/read_snapshot/snapshot.rs#L346) `ReadSnapshot::range_scan`; [src/engine/api/transaction.rs:827](../../src/engine/api/transaction.rs#L827) `Transaction::get`; [src/engine/api/transaction.rs:864](../../src/engine/api/transaction.rs#L864) `Transaction::scan`.
+Production: [src/runtime/read_snapshot/snapshot.rs:139](../../src/runtime/read_snapshot/snapshot.rs#L139) `ReadSnapshot::get_bytes`; [src/runtime/read_snapshot/snapshot.rs:254](../../src/runtime/read_snapshot/snapshot.rs#L254) `ReadSnapshot::range_scan`; [src/engine/api/transaction.rs:827](../../src/engine/api/transaction.rs#L827) `Transaction::get`; [src/engine/api/transaction.rs:864](../../src/engine/api/transaction.rs#L864) `Transaction::scan`.
 
 Exact evidence and assertion markers:
 
@@ -121,7 +121,7 @@ Uncovered boundary: The oracle is bounded and covers active/immutable selection;
 
 Composed pressure regression: [should_preserve_snapshot_isolation_when_spill_pressure_is_released](../../tests/snapshot_spill_pressure.rs) — A controlled clock expires only the first eight keys for a new reader before overwrites; the original snapshot retains all thirty-two original values through compaction. See [fixture scope and mutation validation](snapshot-spill-pressure-fixture.md).
 
-Production: [src/runtime/read_snapshot/snapshot.rs:132](../../src/runtime/read_snapshot/snapshot.rs#L132) `ReadSnapshot::get_bytes`; [src/runtime/read_snapshot/snapshot.rs:346](../../src/runtime/read_snapshot/snapshot.rs#L346) `ReadSnapshot::range_scan`; [src/compaction/mod.rs:34](../../src/compaction/mod.rs#L34) `execute_compaction`; [src/engine/api/transaction.rs:509](../../src/engine/api/transaction.rs#L509) `Transaction::delete_range`.
+Production: [src/runtime/read_snapshot/snapshot.rs:139](../../src/runtime/read_snapshot/snapshot.rs#L139) `ReadSnapshot::get_bytes`; [src/runtime/read_snapshot/snapshot.rs:254](../../src/runtime/read_snapshot/snapshot.rs#L254) `ReadSnapshot::range_scan`; [src/compaction/mod.rs:34](../../src/compaction/mod.rs#L34) `execute_compaction`; [src/engine/api/transaction.rs:509](../../src/engine/api/transaction.rs#L509) `Transaction::delete_range`.
 
 Exact evidence and assertion markers:
 
@@ -180,7 +180,7 @@ Uncovered boundary: No claim that rolling back an already accepted/timed-out run
 
 ## TX-7
 
-Production: [src/engine/api/transaction.rs:864](../../src/engine/api/transaction.rs#L864) `Transaction::scan`; [src/runtime/read_snapshot/snapshot.rs:346](../../src/runtime/read_snapshot/snapshot.rs#L346) `ReadSnapshot::range_scan`; [src/engine/api/iterator.rs:83](../../src/engine/api/iterator.rs#L83) `try_collect`.
+Production: [src/engine/api/transaction.rs:864](../../src/engine/api/transaction.rs#L864) `Transaction::scan`; [src/runtime/read_snapshot/snapshot.rs:254](../../src/runtime/read_snapshot/snapshot.rs#L254) `ReadSnapshot::range_scan`; [src/engine/api/iterator.rs:83](../../src/engine/api/iterator.rs#L83) `try_collect`.
 
 Exact evidence and assertion markers:
 

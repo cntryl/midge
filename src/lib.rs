@@ -171,6 +171,7 @@ pub mod __internal {
     }
     pub mod runtime {
         pub use crate::runtime::keyed_group_commit::KeyedGroupCommit;
+        pub use crate::runtime::read_snapshot::point_read::audit::set_point_read_level_order_audit;
     }
     pub mod startup {
         pub use crate::runtime::{StartupEvent, StartupObserver};

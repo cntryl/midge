@@ -57,6 +57,11 @@ L0 files may overlap arbitrarily, so the read view checks their manifest bounds
 in recency order. A point read opens only files whose complete, valid bounds
 include the key, plus every file with incomplete, missing, or inverted bounds.
 Both endpoints are inclusive so range-tombstone coverage remains conservative.
+Candidates are visited newest-first, one L0 file or one deeper level at a time,
+and the read stops at the first group that yields a point state or a covering
+range tombstone; level order (SST-10) guarantees every older source holds only
+older versions, so a key found in the memtable opens no SST (#903). L0 files
+whose sequence ranges cannot be ordered are visited together.
 Admission bounds steady-state L0 by `H`; historical or recovered backlogs can
 exceed this count and remain readable. Selection then checks the actual L0
 count without imposing a startup limit. Complete L1+ files are ordered by full
