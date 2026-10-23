@@ -316,6 +316,11 @@ name = "tier2_subsystem_durability_commit_latency"
 path = "benches/tier2_subsystem_durability_commit_latency.rs"
 harness = false
 
+[[bench]]
+name = "tier2_subsystem_hybrid_durability_lag"
+path = "benches/tier2_subsystem_hybrid_durability_lag.rs"
+harness = false
+
 # Tier 3
 [[bench]]
 name = "tier3_system_engine"
