@@ -11,11 +11,21 @@
 //!   second-access admission gate.
 //! - **Metrics**: Hit/miss/eviction tracking per shard
 //!
-//! Point-read paths populate the block cache synchronously. Range-scan paths
-//! that use contiguous readahead avoid one-pass scan pollution by bypassing
-//! cache insertion entirely.
+//! Point-read paths populate the block cache synchronously. Range scans look
+//! blocks up in the cache but by default do not insert the blocks they read
+//! ([`CacheFill::Bypass`]), so a one-pass scan does not evict the point-read
+//! working set; a scan opts in with [`CacheFill::Normal`] (#944).
 
 mod config;
+
+/// Whether a block read inserts the block it fetched into the block cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheFill {
+    /// Look the block up, but never insert it: the default for range scans.
+    Bypass,
+    /// Insert fetched blocks: the behavior of point reads and metadata.
+    Normal,
+}
 pub mod key;
 pub mod metrics;
 pub mod policy;

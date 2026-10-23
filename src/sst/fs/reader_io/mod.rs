@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::sst::bloom::BlockBloomFilter;
-use crate::sst::cache::BlockCache;
+use crate::sst::cache::{BlockCache, CacheFill};
 use crate::sst::index::tuner::IndexKind;
 use crate::sst::trie::TrieReader;
 use crate::sst::types::{BlockHandle, Footer, SstEntry, SST_FORMAT_V4};
@@ -156,6 +156,8 @@ pub(crate) struct SstStateScan {
     snapshot_seq: u64,
     now_millis: u64,
     raw_state: bool,
+    /// Whether blocks this scan fetches are inserted into the block cache.
+    cache_fill: CacheFill,
     initialized: bool,
     lifecycle: SstScanLifecycle,
     index: Option<IndexEntries>,
@@ -443,6 +445,7 @@ impl SstStateScan {
             snapshot_seq,
             now_millis,
             raw_state: false,
+            cache_fill: CacheFill::Normal,
             initialized: false,
             lifecycle: SstScanLifecycle::Active,
             index: None,
@@ -524,9 +527,11 @@ impl SstStateScan {
             .diagnostics
             .sst_metrics()
             .record_candidate_blocks_checked(1);
-        let block = self
-            .reader
-            .read_cached_data_block_from(&handle, self.reader.handle.as_deref())?;
+        let block = self.reader.read_cached_data_block_from(
+            &handle,
+            self.reader.handle.as_deref(),
+            self.cache_fill,
+        )?;
         let entries = self.reader.scan_block_entries_from_bytes(&block)?;
         self.block_entries = Some(if self.reverse {
             BlockEntryCursor::Reverse(entries.into_iter().rev())
@@ -811,9 +816,11 @@ impl SstFileIo {
         end: Option<Vec<u8>>,
         reverse: bool,
         snapshot_seq: u64,
+        cache_fill: CacheFill,
     ) -> SstStateScan {
         let mut scan = self.state_scan(start, end, reverse, snapshot_seq, 0);
         scan.raw_state = true;
+        scan.cache_fill = cache_fill;
         scan
     }
 

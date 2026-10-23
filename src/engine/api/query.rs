@@ -3,6 +3,7 @@
 //! Provides a fluent API for specifying range scans with optional filters.
 
 use super::iterator::Direction;
+use crate::sst::cache::CacheFill;
 use bytes::Bytes;
 
 /// Lightweight scan query builder for range operations.
@@ -18,6 +19,10 @@ pub struct Query {
     pub limit: Option<usize>,
     /// Iteration direction (Forward or Reverse)
     pub direction: Direction,
+    /// Whether the SST blocks this scan reads are inserted into the block
+    /// cache. Scans bypass insertion by default so they do not evict the
+    /// point-read working set (#944).
+    pub cache_fill: CacheFill,
 }
 
 impl Default for Query {
@@ -36,7 +41,15 @@ impl Query {
             prefix: None,
             limit: None,
             direction: Direction::Forward,
+            cache_fill: CacheFill::Bypass,
         }
+    }
+
+    /// Choose whether the scan's block reads fill the block cache.
+    #[must_use]
+    pub fn cache_fill(mut self, fill: CacheFill) -> Self {
+        self.cache_fill = fill;
+        self
     }
 
     /// Set the start key (inclusive)

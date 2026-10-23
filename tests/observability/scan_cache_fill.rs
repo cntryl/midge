@@ -91,3 +91,32 @@ fn should_keep_hot_block_cached_given_full_scan_when_scan_completes() {
         "the hot key's block was evicted by the scan"
     );
 }
+
+#[test]
+fn should_cache_scanned_blocks_given_normal_fill_when_scan_completes() {
+    // Arrange: a scan that opts into filling the cache.
+    let temp_dir = TempDir::new().expect("temp dir");
+    let (engine, cf) = open_small_cache_engine(&temp_dir);
+    let last_key = SST_COUNT * KEYS_PER_SST - 1;
+
+    // Act
+    let tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .expect("begin scan");
+    let rows = tx
+        .scan(&Query::new().cache_fill(cntryl_midge::CacheFill::Normal))
+        .expect("scan")
+        .try_collect()
+        .expect("scan rows");
+    let hits_before = block_cache_hits(&engine);
+    point_read(&engine, &cf, last_key);
+    let hits_after = block_cache_hits(&engine);
+
+    // Assert: the block the scan read last is still cached.
+    assert_eq!(rows.len(), SST_COUNT * KEYS_PER_SST);
+    assert_eq!(
+        hits_after - hits_before,
+        1,
+        "the scan did not fill the cache"
+    );
+}

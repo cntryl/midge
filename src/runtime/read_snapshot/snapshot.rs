@@ -7,6 +7,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{KeyState, SstStateReader};
+use crate::sst::cache::CacheFill;
 use crate::sst::read_path_metrics::SstReadObserver as _;
 
 impl ReadSnapshot {
@@ -95,6 +96,8 @@ impl ReadSnapshot {
         self
     }
 
+    /// A scan whose SST block reads bypass block-cache insertion (#944).
+    #[cfg(test)]
     pub(crate) fn state_scan(
         self: &Arc<Self>,
         start: Option<Vec<u8>>,
@@ -102,7 +105,18 @@ impl ReadSnapshot {
         reverse: bool,
         sequence: u64,
     ) -> SnapshotScan {
-        SnapshotScan::new(Arc::clone(self), start, end, reverse, sequence)
+        self.state_scan_with_cache_fill(start, end, reverse, sequence, CacheFill::Bypass)
+    }
+
+    pub(crate) fn state_scan_with_cache_fill(
+        self: &Arc<Self>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        reverse: bool,
+        sequence: u64,
+        cache_fill: CacheFill,
+    ) -> SnapshotScan {
+        SnapshotScan::new(Arc::clone(self), start, end, reverse, sequence, cache_fill)
     }
 
     pub(super) fn sst_reader(
@@ -240,6 +254,7 @@ impl ReadSnapshot {
                     end_opt.map(<[u8]>::to_vec),
                     false,
                     u64::MAX,
+                    CacheFill::Normal,
                 ) {
                     let (_, state) = entry?;
                     if let Some(seq) = Self::state_sequence(&state).filter(|seq| *seq > threshold) {

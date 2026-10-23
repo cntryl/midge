@@ -3,6 +3,7 @@ use super::{
     RangeCoverSweep, RangeTombstone, ReadSnapshot, SstFileIo, SstStateReader, SstStateScan,
 };
 use crate::memtable::SkipListMemtable;
+use crate::sst::cache::CacheFill;
 use crate::sst::read_path_metrics::SstReadObserver as _;
 
 #[cfg(test)]
@@ -37,6 +38,7 @@ struct SstLevelStateIterator {
     end: Option<Vec<u8>>,
     reverse: bool,
     sequence: u64,
+    cache_fill: CacheFill,
     pending: Option<MidgeResult<(bytes::Bytes, KeyState)>>,
     /// Range tombstones of files opened since the scan last collected them.
     /// A file's tombstones join the scan when the cursor opens it, not up
@@ -57,6 +59,7 @@ impl SstLevelStateIterator {
         end: Option<Vec<u8>>,
         reverse: bool,
         sequence: u64,
+        cache_fill: CacheFill,
     ) -> Self {
         if reverse {
             files.reverse();
@@ -69,6 +72,7 @@ impl SstLevelStateIterator {
             end,
             reverse,
             sequence,
+            cache_fill,
             pending: None,
             opened_tombstones: Vec::new(),
             collect_tombstones: true,
@@ -125,6 +129,7 @@ impl SstLevelStateIterator {
                 self.end.clone(),
                 self.reverse,
                 self.sequence,
+                self.cache_fill,
             ));
         }
     }
@@ -210,6 +215,7 @@ pub(crate) struct SnapshotScan {
     end: Option<Vec<u8>>,
     reverse: bool,
     sequence: u64,
+    cache_fill: CacheFill,
     initialized: bool,
     lifecycle: SnapshotScanLifecycle,
     sources: Vec<SnapshotStateSource>,
@@ -229,6 +235,7 @@ impl SnapshotScan {
         end: Option<Vec<u8>>,
         reverse: bool,
         sequence: u64,
+        cache_fill: CacheFill,
     ) -> Self {
         Self {
             snapshot,
@@ -236,6 +243,7 @@ impl SnapshotScan {
             end,
             reverse,
             sequence,
+            cache_fill,
             initialized: false,
             lifecycle: SnapshotScanLifecycle::Active,
             sources: Vec::new(),
@@ -317,6 +325,7 @@ impl SnapshotScan {
                         self.end.clone(),
                         self.reverse,
                         self.sequence,
+                        self.cache_fill,
                     )),
                 )));
         }
@@ -342,6 +351,7 @@ impl SnapshotScan {
                         self.end.clone(),
                         self.reverse,
                         self.sequence,
+                        self.cache_fill,
                     )),
                 )));
         }
@@ -374,6 +384,7 @@ impl SnapshotScan {
                             self.end.clone(),
                             self.reverse,
                             self.sequence,
+                            self.cache_fill,
                         )
                         .without_tombstone_collection(),
                     ),
