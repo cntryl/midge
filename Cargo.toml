@@ -321,6 +321,11 @@ name = "tier2_subsystem_hybrid_durability_lag"
 path = "benches/tier2_subsystem_hybrid_durability_lag.rs"
 harness = false
 
+[[bench]]
+name = "tier2_subsystem_baseline_matrix"
+path = "benches/tier2_subsystem_baseline_matrix.rs"
+harness = false
+
 # Tier 3
 [[bench]]
 name = "tier3_system_engine"
