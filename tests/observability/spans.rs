@@ -35,8 +35,11 @@ fn should_open_one_span_per_public_operation_given_scoped_subscriber_when_api_is
     let names = Arc::clone(&recorder.0);
     let subscriber = tracing_subscriber::registry().with(recorder);
 
-    // Act
+    // Act. Other tests in this binary hit these callsites first, with no or a
+    // filtering subscriber, so their cached interest must be recomputed
+    // against the scoped subscriber or a span can be skipped.
     tracing::subscriber::with_default(subscriber, || {
+        tracing::callsite::rebuild_interest_cache();
         let mut tx = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .unwrap();

@@ -10,6 +10,9 @@ mod latency_histograms;
 #[path = "observability/spans.rs"]
 mod spans;
 
+#[path = "observability/first_hit_reads.rs"]
+mod first_hit_reads;
+
 mod telemetry_integration {
     //! Operation-integrity checks for code paths that are expected to emit
     //! telemetry when instrumentation is available, plus direct assertions
@@ -350,21 +353,26 @@ mod read_amp_api {
 
     #[test]
     fn should_track_exact_l0_overlap_across_overlapping_ssts() -> MidgeResult<()> {
-        // Arrange
+        // Arrange: three L0 files span the key; none holds it, so no source
+        // decides the read early (#903) and every candidate is touched.
         let temp_dir = TempDir::new().expect("temp dir");
         let engine = open_local_without_compaction(&temp_dir);
         let cf = engine.create_column_family("l0-overlap")?;
-        for generation in 0..3 {
-            flush_hot_key_generation(&engine, &cf, generation)?;
+        for generation in 0..3_u8 {
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+            tx.put(b"hot-key-a".to_vec(), vec![generation], None)?;
+            tx.put(b"hot-key-z".to_vec(), vec![generation], None)?;
+            tx.commit(WriteOptions::buffered())?;
+            engine.flush_cf(&cf)?;
         }
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 
         // Act
-        let value = tx.get(b"hot-key")?;
+        let value = tx.get(b"hot-key-m")?;
         let metrics = engine.metrics().get_read_amp_metrics()?;
 
         // Assert
-        assert_eq!(value.as_deref(), Some(b"value-02".as_slice()));
+        assert_eq!(value, None);
         assert_eq!(metrics.reads_total, 1);
         assert_eq!(metrics.ssts_touched_total, 3);
         assert_eq!(metrics.l0_ssts_touched_total, 3);
@@ -408,7 +416,8 @@ mod read_amp_api {
         }
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 
-        // Act
+        // Act: the newest L0 file decides every read, so each touches one SST
+        // (#903).
         for _ in 0..10 {
             let _ = tx.get(b"hot-key")?;
         }
@@ -416,36 +425,42 @@ mod read_amp_api {
 
         // Assert
         assert_eq!(metrics.reads_total, 10);
-        assert_eq!(metrics.ssts_touched_total, 20);
-        assert_eq!(metrics.l0_ssts_touched_total, 20);
-        assert!((metrics.avg_ssts_per_read - 2.0).abs() <= f64::EPSILON);
-        assert!((metrics.avg_l0_ssts_per_read - 2.0).abs() <= f64::EPSILON);
+        assert_eq!(metrics.ssts_touched_total, 10);
+        assert_eq!(metrics.l0_ssts_touched_total, 10);
+        assert!((metrics.avg_ssts_per_read - 1.0).abs() <= f64::EPSILON);
+        assert!((metrics.avg_l0_ssts_per_read - 1.0).abs() <= f64::EPSILON);
         Ok(())
     }
 
     #[test]
-    fn should_report_budget_violations_for_one_high_amplification_read() -> MidgeResult<()> {
-        // Arrange
+    fn should_report_sst_budget_violation_for_one_high_amplification_miss() -> MidgeResult<()> {
+        // Arrange: eleven L0 files span the key and none holds it, so the read
+        // is decided by no source and touches every file (#903); each costs
+        // its index block and a bloom rejection.
         let temp_dir = TempDir::new().expect("temp dir");
         let engine = open_local_without_compaction(&temp_dir);
         let cf = engine.create_column_family("budget-violation")?;
-        for generation in 0..11 {
-            flush_hot_key_generation(&engine, &cf, generation)?;
+        for generation in 0..11_u8 {
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+            tx.put(b"hot-key-a".to_vec(), vec![generation], None)?;
+            tx.put(b"hot-key-z".to_vec(), vec![generation], None)?;
+            tx.commit(WriteOptions::buffered())?;
+            engine.flush_cf(&cf)?;
         }
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 
         // Act
-        let value = tx.get(b"hot-key")?;
+        let value = tx.get(b"hot-key-m")?;
         let metrics = engine.metrics().get_read_amp_metrics()?;
 
         // Assert
-        assert_eq!(value.as_deref(), Some(b"value-10".as_slice()));
+        assert_eq!(value, None);
         assert_eq!(metrics.reads_total, 1);
         assert_eq!(metrics.ssts_touched_total, 11);
         assert_eq!(metrics.l0_ssts_touched_total, 11);
-        assert_eq!(metrics.blocks_read_total, 22);
+        assert_eq!(metrics.blocks_read_total, 11);
         assert!((metrics.sst_budget_violation_rate - 1.0).abs() <= f64::EPSILON);
-        assert!((metrics.block_budget_violation_rate - 1.0).abs() <= f64::EPSILON);
+        assert!(metrics.block_budget_violation_rate.abs() <= f64::EPSILON);
         Ok(())
     }
 }

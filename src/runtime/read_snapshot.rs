@@ -30,7 +30,8 @@ pub struct ReadSnapshot {
     pub cf_id: crate::types::ColumnFamilyId,
     /// Active memtable snapshot
     pub memtable: Arc<SkipListMemtable>,
-    /// Immutable memtables (newest to oldest)
+    /// Immutable memtables, oldest to newest as frozen; point reads iterate
+    /// them in reverse so newer versions are seen first.
     pub immutable_memtables: Vec<Arc<SkipListMemtable>>,
     /// Immutable indexed SST catalog for this column family.
     pub(crate) sst_view: Arc<SstReadView>,
@@ -48,6 +49,7 @@ pub struct ReadSnapshot {
 }
 
 mod merge;
+pub(crate) mod point_read;
 mod scan;
 mod snapshot;
 
