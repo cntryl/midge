@@ -6,30 +6,41 @@
 //! pinned identity and byte range, so a working set larger than memory stops
 //! paying provider latency and request cost on every miss.
 //!
-//! The cache is advisory. Each entry carries a CRC32C of its bytes; a
-//! corrupt, truncated or missing entry is dropped and the read falls through
-//! to the provider with its identity precondition unchanged. The directory is
-//! disposable and is cleared on open. Its bytes come from a fixed share of the
-//! local storage budget carved out before WAL, spill, flush and staging are
-//! admitted, so it can never consume space those need; within its share it
-//! evicts least recently used entries.
+//! The cache is advisory. Each entry records the identity it was stored under
+//! and a CRC32C of its bytes; an entry that fails either check, is truncated
+//! or is missing is dropped and the read falls through to the provider with
+//! its identity precondition unchanged. The directory is disposable and is
+//! cleared on open. Its bytes come from a fixed share of the local storage
+//! budget carved out before WAL, spill, flush and staging are admitted, so it
+//! can never consume space those need; within its share it evicts least
+//! recently used entries.
 
 use crate::io::{Durability, Fs, FsError, FsPath, FsResult, OpenOptions};
 use bytes::Bytes;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Directory under the local root that holds cache entries.
 const CACHE_DIR: &str = "sst-cache";
-/// Bytes of CRC32C ahead of each entry's payload.
-const HEADER_BYTES: usize = 4;
+/// Fixed header bytes ahead of the identity: the payload CRC32C and the
+/// identity length, both little-endian `u32`.
+const FIXED_HEADER_BYTES: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct EntryKey {
     object: String,
     offset: u64,
     len: u64,
+}
+
+impl EntryKey {
+    /// Bytes the entry occupies on disk: header, identity and payload.
+    fn charge(&self) -> u64 {
+        self.len
+            .saturating_add(FIXED_HEADER_BYTES as u64)
+            .saturating_add(self.object.len() as u64)
+    }
 }
 
 struct Entry {
@@ -41,7 +52,50 @@ struct CacheState {
     entries: HashMap<EntryKey, Entry>,
     /// Entry keys per object, for containment lookups and object-wide drops.
     by_object: HashMap<String, Vec<EntryKey>>,
+    /// Entries by last use, oldest first; ticks are unique, so this is a map.
+    lru: BTreeMap<u64, EntryKey>,
     used_bytes: u64,
+}
+
+impl CacheState {
+    fn touch(&mut self, key: &EntryKey, now: u64) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            self.lru.remove(&entry.last_used);
+            entry.last_used = now;
+            self.lru.insert(now, key.clone());
+        }
+    }
+
+    fn register(&mut self, key: EntryKey, now: u64) {
+        self.used_bytes = self.used_bytes.saturating_add(key.charge());
+        self.lru.insert(now, key.clone());
+        self.by_object
+            .entry(key.object.clone())
+            .or_default()
+            .push(key.clone());
+        self.entries.insert(key, Entry { last_used: now });
+    }
+
+    fn forget(&mut self, key: &EntryKey) {
+        if let Some(entry) = self.entries.remove(key) {
+            self.used_bytes = self.used_bytes.saturating_sub(key.charge());
+            self.lru.remove(&entry.last_used);
+        }
+        if let Some(keys) = self.by_object.get_mut(&key.object) {
+            keys.retain(|candidate| candidate != key);
+            if keys.is_empty() {
+                self.by_object.remove(&key.object);
+            }
+        }
+    }
+
+    fn containing(&self, object: &str, offset: u64, end: u64) -> Option<EntryKey> {
+        self.by_object.get(object).and_then(|keys| {
+            keys.iter()
+                .find(|key| key.offset <= offset && end <= key.offset.saturating_add(key.len))
+                .cloned()
+        })
+    }
 }
 
 pub(crate) struct RemoteBlockCache {
@@ -97,18 +151,11 @@ impl RemoteBlockCache {
         let end = offset.checked_add(len)?;
         let key = {
             let mut state = self.lock();
-            let found = state.by_object.get(object).and_then(|keys| {
-                keys.iter()
-                    .find(|key| key.offset <= offset && end <= key.offset + key.len)
-                    .cloned()
-            });
-            let Some(key) = found else {
+            let Some(key) = state.containing(object, offset, end) else {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 return None;
             };
-            if let Some(entry) = state.entries.get_mut(&key) {
-                entry.last_used = self.clock.fetch_add(1, Ordering::Relaxed);
-            }
+            state.touch(&key, self.tick());
             key
         };
         let Ok(payload) = self.read_entry(&key) else {
@@ -128,53 +175,46 @@ impl RemoteBlockCache {
     /// ignored: the cache is advisory.
     pub(crate) fn insert(&self, object: &str, offset: u64, bytes: &Bytes) {
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        let charge = len.saturating_add(HEADER_BYTES as u64);
-        if len == 0 || charge > self.budget_bytes {
-            return;
-        }
         let key = EntryKey {
             object: object.to_string(),
             offset,
             len,
         };
+        let charge = key.charge();
+        if len == 0 || charge > self.budget_bytes || self.lock().entries.contains_key(&key) {
+            return;
+        }
+        // The file is complete before the entry is registered, so a concurrent
+        // lookup never finds an entry whose bytes are still being written,
+        // which would make it drop good work and leave an orphan file.
+        if self.write_entry(&key, bytes).is_err() {
+            return;
+        }
         let evicted = {
             let mut state = self.lock();
             if state.entries.contains_key(&key) {
+                // Another thread stored the same range meanwhile; the file it
+                // registered holds the same bytes.
                 return;
             }
             let mut evicted = Vec::new();
             while state.used_bytes.saturating_add(charge) > self.budget_bytes {
-                let Some(victim) = state
-                    .entries
-                    .iter()
-                    .min_by_key(|(_, entry)| entry.last_used)
-                    .map(|(key, _)| key.clone())
-                else {
+                let Some((_, victim)) = state.lru.pop_first() else {
                     break;
                 };
-                Self::forget(&mut state, &victim);
+                state.forget(&victim);
                 evicted.push(victim);
             }
-            state.used_bytes = state.used_bytes.saturating_add(charge);
-            state.entries.insert(
-                key.clone(),
-                Entry {
-                    last_used: self.clock.fetch_add(1, Ordering::Relaxed),
-                },
-            );
-            state
-                .by_object
-                .entry(key.object.clone())
-                .or_default()
-                .push(key.clone());
+            state.register(key, self.tick());
             evicted
         };
         for victim in &evicted {
             let _ = self.fs.remove_file(&Self::path(victim));
         }
-        if self.write_entry(&key, bytes).is_err() {
-            self.drop_entry(&key);
-        }
+    }
+
+    fn tick(&self) -> u64 {
+        self.clock.fetch_add(1, Ordering::Relaxed)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, CacheState> {
@@ -185,6 +225,8 @@ impl RemoteBlockCache {
 
     fn path(key: &EntryKey) -> FsPath {
         // Identities are provider strings; a checksum keeps file names portable.
+        // Two identities may share a name, so the entry header repeats the
+        // identity and `read_entry` compares it.
         let object = crc32c::crc32c(key.object.as_bytes());
         FsPath::new(format!(
             "{CACHE_DIR}/{object:08x}-{:016x}-{:x}.blk",
@@ -192,18 +234,37 @@ impl RemoteBlockCache {
         ))
     }
 
+    /// Write the framed entry to a temporary name and move it into place, so
+    /// the final name only ever holds a complete entry.
     fn write_entry(&self, key: &EntryKey, bytes: &Bytes) -> FsResult<()> {
+        let path = Self::path(key);
+        let staging = FsPath::new(format!("{}.{:x}.tmp", path.0, self.tick()));
+        let written = self
+            .write_framed(&staging, key, bytes)
+            .and_then(|()| self.fs.rename_atomic(&staging, &path));
+        if written.is_err() {
+            let _ = self.fs.remove_file(&staging);
+        }
+        written
+    }
+
+    fn write_framed(&self, path: &FsPath, key: &EntryKey, bytes: &Bytes) -> FsResult<()> {
         let mut file = self.fs.open(
-            &Self::path(key),
+            path,
             OpenOptions {
                 mode: crate::io::OpenMode::ReadWrite,
                 create: true,
-                create_new: false,
-                truncate: true,
+                create_new: true,
+                truncate: false,
             },
         )?;
-        let mut framed = Vec::with_capacity(HEADER_BYTES + bytes.len());
+        let identity = key.object.as_bytes();
+        let identity_len = u32::try_from(identity.len())
+            .map_err(|_| FsError::Unsupported("cache identity too long".into()))?;
+        let mut framed = Vec::with_capacity(FIXED_HEADER_BYTES + identity.len() + bytes.len());
         framed.extend_from_slice(&crc32c::crc32c(bytes).to_le_bytes());
+        framed.extend_from_slice(&identity_len.to_le_bytes());
+        framed.extend_from_slice(identity);
         framed.extend_from_slice(bytes);
         file.write_at(0, Bytes::from(framed))?;
         // The cache is disposable; no sync beyond what the OS flushes itself.
@@ -212,40 +273,35 @@ impl RemoteBlockCache {
     }
 
     fn read_entry(&self, key: &EntryKey) -> FsResult<Bytes> {
+        let corrupt = |what: &str| FsError::Corruption(format!("cache entry {what}"));
         let file = self.fs.open(&Self::path(key), OpenOptions::READ_ONLY)?;
-        let framed = file.read_at(0, key.len.saturating_add(HEADER_BYTES as u64))?;
-        let (header, payload) = framed
-            .split_at_checked(HEADER_BYTES)
-            .ok_or_else(|| FsError::Corruption("cache entry shorter than its header".into()))?;
-        let expected = u32::from_le_bytes(header.try_into().expect("four header bytes"));
-        if crc32c::crc32c(payload) != expected || payload.len() as u64 != key.len {
-            return Err(FsError::Corruption(
-                "cache entry failed its checksum".into(),
-            ));
+        let framed = file.read_at(0, key.charge())?;
+        if framed.len() as u64 != key.charge() {
+            return Err(corrupt("has the wrong length"));
         }
-        Ok(framed.slice(HEADER_BYTES..))
+        let (header, rest) = framed
+            .split_at_checked(FIXED_HEADER_BYTES)
+            .ok_or_else(|| corrupt("is shorter than its header"))?;
+        let expected = u32::from_le_bytes(header[..4].try_into().expect("four crc bytes"));
+        let identity_len = u32::from_le_bytes(header[4..].try_into().expect("four length bytes"));
+        let (identity, payload) = rest
+            .split_at_checked(usize::try_from(identity_len).unwrap_or(usize::MAX))
+            .ok_or_else(|| corrupt("is shorter than its identity"))?;
+        if identity != key.object.as_bytes() {
+            return Err(corrupt("belongs to another object"));
+        }
+        if crc32c::crc32c(payload) != expected {
+            return Err(corrupt("failed its checksum"));
+        }
+        Ok(framed.slice(framed.len() - payload.len()..))
     }
 
     fn drop_entry(&self, key: &EntryKey) {
         {
             let mut state = self.lock();
-            Self::forget(&mut state, key);
+            state.forget(key);
         }
         let _ = self.fs.remove_file(&Self::path(key));
-    }
-
-    fn forget(state: &mut CacheState, key: &EntryKey) {
-        if state.entries.remove(key).is_some() {
-            state.used_bytes = state
-                .used_bytes
-                .saturating_sub(key.len.saturating_add(HEADER_BYTES as u64));
-        }
-        if let Some(keys) = state.by_object.get_mut(&key.object) {
-            keys.retain(|candidate| candidate != key);
-            if keys.is_empty() {
-                state.by_object.remove(&key.object);
-            }
-        }
     }
 
     #[cfg(test)]
@@ -256,15 +312,48 @@ impl RemoteBlockCache {
 
 #[cfg(test)]
 mod tests {
-    use super::RemoteBlockCache;
-    use crate::io::{Fs, FsPath, ReadFs};
+    use super::{EntryKey, RemoteBlockCache, CACHE_DIR};
+    use crate::io::traits::{DirEntry, Metadata};
+    use crate::io::{Durability, File, Fs, FsPath, FsResult, OpenOptions, ReadFile, ReadFs};
     use bytes::Bytes;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     fn cache(budget: u64) -> (Arc<crate::io::MockFs>, RemoteBlockCache) {
         let fs = Arc::new(crate::io::MockFs::new());
         let cache = RemoteBlockCache::open(Arc::clone(&fs) as Arc<dyn Fs>, budget).expect("open");
         (fs, cache)
+    }
+
+    fn entry_files(fs: &dyn Fs) -> Vec<String> {
+        fs.list_dir(&FsPath::new(CACHE_DIR))
+            .expect("list")
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect()
+    }
+
+    fn read_all(fs: &dyn Fs, path: &FsPath) -> Vec<u8> {
+        let len = fs.metadata(path).expect("metadata").len;
+        fs.open_read(path)
+            .expect("open")
+            .read_at(0, len)
+            .expect("read")
+            .to_vec()
+    }
+
+    fn rewrite(fs: &dyn Fs, path: &FsPath, bytes: Vec<u8>) {
+        let mut file = fs
+            .open(
+                path,
+                OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: false,
+                    truncate: true,
+                },
+            )
+            .expect("open entry");
+        file.write_at(0, Bytes::from(bytes)).expect("rewrite entry");
     }
 
     #[test]
@@ -288,25 +377,14 @@ mod tests {
         // Arrange
         let (fs, cache) = cache(1024);
         cache.insert("obj", 0, &Bytes::from_static(b"payload"));
-        let entry = fs
-            .list_dir(&FsPath::new("sst-cache"))
-            .expect("list")
-            .into_iter()
-            .next()
-            .expect("one entry");
-        let path = FsPath::new(format!("sst-cache/{}", entry.name));
-        let mut file = fs
-            .open(
-                &path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
-            .expect("open entry");
-        file.write_at(5, Bytes::from_static(b"X")).expect("corrupt");
+        let path = FsPath::new(format!(
+            "{CACHE_DIR}/{}",
+            entry_files(fs.as_ref()).pop().expect("one entry")
+        ));
+        let mut bytes = read_all(fs.as_ref(), &path);
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        rewrite(fs.as_ref(), &path, bytes);
 
         // Act
         let first = cache.get("obj", 0, 7);
@@ -316,31 +394,57 @@ mod tests {
         assert_eq!(first, None);
         assert_eq!(second, None);
         assert_eq!(cache.used_bytes(), 0);
-        assert!(fs
-            .list_dir(&FsPath::new("sst-cache"))
-            .expect("list")
-            .is_empty());
+        assert_eq!(entry_files(fs.as_ref()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn should_miss_given_entry_file_of_another_object_when_names_collide() {
+        // Arrange: two objects whose entries would share a file name (as two
+        // identities with the same checksum do) and the same range; the
+        // second object's file is replaced by the first object's bytes, which
+        // carry a valid payload checksum.
+        let (fs, cache) = cache(1024);
+        cache.insert("object-a", 0, &Bytes::from_static(b"bytes of a"));
+        cache.insert("object-b", 0, &Bytes::from_static(b"bytes of b"));
+        let key = |object: &str| EntryKey {
+            object: object.into(),
+            offset: 0,
+            len: 10,
+        };
+        let a = read_all(fs.as_ref(), &RemoteBlockCache::path(&key("object-a")));
+        rewrite(fs.as_ref(), &RemoteBlockCache::path(&key("object-b")), a);
+
+        // Act
+        let served = cache.get("object-b", 0, 10);
+
+        // Assert: the identity check refuses another object's bytes.
+        assert_eq!(served, None);
+        assert_eq!(
+            cache.get("object-a", 0, 10).as_deref(),
+            Some(b"bytes of a".as_slice())
+        );
     }
 
     #[test]
     fn should_evict_least_recently_used_given_budget_exceeded_when_inserting() {
-        // Arrange: three 100-byte entries fit a 350-byte budget two at a time
-        // (each costs 104 bytes with its header).
-        let (_fs, cache) = cache(350);
+        // Arrange: three 100-byte entries under one-byte identities cost 109
+        // bytes each, so a 300-byte budget holds two at a time.
+        let (_fs, cache) = cache(300);
         let payload = Bytes::from(vec![7_u8; 100]);
         cache.insert("a", 0, &payload);
         cache.insert("b", 0, &payload);
         cache.insert("c", 0, &payload);
-        assert!(cache.get("a", 0, 100).is_some(), "a is the most recent");
+        assert!(cache.get("a", 0, 100).is_none(), "a was the oldest");
+        assert!(cache.get("b", 0, 100).is_some(), "b is now the most recent");
 
         // Act
         cache.insert("d", 0, &payload);
 
-        // Assert: b, the least recently used, is gone; a stays.
-        assert!(cache.get("b", 0, 100).is_none());
-        assert!(cache.get("a", 0, 100).is_some());
+        // Assert: c, the least recently used, is gone; b stays.
+        assert!(cache.get("c", 0, 100).is_none());
+        assert!(cache.get("b", 0, 100).is_some());
         assert!(cache.get("d", 0, 100).is_some());
-        assert!(cache.used_bytes() <= 350);
+        assert!(cache.used_bytes() <= 300);
     }
 
     #[test]
@@ -354,5 +458,93 @@ mod tests {
         // Assert
         assert_eq!(cache.used_bytes(), 0);
         assert!(cache.get("obj", 0, 100).is_none());
+    }
+
+    /// Runs a hook the first time a file is created, so a test can act in the
+    /// middle of an insert.
+    struct HookedFs {
+        inner: Arc<crate::io::MockFs>,
+        on_create: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl ReadFs for HookedFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn ReadFile + '_>> {
+            self.inner.open_read(path)
+        }
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
+    impl Fs for HookedFs {
+        fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            if opts.create {
+                if let Some(hook) = self.on_create.lock().expect("hook").take() {
+                    hook();
+                }
+            }
+            self.inner.open(path, opts)
+        }
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+        fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
+            self.inner.sync_dir(path, dur)
+        }
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+            self.inner.rename_atomic(from, to)
+        }
+    }
+
+    #[test]
+    fn should_leave_no_orphan_given_lookup_during_write_when_inserting() {
+        // Arrange: a lookup for the range being inserted runs while its file
+        // is still being written.
+        let fs = Arc::new(HookedFs {
+            inner: Arc::new(crate::io::MockFs::new()),
+            on_create: Mutex::new(None),
+        });
+        let cache =
+            Arc::new(RemoteBlockCache::open(Arc::clone(&fs) as Arc<dyn Fs>, 1024).expect("open"));
+        let during = Arc::new(Mutex::new(None));
+        {
+            let cache = Arc::clone(&cache);
+            let during = Arc::clone(&during);
+            *fs.on_create.lock().expect("hook") = Some(Box::new(move || {
+                *during.lock().expect("record") =
+                    Some((cache.get("obj", 0, 7), cache.used_bytes()));
+            }));
+        }
+
+        // Act
+        cache.insert("obj", 0, &Bytes::from_static(b"payload"));
+
+        // Assert: the concurrent lookup missed without touching the entry,
+        // and afterwards the entry is served and the only file is accounted.
+        let during = during.lock().expect("record").take().expect("hook ran");
+        assert_eq!(during, (None, 0));
+        assert_eq!(
+            cache.get("obj", 0, 7).as_deref(),
+            Some(b"payload".as_slice())
+        );
+        let files = entry_files(fs.as_ref());
+        assert_eq!(files.len(), 1, "files on disk: {files:?}");
+        let on_disk = fs
+            .metadata(&FsPath::new(format!("{CACHE_DIR}/{}", files[0])))
+            .expect("metadata")
+            .len;
+        assert_eq!(cache.used_bytes(), on_disk);
     }
 }

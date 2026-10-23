@@ -3,10 +3,10 @@
 //! cold reader open costs one HEAD plus one tail read instead of one request
 //! per metadata block.
 
-use cntryl_midge::__internal::simulation::{Operation, SimulatedObjectStore};
+use cntryl_midge::__internal::simulation::{Operation, Schedule, SimulatedObjectStore};
 use cntryl_midge::{
-    CloudProviderConfig, CloudStorageLocation, Engine, MemoryBudget, OpenOptions, TransactionMode,
-    WriteOptions,
+    CloudProviderConfig, CloudStorageLocation, Engine, EngineHealth, MemoryBudget, OpenOptions,
+    RecoveryPolicy, TransactionMode, WriteOptions,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -215,6 +215,9 @@ fn should_bound_cache_bytes_to_its_share_given_small_local_budget_when_working_s
     const LOCAL_BUDGET: u64 = 32 * 1024 * 1024;
     const CACHE_SHARE: u64 = LOCAL_BUDGET / 4;
     const SSTS: usize = 12;
+    // Background compaction may have one insert in flight, whose 64 KiB block
+    // is on disk before the entries it evicts are removed.
+    const IN_FLIGHT_SLACK: u64 = 2 * 64 * 1024;
     let dir = tempfile::tempdir().expect("database directory");
     let store = SimulatedObjectStore::eager();
     let options = |cache: &Path| {
@@ -282,8 +285,81 @@ fn should_bound_cache_bytes_to_its_share_given_small_local_budget_when_working_s
         "cache holds only {cached_bytes} bytes"
     );
     assert!(
-        cached_bytes <= CACHE_SHARE + 64 * 1024,
+        cached_bytes <= CACHE_SHARE + IN_FLIGHT_SLACK,
         "cache holds {cached_bytes} bytes against a {CACHE_SHARE}-byte share"
+    );
+    engine.shutdown(Duration::from_secs(30)).expect("shutdown");
+}
+
+#[test]
+fn should_keep_disk_cache_given_salvaged_local_sst_when_reading_published_sst() {
+    // Arrange: four published SSTs; the remote copy of one is corrupted while
+    // a verified local copy survives, so a salvage open retains it and
+    // rebuilds its SST read view around that override.
+    let dir = tempfile::tempdir().expect("database directory");
+    let seed = SimulatedObjectStore::eager();
+    let mut seeded = cold_engine(dir.path(), &seed);
+    seeded
+        .shutdown(Duration::from_secs(30))
+        .expect("release the seed lease");
+    drop(seeded);
+    let mut image = seed.image();
+    let salvaged = image
+        .objects
+        .keys()
+        .find(|key| {
+            std::path::Path::new(key)
+                .extension()
+                .is_some_and(|extension| extension == "sst")
+        })
+        .cloned()
+        .expect("a published SST");
+    let basename = salvaged.rsplit('/').next().expect("object basename");
+    let local = dir.path().join("sst").join(basename);
+    std::fs::create_dir_all(local.parent().expect("sst dir")).expect("local sst dir");
+    std::fs::write(&local, &image.objects[&salvaged]).expect("preserve the local copy");
+    image.objects.get_mut(&salvaged).expect("remote copy")[0] ^= 1;
+    let store = SimulatedObjectStore::from_image(Schedule::Eager, &image);
+    let options = OpenOptions::cloud(
+        dir.path(),
+        CloudStorageLocation::new(
+            CloudProviderConfig::aws_s3_static("bucket", "us-east-1", "access", "secret"),
+            "block-cache/",
+        ),
+    )
+    .object_store_for_testing(Arc::new(store.process()))
+    .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
+    .background_compaction(false)
+    .recovery_policy(RecoveryPolicy::Salvage)
+    .build()
+    .expect("salvage options");
+
+    // Act: a salvage open, then two passes over every SST.
+    let mut engine = Engine::open(options).expect("salvage reopen");
+    let cf = engine.get_column_family("data").expect("recovered CF");
+    assert!(
+        local.exists(),
+        "salvage must preserve the only verified SST copy"
+    );
+    assert_eq!(
+        engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("metrics")
+            .health,
+        EngineHealth::SalvageMode,
+        "the open retained the local copy and rebuilt its SST read view"
+    );
+    read_working_set(&engine, cf.id());
+    let before_warm = range_reads(&store);
+    read_working_set(&engine, cf.id());
+    let warm_reads = range_reads(&store) - before_warm;
+
+    // Assert: the published SSTs are served from the disk cache, so the warm
+    // pass reaches the provider for nothing.
+    assert_eq!(
+        warm_reads, 0,
+        "salvage recovery dropped the remote block cache: {warm_reads} range reads warm"
     );
     engine.shutdown(Duration::from_secs(30)).expect("shutdown");
 }

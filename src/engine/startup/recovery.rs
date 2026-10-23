@@ -118,14 +118,16 @@ impl RuntimeRecoveryMaterialization {
         Self::evict_resident_manifest_ssts(materialized)?;
         if !materialized.state.salvaged_local_ssts.is_empty() {
             if let Some(storage) = &materialized.runtime_config.hybrid_storage {
-                let fs: Arc<dyn crate::io::Fs> = Arc::new(
-                    crate::storage::remote_sst::RemoteSstFs::new(
-                        Arc::clone(&materialized.state.fs),
-                        storage.remote_sst_backend(),
-                        storage.storage_io_timeout(),
-                    )
-                    .with_verified_local_overrides(materialized.state.salvaged_local_ssts.clone()),
-                );
+                let mut remote = crate::storage::remote_sst::RemoteSstFs::new(
+                    Arc::clone(&materialized.state.fs),
+                    storage.remote_sst_backend(),
+                    storage.storage_io_timeout(),
+                )
+                .with_verified_local_overrides(materialized.state.salvaged_local_ssts.clone());
+                if let Some(cache) = &materialized.remote_block_cache {
+                    remote = remote.with_block_cache(Arc::clone(cache));
+                }
+                let fs: Arc<dyn crate::io::Fs> = Arc::new(remote);
                 materialized.runtime_config.sst_read_fs = Some(Arc::clone(&fs));
                 materialized.state.recovery_sst_fs =
                     Some(crate::telemetry::recovery_progress::observe_reads(fs));

@@ -45,6 +45,9 @@ struct RuntimeStorageMaterialization {
     sst_inventory: Option<Arc<dyn crate::storage::inventory::ObjectInventory>>,
     cloud_storage_for_restore: Option<Arc<crate::storage::cloud::CloudStorage>>,
     cloud_metadata_storage_for_mirror: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    /// The disk cache of remote SST ranges, so a recovery path that rebuilds
+    /// the SST read view keeps serving from it (#938).
+    remote_block_cache: Option<Arc<crate::storage::remote_block_cache::RemoteBlockCache>>,
     streaming_wal: Option<streaming_recovery::CloudReplay>,
 }
 
