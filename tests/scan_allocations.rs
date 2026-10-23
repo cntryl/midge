@@ -91,13 +91,13 @@ fn should_allocate_less_than_once_per_row_given_many_sources_when_scanning_every
     let tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadOnly)
         .expect("begin scan");
-    let mut rows = tx.scan(&Query::new()).expect("scan");
+    let rows = tx.scan(&Query::new()).expect("scan");
     let expected_rows = SST_COUNT * KEYS_PER_SST + MEMTABLE_KEYS;
 
     // Act: count allocations while rows are pulled, without collecting them.
     let before = ALLOCATIONS.load(Ordering::Relaxed);
-    let mut count = 0_usize;
-    while let Some(row) = rows.next() {
+    let mut count = 0_u64;
+    for row in rows {
         let (key, value) = row.expect("row");
         std::hint::black_box((key.len(), value.len()));
         count += 1;
@@ -106,10 +106,10 @@ fn should_allocate_less_than_once_per_row_given_many_sources_when_scanning_every
 
     // Assert: the per-row cost is amortized block work, not a key copy or a
     // merge clone per row.
-    assert_eq!(count, expected_rows);
-    let per_row = allocations as f64 / count as f64;
+    assert_eq!(count, u64::try_from(expected_rows).expect("row count"));
     assert!(
-        per_row < 1.0,
-        "{allocations} allocations for {count} rows ({per_row:.2} per row)"
+        allocations < count,
+        "{allocations} allocations for {count} rows ({} per hundred rows)",
+        allocations * 100 / count
     );
 }

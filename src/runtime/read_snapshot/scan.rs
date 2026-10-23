@@ -455,23 +455,27 @@ impl SnapshotScan {
         })
     }
 
+    /// The next key in scan order across every source head. Heads are compared
+    /// by reference and only the winner is cloned, which for a key sliced from
+    /// its block's arena is a reference count (#945).
     fn next_key(&self) -> Option<bytes::Bytes> {
-        self.sources
-            .iter()
-            .filter_map(|source| source.head.as_ref()?.as_ref().ok().map(|(key, _)| key))
-            .cloned()
-            .reduce(|selected, candidate| {
-                let candidate_wins = if self.reverse {
-                    candidate > selected
+        let mut selected: Option<&bytes::Bytes> = None;
+        for source in &self.sources {
+            let Some(Ok((candidate, _))) = source.head.as_ref() else {
+                continue;
+            };
+            let candidate_wins = selected.is_none_or(|current| {
+                if self.reverse {
+                    candidate > current
                 } else {
-                    candidate < selected
-                };
-                if candidate_wins {
-                    candidate
-                } else {
-                    selected
+                    candidate < current
                 }
-            })
+            });
+            if candidate_wins {
+                selected = Some(candidate);
+            }
+        }
+        selected.cloned()
     }
 
     fn next_visible(&mut self) -> MidgeResult<Option<(bytes::Bytes, bytes::Bytes)>> {

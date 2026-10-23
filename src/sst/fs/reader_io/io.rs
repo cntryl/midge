@@ -70,12 +70,14 @@ impl SstFileIo {
             }
             Self::validate_block_handle(*handle, self.block_region_end, "data")?;
             let block = self.read_block(handle)?;
-            for entry in self.scan_block_entries_from_bytes(&block)? {
+            let decoded = self.decode_scan_block(&block)?;
+            for index in 0..decoded.len() {
                 if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
                     return Err(MidgeError::Timeout(
                         "SST verification deadline expired".into(),
                     ));
                 }
+                let entry = decoded.entry(index);
                 summary.observe(file_size, &entry.key, entry.sequence, None)?;
             }
         }
@@ -443,7 +445,7 @@ impl SstFileIo {
         result
     }
 
-    fn decode_framed_block<R>(
+    pub(super) fn decode_framed_block<R>(
         buffer: &[u8],
         reserve_decoded: impl FnOnce(usize) -> MidgeResult<R>,
     ) -> MidgeResult<(bytes::Bytes, R)> {

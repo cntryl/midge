@@ -13,7 +13,7 @@ use crate::sst::bloom::BlockBloomFilter;
 use crate::sst::cache::{BlockCache, CacheFill};
 use crate::sst::index::tuner::IndexKind;
 use crate::sst::trie::TrieReader;
-use crate::sst::types::{BlockHandle, Footer, SstEntry, SST_FORMAT_V4};
+use crate::sst::types::{BlockHandle, Footer, SST_FORMAT_V4};
 use crate::types::{EntryType, KeyState, RangeTombstone};
 
 type IndexEntries = Arc<Vec<(Vec<u8>, BlockHandle)>>;
@@ -80,17 +80,35 @@ pub struct SstFileIo {
     metadata_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
 }
 
-enum BlockEntryCursor {
-    Forward(std::vec::IntoIter<SstEntry>),
-    Reverse(std::iter::Rev<std::vec::IntoIter<SstEntry>>),
+/// Walks one decoded block's entries in either direction without copying.
+struct BlockEntryCursor {
+    block: state::DecodedScanBlock,
+    /// Entries handed out so far, counted from the walk's starting end.
+    taken: usize,
+    reverse: bool,
 }
 
 impl BlockEntryCursor {
-    fn next(&mut self) -> Option<SstEntry> {
-        match self {
-            Self::Forward(entries) => entries.next(),
-            Self::Reverse(entries) => entries.next(),
+    fn new(block: state::DecodedScanBlock, reverse: bool) -> Self {
+        Self {
+            block,
+            taken: 0,
+            reverse,
         }
+    }
+
+    fn next(&mut self) -> Option<state::ScanEntry> {
+        let remaining = self.block.len().checked_sub(self.taken)?;
+        if remaining == 0 {
+            return None;
+        }
+        let index = if self.reverse {
+            remaining - 1
+        } else {
+            self.taken
+        };
+        self.taken += 1;
+        Some(self.block.entry(index))
     }
 }
 
@@ -165,7 +183,9 @@ pub(crate) struct SstStateScan {
     last_block: usize,
     next_block: usize,
     block_entries: Option<BlockEntryCursor>,
-    pending_entry: Option<SstEntry>,
+    pending_entry: Option<state::ScanEntry>,
+    /// Bytes read ahead of the current block for large scans (#945).
+    window: Option<index::ReadWindow>,
 }
 
 /// Fallible, block-at-a-time cursor over every persisted logical version.
@@ -454,6 +474,7 @@ impl SstStateScan {
             next_block: 0,
             block_entries: None,
             pending_entry: None,
+            window: None,
         }
     }
 
@@ -527,31 +548,40 @@ impl SstStateScan {
             .diagnostics
             .sst_metrics()
             .record_candidate_blocks_checked(1);
-        let block = self.reader.read_cached_data_block_from(
+        // The bytes this scan can still visit: readahead never leaves them.
+        let span = self
+            .index
+            .as_ref()
+            .and_then(|index| {
+                let (_, first) = index.get(self.first_block)?;
+                let (_, last) = index.get(self.last_block)?;
+                Some(first.offset..last.offset.saturating_add(last.size))
+            })
+            .unwrap_or(handle.offset..handle.offset.saturating_add(handle.size));
+        let block = self.reader.read_cached_data_block_windowed(
             &handle,
             self.reader.handle.as_deref(),
             self.cache_fill,
+            self.reverse,
+            &span,
+            &mut self.window,
         )?;
-        let entries = self.reader.scan_block_entries_from_bytes(&block)?;
-        self.block_entries = Some(if self.reverse {
-            BlockEntryCursor::Reverse(entries.into_iter().rev())
-        } else {
-            BlockEntryCursor::Forward(entries.into_iter())
-        });
+        let decoded = self.reader.decode_scan_block(&block)?;
+        self.block_entries = Some(BlockEntryCursor::new(decoded, self.reverse));
         Ok(true)
     }
 
-    fn next_raw_entry(&mut self) -> MidgeResult<Option<SstEntry>> {
+    fn next_raw_entry(&mut self) -> MidgeResult<Option<state::ScanEntry>> {
         loop {
             if let Some(entry) = self.block_entries.as_mut().and_then(BlockEntryCursor::next) {
                 if self
                     .start
                     .as_deref()
-                    .is_some_and(|start| entry.key.as_slice() < start)
+                    .is_some_and(|start| entry.key.as_ref() < start)
                     || self
                         .end
                         .as_deref()
-                        .is_some_and(|end| entry.key.as_slice() >= end)
+                        .is_some_and(|end| entry.key.as_ref() >= end)
                 {
                     continue;
                 }
@@ -564,17 +594,11 @@ impl SstStateScan {
         }
     }
 
-    fn consider_entry(&self, best: &mut KeyState, entry: SstEntry) -> MidgeResult<()> {
+    fn consider_entry(&self, best: &mut KeyState, entry: state::ScanEntry) -> MidgeResult<()> {
         if self.snapshot_seq != u64::MAX && entry.sequence > self.snapshot_seq {
             return Ok(());
         }
-
-        let candidate = if entry.is_tombstone() {
-            KeyState::Tombstone(entry.sequence)
-        } else {
-            SstFileIo::state_from_entry(entry)
-        };
-        SstFileIo::merge_newer_state(best, candidate)
+        SstFileIo::merge_newer_state(best, SstFileIo::state_from_scan_entry(entry))
     }
 
     fn next_state(&mut self) -> MidgeResult<Option<(Bytes, KeyState)>> {
@@ -587,6 +611,8 @@ impl SstStateScan {
                 return Ok(None);
             };
 
+            // A reference count, not a copy: the key is a slice of its
+            // block's key arena (#945).
             let key = first.key.clone();
             let mut best = KeyState::Absent;
             self.consider_entry(&mut best, first)?;
@@ -613,7 +639,7 @@ impl SstStateScan {
                         state => state,
                     }
                 };
-                return Ok(Some((Bytes::from(key), state)));
+                return Ok(Some((key, state)));
             }
         }
     }

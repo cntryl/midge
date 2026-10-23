@@ -16,6 +16,9 @@ use read_amp::{
 };
 use std::time::Instant;
 
+// Count allocations per operation so the long-scan row reports them (#945).
+cntryl_stress::stress_allocator!();
+
 fn as_f64(value: u64) -> f64 {
     f64::from(u32::try_from(value).expect("benchmark counter fits in u32"))
 }
@@ -166,6 +169,50 @@ fn point_hit_miss(ctx: &mut StressContext) {
 )]
 fn mixed_point_short_scan(ctx: &mut StressContext) {
     run_case(ctx, "mixed_point_short_scan", 32_768, 1_024);
+}
+
+/// Full scans over the three overlapping SSTs; the logical unit is the emitted
+/// row, so the harness reports rows per second; allocations per row are
+/// pinned by `tests/scan_allocations.rs` (the harness counts allocations only
+/// for sampled closures) (#945).
+#[stress(
+    tier = 2,
+    role = "diagnostic",
+    metadata(component = "engine_read_amplification", scenario = "long_scan")
+)]
+fn long_scan(ctx: &mut StressContext) {
+    let fixture = ReadAmpFixture::new();
+    let scans = 64;
+    let workload = ReadWorkload::long_scans(scans);
+    ctx.parameter("storage_profile", "local");
+    ctx.parameter("sst_layout", "three_overlapping_l0_ssts");
+    ctx.parameter("fixture_keys_per_sst", KEYS_PER_SST);
+    ctx.parameter("scans", scans);
+    ctx.parameter("logical_unit", "scan_row");
+    ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
+
+    let started_at = Instant::now();
+    let result = run_workload(&fixture, &workload);
+    let elapsed = started_at.elapsed();
+
+    assert_eq!(result.scans, workload.expected_scans());
+    assert_eq!(
+        result.scan_rows,
+        workload.expected_scans() * u64::try_from(KEYS_PER_SST).expect("keys per SST fits in u64")
+    );
+
+    ctx.record_external_outcome(
+        "long_scan",
+        elapsed,
+        LogicalUnit::new("scan_row"),
+        OperationOutcome::success(result.scan_rows),
+    );
+    ctx.record_observation(
+        "scan_rows",
+        as_f64(result.scan_rows),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
 }
 
 stress_main!();

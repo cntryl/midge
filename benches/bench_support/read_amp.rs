@@ -71,6 +71,7 @@ fn key(index: usize) -> Vec<u8> {
 pub struct ReadWorkload {
     point_keys: Vec<Vec<u8>>,
     scan_queries: Vec<Query>,
+    rows_per_scan: usize,
 }
 
 impl ReadWorkload {
@@ -93,6 +94,20 @@ impl ReadWorkload {
         Self {
             point_keys,
             scan_queries,
+            rows_per_scan: SCAN_WIDTH,
+        }
+    }
+
+    /// Full scans over the fixture: every key once, merged across the three
+    /// overlapping SSTs (#945). The observability test shares this module and
+    /// does not run long scans.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn long_scans(scans: usize) -> Self {
+        Self {
+            point_keys: Vec::new(),
+            scan_queries: (0..scans).map(|_| Query::new()).collect(),
+            rows_per_scan: KEYS_PER_SST,
         }
     }
 
@@ -146,7 +161,10 @@ pub fn run_workload(fixture: &ReadAmpFixture, workload: &ReadWorkload) -> ReadWo
             assert_eq!(value.as_ref(), &[2; VALUE_SIZE]);
             rows += 1;
         }
-        assert_eq!(rows, SCAN_WIDTH, "each short scan must return eight rows");
+        assert_eq!(
+            rows, workload.rows_per_scan,
+            "each scan must return the workload's row count"
+        );
         result.scans += 1;
         result.scan_rows += u64::try_from(rows).expect("scan row count fits in u64");
     }

@@ -91,19 +91,16 @@ impl crate::sst::SstStateReader for SstFileIo {
         };
         for (_first_key, handle) in &index[span] {
             let block_data = self.read_cached_data_block(handle)?;
-            for entry in self.scan_block_entries_from_bytes(&block_data)? {
-                if start.is_some_and(|bound| entry.key.as_slice() < bound)
-                    || end.is_some_and(|bound| entry.key.as_slice() >= bound)
+            let decoded = self.decode_scan_block(&block_data)?;
+            for index in 0..decoded.len() {
+                let entry = decoded.entry(index);
+                if start.is_some_and(|bound| entry.key.as_ref() < bound)
+                    || end.is_some_and(|bound| entry.key.as_ref() >= bound)
                 {
                     continue;
                 }
-                let key = Bytes::from(entry.key.clone());
-                let state = if entry.is_tombstone() {
-                    KeyState::Tombstone(entry.sequence)
-                } else {
-                    Self::state_from_entry(entry)
-                };
-                result.push((key, state));
+                let key = entry.key.clone();
+                result.push((key, Self::state_from_scan_entry(entry)));
             }
         }
         Ok(result)
@@ -182,23 +179,19 @@ impl crate::sst::SstStateReader for SstFileIo {
 
         for (_first_key, handle) in handles {
             let block_data = self.read_cached_data_block(handle)?;
-            for entry in self.scan_block_entries_from_bytes(&block_data)? {
-                if let Some(s) = start {
-                    if entry.key.as_slice() < s {
-                        continue;
-                    }
+            let decoded = self.decode_scan_block(&block_data)?;
+            for index in 0..decoded.len() {
+                let entry = decoded.entry(index);
+                if start.is_some_and(|bound| entry.key.as_ref() < bound)
+                    || end.is_some_and(|bound| entry.key.as_ref() >= bound)
+                {
+                    continue;
                 }
-                if let Some(e) = end {
-                    if entry.key.as_slice() >= e {
-                        continue;
-                    }
-                }
-
-                let key = Bytes::from(entry.key.clone());
-                let state = if entry.is_tombstone() || entry.is_expired(now_millis) {
+                let key = entry.key.clone();
+                let state = if crate::common::time::is_expired_at(entry.expiration, now_millis) {
                     KeyState::Tombstone(entry.sequence)
                 } else {
-                    Self::state_from_entry(entry)
+                    Self::state_from_scan_entry(entry)
                 };
                 result.push((key, state));
             }
