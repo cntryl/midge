@@ -149,11 +149,15 @@ A write can cross several boundaries:
 `commit()` does not always wait for all of them. The selected `WriteOptions`
 define the acknowledgment boundary on a successful return.
 
-Every synchronous runtime response also has a deadline. If `commit()` returns
-`MidgeError::Timeout`, the runtime may already have accepted the transaction and
-may complete it later; the timeout removes the caller's response route but does
-not cancel the mutation. Treat the outcome as unknown and use an
-application-level idempotency check before retrying.
+Every synchronous runtime response also has a deadline. When the response to a
+commit with writes misses it, the runtime may already have accepted the
+transaction and may complete it later: the timeout removes the caller's response
+route but does not cancel the mutation. `commit()` therefore reports that case
+as `MidgeError::OutcomeUnknown`, not as `MidgeError::Timeout`, so
+`severity()` never suggests a retry for a write that may have landed. Use an
+application-level idempotency check before writing it again. A plain
+`MidgeError::Timeout` from `commit()` comes only from commits that cannot have
+changed state.
 
 When a commit with writes has crossed the WAL or visibility boundary but Midge
 cannot confirm its requested durability, `commit()` reports
@@ -181,8 +185,8 @@ because its record was synced before it was applied.
 `MidgeError::Fenced` from `commit()` means the write was not applied and has
 no WAL record restart could replay. That includes a write that waited
 behind a failed batch and was never logged. Midge never retries a write after
-`OutcomeUnknown` or `Timeout`, so a caller that retries must first check whether
-the write applied, as described above.
+`OutcomeUnknown`, so a caller that retries must first check whether the write
+applied, as described above.
 
 `abandoned_runtime_requests_total` and `late_runtime_responses_total` are global
 diagnostic counters. Their deltas include unrelated requests and both successful
