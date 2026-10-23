@@ -9,7 +9,6 @@ use crate::sst::fs::SstFileIo;
 #[cfg(test)]
 use crate::types::EntryType;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -22,13 +21,18 @@ pub(crate) struct ReadResources {
     sst_path_prefix: PathBuf,
     block_cache: Arc<BlockCache>,
     readers: Mutex<HashMap<ReaderCacheKey, CachedReader>>,
-    /// Every block-cache id handed out, by SST name. It outlives reader
-    /// eviction, so pruning a dead SST purges its blocks even when its reader
-    /// was already evicted under metadata pressure.
-    block_cache_ids: Mutex<HashMap<String, std::collections::HashSet<u64>>>,
+    /// The block-cache id of every live manifest entry. It outlives reader
+    /// eviction, so a reopened reader finds its warm blocks and pruning a dead
+    /// SST purges its blocks even when its reader was already evicted under
+    /// metadata pressure.
+    block_cache_ids: Mutex<HashMap<ReaderCacheKey, u64>>,
     metadata_budget: ResourceBudget,
     reader_admission: OpenAdmission,
     access_clock: std::sync::atomic::AtomicU64,
+    /// Source of block-cache identities: an entry takes the next value the
+    /// first time it opens and keeps it until pruned, so no two live entries
+    /// ever share one and a pruned entry's id is never reissued (#917).
+    next_sst_id: std::sync::atomic::AtomicU64,
     diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
     #[cfg(test)]
     prune_calls: std::sync::atomic::AtomicUsize,
@@ -39,10 +43,26 @@ struct CachedReader {
     last_used: u64,
 }
 
+/// The manifest identity a cached reader was opened for. A same-named entry
+/// with a different family, size, or checksum is a different file and gets its
+/// own reader; the fields are compared structurally, never through a digest.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ReaderCacheKey {
     name: String,
-    sst_id: u64,
+    cf_id: u32,
+    size_bytes: u64,
+    content_crc32c: Option<u32>,
+}
+
+impl ReaderCacheKey {
+    fn for_file(file_meta: &FileMeta) -> Self {
+        Self {
+            name: file_meta.name.clone(),
+            cf_id: file_meta.cf_id,
+            size_bytes: file_meta.size_bytes,
+            content_crc32c: file_meta.content_crc32c,
+        }
+    }
 }
 
 impl ReadResources {
@@ -86,6 +106,7 @@ impl ReadResources {
             metadata_budget: ResourceBudget::new(block_cache_size / 4),
             reader_admission: OpenAdmission::new(block_cache_size / 4),
             access_clock: std::sync::atomic::AtomicU64::new(0),
+            next_sst_id: std::sync::atomic::AtomicU64::new(1),
             diagnostics,
             #[cfg(test)]
             prune_calls: std::sync::atomic::AtomicUsize::new(0),
@@ -105,12 +126,7 @@ impl ReadResources {
         file_meta: &FileMeta,
         record_metrics: bool,
     ) -> MidgeResult<Arc<SstFileIo>> {
-        let name = file_meta.name.clone();
-        let sst_id = Self::sst_id_for_file(file_meta);
-        let cache_key = ReaderCacheKey {
-            name: name.clone(),
-            sst_id,
-        };
+        let cache_key = ReaderCacheKey::for_file(file_meta);
         if let Some(reader) = self.cached_reader(&cache_key)? {
             if record_metrics {
                 self.diagnostics.sst_metrics().record_reader_cache_hit();
@@ -178,15 +194,19 @@ impl ReadResources {
                 file_meta.name
             )));
         }
-        self.block_cache_ids
+        // Ids start at 1; 0 marks a reader opened without a block cache.
+        let sst_id = *self
+            .block_cache_ids
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(cache_key.name.clone())
-            .or_default()
-            .insert(cache_key.sst_id);
+            .entry(cache_key.clone())
+            .or_insert_with(|| {
+                self.next_sst_id
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            });
         let reader = Arc::new(
             opened
-                .with_block_cache(Arc::clone(&self.block_cache), cache_key.sst_id)
+                .with_block_cache(Arc::clone(&self.block_cache), sst_id)
                 .with_read_path_diagnostics(self.diagnostics.clone()),
         );
         let mut readers = self
@@ -251,26 +271,16 @@ impl ReadResources {
         self.block_cache_ids
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|name, ids| {
-                let live = live_names.contains(name);
+            .retain(|key, sst_id| {
+                let live = live_names.contains(&key.name);
                 if !live {
-                    stale_sst_ids.extend(ids.iter().copied());
+                    stale_sst_ids.push(*sst_id);
                 }
                 live
             });
         for sst_id in stale_sst_ids {
             let _ = self.block_cache.remove_sst(sst_id);
         }
-    }
-
-    fn sst_id_for_file(file_meta: &FileMeta) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        file_meta.cf_id.hash(&mut hasher);
-        file_meta.sst_seq.hash(&mut hasher);
-        file_meta.size_bytes.hash(&mut hasher);
-        file_meta.content_crc32c.hash(&mut hasher);
-        file_meta.name.hash(&mut hasher);
-        hasher.finish()
     }
 
     #[cfg(test)]
@@ -436,31 +446,78 @@ mod tests {
     }
 
     #[test]
-    fn should_derive_distinct_cache_ids_for_same_name_when_manifest_identity_differs() {
-        // Arrange
-        let first = FileMeta {
-            name: "same.sst".to_string(),
-            cf_id: 1,
-            sst_seq: 10,
-            size_bytes: 128,
-            content_crc32c: Some(1),
-            ..Default::default()
-        };
-        let second = FileMeta {
-            name: "same.sst".to_string(),
-            cf_id: 2,
-            sst_seq: 10,
-            size_bytes: 128,
-            content_crc32c: Some(1),
-            ..Default::default()
-        };
+    fn should_keep_block_cache_id_given_evicted_reader_when_reopened_before_prune(
+    ) -> MidgeResult<()> {
+        // Arrange: the reader is evicted under metadata pressure while its
+        // manifest entry stays live, so its warm blocks must stay reachable.
+        let temp_dir = tempfile::tempdir()?;
+        let meta = write_test_sst(&temp_dir, "evicted.sst")?;
+        let resources = ReadResources::new(
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            PathBuf::new(),
+            1024 * 1024,
+            CachePolicyType::Lru,
+        );
+        let first_id = resources.reader_for(&meta)?.block_cache_sst_id();
+        assert!(resources.evict_idle_reader()?);
+        assert_eq!(resources.cached_reader_count(), 0);
 
         // Act
-        let first_id = ReadResources::sst_id_for_file(&first);
-        let second_id = ReadResources::sst_id_for_file(&second);
+        let second_id = resources.reader_for(&meta)?.block_cache_sst_id();
+
+        // Assert
+        assert_eq!(first_id, second_id);
+        Ok(())
+    }
+
+    #[test]
+    fn should_assign_fresh_block_cache_id_given_pruned_file_when_reopened() -> MidgeResult<()> {
+        // Arrange: a reader is opened, pruned away, and the same manifest
+        // entry is opened again (#917).
+        let temp_dir = tempfile::tempdir()?;
+        let meta = write_test_sst(&temp_dir, "reopen.sst")?;
+        let resources = ReadResources::new(
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            PathBuf::new(),
+            1024 * 1024,
+            CachePolicyType::Lru,
+        );
+        let first_id = resources.reader_for(&meta)?.block_cache_sst_id();
+        resources.prune_to_live_ssts(&HashSet::new());
+
+        // Act
+        let second_id = resources.reader_for(&meta)?.block_cache_sst_id();
+
+        // Assert: a block-cache identity is never handed out twice, so a
+        // stale block can never alias a reopened file, whatever its metadata.
+        assert_ne!(first_id, second_id);
+        Ok(())
+    }
+
+    #[test]
+    fn should_assign_distinct_block_cache_ids_given_same_name_when_manifest_identity_differs(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let first = write_test_sst(&temp_dir, "same.sst")?;
+        let second = FileMeta {
+            cf_id: first.cf_id + 1,
+            ..first.clone()
+        };
+        let resources = ReadResources::new(
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            PathBuf::new(),
+            1024 * 1024,
+            CachePolicyType::Lru,
+        );
+
+        // Act
+        let first_id = resources.reader_for(&first)?.block_cache_sst_id();
+        let second_id = resources.reader_for(&second)?.block_cache_sst_id();
 
         // Assert
         assert_ne!(first_id, second_id);
+        Ok(())
     }
 
     #[test]
