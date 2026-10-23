@@ -135,18 +135,61 @@ impl SstFileIo {
         let file_size = metadata.len;
 
         let footer_size = u64::try_from(SST_FOOTER_SIZE).expect("V4 footer size fits u64");
-        let file = self
-            .fs
-            .open(
-                &self.path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
-            .map_err(FsError::into_midge)?;
+        let read_only = crate::io::OpenOptions {
+            mode: crate::io::OpenMode::ReadOnly,
+            create: false,
+            create_new: false,
+            truncate: false,
+        };
+        // One owned handle serves this reader for its lifetime (#919); a
+        // backend without owned handles falls back to opening per read.
+        self.handle =
+            match crate::io::open_persistent_handle(self.fs.as_ref(), &self.path, read_only) {
+                Ok(handle) => Some(handle),
+                Err(FsError::Unsupported(_)) => None,
+                Err(error) => return Err(error.into_midge()),
+            };
+        let footer = {
+            let transient;
+            let file: &dyn File = if let Some(handle) = &self.handle {
+                handle.as_ref()
+            } else {
+                transient = self
+                    .fs
+                    .open(&self.path, read_only)
+                    .map_err(FsError::into_midge)?;
+                transient.as_ref()
+            };
+            Self::read_footer(file, file_size, footer_size)?
+        };
+        let footer_offset = file_size - footer_size;
+        self.block_region_end = footer_offset;
+        Self::validate_block_handle(footer.meta_index_handle, footer_offset, "metadata")?;
+        Self::validate_block_handle(footer.index_handle, footer_offset, "index")?;
+        if let Some(handle) = footer.trie_handle {
+            Self::validate_block_handle(handle, footer_offset, "trie")?;
+        }
+        if let Some(handle) = footer.block_bloom_handle {
+            Self::validate_block_handle(handle, footer_offset, "block bloom")?;
+        }
+        self.footer = Some(footer);
+        self.load_sst_metadata()?;
+        self.load_block_bloom()?;
+        let index_handle = self
+            .footer
+            .as_ref()
+            .ok_or_else(|| MidgeError::Corruption("SST footer is missing".into()))?
+            .index_handle;
+        let index_data = self.read_metadata_block(&index_handle, "SST index")?;
+        let index = self.decode_index_entries(&index_data)?;
+        self.validate_nonoverlapping_references(&index)?;
+        self.index_entries.store(Some(Arc::new(index)));
+
+        Ok(())
+    }
+
+    /// Decode the V4 footer at the end of `file`, naming legacy formats.
+    fn read_footer(file: &dyn File, file_size: u64, footer_size: u64) -> MidgeResult<Footer> {
         if file_size < footer_size {
             if file_size >= 8
                 && file
@@ -163,12 +206,11 @@ impl SstFileIo {
                 "SST is too short for the {SST_FOOTER_SIZE}-byte V4 footer"
             )));
         }
-        let footer_offset = file_size - footer_size;
         let footer_data = file
-            .read_at(footer_offset, footer_size)
+            .read_at(file_size - footer_size, footer_size)
             .map_err(FsError::into_midge)?;
-        let footer = match Footer::decode(&footer_data) {
-            Ok(footer) => footer,
+        match Footer::decode(&footer_data) {
+            Ok(footer) => Ok(footer),
             Err(error) => {
                 let trailing_magic = file
                     .read_at(file_size.saturating_sub(8), 8)
@@ -178,33 +220,9 @@ impl SstFileIo {
                         "legacy SST V1-V3 is unsupported; this build requires V4".into(),
                     ));
                 }
-                return Err(error);
+                Err(error)
             }
-        };
-        self.block_region_end = footer_offset;
-        Self::validate_block_handle(footer.meta_index_handle, footer_offset, "metadata")?;
-        Self::validate_block_handle(footer.index_handle, footer_offset, "index")?;
-        if let Some(handle) = footer.trie_handle {
-            Self::validate_block_handle(handle, footer_offset, "trie")?;
         }
-        if let Some(handle) = footer.block_bloom_handle {
-            Self::validate_block_handle(handle, footer_offset, "block bloom")?;
-        }
-        drop(file);
-        self.footer = Some(footer);
-        self.load_sst_metadata()?;
-        self.load_block_bloom()?;
-        let index_handle = self
-            .footer
-            .as_ref()
-            .ok_or_else(|| MidgeError::Corruption("SST footer is missing".into()))?
-            .index_handle;
-        let index_data = self.read_metadata_block(&index_handle, "SST index")?;
-        let index = self.decode_index_entries(&index_data)?;
-        self.validate_nonoverlapping_references(&index)?;
-        self.index_entries.store(Some(Arc::new(index)));
-
-        Ok(())
     }
 
     fn load_sst_metadata(&mut self) -> MidgeResult<()> {
@@ -328,6 +346,9 @@ impl SstFileIo {
 
     pub(super) fn read_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
         Self::validate_block_handle(*handle, self.block_region_end, "referenced")?;
+        if let Some(file) = &self.handle {
+            return self.read_block_from(file.as_ref(), handle);
+        }
         let file = self
             .fs
             .open(
@@ -353,26 +374,29 @@ impl SstFileIo {
             return self.read_block(handle);
         };
 
-        let file = self
-            .fs
-            .open(
-                &self.path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
-            .map_err(FsError::into_midge)?;
-        let (decoded, retained_reservation) = self.read_framed_block(
-            file.as_ref(),
-            handle,
-            Some((&budget, resource)),
-            |decoded_size| {
+        let (decoded, retained_reservation) = {
+            let transient;
+            let file: &dyn File = if let Some(owned) = &self.handle {
+                owned.as_ref()
+            } else {
+                transient = self
+                    .fs
+                    .open(
+                        &self.path,
+                        crate::io::OpenOptions {
+                            mode: crate::io::OpenMode::ReadOnly,
+                            create: false,
+                            create_new: false,
+                            truncate: false,
+                        },
+                    )
+                    .map_err(FsError::into_midge)?;
+                transient.as_ref()
+            };
+            self.read_framed_block(file, handle, Some((&budget, resource)), |decoded_size| {
                 budget.reserve(decoded_size.saturating_mul(4).saturating_add(256), resource)
-            },
-        )?;
+            })?
+        };
         // The decoded bytes are transient, but their decoded reader structure
         // remains live (index, filter, trie, or range tombstones). Keep this
         // conservative reservation with the reader for that parsed structure.

@@ -48,6 +48,11 @@ pub(crate) struct SstPointReadStats {
 pub struct SstFileIo {
     path: FsPath,
     fs: Arc<dyn Fs>,
+    /// The file handle held for the reader's lifetime when the backend offers
+    /// owned handles (#919): block reads and scans share it, so the file is
+    /// opened and its path checked once per reader instead of once per block.
+    /// Backends without owned handles leave it `None` and open per read.
+    handle: Option<Box<dyn File>>,
     footer: Option<Footer>,
     /// Exclusive end of the block region (the footer starts here).
     block_region_end: u64,
@@ -153,7 +158,6 @@ pub(crate) struct SstStateScan {
     raw_state: bool,
     initialized: bool,
     lifecycle: SstScanLifecycle,
-    file: Option<Box<dyn File>>,
     index: Option<IndexEntries>,
     first_block: usize,
     last_block: usize,
@@ -173,7 +177,6 @@ struct SstRawVersionScan {
     end: Option<Vec<u8>>,
     initialized: bool,
     lifecycle: SstScanLifecycle,
-    file: Option<Box<dyn File>>,
     index: Option<IndexEntries>,
     first_block: usize,
     last_block: usize,
@@ -201,27 +204,12 @@ impl SstRawVersionScan {
             .as_ref()
             .map(|budget| budget.reserve(bounds_bytes, "raw cursor bounds"))
             .transpose()?;
-        let (file, lifecycle) = match crate::io::open_persistent_handle(
-            reader.fs.as_ref(),
-            &reader.path,
-            OpenOptions {
-                mode: OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        ) {
-            Ok(file) => (Some(file), SstScanLifecycle::Active),
-            Err(FsError::Unsupported(_)) => (None, SstScanLifecycle::Active),
-            Err(error) => (None, SstScanLifecycle::Failed(error.into_midge())),
-        };
         Ok(Self {
             reader,
             start,
             end,
             initialized: false,
-            lifecycle,
-            file,
+            lifecycle: SstScanLifecycle::Active,
             index: None,
             first_block: 0,
             last_block: 0,
@@ -248,7 +236,9 @@ impl SstRawVersionScan {
             return Ok(());
         }
 
-        let index = self.reader.index_entries_from(self.file.as_deref())?;
+        let index = self
+            .reader
+            .index_entries_from(self.reader.handle.as_deref())?;
         if index.is_empty() {
             self.lifecycle = SstScanLifecycle::Exhausted;
             return Ok(());
@@ -287,7 +277,7 @@ impl SstRawVersionScan {
             self.next_block = block_index + 1;
         }
 
-        let opened_file = if self.file.is_none() {
+        let opened_file = if self.reader.handle.is_none() {
             Some(
                 self.reader
                     .fs
@@ -306,7 +296,8 @@ impl SstRawVersionScan {
             None
         };
         let file = self
-            .file
+            .reader
+            .handle
             .as_deref()
             .or(opened_file.as_deref())
             .expect("SST file opened");
@@ -444,20 +435,6 @@ impl SstStateScan {
         snapshot_seq: u64,
         now_millis: u64,
     ) -> Self {
-        let (file, lifecycle) = match crate::io::open_persistent_handle(
-            reader.fs.as_ref(),
-            &reader.path,
-            OpenOptions {
-                mode: OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        ) {
-            Ok(file) => (Some(file), SstScanLifecycle::Active),
-            Err(FsError::Unsupported(_)) => (None, SstScanLifecycle::Active),
-            Err(error) => (None, SstScanLifecycle::Failed(error.into_midge())),
-        };
         Self {
             reader,
             start,
@@ -467,8 +444,7 @@ impl SstStateScan {
             now_millis,
             raw_state: false,
             initialized: false,
-            lifecycle,
-            file,
+            lifecycle: SstScanLifecycle::Active,
             index: None,
             first_block: 0,
             last_block: 0,
@@ -492,7 +468,9 @@ impl SstStateScan {
             return Ok(());
         }
 
-        let index = self.reader.index_entries_from(self.file.as_deref())?;
+        let index = self
+            .reader
+            .index_entries_from(self.reader.handle.as_deref())?;
         if index.is_empty() {
             self.lifecycle = SstScanLifecycle::Exhausted;
             return Ok(());
@@ -548,7 +526,7 @@ impl SstStateScan {
             .record_candidate_blocks_checked(1);
         let block = self
             .reader
-            .read_cached_data_block_from(&handle, self.file.as_deref())?;
+            .read_cached_data_block_from(&handle, self.reader.handle.as_deref())?;
         let entries = self.reader.scan_block_entries_from_bytes(&block)?;
         self.block_entries = Some(if self.reverse {
             BlockEntryCursor::Reverse(entries.into_iter().rev())
@@ -684,6 +662,7 @@ impl SstFileIo {
         Self {
             path: FsPath::new(path_str),
             fs,
+            handle: None,
             footer: None,
             block_region_end: 0,
             // Readers without a cache never consume this placeholder. Cache

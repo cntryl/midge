@@ -136,7 +136,7 @@ pub trait ReadObserver: Send + Sync {
 }
 
 /// The read-only operations of an individual file handle.
-pub trait ReadFile: Send {
+pub trait ReadFile: Send + Sync {
     /// Read at specific offset
     ///
     /// # Errors
