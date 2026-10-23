@@ -3,6 +3,7 @@
 //! This module owns the concrete skiplist memtable and its conservative encoded
 //! bounds.
 
+pub(crate) mod range_tombstone_index;
 pub(crate) mod size_bound;
 pub(crate) mod skiplist;
 
@@ -65,6 +66,10 @@ pub struct SkipListMemtable {
     encoded_size_bound: std::sync::atomic::AtomicUsize,
     range_tombstone_count: std::sync::atomic::AtomicUsize,
     range_tombstones: RwLock<Vec<RangeTombstone>>,
+    /// Tombstone entries inspected by covering lookups, so tests can pin the
+    /// lookup cost (#921).
+    #[cfg(test)]
+    tombstones_examined: std::sync::atomic::AtomicUsize,
 }
 
 impl SkipListMemtable {
@@ -76,7 +81,15 @@ impl SkipListMemtable {
             encoded_size_bound: std::sync::atomic::AtomicUsize::new(size_bound::FIXED_SST_BYTES),
             range_tombstone_count: std::sync::atomic::AtomicUsize::new(0),
             range_tombstones: RwLock::new(Vec::new()),
+            #[cfg(test)]
+            tombstones_examined: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tombstones_examined(&self) -> usize {
+        self.tombstones_examined
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[must_use]
@@ -479,7 +492,11 @@ impl SkipListMemtable {
         {
             return None;
         }
-        max_covering_seq(self.range_tombstones.read().iter(), key, snapshot_seq)
+        let tombstones = self.range_tombstones.read();
+        #[cfg(test)]
+        self.tombstones_examined
+            .fetch_add(tombstones.len(), std::sync::atomic::Ordering::Relaxed);
+        max_covering_seq(tombstones.iter(), key, snapshot_seq)
     }
 
     /// Return all range tombstones for flush/compaction publication.
@@ -807,6 +824,32 @@ mod tests {
         assert_eq!(unbounded, Some(12));
         assert_eq!(below_all, None);
         assert_eq!(end_is_exclusive, None);
+        Ok(())
+    }
+
+    #[test]
+    fn should_examine_few_tombstones_given_ten_thousand_disjoint_ranges_when_looking_up_cover(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: one range per tenant, none overlapping (#921).
+        let memtable = SkipListMemtable::new();
+        for i in 0..10_000_u64 {
+            let start = format!("tenant_{i:06}_a").into_bytes();
+            let end = format!("tenant_{i:06}_z").into_bytes();
+            memtable.delete_range_with_seq(&start, &end, i + 1)?;
+        }
+
+        // Act
+        let covered = memtable.max_covering_tombstone_seq(b"tenant_004242_m", u64::MAX);
+        let uncovered = memtable.max_covering_tombstone_seq(b"tenant_004242_zz", u64::MAX);
+
+        // Assert: two lookups touch a handful of index entries, not 20,000.
+        assert_eq!(covered, Some(4243));
+        assert_eq!(uncovered, None);
+        assert!(
+            memtable.tombstones_examined() <= 8,
+            "examined {} tombstone entries",
+            memtable.tombstones_examined()
+        );
         Ok(())
     }
 
