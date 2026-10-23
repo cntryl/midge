@@ -436,31 +436,53 @@ mod tests {
     }
 
     #[test]
-    fn should_derive_distinct_cache_ids_for_same_name_when_manifest_identity_differs() {
-        // Arrange
-        let first = FileMeta {
-            name: "same.sst".to_string(),
-            cf_id: 1,
-            sst_seq: 10,
-            size_bytes: 128,
-            content_crc32c: Some(1),
-            ..Default::default()
-        };
-        let second = FileMeta {
-            name: "same.sst".to_string(),
-            cf_id: 2,
-            sst_seq: 10,
-            size_bytes: 128,
-            content_crc32c: Some(1),
-            ..Default::default()
-        };
+    fn should_assign_fresh_block_cache_id_given_pruned_file_when_reopened() -> MidgeResult<()> {
+        // Arrange: a reader is opened, pruned away, and the same manifest
+        // entry is opened again (#917).
+        let temp_dir = tempfile::tempdir()?;
+        let meta = write_test_sst(&temp_dir, "reopen.sst")?;
+        let resources = ReadResources::new(
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            PathBuf::new(),
+            1024 * 1024,
+            CachePolicyType::Lru,
+        );
+        let first_id = resources.reader_for(&meta)?.block_cache_sst_id();
+        resources.prune_to_live_ssts(&HashSet::new());
 
         // Act
-        let first_id = ReadResources::sst_id_for_file(&first);
-        let second_id = ReadResources::sst_id_for_file(&second);
+        let second_id = resources.reader_for(&meta)?.block_cache_sst_id();
+
+        // Assert: a block-cache identity is never handed out twice, so a
+        // stale block can never alias a reopened file, whatever its metadata.
+        assert_ne!(first_id, second_id);
+        Ok(())
+    }
+
+    #[test]
+    fn should_assign_distinct_block_cache_ids_given_same_name_when_manifest_identity_differs(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let temp_dir = tempfile::tempdir()?;
+        let first = write_test_sst(&temp_dir, "same.sst")?;
+        let second = FileMeta {
+            cf_id: first.cf_id + 1,
+            ..first.clone()
+        };
+        let resources = ReadResources::new(
+            Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?),
+            PathBuf::new(),
+            1024 * 1024,
+            CachePolicyType::Lru,
+        );
+
+        // Act
+        let first_id = resources.reader_for(&first)?.block_cache_sst_id();
+        let second_id = resources.reader_for(&second)?.block_cache_sst_id();
 
         // Assert
         assert_ne!(first_id, second_id);
+        Ok(())
     }
 
     #[test]

@@ -787,6 +787,12 @@ impl SstFileIo {
         self
     }
 
+    /// The identity this reader's blocks are cached under.
+    #[cfg(test)]
+    pub(crate) fn block_cache_sst_id(&self) -> u64 {
+        self.sst_id
+    }
+
     /// Attach the runtime that owns this reader's diagnostics.
     #[must_use]
     pub(crate) fn with_read_path_diagnostics(
