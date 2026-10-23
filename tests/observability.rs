@@ -13,6 +13,9 @@ mod spans;
 #[path = "observability/first_hit_reads.rs"]
 mod first_hit_reads;
 
+#[path = "observability/scan_cache_fill.rs"]
+mod scan_cache_fill;
+
 mod telemetry_integration {
     //! Operation-integrity checks for code paths that are expected to emit
     //! telemetry when instrumentation is available, plus direct assertions

@@ -1,7 +1,7 @@
 use super::{BlockHandle, IndexEntries, SstFileIo};
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::File;
-use crate::sst::cache::CacheKey;
+use crate::sst::cache::{CacheFill, CacheKey};
 use std::sync::Arc;
 
 impl SstFileIo {
@@ -276,13 +276,17 @@ impl SstFileIo {
     }
 
     pub(super) fn read_cached_data_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
-        self.read_cached_data_block_from(handle, self.handle.as_deref())
+        self.read_cached_data_block_from(handle, self.handle.as_deref(), CacheFill::Normal)
     }
 
+    /// Serve a data block from the cache or the file; a miss is inserted only
+    /// under [`CacheFill::Normal`], so scans can read without evicting the
+    /// point-read working set (#944).
     pub(super) fn read_cached_data_block_from(
         &self,
         handle: &BlockHandle,
         file: Option<&dyn File>,
+        cache_fill: CacheFill,
     ) -> MidgeResult<bytes::Bytes> {
         let cache_key = CacheKey::for_data(self.sst_id, handle.offset);
         let read_metrics = self.diagnostics.sst_metrics();
@@ -300,7 +304,9 @@ impl SstFileIo {
                     |file| self.read_block_from(file, handle),
                 )?;
                 read_metrics.record_data_block_read();
-                cache.put(cache_key, &bytes);
+                if cache_fill == CacheFill::Normal {
+                    cache.put(cache_key, &bytes);
+                }
                 Ok(bytes)
             }
         } else {

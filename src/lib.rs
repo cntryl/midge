@@ -305,6 +305,7 @@ pub use types::ColumnFamilyId;
 
 // Scan API
 pub use engine::{Direction, IteratorState, Query, ScanIterator};
+pub use sst::cache::CacheFill;
 
 // Observability and diagnostics
 pub use config::{

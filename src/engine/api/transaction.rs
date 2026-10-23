@@ -981,8 +981,13 @@ impl Transaction {
         let start = query.effective_start().map(<[u8]>::to_vec);
         let end = query.effective_end();
         let reverse = query.direction == super::iterator::Direction::Reverse;
-        let snapshot_scan =
-            snapshot.state_scan(start.clone(), end.clone(), reverse, self.start_sequence);
+        let snapshot_scan = snapshot.state_scan_with_cache_fill(
+            start.clone(),
+            end.clone(),
+            reverse,
+            self.start_sequence,
+            query.effective_cache_fill(),
+        );
         let intent_scan = self
             .write_set
             .key_scan(start.as_deref(), end.as_deref(), reverse)?;
