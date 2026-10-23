@@ -67,6 +67,10 @@ pub struct SstFileIo {
     largest_key: Option<Vec<u8>>,
     range_tombstone_handle: Option<BlockHandle>,
     range_tombstones: Vec<RangeTombstone>,
+    /// Fragmented view of `range_tombstones` for point lookups, built once at
+    /// open; `None` when they nest too deeply for its memory bound (#921).
+    range_tombstone_index:
+        Option<crate::memtable::range_tombstone_index::FragmentedRangeTombstones>,
     metadata_budget: Option<crate::common::resource_budget::ResourceBudget>,
     metadata_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
 }
@@ -698,6 +702,7 @@ impl SstFileIo {
             largest_key: None,
             range_tombstone_handle: None,
             range_tombstones: Vec::new(),
+            range_tombstone_index: None,
             metadata_budget: None,
             metadata_reservations: Vec::new(),
         }

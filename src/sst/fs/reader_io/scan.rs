@@ -222,14 +222,22 @@ impl crate::sst::SstStateReader for SstFileIo {
     }
 
     fn max_covering_tombstone_seq(&self, key: &[u8], snapshot_seq: u64) -> Option<u64> {
-        crate::memtable::max_covering_seq(&self.range_tombstones, key, snapshot_seq)
+        match &self.range_tombstone_index {
+            Some(index) => index.max_covering_seq(key, snapshot_seq),
+            None => crate::memtable::max_covering_seq(&self.range_tombstones, key, snapshot_seq),
+        }
     }
 
     fn range_tombstone_memory_usage(&self) -> usize {
+        let index_bytes = self.range_tombstone_index.as_ref().map_or(
+            0,
+            crate::memtable::range_tombstone_index::FragmentedRangeTombstones::memory_usage,
+        );
         self.range_tombstones.iter().fold(
             self.range_tombstones
                 .len()
-                .saturating_mul(std::mem::size_of::<crate::types::RangeTombstone>()),
+                .saturating_mul(std::mem::size_of::<crate::types::RangeTombstone>())
+                .saturating_add(index_bytes),
             |total, tombstone| {
                 total
                     .saturating_add(tombstone.start.capacity())
