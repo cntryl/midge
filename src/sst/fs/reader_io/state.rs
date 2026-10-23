@@ -1,52 +1,100 @@
-use super::{BlockEntryDecoder, KeyState, SstEntry, SstFileIo};
+use super::{BlockEntryDecoder, KeyState, SstFileIo};
 use crate::common::{MidgeError, MidgeResult};
 use crate::sst::bloom::writer::BloomTestResult;
 use crate::sst::encoding;
 use crate::types::EntryType;
 use bytes::Bytes;
 
+/// A data block decoded for a lazy scan: one key arena plus per-entry
+/// positions into it and into the block's value bytes.
+pub(super) struct DecodedScanBlock {
+    keys: Bytes,
+    entries: Vec<ScanEntryMeta>,
+}
+
+struct ScanEntryMeta {
+    key_start: usize,
+    key_end: usize,
+    value: Option<Bytes>,
+    sequence: u64,
+    entry_type: EntryType,
+    expiration: Option<u64>,
+}
+
+/// One entry handed to the scan; `key` and `value` share their block's
+/// buffers, so cloning either is a reference count.
+pub(super) struct ScanEntry {
+    pub(super) key: Bytes,
+    pub(super) value: Option<Bytes>,
+    pub(super) sequence: u64,
+    pub(super) entry_type: EntryType,
+    pub(super) expiration: Option<u64>,
+}
+
+impl DecodedScanBlock {
+    pub(super) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub(super) fn entry(&self, index: usize) -> ScanEntry {
+        let meta = &self.entries[index];
+        ScanEntry {
+            key: self.keys.slice(meta.key_start..meta.key_end),
+            value: meta.value.clone(),
+            sequence: meta.sequence,
+            entry_type: meta.entry_type,
+            expiration: meta.expiration,
+        }
+    }
+}
+
 impl SstFileIo {
-    pub(super) fn scan_block_entries_from_bytes(
-        &self,
-        block_data: &bytes::Bytes,
-    ) -> MidgeResult<Vec<SstEntry>> {
-        let mut result = Vec::new();
+    /// Decode a data block for a lazy scan. Every reconstructed key is appended
+    /// to one arena and the entries index into it, so handing a key to the
+    /// scan is a slice of the shared arena rather than a copy per key (#945).
+    pub(super) fn decode_scan_block(&self, block_data: &Bytes) -> MidgeResult<DecodedScanBlock> {
+        // The block is sliced once per value; cloning it first promotes the
+        // buffer to a shared one so every later slice is a reference count.
+        let block = block_data.clone();
+        let mut keys = Vec::with_capacity(block.len());
+        let mut entries = Vec::new();
         let mut decoder = BlockEntryDecoder::default();
 
         while let Some(entry) =
-            decoder.next(block_data, self.format_version, None, "range decoder key")?
+            decoder.next(&block, self.format_version, None, "range decoder key")?
         {
-            let value_bytes = if let Some(val_off) = entry.value_offset {
-                let val_len = match entry.value {
-                    Some(v) => v.len(),
-                    None => {
-                        return Err(MidgeError::Corruption(
-                            "value offset present without value".into(),
-                        ))
-                    }
-                };
-                Some(block_data.slice(val_off..val_off + val_len))
-            } else {
-                None
+            let value = match (entry.value_offset, entry.value) {
+                (Some(offset), Some(value)) => Some(block.slice(offset..offset + value.len())),
+                (Some(_), None) => {
+                    return Err(MidgeError::Corruption(
+                        "value offset present without value".into(),
+                    ))
+                }
+                (None, _) => None,
             };
-
-            result.push(SstEntry::new(
-                decoder.key().to_vec(),
-                value_bytes,
-                entry.sequence,
-                entry.entry_type,
-                entry.expiration,
-            ));
+            let key_start = keys.len();
+            keys.extend_from_slice(decoder.key());
+            entries.push(ScanEntryMeta {
+                key_start,
+                key_end: keys.len(),
+                value,
+                sequence: entry.sequence,
+                entry_type: entry.entry_type,
+                expiration: entry.expiration,
+            });
         }
 
-        Ok(result)
+        Ok(DecodedScanBlock {
+            keys: Bytes::from(keys),
+            entries,
+        })
     }
 
-    pub(super) fn state_from_entry(entry: SstEntry) -> KeyState {
-        if entry.is_tombstone() {
+    pub(super) fn state_from_scan_entry(entry: ScanEntry) -> KeyState {
+        if entry.entry_type == EntryType::Delete {
             KeyState::Tombstone(entry.sequence)
         } else if let Some(value) = entry.value {
-            KeyState::Value(value, entry.sequence, entry.expiration, entry.op_type)
+            KeyState::Value(value, entry.sequence, entry.expiration, entry.entry_type)
         } else {
             KeyState::Absent
         }

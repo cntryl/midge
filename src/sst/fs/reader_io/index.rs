@@ -318,4 +318,97 @@ impl SstFileIo {
             Ok(bytes)
         }
     }
+
+    /// Like [`Self::read_cached_data_block_from`], but a scan that bypasses the
+    /// cache reads ahead: a miss fetches up to [`READAHEAD_BYTES`] of the block
+    /// region in the scan's direction into `window` and later blocks inside it
+    /// are served from that buffer, so a long scan costs one read per window
+    /// instead of one per block (#945). Small scans fill the cache instead and
+    /// read one block at a time, since their next block is rarely wanted.
+    pub(super) fn read_cached_data_block_windowed(
+        &self,
+        handle: &BlockHandle,
+        file: Option<&dyn File>,
+        cache_fill: CacheFill,
+        reverse: bool,
+        span: &std::ops::Range<u64>,
+        window: &mut Option<ReadWindow>,
+    ) -> MidgeResult<bytes::Bytes> {
+        let (Some(file), CacheFill::Bypass) = (file, cache_fill) else {
+            return self.read_cached_data_block_from(handle, file, cache_fill);
+        };
+        let cache_key = CacheKey::for_data(self.sst_id, handle.offset);
+        let read_metrics = self.diagnostics.sst_metrics();
+        if let Some(cache) = &self.block_cache {
+            if let Some(cached_value) = cache.get(&cache_key) {
+                read_metrics.record_block_cache_hit();
+                self.diagnostics.record_block_cache_lookup(true);
+                return Ok(cached_value.data);
+            }
+            read_metrics.record_block_cache_miss();
+            self.diagnostics.record_block_cache_lookup(false);
+        }
+        Self::validate_block_handle(*handle, self.block_region_end, "referenced")?;
+        let frame = if let Some(frame) = window.as_ref().and_then(|window| window.frame(handle)) {
+            frame
+        } else {
+            let fetched = self.read_window(file, handle, reverse, span)?;
+            let frame = fetched
+                .frame(handle)
+                .ok_or_else(|| MidgeError::Internal("read window misses its block".into()))?;
+            *window = Some(fetched);
+            frame
+        };
+        let (block, ()) = Self::decode_framed_block(&frame, |_| Ok(()))?;
+        read_metrics.record_data_block_read();
+        Ok(block)
+    }
+
+    /// Fetch the window that starts at `handle` going forward, or ends at it
+    /// going backward, clipped to `span`: the byte range of the blocks the scan
+    /// can still visit, so a narrow range scan never reads past its own end.
+    fn read_window(
+        &self,
+        file: &dyn File,
+        handle: &BlockHandle,
+        reverse: bool,
+        span: &std::ops::Range<u64>,
+    ) -> MidgeResult<ReadWindow> {
+        let block_end = handle.offset.saturating_add(handle.size);
+        let (offset, len) = if reverse {
+            let offset = block_end
+                .saturating_sub(READAHEAD_BYTES.max(handle.size))
+                .max(span.start.min(handle.offset));
+            (offset, block_end - offset)
+        } else {
+            let end = handle
+                .offset
+                .saturating_add(READAHEAD_BYTES.max(handle.size))
+                .min(span.end.max(block_end))
+                .min(self.block_region_end);
+            (handle.offset, end - handle.offset)
+        };
+        let bytes = file
+            .read_at(offset, len)
+            .map_err(crate::io::FsError::into_midge)?;
+        Ok(ReadWindow { offset, bytes })
+    }
+}
+
+/// Bytes a bypassing scan read ahead of its current block.
+const READAHEAD_BYTES: u64 = 256 * 1024;
+
+pub(super) struct ReadWindow {
+    offset: u64,
+    bytes: bytes::Bytes,
+}
+
+impl ReadWindow {
+    /// The framed block for `handle` when the window covers it entirely.
+    fn frame(&self, handle: &BlockHandle) -> Option<bytes::Bytes> {
+        let start = handle.offset.checked_sub(self.offset)?;
+        let end = start.checked_add(handle.size)?;
+        let (start, end) = (usize::try_from(start).ok()?, usize::try_from(end).ok()?);
+        (end <= self.bytes.len()).then(|| self.bytes.slice(start..end))
+    }
 }

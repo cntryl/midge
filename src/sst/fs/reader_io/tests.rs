@@ -501,12 +501,12 @@ fn should_get_state_at_read_only_candidate_block_when_key_present() -> MidgeResu
     let target_block_idx = 1;
     let target_handle = index[target_block_idx].1;
     let target_block = reader.read_block(&target_handle)?;
-    let entries = reader.scan_block_entries_from_bytes(&target_block)?;
+    let entries = reader.decode_scan_block(&target_block)?;
     assert!(
         entries.len() >= 2,
         "target block should contain multiple keys"
     );
-    let target_key = entries[1].key.clone();
+    let target_key = entries.entry(1).key;
 
     counting_fs.clear_reads();
 
@@ -535,7 +535,7 @@ fn should_get_state_at_read_only_candidate_block_when_key_missing() -> MidgeResu
     let target_block_idx = 1;
     let target_handle = index[target_block_idx].1;
     let target_block = reader.read_block(&target_handle)?;
-    let entries = reader.scan_block_entries_from_bytes(&target_block)?;
+    let entries = reader.decode_scan_block(&target_block)?;
     assert!(
         entries.len() >= 2,
         "target block should contain multiple keys"
@@ -547,7 +547,7 @@ fn should_get_state_at_read_only_candidate_block_when_key_missing() -> MidgeResu
     assert_eq!(block_bloom.num_blocks(), index.len());
     let missing_key = (0..256u16)
         .map(|suffix| {
-            let mut key = entries[1].key.clone();
+            let mut key = entries.entry(1).key.to_vec();
             key.extend_from_slice(format!("-missing-{suffix}").as_bytes());
             key
         })
@@ -811,8 +811,8 @@ fn should_use_trie_accelerator_when_structured_key_is_present() -> MidgeResult<(
     let target_block_idx = 1;
     let target_handle = index[target_block_idx].1;
     let target_block = reader.read_block(&target_handle)?;
-    let entries = reader.scan_block_entries_from_bytes(&target_block)?;
-    let target_key = entries[1].key.clone();
+    let entries = reader.decode_scan_block(&target_block)?;
+    let target_key = entries.entry(1).key;
 
     counting_fs.clear_reads();
 
