@@ -39,8 +39,10 @@ pub mod bench {
 }
 
 use crate::common::{MidgeError, MidgeResult};
+use crate::memtable::range_tombstone_index::FragmentedRangeTombstones;
 use crate::memtable::skiplist::{OpType, SkipList};
 use crate::types::{EntryType, KeyState, RangeTombstone};
+use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -65,11 +67,25 @@ pub struct SkipListMemtable {
     size_bytes: std::sync::atomic::AtomicUsize,
     encoded_size_bound: std::sync::atomic::AtomicUsize,
     range_tombstone_count: std::sync::atomic::AtomicUsize,
+    /// Append-only: the index cache below treats `built_for == count` as
+    /// "built from exactly these tombstones", which holds only while nothing
+    /// removes or reorders entries.
     range_tombstones: RwLock<Vec<RangeTombstone>>,
+    /// Fragmented view of `range_tombstones` for point lookups, rebuilt lazily
+    /// after the next `delete_range` (#921). Readers load it without locking.
+    range_tombstone_index: ArcSwapOption<TombstoneIndexCache>,
     /// Tombstone entries inspected by covering lookups, so tests can pin the
     /// lookup cost (#921).
     #[cfg(test)]
     tombstones_examined: std::sync::atomic::AtomicUsize,
+}
+
+/// The fragmented index for a tombstone count; `index` is `None` when the
+/// tombstones nest too deeply for the index's memory bound, in which case
+/// lookups keep scanning linearly until the next `delete_range`.
+struct TombstoneIndexCache {
+    built_for: usize,
+    index: Option<FragmentedRangeTombstones>,
 }
 
 impl SkipListMemtable {
@@ -81,6 +97,7 @@ impl SkipListMemtable {
             encoded_size_bound: std::sync::atomic::AtomicUsize::new(size_bound::FIXED_SST_BYTES),
             range_tombstone_count: std::sync::atomic::AtomicUsize::new(0),
             range_tombstones: RwLock::new(Vec::new()),
+            range_tombstone_index: ArcSwapOption::empty(),
             #[cfg(test)]
             tombstones_examined: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -485,18 +502,40 @@ impl SkipListMemtable {
     /// sequence (#495).
     #[must_use]
     pub fn max_covering_tombstone_seq(&self, key: &[u8], snapshot_seq: u64) -> Option<u64> {
-        if self
+        let count = self
             .range_tombstone_count
-            .load(std::sync::atomic::Ordering::Acquire)
-            == 0
-        {
+            .load(std::sync::atomic::Ordering::Acquire);
+        if count == 0 {
             return None;
+        }
+        let cache = match self.range_tombstone_index.load_full() {
+            Some(cache) if cache.built_for == count => cache,
+            _ => self.rebuild_tombstone_index(),
+        };
+        if let Some(index) = &cache.index {
+            #[cfg(test)]
+            self.tombstones_examined
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return index.max_covering_seq(key, snapshot_seq);
         }
         let tombstones = self.range_tombstones.read();
         #[cfg(test)]
         self.tombstones_examined
             .fetch_add(tombstones.len(), std::sync::atomic::Ordering::Relaxed);
         max_covering_seq(tombstones.iter(), key, snapshot_seq)
+    }
+
+    /// Fragment the current tombstones and publish the result. Concurrent
+    /// readers may build the same index twice; either copy is correct.
+    fn rebuild_tombstone_index(&self) -> Arc<TombstoneIndexCache> {
+        let tombstones = self.range_tombstones.read();
+        let cache = Arc::new(TombstoneIndexCache {
+            built_for: tombstones.len(),
+            index: FragmentedRangeTombstones::build(&tombstones),
+        });
+        drop(tombstones);
+        self.range_tombstone_index.store(Some(Arc::clone(&cache)));
+        cache
     }
 
     /// Return all range tombstones for flush/compaction publication.
@@ -850,6 +889,23 @@ mod tests {
             "examined {} tombstone entries",
             memtable.tombstones_examined()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn should_see_new_tombstone_given_cached_index_when_delete_range_follows_lookup(
+    ) -> crate::common::MidgeResult<()> {
+        // Arrange: a lookup builds the index from one tombstone.
+        let memtable = SkipListMemtable::new();
+        memtable.delete_range_with_seq(b"a", b"c", 4)?;
+        assert_eq!(memtable.max_covering_tombstone_seq(b"m", u64::MAX), None);
+
+        // Act: a later range covers the key; the cached index is stale.
+        memtable.delete_range_with_seq(b"k", b"p", 9)?;
+        let covering = memtable.max_covering_tombstone_seq(b"m", u64::MAX);
+
+        // Assert
+        assert_eq!(covering, Some(9));
         Ok(())
     }
 

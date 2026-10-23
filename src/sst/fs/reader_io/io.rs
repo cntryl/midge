@@ -239,6 +239,10 @@ impl SstFileIo {
             }
             _ => Vec::new(),
         };
+        self.range_tombstone_index =
+            crate::memtable::range_tombstone_index::FragmentedRangeTombstones::build(
+                &self.range_tombstones,
+            );
         self.trie_reader = match (self.index_kind, footer.trie_handle) {
             (IndexKind::Trie, Some(handle)) => {
                 let trie_bytes = self.read_metadata_block(&handle, "SST trie")?;

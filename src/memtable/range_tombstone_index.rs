@@ -111,7 +111,12 @@ impl FragmentedRangeTombstones {
                 total
                     .saturating_add(fragment.start.capacity())
                     .saturating_add(fragment.end.capacity())
-                    .saturating_add(fragment.seqs.capacity().saturating_mul(8))
+                    .saturating_add(
+                        fragment
+                            .seqs
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<u64>()),
+                    )
             },
         )
     }
@@ -142,8 +147,11 @@ mod tests {
         ];
         let index = FragmentedRangeTombstones::build(&tombstones).expect("bounded index");
 
-        // Act / Assert
-        assert_eq!(index.max_covering_seq(b"d", u64::MAX), Some(20));
+        // Act
+        let nested_newest = index.max_covering_seq(b"d", u64::MAX);
+
+        // Assert
+        assert_eq!(nested_newest, Some(20));
         assert_eq!(index.max_covering_seq(b"d", 15), Some(10));
         assert_eq!(index.max_covering_seq(b"d", 9), None);
         assert_eq!(index.max_covering_seq(b"b", u64::MAX), Some(10));
