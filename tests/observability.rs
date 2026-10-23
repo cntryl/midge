@@ -10,6 +10,9 @@ mod latency_histograms;
 #[path = "observability/spans.rs"]
 mod spans;
 
+#[path = "observability/first_hit_reads.rs"]
+mod first_hit_reads;
+
 mod telemetry_integration {
     //! Operation-integrity checks for code paths that are expected to emit
     //! telemetry when instrumentation is available, plus direct assertions
