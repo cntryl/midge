@@ -7,6 +7,9 @@ mod common;
 #[path = "cloud_core/cloud_durable_wait.rs"]
 mod cloud_durable_wait;
 
+#[path = "cloud_core/remote_block_cache.rs"]
+mod remote_block_cache;
+
 mod cloud_recovery {
     //! Reopen Consistency After Flush And Background Upload Activity
     //!
