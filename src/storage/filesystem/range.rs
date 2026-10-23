@@ -93,7 +93,7 @@ pub(super) fn mutation_stripe(full_path: &Path) -> usize {
 pub(super) struct MutationGuard {
     _stripe: parking_lot::MutexGuard<'static, ()>,
     #[cfg(feature = "failpoints")]
-    _failpoint_gate: Option<parking_lot::RwLockReadGuard<'static, ()>>,
+    _failpoint_gate: Option<parking_lot::RecursiveRwLockReadGuard<'static, ()>>,
 }
 
 pub(super) fn mutation_lock(full_path: &Path) -> MutationGuard {
