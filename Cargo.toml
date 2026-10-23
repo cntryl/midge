@@ -25,6 +25,15 @@ name = "midge"
 path = "src/bin/midge.rs"
 bench = false
 
+# `panic = "unwind"` (the default) stays: worker panics are isolated with
+# `catch_unwind` so they fence the writer instead of aborting the process.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+
 # =============================================================================
 # Dependencies
 # =============================================================================
@@ -37,9 +46,11 @@ dashmap = "6.2"
 fail = { version = "0.5", features = ["failpoints"], optional = true }
 parking_lot = "0.13"
 
-# Utilities used by stress workloads
+# Randomness for skiplist tower heights and provider request jitter
 rand = "0.10"
-hdrhistogram = "7.6"
+
+# Optional global allocator; see `docs/operations/performance-tuning.md`
+mimalloc = { version = "0.1", optional = true }
 
 # Compression
 lz4_flex = "0.14"
@@ -101,6 +112,7 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 [dev-dependencies]
 proptest = "1.12"
 cntryl-stress = "0.5.1"
+hdrhistogram = "7.6"
 sha2 = "0.11"
 # Self dev-dependency: turns on `internal-testing` for tests/ and benches/ so
 # they can reach implementation internals through `cntryl_midge::__internal`
@@ -114,6 +126,9 @@ cntryl-midge = { path = ".", features = ["internal-testing"] }
 [features]
 default = ["cloud-all"]
 failpoints = ["dep:fail"]
+# Installs mimalloc as the global allocator of the `midge` binary. The library
+# never installs an allocator; embedding applications choose their own.
+alloc-mimalloc = ["dep:mimalloc"]
 telemetry = [
     "cloud-common",
     "dep:opentelemetry",
