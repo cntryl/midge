@@ -173,6 +173,9 @@ pub struct SkipList {
     top_level: AtomicUsize,
     seed: u64,
     retained_bytes: AtomicUsize,
+    /// Nodes visited by range scans, so tests can pin a scan's cost (#920).
+    #[cfg(test)]
+    nodes_visited: AtomicUsize,
 }
 
 struct UpsertVersion {
@@ -193,8 +196,24 @@ impl SkipList {
             top_level: AtomicUsize::new(1),
             seed: rand::random(),
             retained_bytes: AtomicUsize::new(0),
+            #[cfg(test)]
+            nodes_visited: AtomicUsize::new(0),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn nodes_visited(&self) -> usize {
+        self.nodes_visited.load(AO::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn note_node_visited(&self) {
+        self.nodes_visited.fetch_add(1, AO::Relaxed);
+    }
+
+    #[cfg(not(test))]
+    #[inline]
+    fn note_node_visited(&self) {}
 
     /// Derive a stable per-list height with promotion probability 1/4.
     #[inline]
@@ -724,6 +743,7 @@ impl SkipList {
         // SAFETY: curr was loaded with Acquire and nodes are never freed
         // while the list is shared.
         while let Some(node) = unsafe { curr.as_ref() } {
+            self.note_node_visited();
             if end.is_some_and(|end_key| node.key.as_ref() >= end_key) {
                 break;
             }

@@ -807,3 +807,71 @@ fn should_match_brute_force_oracle_when_scans_cross_overlapping_range_tombstones
         }
     }
 }
+
+fn hundred_thousand_key_snapshot() -> (Arc<SkipListMemtable>, Arc<ReadSnapshot>) {
+    let memtable = Arc::new(SkipListMemtable::new());
+    for i in 0..100_000_u64 {
+        memtable
+            .put_with_seq(
+                format!("key:{i:06}").into_bytes(),
+                b"v".to_vec(),
+                i + 1,
+                None,
+            )
+            .expect("put");
+    }
+    let snapshot = Arc::new(ReadSnapshot::new(
+        Arc::clone(&memtable),
+        Vec::new(),
+        Vec::new(),
+        Arc::new(crate::io::MockFs::new()),
+        std::path::PathBuf::new(),
+        true,
+        0,
+    ));
+    (memtable, snapshot)
+}
+
+#[test]
+fn should_touch_few_nodes_given_hundred_thousand_keys_when_forward_scan_takes_ten() {
+    // Arrange (#920)
+    let (memtable, snapshot) = hundred_thousand_key_snapshot();
+
+    // Act
+    let rows: Vec<_> = snapshot
+        .state_scan(None, None, false, u64::MAX)
+        .take(10)
+        .collect::<MidgeResult<_>>()
+        .expect("scan rows");
+
+    // Assert: the scan's cost follows the rows taken, not the range.
+    assert_eq!(rows.len(), 10);
+    assert_eq!(rows[0].0.as_ref(), b"key:000000");
+    assert!(
+        memtable.scan_nodes_visited() <= 300,
+        "visited {} nodes",
+        memtable.scan_nodes_visited()
+    );
+}
+
+#[test]
+fn should_touch_few_nodes_given_hundred_thousand_keys_when_reverse_scan_takes_ten() {
+    // Arrange (#920)
+    let (memtable, snapshot) = hundred_thousand_key_snapshot();
+
+    // Act
+    let rows: Vec<_> = snapshot
+        .state_scan(None, None, true, u64::MAX)
+        .take(10)
+        .collect::<MidgeResult<_>>()
+        .expect("scan rows");
+
+    // Assert
+    assert_eq!(rows.len(), 10);
+    assert_eq!(rows[0].0.as_ref(), b"key:099999");
+    assert!(
+        memtable.scan_nodes_visited() <= 300,
+        "visited {} nodes",
+        memtable.scan_nodes_visited()
+    );
+}

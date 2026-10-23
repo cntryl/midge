@@ -109,6 +109,12 @@ impl SkipListMemtable {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Skiplist nodes visited by range scans over this memtable (#920).
+    #[cfg(test)]
+    pub(crate) fn scan_nodes_visited(&self) -> usize {
+        self.skiplist.nodes_visited()
+    }
+
     #[must_use]
     pub(crate) fn contains_key_sequence(&self, key: &[u8], sequence: u64) -> bool {
         self.skiplist.contains_sequence(key, sequence)
