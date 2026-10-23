@@ -2036,6 +2036,144 @@ mod tests {
         assert_eq!(next.target_files, Vec::<String>::new());
     }
 
+    /// An L0 file with disjoint, increasing sequence ranges per flush; `heat`
+    /// read hits make the picker prefer it.
+    fn l0_file_with_sequences(
+        sequence: u64,
+        smallest_key: &[u8],
+        largest_key: &[u8],
+        heat: u64,
+    ) -> FileMeta {
+        let mut file = make_file(
+            &crate::cloud_layout::file_name(0, 0, sequence),
+            0,
+            0,
+            1,
+            Some(smallest_key.to_vec()),
+            Some(largest_key.to_vec()),
+        );
+        file.sst_seq = sequence;
+        file.smallest_seq = Some(sequence * 100);
+        file.largest_seq = Some(sequence * 100 + 99);
+        file.key_bounds_complete = true;
+        for _ in 0..heat {
+            file.record_read();
+        }
+        file
+    }
+
+    fn key_ranges_overlap(left: &FileMeta, right: &FileMeta) -> bool {
+        match (
+            &left.smallest_key,
+            &left.largest_key,
+            &right.smallest_key,
+            &right.largest_key,
+        ) {
+            (Some(ls), Some(ll), Some(rs), Some(rl)) => ls <= rl && rs <= ll,
+            _ => true,
+        }
+    }
+
+    /// Pairs `(remaining, selected)` where an L0 file the plan leaves behind
+    /// overlaps a selected L0 file and holds older versions. Compacting the
+    /// selected file into L1 would then leave L1 with a newer version than
+    /// L0 for the same key, which breaks the "deeper level holds older
+    /// versions" rule every level-ordered read depends on (#902).
+    fn l0_level_order_violations(
+        files: &[FileMeta],
+        plan: &CompactionPlan,
+    ) -> Vec<(String, String)> {
+        let l0: Vec<&FileMeta> = files.iter().filter(|file| file.level == 0).collect();
+        let selected: Vec<&FileMeta> = l0
+            .iter()
+            .copied()
+            .filter(|file| plan.source_files.contains(&file.name))
+            .collect();
+        let mut violations = Vec::new();
+        for remaining in l0
+            .iter()
+            .copied()
+            .filter(|file| !plan.source_files.contains(&file.name))
+        {
+            for chosen in &selected {
+                let remaining_is_older = match (remaining.largest_seq, chosen.smallest_seq) {
+                    (Some(remaining_last), Some(chosen_first)) => remaining_last < chosen_first,
+                    _ => false,
+                };
+                if remaining_is_older && key_ranges_overlap(remaining, chosen) {
+                    violations.push((remaining.name.clone(), chosen.name.clone()));
+                }
+            }
+        }
+        violations
+    }
+
+    #[test]
+    fn should_keep_remaining_l0_versions_newer_than_compacted_ones_given_hot_newer_files_when_planning(
+    ) {
+        // Arrange: six overlapping L0 files flushed in order; the three newest
+        // are hot, the two just after the oldest are cold.
+        let compactor = Compactor::new();
+        let files: Vec<FileMeta> = (1..=6_u64)
+            .map(|sequence| {
+                let heat = if sequence >= 4 { 10 } else { 0 };
+                l0_file_with_sequences(sequence, b"a", b"z", heat)
+            })
+            .collect();
+
+        // Act
+        let plan = compactor
+            .pick_compaction(&files, 0)
+            .expect("compaction planning")
+            .expect("L0 threshold should produce a compaction plan");
+
+        // Assert: no file left in L0 is older than a file moving to L1 over
+        // the same keys.
+        let violations = l0_level_order_violations(&files, &plan);
+        assert!(
+            violations.is_empty(),
+            "plan {:?} leaves older L0 versions behind newer L1 ones: {violations:?}",
+            plan.source_files
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+        #[test]
+        fn should_never_leave_older_overlapping_l0_files_behind_given_random_layouts_when_planning(
+            specs in proptest::collection::vec((0_u8..8, 0_u8..8, 0_u64..20), 2..10),
+        ) {
+            // Arrange: files flushed in order with random key ranges and heat.
+            let files: Vec<FileMeta> = specs
+                .iter()
+                .enumerate()
+                .map(|(index, (low, high, heat))| {
+                    let (small, large) = if low <= high { (*low, *high) } else { (*high, *low) };
+                    l0_file_with_sequences(
+                        u64::try_from(index + 1).expect("index fits"),
+                        &[b'a' + small],
+                        &[b'a' + large],
+                        *heat,
+                    )
+                })
+                .collect();
+            let compactor = Compactor::new();
+
+            // Act
+            let plan = compactor.pick_l0_compaction(&files, 0, false).expect("planning");
+
+            // Assert
+            if let Some(plan) = plan {
+                let violations = l0_level_order_violations(&files, &plan);
+                proptest::prop_assert!(
+                    violations.is_empty(),
+                    "plan {:?} leaves older L0 versions behind newer L1 ones: {violations:?}",
+                    plan.source_files
+                );
+            }
+        }
+    }
+
     #[test]
     fn should_eventually_include_oldest_cold_l0_file_when_read_heat_is_skewed() {
         // Arrange
