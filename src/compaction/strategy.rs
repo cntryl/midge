@@ -821,8 +821,12 @@ fn select_level_ordered_l0_batch<'a>(
 }
 
 /// Whether two files' inclusive key ranges intersect; a file without complete
-/// bounds may hold any key, so it overlaps everything.
+/// bounds (missing endpoints, or a legacy entry whose range tombstones were
+/// not folded into its bounds) may hold any key, so it overlaps everything.
 fn l0_key_ranges_overlap(left: &FileMeta, right: &FileMeta) -> bool {
+    if !left.key_bounds_complete || !right.key_bounds_complete {
+        return true;
+    }
     match (
         &left.smallest_key,
         &left.largest_key,
@@ -2023,14 +2027,17 @@ mod tests {
         let files: Vec<_> = (1..=5_u64)
             .map(|sequence| {
                 let key = vec![u8::try_from(sequence).expect("fixture sequence")];
-                make_file(
+                let mut file = make_file(
                     &crate::cloud_layout::file_name(0, 0, sequence),
                     0,
                     0,
                     1,
                     Some(key.clone()),
                     Some(key),
-                )
+                );
+                // Disjoint single-key files; complete bounds let heat order them.
+                file.key_bounds_complete = true;
+                file
             })
             .collect();
         for _ in 0..10 {
@@ -2110,6 +2117,9 @@ mod tests {
     }
 
     fn key_ranges_overlap(left: &FileMeta, right: &FileMeta) -> bool {
+        if !left.key_bounds_complete || !right.key_bounds_complete {
+            return true;
+        }
         match (
             &left.smallest_key,
             &left.largest_key,
@@ -2182,6 +2192,40 @@ mod tests {
             "plan {:?} leaves older L0 versions behind newer L1 ones: {violations:?}",
             plan.source_files
         );
+    }
+
+    #[test]
+    fn should_block_newer_files_given_older_l0_file_with_incomplete_bounds_when_planning() {
+        // Arrange: the middle file is a legacy entry whose bounds omit its
+        // range tombstones, so it may cover any key; the newest file is hot
+        // and disjoint from every recorded range.
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l0_file_count_threshold: 2,
+            ..LeveledCompactionConfig::default()
+        });
+        let mut legacy = l0_file_with_sequences(2, b"d", b"f", 0);
+        legacy.key_bounds_complete = false;
+        let files = vec![
+            l0_file_with_sequences(1, b"a", b"c", 0),
+            legacy,
+            l0_file_with_sequences(3, b"m", b"z", 10),
+            l0_file_with_sequences(4, b"m", b"z", 10),
+        ];
+
+        // Act
+        let plan = compactor
+            .pick_l0_compaction(&files, 0, false)
+            .expect("compaction planning")
+            .expect("L0 threshold should produce a compaction plan");
+
+        // Assert: the hot files stay behind the legacy file that may cover
+        // their keys; the batch is the two oldest.
+        let mut selected = plan.source_files.clone();
+        selected.sort();
+        let mut expected = vec![files[0].name.clone(), files[1].name.clone()];
+        expected.sort();
+        assert_eq!(selected, expected);
+        assert_eq!(l0_level_order_violations(&files, &plan), Vec::new());
     }
 
     proptest::proptest! {

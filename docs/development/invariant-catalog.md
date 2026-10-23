@@ -93,6 +93,7 @@ in [`recovery-internals.md`](recovery-internals.md).
 | SST-7 | Compaction output identity and sequence are assigned before worker execution. A placeholder or incomplete plan is not publishable. Resource exhaustion or cancellation before publication retains the authoritative inputs. | [Exact evidence](invariant-evidence.md#sst-7) |
 | SST-8 | Manifest journal edits are replayed without gaps. Checkpoint horizons advance only over edits included in that snapshot; a crash between snapshot rename and journal truncation remains idempotent. | [Exact evidence](invariant-evidence.md#sst-8) |
 | SST-9 | Newly created database and storage directories are durably linked before Midge admits writes, so a synced file is not lost behind a volatile parent-directory entry. | [Exact evidence](invariant-evidence.md#sst-9) |
+| SST-10 | L0 → L1 compaction preserves level order: a file joins the batch only once every older L0 file overlapping its keys is in the batch, so after publication every version a remaining L0 file holds over a key is newer than every L1 version of that key. The oldest L0 file is always the first pick; read heat orders only admissible files. A manifest edit that would leave an older L0 file behind a newer deeper one is applied but logged. | [Exact evidence](invariant-evidence.md#sst-10) |
 
 Owners: `src/metadata/`, `src/runtime/intent_persistence.rs`,
 `src/runtime/actors/flush/`, `src/runtime/actors/compaction/`,

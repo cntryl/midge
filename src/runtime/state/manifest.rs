@@ -38,39 +38,47 @@ fn flush_record_is_bounded(file_meta: &crate::runtime::FileMeta) -> bool {
     record_bound <= crate::metadata::store::LOCAL_FLUSH_RECORD_BYTES
 }
 
-/// Pairs `(remaining L0 file, published deeper file)` where a file still in L0
-/// overlaps a newly published L1+ file of the same family and holds versions no
-/// newer than it (#902). Level order requires every L0 version over a key to
-/// be newer than every deeper version of that key; an edit that breaks it means
-/// the picker moved a file past an older overlapping sibling. Files without
-/// complete bounds or sequences cannot be judged and are skipped.
+/// Pairs `(remaining L0 file, compacted L0 input)` where a file still in L0
+/// overlaps an L0 file the edit moved deeper and holds versions no newer than
+/// it (#902). Level order requires every L0 version over a key to be newer than
+/// every deeper version of that key, so the check mirrors the picker's rule: a
+/// compacted input is compared against each remaining sibling's own key range,
+/// not the output span, which also covers keys the input never held. A file
+/// without complete bounds may hold any key and overlaps everything; a file
+/// without sequences cannot be judged and is skipped.
 fn l0_level_order_violations(
-    files: &[crate::metadata::FileMeta],
-    added: &[crate::runtime::FileMeta],
+    remaining: &[crate::metadata::FileMeta],
+    compacted: &[crate::metadata::FileMeta],
 ) -> Vec<(String, String)> {
+    fn range(file: &crate::metadata::FileMeta) -> Option<(&[u8], &[u8])> {
+        match (&file.smallest_key, &file.largest_key) {
+            (Some(first), Some(last)) if file.key_bounds_complete => {
+                Some((first.as_slice(), last.as_slice()))
+            }
+            _ => None,
+        }
+    }
+
     let mut violations = Vec::new();
-    for published in added.iter().filter(|file| file.level >= 1) {
-        let (Some(published_first), Some(published_last), Some(published_newest)) = (
-            published.smallest_key.as_deref(),
-            published.largest_key.as_deref(),
-            published.largest_seq,
-        ) else {
+    for input in compacted.iter().filter(|file| file.level == 0) {
+        let Some(input_newest) = input.largest_seq else {
             continue;
         };
-        for remaining in files
+        for sibling in remaining
             .iter()
-            .filter(|file| file.level == 0 && file.cf_id == published.cf_id)
+            .filter(|file| file.level == 0 && file.cf_id == input.cf_id)
         {
-            let (Some(remaining_first), Some(remaining_last), Some(remaining_oldest)) = (
-                remaining.smallest_key.as_deref(),
-                remaining.largest_key.as_deref(),
-                remaining.smallest_seq,
-            ) else {
+            let Some(sibling_oldest) = sibling.smallest_seq else {
                 continue;
             };
-            let overlaps = remaining_first <= published_last && published_first <= remaining_last;
-            if overlaps && remaining_oldest <= published_newest {
-                violations.push((remaining.name.clone(), published.name.clone()));
+            let overlaps = match (range(sibling), range(input)) {
+                (Some((sibling_first, sibling_last)), Some((input_first, input_last))) => {
+                    sibling_first <= input_last && input_first <= sibling_last
+                }
+                _ => true,
+            };
+            if overlaps && sibling_oldest <= input_newest {
+                violations.push((sibling.name.clone(), input.name.clone()));
             }
         }
     }
@@ -614,10 +622,14 @@ impl RuntimeState {
         added: &[crate::runtime::FileMeta],
     ) -> bool {
         let mut changed = false;
+        let mut compacted_l0 = Vec::new();
         self.manifest.retain_files(|file| {
             let keep = !removed.contains(&file.name);
             if !keep {
                 changed = true;
+                if file.level == 0 {
+                    compacted_l0.push(file.clone());
+                }
             }
             keep
         });
@@ -625,15 +637,22 @@ impl RuntimeState {
         for file_meta in added {
             changed |= self.insert_manifest_file_if_missing(file_meta);
         }
-        for (remaining, published) in l0_level_order_violations(&self.manifest.files, added) {
-            // The manifest is authoritative and today's reads merge every
-            // level, so the edit stands; the warning names the files so a
-            // picker regression (#902) is visible before reads rely on order.
-            tracing::warn!(
-                remaining,
-                published,
-                "L0 file holds versions no newer than a deeper file over the same keys"
-            );
+        if added.iter().any(|file| file.level >= 1) {
+            for (remaining, compacted) in
+                l0_level_order_violations(&self.manifest.files, &compacted_l0)
+            {
+                // The manifest is authoritative and today's reads merge every
+                // level, so the edit stands; the warning names the files so a
+                // picker regression (#902) is visible before reads rely on
+                // order. A manifest written by an older picker may already
+                // hold such a file; it warns on every deeper publication over
+                // its keys until it compacts.
+                tracing::warn!(
+                    remaining,
+                    compacted,
+                    "L0 file holds versions no newer than a sibling compacted deeper over the same keys"
+                );
+            }
         }
 
         changed
@@ -717,55 +736,80 @@ mod l0_level_order_tests {
         }
     }
 
-    fn published(name: &str, first: &[u8], last: &[u8], newest: u64) -> crate::runtime::FileMeta {
-        crate::runtime::FileMeta {
-            name: name.to_string(),
-            level: 1,
-            size_bytes: 1,
-            content_crc32c: None,
-            cf_id: 7,
-            smallest_key: Some(first.to_vec()),
-            largest_key: Some(last.to_vec()),
-            smallest_seq: Some(1),
-            largest_seq: Some(newest),
-            key_bounds_complete: true,
-        }
-    }
+    const NONE: Vec<(String, String)> = Vec::new();
 
     #[test]
-    fn should_report_remaining_l0_file_given_older_overlapping_versions_when_deeper_file_published()
-    {
-        // Arrange: the deeper file holds versions up to 600; one L0 file holds
-        // older versions over the same keys, one newer, one disjoint.
-        let files = vec![
+    fn should_report_remaining_l0_file_given_older_overlapping_versions_when_sibling_compacted() {
+        // Arrange: the compacted input holds versions 300..600; one remaining
+        // L0 file holds older versions over the same keys, one newer, one
+        // disjoint.
+        let remaining = vec![
             l0("older.sst", b"a", b"m", (200, 299)),
             l0("newer.sst", b"a", b"m", (700, 799)),
             l0("disjoint.sst", b"x", b"z", (100, 199)),
         ];
-        let added = vec![published("l1.sst", b"c", b"k", 600)];
+        let compacted = vec![l0("input.sst", b"c", b"k", (300, 600))];
 
         // Act
-        let violations = l0_level_order_violations(&files, &added);
+        let violations = l0_level_order_violations(&remaining, &compacted);
 
         // Assert
         assert_eq!(
             violations,
-            vec![("older.sst".to_string(), "l1.sst".to_string())]
+            vec![("older.sst".to_string(), "input.sst".to_string())]
         );
     }
 
     #[test]
-    fn should_report_nothing_given_level_zero_output_when_edit_applied() {
-        // Arrange: a flush adds an L0 file; level order says nothing about it.
-        let files = vec![l0("older.sst", b"a", b"m", (200, 299))];
-        let mut added = published("l0-out.sst", b"a", b"m", 900);
-        added.level = 0;
+    fn should_report_nothing_given_remaining_file_inside_output_span_when_it_overlaps_no_input() {
+        // Arrange: the picker legitimately takes the oldest file and a hot
+        // disjoint one; the cold middle file lies inside the output's span
+        // but shares no key with either input.
+        let remaining = vec![l0("middle.sst", b"d", b"k", (200, 299))];
+        let compacted = vec![
+            l0("oldest.sst", b"a", b"c", (100, 199)),
+            l0("hot.sst", b"m", b"z", (300, 399)),
+        ];
 
         // Act
-        let violations = l0_level_order_violations(&files, &[added]);
+        let violations = l0_level_order_violations(&remaining, &compacted);
 
         // Assert
-        assert!(violations.is_empty());
+        assert_eq!(violations, NONE);
+    }
+
+    #[test]
+    fn should_report_remaining_file_given_incomplete_bounds_when_disjoint_sibling_compacted() {
+        // Arrange: a legacy L0 file with incomplete bounds may hold any key,
+        // so a newer input compacted past it is a violation even though the
+        // recorded point-key ranges are disjoint.
+        let mut legacy = l0("legacy.sst", b"a", b"c", (100, 199));
+        legacy.key_bounds_complete = false;
+        let compacted = vec![l0("input.sst", b"m", b"z", (300, 399))];
+
+        // Act
+        let violations = l0_level_order_violations(&[legacy], &compacted);
+
+        // Assert
+        assert_eq!(
+            violations,
+            vec![("legacy.sst".to_string(), "input.sst".to_string())]
+        );
+    }
+
+    #[test]
+    fn should_report_nothing_given_no_l0_input_when_inner_level_compaction_applied() {
+        // Arrange: an L1 → L2 edit removes no L0 file; level order at L0 is
+        // untouched.
+        let remaining = vec![l0("older.sst", b"a", b"m", (200, 299))];
+        let mut input = l0("l1-input.sst", b"a", b"m", (900, 999));
+        input.level = 1;
+
+        // Act
+        let violations = l0_level_order_violations(&remaining, &[input]);
+
+        // Assert
+        assert_eq!(violations, NONE);
     }
 }
 

@@ -83,7 +83,10 @@ startup inventory cap. Scan work still grows with the files and rows read.
 
 Compaction represents source files and the complete target-level span
 separately. L0 retains one head per bounded selected source plus one chained
-target head. Ordinary inner-level compaction retains one chained source head and
+target head. The L0 batch is selected in level order (SST-10): the oldest file
+first, then only files whose older overlapping siblings are already selected, so
+the batch size bound is the configured file-count threshold, not the overlap
+closure. Ordinary inner-level compaction retains one chained source head and
 one chained target head. Overlap repair instead gives each source its own head;
 components above the configured fan-in use repeated bounded raw merges into
 non-authoritative local scratch runs. Point versions and range-tombstone start/end events share
