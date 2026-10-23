@@ -374,26 +374,29 @@ impl SstFileIo {
             return self.read_block(handle);
         };
 
-        let file = self
-            .fs
-            .open(
-                &self.path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
-            .map_err(FsError::into_midge)?;
-        let (decoded, retained_reservation) = self.read_framed_block(
-            file.as_ref(),
-            handle,
-            Some((&budget, resource)),
-            |decoded_size| {
+        let (decoded, retained_reservation) = {
+            let transient;
+            let file: &dyn File = if let Some(owned) = &self.handle {
+                owned.as_ref()
+            } else {
+                transient = self
+                    .fs
+                    .open(
+                        &self.path,
+                        crate::io::OpenOptions {
+                            mode: crate::io::OpenMode::ReadOnly,
+                            create: false,
+                            create_new: false,
+                            truncate: false,
+                        },
+                    )
+                    .map_err(FsError::into_midge)?;
+                transient.as_ref()
+            };
+            self.read_framed_block(file, handle, Some((&budget, resource)), |decoded_size| {
                 budget.reserve(decoded_size.saturating_mul(4).saturating_add(256), resource)
-            },
-        )?;
+            })?
+        };
         // The decoded bytes are transient, but their decoded reader structure
         // remains live (index, filter, trie, or range tombstones). Keep this
         // conservative reservation with the reader for that parsed structure.

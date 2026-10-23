@@ -53,10 +53,13 @@ win.
 
 ## File handles
 
-Each cached SST reader holds one open file descriptor for its lifetime, so the
-process's descriptor budget is the reader cache's capacity plus the WAL,
-manifest, and lease handles. The reader cache is bounded by a quarter of the
-block-cache size in reader metadata and evicts idle readers first; a reader
-evicted while a read is in flight keeps its handle until that read finishes.
-Size the block cache, and the process `ulimit -n`, so the live SST inventory
-fits with headroom.
+Each cached SST reader holds one open file descriptor for its lifetime. The
+reader cache is bounded in bytes, not in readers: it keeps reader metadata
+within a quarter of the block-cache size and evicts idle readers only when that
+budget is exhausted, so the number of cached readers, and therefore of open
+descriptors, is that budget divided by a reader's metadata reservation (about
+1 KiB for a small SST, more for large indexes). Readers evicted while a read or
+scan still references them keep their descriptor until it finishes, and
+compaction opens its own readers outside the cache. Add the WAL, manifest, and
+lease handles, and keep the process `ulimit -n` above that total for the live
+SST inventory; a descriptor shortage surfaces as an I/O error on reader open.

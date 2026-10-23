@@ -324,7 +324,6 @@ fn should_isolate_replaced_sst_cache_entries_by_generation_identity() -> MidgeRe
     Ok(())
 }
 
-#[cfg(unix)]
 #[test]
 fn should_open_file_once_given_thousand_block_cache_misses_when_point_reading() -> MidgeResult<()> {
     // Arrange: no block cache, so every point read fetches its data block.
@@ -356,6 +355,7 @@ fn should_open_file_once_given_thousand_block_cache_misses_when_point_reading() 
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
 fn should_finish_scan_from_open_handle_when_backing_sst_is_unlinked_mid_scan() -> MidgeResult<()> {
     // Arrange
