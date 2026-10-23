@@ -39,9 +39,9 @@ pub(crate) fn is_active(name: &str) -> bool {
 }
 
 #[cfg(all(test, feature = "failpoints"))]
-use parking_lot::RwLockWriteGuard;
+use parking_lot::RecursiveRwLockWriteGuard;
 #[cfg(feature = "failpoints")]
-use parking_lot::{RwLock, RwLockReadGuard};
+use parking_lot::{RecursiveRwLock, RecursiveRwLockReadGuard};
 #[cfg(feature = "failpoints")]
 use std::cell::Cell;
 #[cfg(feature = "failpoints")]
@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 #[cfg(feature = "failpoints")]
-static FAILPOINT_GATE: OnceLock<RwLock<()>> = OnceLock::new();
+static FAILPOINT_GATE: OnceLock<RecursiveRwLock<()>> = OnceLock::new();
 
 /// Identifies the current holder of the gate's write side. Every test guard
 /// changes it on acquire and again before release.
@@ -108,8 +108,8 @@ impl WorkerGate {
 }
 
 #[cfg(feature = "failpoints")]
-fn gate() -> &'static RwLock<()> {
-    FAILPOINT_GATE.get_or_init(|| RwLock::new(()))
+fn gate() -> &'static RecursiveRwLock<()> {
+    FAILPOINT_GATE.get_or_init(|| RecursiveRwLock::new(()))
 }
 
 /// Read-side gate held while production code evaluates a failpoint.
@@ -119,15 +119,15 @@ fn gate() -> &'static RwLock<()> {
 /// fault-injection scenario is running. The owner thread skips the read lock
 /// because it already holds the write side.
 #[cfg(feature = "failpoints")]
-pub(crate) fn read_gate() -> Option<RwLockReadGuard<'static, ()>> {
+pub(crate) fn read_gate() -> Option<RecursiveRwLockReadGuard<'static, ()>> {
     if skips_gate() {
         None
     } else {
-        // `read_recursive` never waits behind a queued writer. A reader that
+        // `RecursiveRwLock::read` never waits behind a queued writer. A reader that
         // blocked there could deadlock across threads: an outer read scope
         // waiting on a worker whose own failpoint read queued behind a
         // failpoint test's pending write (#434).
-        Some(gate().read_recursive())
+        Some(gate().read())
     }
 }
 
@@ -160,7 +160,7 @@ pub(crate) fn with_read_gate<T>(operation: impl FnOnce() -> T) -> T {
         if skips_gate() {
             return operation();
         }
-        let _guard = gate().read_recursive();
+        let _guard = gate().read();
         let _scope = FailpointReadScope::enter();
         operation()
     }
@@ -174,7 +174,7 @@ pub(crate) fn with_read_gate<T>(operation: impl FnOnce() -> T) -> T {
 /// Guard used by failpoint tests to isolate process-global configurations.
 #[cfg(all(test, feature = "failpoints"))]
 pub(crate) struct TestFailpointGuard {
-    guard: Option<RwLockWriteGuard<'static, ()>>,
+    guard: Option<RecursiveRwLockWriteGuard<'static, ()>>,
 }
 
 #[cfg(all(test, feature = "failpoints"))]
