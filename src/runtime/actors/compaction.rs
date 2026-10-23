@@ -330,6 +330,9 @@ pub struct CompactionActor {
     active_source_fragmentation: Option<Vec<u8>>,
     /// Kept through completion so failed publication can charge its residue.
     active_output_generation: Option<(u32, u32, u64)>,
+    /// When the active worker started; the compaction latency histogram
+    /// measures from here to manifest publication.
+    active_started_at: Option<std::time::Instant>,
     /// Captured only by the initiating manual generation; joining waiters
     /// never change an accepted worker's origin or callerless ownership.
     active_manual_deadline: Option<OperationDeadline>,
@@ -368,6 +371,7 @@ impl CompactionActor {
             active_same_level_repair: false,
             active_source_fragmentation: None,
             active_output_generation: None,
+            active_started_at: None,
             active_manual_deadline: None,
             worker_cancel: Arc::new(AtomicBool::new(false)),
             worker_handle: None,
@@ -742,6 +746,22 @@ impl CompactionActor {
         Ok(self.active_manual_deadline)
     }
 
+    /// When the worker for the accepted output generation started, for the
+    /// compaction latency histogram.
+    pub(crate) fn started_at_for_generation(
+        &self,
+        cf_id: u32,
+        target_level: u32,
+        generation: u64,
+    ) -> MidgeResult<Option<std::time::Instant>> {
+        if self.accepted_output_generation(cf_id, target_level)? != generation {
+            return Err(MidgeError::Fenced(
+                "compaction start time does not match the accepted output generation".into(),
+            ));
+        }
+        Ok(self.active_started_at)
+    }
+
     #[cfg(test)]
     pub(crate) fn prepare_publication_generation_for_test(
         &mut self,
@@ -945,6 +965,7 @@ impl CompactionActor {
         self.active_same_level_repair = false;
         self.active_source_fragmentation = None;
         self.active_manual_deadline = None;
+        self.active_started_at = None;
         self.compaction_running = false;
     }
 
@@ -978,6 +999,7 @@ impl CompactionActor {
 
         self.compaction_running = true;
         self.active_manual_deadline = None;
+        self.active_started_at = Some(std::time::Instant::now());
         self.active_output_generation = Some((plan.cf_id, plan.target_level, plan.output_seq));
         self.active_input_ssts.clone_from(&plan.input_files);
         self.active_input_metadata = state
@@ -1186,6 +1208,14 @@ impl CompactionActor {
         let worker = std::thread::Builder::new()
             .name(format!("midge-compaction-{job_id}"))
             .spawn(move || {
+            let _span = tracing::debug_span!(
+                "compaction_job",
+                job_id,
+                cf_id = plan_clone.cf_id,
+                target_level = plan_clone.target_level,
+                inputs = plan_clone.input_files.len()
+            )
+            .entered();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let abort_check = || worker_cancel.load(Ordering::Acquire);
                 let result = Self::execute_with_storage(

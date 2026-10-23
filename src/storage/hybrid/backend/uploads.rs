@@ -653,10 +653,12 @@ impl HybridStorage {
 
         match verify_remote(receipt) {
             Ok(()) => {
-                let upload_latency_us = Self::duration_micros_to_u64(upload_start.elapsed());
+                let upload_elapsed = upload_start.elapsed();
+                let upload_latency_us = Self::duration_micros_to_u64(upload_elapsed);
                 Self::log_wal_upload_ack(upload);
                 counters.record(|m| {
                     m.record_cloud_async_wal_upload_completed(upload_latency_us);
+                    m.record_cloud_wal_upload_latency(upload_elapsed);
                 });
                 Self::wal_upload_ack_event(upload)
             }

@@ -35,6 +35,7 @@ impl RuntimeState {
         cf_state.immutable_memtables.push(Arc::clone(&memtable));
         let flush = ImmutableFlush {
             flush_id,
+            started_at: std::time::Instant::now(),
             accounting: super::FlushPublicationAccounting::new(origin),
             writer_epoch: self.writer_epoch,
             memtable,

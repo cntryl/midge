@@ -261,6 +261,39 @@ pub struct RecoveryMetricsSnapshot {
     pub intent_log_entries_replayed: u64,
 }
 
+/// Per-operation latency distributions of one engine, as bucketed
+/// percentiles. Every histogram is always on; each costs one relaxed atomic
+/// increment per record.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RuntimeLatencySummaries {
+    /// `WriteOptions::sync()` commits, from `commit()` entry to return.
+    pub commit_sync: crate::common::LatencySummary,
+    /// `WriteOptions::buffered()` commits.
+    pub commit_buffered: crate::common::LatencySummary,
+    /// `WriteOptions::best_effort()` commits.
+    pub commit_best_effort: crate::common::LatencySummary,
+    /// `WriteOptions::cloud_async()` commits.
+    pub commit_cloud_async: crate::common::LatencySummary,
+    /// `WriteOptions::cloud_strict()` commits.
+    pub commit_cloud_strict: crate::common::LatencySummary,
+    /// `Transaction::get`, write set and snapshot included. Sampled: one read
+    /// in sixteen per thread is timed, so `count` is the sample count, not the
+    /// read count; the percentiles describe the whole population.
+    pub point_read: crate::common::LatencySummary,
+    /// Whole scans, from `Transaction::scan` to the iterator's drop.
+    pub scan: crate::common::LatencySummary,
+    /// Flushes, from memtable freeze to local manifest publication.
+    pub flush: crate::common::LatencySummary,
+    /// Compactions, from worker start to manifest publication.
+    pub compaction: crate::common::LatencySummary,
+    /// Logical WAL sync waits as seen by the runtime, one per barrier.
+    pub wal_fsync: crate::common::LatencySummary,
+    /// Cloud WAL segment uploads that completed.
+    pub cloud_wal_upload: crate::common::LatencySummary,
+    /// Cloud metadata mirrors against a provider, successful or not.
+    pub cloud_metadata_mirror: crate::common::LatencySummary,
+}
+
 /// Stable operator-facing snapshot of runtime metrics.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RuntimeMetricsSnapshot {
@@ -312,6 +345,8 @@ pub struct RuntimeMetricsSnapshot {
     pub wal_fsync_ns_total: u64,
     /// Maximum latency of one physical WAL fsync.
     pub wal_fsync_ns_max: u64,
+    /// Per-operation latency distributions for this engine.
+    pub latency: RuntimeLatencySummaries,
     /// Durability waiters completed through keyed fan-out events.
     pub durability_waiters_fanned_out_total: u64,
     /// Runtime requests whose caller stopped waiting before a response arrived.

@@ -223,6 +223,10 @@ impl EventLoop {
         }
         match completion.result {
             Ok(delta) => {
+                let frozen_at = self
+                    .state
+                    .immutable_flush_by_id(completion.identity.flush_id)
+                    .map(|(_, flush)| flush.started_at);
                 if let Err(error) = self.commit_flush_metadata(&delta) {
                     self.state.fence_metadata_until_reloaded();
                     self.fail_flush_pipeline(
@@ -231,6 +235,11 @@ impl EventLoop {
                         &error,
                     );
                     return true;
+                }
+                if let Some(frozen_at) = frozen_at {
+                    self.state
+                        .diagnostics
+                        .record(|m| m.record_flush_latency(frozen_at.elapsed()));
                 }
                 if let Err(error) = self.submit_flush_mirror(delta, completion.reservation) {
                     self.fail_flush_pipeline(

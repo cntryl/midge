@@ -9,6 +9,7 @@ use crate::wal::cloud_catalog::CatalogEntry;
 use crate::wal::publish::OwedSegment;
 
 impl EventLoop {
+    #[tracing::instrument(level = "debug", skip_all, fields(segment_id, max_sequence))]
     pub(super) fn handle_storage_event_cloud_ack(
         &mut self,
         segment_id: u64,

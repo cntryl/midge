@@ -4,6 +4,12 @@
 
 mod common;
 
+#[path = "observability/latency_histograms.rs"]
+mod latency_histograms;
+
+#[path = "observability/spans.rs"]
+mod spans;
+
 mod telemetry_integration {
     //! Operation-integrity checks for code paths that are expected to emit
     //! telemetry when instrumentation is available, plus direct assertions

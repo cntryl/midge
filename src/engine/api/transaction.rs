@@ -20,6 +20,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// One point read in this many, per thread, is timed for the point-read
+/// latency histogram. A memtable hit costs about 250 ns and two clock reads
+/// cost about 25 ns, so timing every read would be a 10% tax; sampling keeps
+/// the histogram always on at well under 2%.
+const POINT_READ_SAMPLE_INTERVAL: u32 = 16;
+
+thread_local! {
+    static POINT_READ_SAMPLE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 const ASSERTION_ACCOUNTING_OVERHEAD: usize = 256;
 
 /// Transaction mode controls read/write capabilities
@@ -611,8 +621,14 @@ impl Transaction {
     /// comes back from commits that cannot have changed state. Midge never
     /// retries a write after either response itself. `Fenced` is returned
     /// when the transaction was not applied and has no WAL record to replay.
+    #[tracing::instrument(
+        level = "debug",
+        skip_all,
+        fields(sync = opts.is_sync(), cloud_strict = opts.is_cloud_strict())
+    )]
     pub fn commit(mut self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
         let mut timing = CommitTiming::maybe_start();
+        let commit_started = Instant::now();
 
         self.validate_assertions()?;
 
@@ -636,6 +652,7 @@ impl Transaction {
             self.unregister_snapshot();
             CommitTiming::record_unregister(&mut timing, unregister_started_at);
             CommitTiming::finish(timing, sync_result.is_ok());
+            self.record_commit_latency(opts, commit_started);
             return sync_result;
         }
 
@@ -719,7 +736,31 @@ impl Transaction {
         self.unregister_snapshot();
         CommitTiming::record_unregister(&mut timing, unregister_started_at);
         CommitTiming::finish(timing, result.is_ok());
+        self.record_commit_latency(opts, commit_started);
         result
+    }
+
+    /// Attribute this commit's wall-clock latency to the durability it asked
+    /// for. Commits that fail after reaching the runtime count too, since a
+    /// caller waited for them; commits rejected before any engine work (an
+    /// invalid option combination, a missing snapshot) are not timed.
+    fn record_commit_latency(&self, opts: crate::engine::api::WriteOptions, started: Instant) {
+        use crate::telemetry::metrics::CommitDurabilityKind;
+        let kind = if opts.is_cloud_strict() {
+            CommitDurabilityKind::CloudStrict
+        } else if opts.is_cloud_async() {
+            CommitDurabilityKind::CloudAsync
+        } else if opts.is_best_effort() {
+            CommitDurabilityKind::BestEffort
+        } else if opts.is_sync() {
+            CommitDurabilityKind::Sync
+        } else {
+            CommitDurabilityKind::Buffered
+        };
+        let elapsed = started.elapsed();
+        self.runtime_handle
+            .diagnostics
+            .record(|m| m.record_commit_latency(kind, elapsed));
     }
 
     fn validate_assertions(&self) -> MidgeResult<()> {
@@ -842,8 +883,25 @@ impl Transaction {
     /// Returns an error when the transaction snapshot is unavailable, or
     /// [`MidgeError::Fenced`] when a cloud transaction's lease is no longer valid.
     pub fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
+        let sampled = POINT_READ_SAMPLE.with(|counter| {
+            let seen = counter.get();
+            counter.set(seen.wrapping_add(1));
+            seen % POINT_READ_SAMPLE_INTERVAL == 0
+        });
+        if !sampled {
+            return self
+                .runtime_handle
+                .read_with_authority(|| self.get_value(key));
+        }
+        let started = Instant::now();
+        let result = self
+            .runtime_handle
+            .read_with_authority(|| self.get_value(key));
+        let elapsed = started.elapsed();
         self.runtime_handle
-            .read_with_authority(|| self.get_value(key))
+            .diagnostics
+            .record(|m| m.record_point_read_latency(elapsed));
+        result
     }
 
     fn get_value(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
@@ -879,8 +937,11 @@ impl Transaction {
     /// [`MidgeError::Fenced`] after lease loss; an existing iterator reports the
     /// same sticky error on its next advance.
     pub fn scan(&self, query: &super::query::Query) -> MidgeResult<super::iterator::Iterator<'_>> {
-        self.runtime_handle
-            .read_with_authority(|| self.build_scan(query))
+        let started = Instant::now();
+        let iterator = self
+            .runtime_handle
+            .read_with_authority(|| self.build_scan(query))?;
+        Ok(iterator.observing_latency(Arc::clone(&self.runtime_handle.diagnostics), started))
     }
 
     fn build_scan(

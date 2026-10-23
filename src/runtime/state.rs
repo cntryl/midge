@@ -53,6 +53,9 @@ pub(crate) enum ImmutableFlushPhase {
 #[derive(Clone)]
 pub(crate) struct ImmutableFlush {
     pub flush_id: u64,
+    /// When the memtable was frozen; the flush latency histogram measures
+    /// from here to local manifest publication.
+    pub started_at: Instant,
     pub(crate) accounting: FlushPublicationAccounting,
     pub writer_epoch: u64,
     /// Earliest WAL segment that can contain this generation's records.
@@ -780,6 +783,7 @@ impl RuntimeState {
             wal_append_ns_total: telemetry.wal_append_ns_total,
             wal_fsync_ns_total: telemetry.wal_fsync_ns_total,
             wal_fsync_ns_max: telemetry.wal_fsync_ns_max,
+            latency: telemetry.latency,
             durability_waiters_fanned_out_total: 0,
             abandoned_runtime_requests_total: 0,
             late_runtime_responses_total: 0,

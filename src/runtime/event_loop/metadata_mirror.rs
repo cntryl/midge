@@ -9,6 +9,22 @@ impl EventLoop {
         &self,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
+        let started = std::time::Instant::now();
+        let result = self.mirror_metadata_within(deadline);
+        // Local-only engines take this path as a no-op; only a real provider
+        // round trip belongs in the histogram.
+        if self.actors.cloud_coordinator.hybrid_storage.is_some() {
+            self.state
+                .diagnostics
+                .record(|m| m.record_cloud_metadata_mirror_latency(started.elapsed()));
+        }
+        result
+    }
+
+    fn mirror_metadata_within(
+        &self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         self.actors.cloud_coordinator.mirror_metadata_within(
             self.state.fs.as_ref(),
             &self.publication.metadata_publication_lock,

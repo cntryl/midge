@@ -237,6 +237,7 @@ impl Engine {
     ///
     /// Returns an error when the engine cannot initialize its storage, runtime,
     /// manifest, or recovery state.
+    #[tracing::instrument(level = "info", skip_all)]
     pub fn open(opts: OpenOptions) -> MidgeResult<Self> {
         startup::EngineStartup::open_owned(opts)
     }
@@ -289,6 +290,7 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error when the flush cannot be scheduled or completed.
+    #[tracing::instrument(level = "debug", skip_all, fields(cf_id = cf.id()))]
     pub fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
         let response = self
             .runtime_handle
@@ -764,6 +766,7 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error when compaction scheduling or completion fails.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn compact_all(&self) -> MidgeResult<()> {
         let request_id = next_request_id()?;
         let resp = self

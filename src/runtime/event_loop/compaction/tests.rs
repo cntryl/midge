@@ -700,6 +700,7 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
                 output_generation: 1,
                 input_ssts: vec![input],
                 output_ssts: Vec::new(),
+                started_at: None,
             },
             outputs: Vec::new(),
             added: Vec::new(),

@@ -22,6 +22,9 @@ pub(crate) struct CompactionPublicationToken {
     pub output_generation: u64,
     pub input_ssts: Vec<String>,
     pub output_ssts: Vec<String>,
+    /// Worker start time, recorded into the compaction latency histogram
+    /// when the manifest publishes. `None` when the actor had no record.
+    pub started_at: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,6 +409,7 @@ mod tests {
                 output_generation: 1,
                 input_ssts: Vec::new(),
                 output_ssts: Vec::new(),
+                started_at: None,
             },
             phase: CompactionPublishPhase::OutputDurable,
             outputs: Vec::new(),

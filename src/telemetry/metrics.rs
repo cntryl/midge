@@ -2,8 +2,25 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::common::latency_histogram::AtomicLatencyHistogram;
 use crate::telemetry::config::TelemetryConfig;
+
+/// Durability level a commit was acknowledged at, for latency attribution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitDurabilityKind {
+    /// `WriteOptions::sync()`: acknowledged after the local fsync.
+    Sync,
+    /// `WriteOptions::buffered()`: acknowledged after the WAL append.
+    Buffered,
+    /// `WriteOptions::best_effort()`: acknowledged after the memtable apply.
+    BestEffort,
+    /// `WriteOptions::cloud_async()`: acknowledged after the cloud WAL append barrier.
+    CloudAsync,
+    /// `WriteOptions::cloud_strict()`: acknowledged after the cloud upload.
+    CloudStrict,
+}
 
 trait AtomicU64SaturatingAdd {
     fn saturating_add(&self, value: u64, ordering: Ordering);
@@ -34,11 +51,23 @@ pub struct Metrics {
     #[cfg(test)]
     pub range_scans: Arc<AtomicU64>,
 
-    // Latency (microseconds)
-    #[cfg(test)]
-    pub write_latency_us: Arc<AtomicU64>,
-    #[cfg(test)]
-    pub read_latency_us: Arc<AtomicU64>,
+    // Latency distributions. Always on for an engine's own counters; one
+    // relaxed increment per record.
+    pub commit_latency_sync: AtomicLatencyHistogram,
+    pub commit_latency_buffered: AtomicLatencyHistogram,
+    pub commit_latency_best_effort: AtomicLatencyHistogram,
+    pub commit_latency_cloud_async: AtomicLatencyHistogram,
+    pub commit_latency_cloud_strict: AtomicLatencyHistogram,
+    pub point_read_latency: AtomicLatencyHistogram,
+    /// Whole-scan latency, recorded when the iterator is dropped.
+    pub scan_latency: AtomicLatencyHistogram,
+    /// Memtable freeze to local manifest publication.
+    pub flush_latency: AtomicLatencyHistogram,
+    /// Compaction worker start to publication.
+    pub compaction_latency: AtomicLatencyHistogram,
+    pub wal_fsync_latency: AtomicLatencyHistogram,
+    pub cloud_wal_upload_latency: AtomicLatencyHistogram,
+    pub cloud_metadata_mirror_latency: AtomicLatencyHistogram,
 
     // WAL operations
     pub wal_appends: Arc<AtomicU64>,
@@ -151,10 +180,18 @@ impl Metrics {
             gets: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             range_scans: Arc::new(AtomicU64::new(0)),
-            #[cfg(test)]
-            write_latency_us: Arc::new(AtomicU64::new(0)),
-            #[cfg(test)]
-            read_latency_us: Arc::new(AtomicU64::new(0)),
+            commit_latency_sync: AtomicLatencyHistogram::default(),
+            commit_latency_buffered: AtomicLatencyHistogram::default(),
+            commit_latency_best_effort: AtomicLatencyHistogram::default(),
+            commit_latency_cloud_async: AtomicLatencyHistogram::default(),
+            commit_latency_cloud_strict: AtomicLatencyHistogram::default(),
+            point_read_latency: AtomicLatencyHistogram::default(),
+            scan_latency: AtomicLatencyHistogram::default(),
+            flush_latency: AtomicLatencyHistogram::default(),
+            compaction_latency: AtomicLatencyHistogram::default(),
+            wal_fsync_latency: AtomicLatencyHistogram::default(),
+            cloud_wal_upload_latency: AtomicLatencyHistogram::default(),
+            cloud_metadata_mirror_latency: AtomicLatencyHistogram::default(),
             wal_appends: Arc::new(AtomicU64::new(0)),
             wal_syncs: Arc::new(AtomicU64::new(0)),
             wal_bytes_written: Arc::new(AtomicU64::new(0)),
@@ -324,23 +361,75 @@ impl Metrics {
         }
     }
 
-    /// Record write operation latency (microseconds)
+    /// Record one commit's wall-clock latency at the durability it requested.
     #[inline]
-    #[cfg(test)]
-    pub fn record_write_latency_us(&self, latency_us: u64) {
+    pub fn record_commit_latency(&self, kind: CommitDurabilityKind, elapsed: Duration) {
         if self.enabled {
-            self.write_latency_us
-                .saturating_add(latency_us, Ordering::Relaxed);
+            let histogram = match kind {
+                CommitDurabilityKind::Sync => &self.commit_latency_sync,
+                CommitDurabilityKind::Buffered => &self.commit_latency_buffered,
+                CommitDurabilityKind::BestEffort => &self.commit_latency_best_effort,
+                CommitDurabilityKind::CloudAsync => &self.commit_latency_cloud_async,
+                CommitDurabilityKind::CloudStrict => &self.commit_latency_cloud_strict,
+            };
+            histogram.record(elapsed);
         }
     }
 
-    /// Record read operation latency (microseconds)
+    /// Record one sampled point read's latency, write set and snapshot
+    /// included. The caller samples; the histogram counts samples.
     #[inline]
-    #[cfg(test)]
-    pub fn record_read_latency_us(&self, latency_us: u64) {
+    pub fn record_point_read_latency(&self, elapsed: Duration) {
         if self.enabled {
-            self.read_latency_us
-                .saturating_add(latency_us, Ordering::Relaxed);
+            self.point_read_latency.record(elapsed);
+        }
+    }
+
+    /// Record one scan's latency from construction to drop.
+    #[inline]
+    pub fn record_scan_latency(&self, elapsed: Duration) {
+        if self.enabled {
+            self.scan_latency.record(elapsed);
+        }
+    }
+
+    /// Record one flush from memtable freeze to local manifest publication.
+    #[inline]
+    pub fn record_flush_latency(&self, elapsed: Duration) {
+        if self.enabled {
+            self.flush_latency.record(elapsed);
+        }
+    }
+
+    /// Record one compaction from worker start to publication.
+    #[inline]
+    pub fn record_compaction_latency(&self, elapsed: Duration) {
+        if self.enabled {
+            self.compaction_latency.record(elapsed);
+        }
+    }
+
+    /// Record one logical WAL sync wait as seen by the runtime.
+    #[inline]
+    pub fn record_wal_fsync_latency(&self, elapsed: Duration) {
+        if self.enabled {
+            self.wal_fsync_latency.record(elapsed);
+        }
+    }
+
+    /// Record one cloud WAL segment upload attempt that completed.
+    #[inline]
+    pub fn record_cloud_wal_upload_latency(&self, elapsed: Duration) {
+        if self.enabled {
+            self.cloud_wal_upload_latency.record(elapsed);
+        }
+    }
+
+    /// Record one cloud metadata mirror, successful or not.
+    #[inline]
+    pub fn record_cloud_metadata_mirror_latency(&self, elapsed: Duration) {
+        if self.enabled {
+            self.cloud_metadata_mirror_latency.record(elapsed);
         }
     }
 
@@ -685,10 +774,20 @@ impl Metrics {
             gets: self.gets.load(Ordering::Relaxed),
             #[cfg(test)]
             range_scans: self.range_scans.load(Ordering::Relaxed),
-            #[cfg(test)]
-            write_latency_us: self.write_latency_us.load(Ordering::Relaxed),
-            #[cfg(test)]
-            read_latency_us: self.read_latency_us.load(Ordering::Relaxed),
+            latency: crate::types::RuntimeLatencySummaries {
+                commit_sync: self.commit_latency_sync.summary(),
+                commit_buffered: self.commit_latency_buffered.summary(),
+                commit_best_effort: self.commit_latency_best_effort.summary(),
+                commit_cloud_async: self.commit_latency_cloud_async.summary(),
+                commit_cloud_strict: self.commit_latency_cloud_strict.summary(),
+                point_read: self.point_read_latency.summary(),
+                scan: self.scan_latency.summary(),
+                flush: self.flush_latency.summary(),
+                compaction: self.compaction_latency.summary(),
+                wal_fsync: self.wal_fsync_latency.summary(),
+                cloud_wal_upload: self.cloud_wal_upload_latency.summary(),
+                cloud_metadata_mirror: self.cloud_metadata_mirror_latency.summary(),
+            },
             #[cfg(test)]
             wal_appends: self.wal_appends.load(Ordering::Relaxed),
             #[cfg(test)]
@@ -779,10 +878,7 @@ pub struct MetricsSnapshot {
     pub gets: u64,
     #[cfg(test)]
     pub range_scans: u64,
-    #[cfg(test)]
-    pub write_latency_us: u64,
-    #[cfg(test)]
-    pub read_latency_us: u64,
+    pub latency: crate::types::RuntimeLatencySummaries,
     #[cfg(test)]
     pub wal_appends: u64,
     #[cfg(test)]
@@ -1006,8 +1102,8 @@ mod tests {
         metrics.record_delete();
         metrics.record_get();
         metrics.record_range_scan();
-        metrics.record_write_latency_us(11);
-        metrics.record_read_latency_us(7);
+        metrics.record_commit_latency(CommitDurabilityKind::Sync, Duration::from_micros(11));
+        metrics.record_point_read_latency(Duration::from_micros(7));
         metrics.record_wal_append(128);
         metrics.record_wal_sync();
         metrics.record_wal_lock_wait(3);
@@ -1026,8 +1122,9 @@ mod tests {
         assert_eq!(snap.merges, 0);
         assert_eq!(snap.gets, 1);
         assert_eq!(snap.range_scans, 1);
-        assert_eq!(snap.write_latency_us, 11);
-        assert_eq!(snap.read_latency_us, 7);
+        assert_eq!(snap.latency.commit_sync.count, 1);
+        assert_eq!(snap.latency.commit_buffered.count, 0);
+        assert_eq!(snap.latency.point_read.count, 1);
         assert_eq!(snap.wal_appends, 1);
         assert_eq!(snap.wal_syncs, 1);
         assert_eq!(snap.wal_bytes_written, 128);

@@ -293,7 +293,7 @@ pub mod __internal {
 
 // Errors
 pub use cloud_layout::CloudObjectLayout;
-pub use common::{MidgeError, MidgeResult, Severity};
+pub use common::{LatencySummary, MidgeError, MidgeResult, Severity};
 
 // Engine / Transactions
 pub use engine::{
@@ -318,8 +318,9 @@ pub use types::{
     StorageAdmissionReason,
 };
 pub use types::{
-    ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot, SnapshotPinSnapshot,
-    StorageFileLayout, StorageLayoutLevel, StorageLayoutSnapshot, StorageVerificationReport,
+    ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeLatencySummaries,
+    RuntimeMetricsSnapshot, SnapshotPinSnapshot, StorageFileLayout, StorageLayoutLevel,
+    StorageLayoutSnapshot, StorageVerificationReport,
 };
 
 // Configuration

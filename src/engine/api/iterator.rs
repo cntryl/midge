@@ -35,6 +35,14 @@ pub struct Iterator<'a> {
     direction: Direction,
     state: IteratorState,
     failure: Option<MidgeError>,
+    latency: Option<ScanLatencyObserver>,
+}
+
+/// Records the whole scan's latency into the owning engine's counters when
+/// the iterator is dropped, whether it was exhausted, abandoned, or failed.
+struct ScanLatencyObserver {
+    diagnostics: std::sync::Arc<crate::diagnostics::RuntimeDiagnostics>,
+    started: std::time::Instant,
 }
 
 impl<'a> Iterator<'a> {
@@ -47,7 +55,22 @@ impl<'a> Iterator<'a> {
             direction,
             state: IteratorState::Active,
             failure: None,
+            latency: None,
         }
+    }
+
+    /// Record this scan's latency into `diagnostics` on drop, measured from
+    /// `started`.
+    pub(crate) fn observing_latency(
+        mut self,
+        diagnostics: std::sync::Arc<crate::diagnostics::RuntimeDiagnostics>,
+        started: std::time::Instant,
+    ) -> Self {
+        self.latency = Some(ScanLatencyObserver {
+            diagnostics,
+            started,
+        });
+        self
     }
 
     /// Return whether iteration is complete.
@@ -86,6 +109,17 @@ impl<'a> Iterator<'a> {
             rows.push(row?);
         }
         Ok(rows)
+    }
+}
+
+impl Drop for Iterator<'_> {
+    fn drop(&mut self) {
+        if let Some(observer) = &self.latency {
+            let elapsed = observer.started.elapsed();
+            observer
+                .diagnostics
+                .record(|m| m.record_scan_latency(elapsed));
+        }
     }
 }
 
