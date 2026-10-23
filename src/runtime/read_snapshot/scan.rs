@@ -2,6 +2,7 @@ use super::{
     Arc, FileMeta, KeyState, LevelRangeCandidates, MidgeError, MidgeResult, RangeCandidates,
     RangeCoverSweep, RangeTombstone, ReadSnapshot, SstFileIo, SstStateReader, SstStateScan,
 };
+use crate::memtable::SkipListMemtable;
 use crate::sst::read_path_metrics::SstReadObserver as _;
 
 #[cfg(test)]
@@ -12,7 +13,8 @@ mod l0_scan_tests;
 mod tests;
 
 enum SnapshotStateIterator {
-    Memory(std::vec::IntoIter<(bytes::Bytes, KeyState)>),
+    /// A lazy memtable cursor; its cost follows the rows taken (#920).
+    Memory(Box<dyn Iterator<Item = (bytes::Bytes, KeyState)> + Send>),
     Sst(Box<SstStateScan>),
     SstLevel(Box<SstLevelStateIterator>),
 }
@@ -247,20 +249,16 @@ impl SnapshotScan {
         self.range_cover.work()
     }
 
-    fn memory_iterator(
-        mut states: Vec<(Vec<u8>, KeyState)>,
+    fn memory_source(
+        memtable: &SkipListMemtable,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        sequence: u64,
         reverse: bool,
-    ) -> SnapshotStateIterator {
-        if reverse {
-            states.reverse();
-        }
-        SnapshotStateIterator::Memory(
-            states
-                .into_iter()
-                .map(|(key, state)| (bytes::Bytes::from(key), state))
-                .collect::<Vec<_>>()
-                .into_iter(),
-        )
+    ) -> SnapshotStateSource {
+        SnapshotStateSource::new(SnapshotStateIterator::Memory(Box::new(
+            memtable.range_state_cursor(start, end, sequence, reverse),
+        )))
     }
 
     fn append_reader_tombstones(
@@ -396,13 +394,13 @@ impl SnapshotScan {
         let end = end_bound.as_deref();
         let snapshot = Arc::clone(&self.snapshot);
 
-        self.sources
-            .push(SnapshotStateSource::new(Self::memory_iterator(
-                snapshot
-                    .memtable
-                    .range_raw_state_at(start, end, self.sequence),
-                self.reverse,
-            )));
+        self.sources.push(Self::memory_source(
+            &snapshot.memtable,
+            start,
+            end,
+            self.sequence,
+            self.reverse,
+        ));
         for tombstone in snapshot.memtable.range_tombstones_at(self.sequence) {
             if ReadSnapshot::range_tombstone_overlaps_query(&tombstone, start, end) {
                 self.range_cover
@@ -411,11 +409,13 @@ impl SnapshotScan {
         }
 
         for immutable in &snapshot.immutable_memtables {
-            self.sources
-                .push(SnapshotStateSource::new(Self::memory_iterator(
-                    immutable.range_raw_state_at(start, end, self.sequence),
-                    self.reverse,
-                )));
+            self.sources.push(Self::memory_source(
+                immutable,
+                start,
+                end,
+                self.sequence,
+                self.reverse,
+            ));
             for tombstone in immutable.range_tombstones_at(self.sequence) {
                 if ReadSnapshot::range_tombstone_overlaps_query(&tombstone, start, end) {
                     self.range_cover

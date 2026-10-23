@@ -358,19 +358,29 @@ impl SkipListMemtable {
         end: Option<&[u8]>,
         snapshot_seq: u64,
     ) -> Vec<(Vec<u8>, KeyState)> {
-        // Seek into the range instead of copying every version of the whole
-        // memtable and filtering afterwards: a scan's cost follows its range.
+        self.range_state_cursor(start, end, snapshot_seq, false)
+            .map(|(key, state)| (key.to_vec(), state))
+            .collect()
+    }
+
+    /// Lazily yield `(key, state)` visible at `snapshot_seq` in `[start, end)`,
+    /// forward or reverse; a scan's cost follows the rows it takes (#920).
+    pub(crate) fn range_state_cursor(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        snapshot_seq: u64,
+        reverse: bool,
+    ) -> impl Iterator<Item = (Bytes, KeyState)> + Send + 'static {
         self.skiplist
-            .range_visible_with_meta(start, end, snapshot_seq)
-            .into_iter()
+            .visible_cursor(start, end, snapshot_seq, reverse)
             .map(|(key, value, seq, is_tombstone, exp, op)| {
                 let state = match (value, is_tombstone) {
                     (_, true) | (None, _) => KeyState::Tombstone(seq),
                     (Some(value), false) => KeyState::Value(value, seq, exp, entry_type_of(op)),
                 };
-                (key.to_vec(), state)
+                (key, state)
             })
-            .collect()
     }
 
     /// Put with explicit sequence and optional expiration (Unix millis)
