@@ -719,3 +719,10 @@ unconsumed name. Active tests check first-block consumption and replenishment
 against the durable selected manifest. They compile but have not executed.
 Compaction's WAL-sequence jumps still use the owned asynchronous fallback;
 this slice does not claim every job start finds an ahead-reserved block.
+
+#941/#906 now have numeric provisional targets recorded in their issues and
+`performance-targets.md`, before the corresponding implementation completes.
+The aggregate reference is `172c941201f42e0206ca912d080e65c23ff4133c`; concurrent
+apply additionally requires a pinned completed #941/#947 checkpoint for an
+isolated comparison. Three alternating pairs and raw artifacts are required;
+no gain or qualification is claimed by preregistration.

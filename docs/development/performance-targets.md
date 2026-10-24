@@ -133,6 +133,29 @@ Hybrid:
 
 ## Recommended Verification
 
+### Preregistered 0.5.0 pipeline targets
+
+Issues #941 and #906 use aggregate reference
+`172c941201f42e0206ca912d080e65c23ff4133c`, which includes ordered fsync and
+completed-prefix acknowledgement. These targets are hypotheses for qualification,
+not measured gains. Before concurrent apply starts, also pin the completed
+#941/#947 prerequisite SHA to isolate apply's contribution.
+
+| Change | Primary target | Guardrails |
+| --- | --- | --- |
+| #941 writer encoding | At least 20% lower event-loop CPU/service nanoseconds per committed 4 KiB unit on `tier2_durability_commit_sync_local_4k_rotation` | Writer encode/compression/CRC/XXH3/append service per unit at most 10% worse; 16/64-writer Strict throughput at least 10% higher in each row, commit p99 at most 5% worse |
+| #906 concurrent apply | At least 10% higher throughput on `tier4_system_local_throughput_regression` | Transaction p99 at most 5% worse; 16/64-writer Strict throughput at least 10% higher in each row, commit p99 at most 5% worse |
+
+For both, retain `tier4_complete_local_strict_group_commit_total` as the complete
+system guard, including its digest, reopen and footprint checks. Use three
+alternating base/candidate pairs on the same machine; retain both exact SHAs,
+six raw artifacts, all pair deltas and their median. Missing CPU/service timing
+is inconclusive and cannot be inferred from wall latency. Unstable observations
+remain inconclusive. Use the existing benchmark facilities without a new runner.
+
+Held-worker read/control progress, byte-compatible WAL, ordered whole-transaction
+visibility, fencing and terminal memory ownership remain hard correctness gates.
+
 Run focused checks before broad suites:
 
 ```bash
