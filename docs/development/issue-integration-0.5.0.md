@@ -726,3 +726,10 @@ The aggregate reference is `172c941201f42e0206ca912d080e65c23ff4133c`; concurren
 apply additionally requires a pinned completed #941/#947 checkpoint for an
 isolated comparison. Three alternating pairs and raw artifacts are required;
 no gain or qualification is claimed by preregistration.
+
+#913's idle continuation now submits an owned no-op mirror every thirty
+seconds through the existing gate and worker. Idle wakeups drain the bounded
+retention cursor without another metadata mutation. An active 25-snapshot
+regression exercises cooldown and multiple idle batches with an injected short
+interval rather than resetting cooldown state. Failpoint test targets compile
+cleanly; execution remains pending.

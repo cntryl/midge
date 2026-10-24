@@ -86,7 +86,9 @@ impl Fixture {
 
     fn collect(&self, generation: &CloudMetadataGeneration, state: &mut MetadataRetentionState) {
         let _guard = self.lock.lock();
-        state.last_run = None;
+        if let Some(last) = state.last_run {
+            std::thread::sleep(state.interval.saturating_sub(last.elapsed()));
+        }
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
         collect_after_commit(&self.context(&deadline), generation, state);
     }
@@ -102,7 +104,10 @@ fn should_reclaim_obsolete_snapshot_versions_when_restart_rediscovers_history() 
     }
     assert_eq!(generation.objects.len(), 1);
     // A new maintenance state models loss of the process-local delete queue.
-    let mut restarted = MetadataRetentionState::default();
+    let mut restarted = MetadataRetentionState {
+        interval: Duration::from_millis(1),
+        ..Default::default()
+    };
 
     // Act: each bounded pass visits at most four ordinal prefixes.
     fixture.collect(&generation, &mut restarted);
@@ -133,7 +138,10 @@ fn should_retain_every_selected_predecessor_when_edit_chain_exceeds_retention_wi
         generation = fixture.publish(sequence, false);
     }
     assert_eq!(generation.objects.len(), 10);
-    let mut state = MetadataRetentionState::default();
+    let mut state = MetadataRetentionState {
+        interval: Duration::from_millis(1),
+        ..Default::default()
+    };
 
     // Act
     fixture.collect(&generation, &mut state);

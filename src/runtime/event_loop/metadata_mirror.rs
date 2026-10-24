@@ -1,6 +1,7 @@
 use super::EventLoop;
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 
+mod retention;
 #[cfg(all(test, feature = "failpoints"))]
 mod tests;
 mod worker;
@@ -21,13 +22,28 @@ pub(super) struct MetadataMirrorJob {
     started: std::time::Instant,
 }
 
-#[derive(Default)]
 pub(super) struct MetadataMirrorPipeline {
     next_operation: u64,
     running: Option<MetadataMirrorJob>,
     pub(super) pending_compaction:
         Option<(crate::compaction::CompactionPlan, Option<OperationDeadline>)>,
     pub(super) pending_flush: Option<u64>,
+    retention_due: std::time::Instant,
+    retention_interval: std::time::Duration,
+}
+
+impl Default for MetadataMirrorPipeline {
+    fn default() -> Self {
+        let retention_interval = crate::runtime::hybrid_persistence::METADATA_RETENTION_INTERVAL;
+        Self {
+            next_operation: 0,
+            running: None,
+            pending_compaction: None,
+            pending_flush: None,
+            retention_due: std::time::Instant::now() + retention_interval,
+            retention_interval,
+        }
+    }
 }
 
 impl MetadataMirrorPipeline {

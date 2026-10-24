@@ -111,8 +111,12 @@ pointer before an identity-conditional DELETE. Unknown reads and conditional
 failures retain data. The scan cursor and counters live with the publication
 owner; restart resets the cursor and rediscovers obligations by canonical
 ordinal prefix. Legacy `metadata/generations/` cleanup is deliberately omitted
-because the new layout replaces that protocol. An idle runtime with no mirrors
-does not run a separate collector timer in this candidate.
+because the new layout replaces that protocol. A separate idle deadline submits
+an owned no-op metadata mirror every 30 seconds. It uses the same publication
+gate, worker and fresh pointer checks, so cooldowns and bounded batches continue
+making progress without another metadata write. Its active idle regression
+injects a short interval in the same owners and drains more than eight obsolete
+snapshots through production idle wakeups without resetting cooldown state.
 
 General orphan collection (#943) remains separate: SST deletion additionally
 needs live snapshot sources, compaction inputs, durable obligations and admitted

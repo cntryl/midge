@@ -82,6 +82,9 @@ impl EventLoop {
         if self.background_maintenance_timeout() == Duration::ZERO {
             return true;
         }
+        if self.metadata_retention_timeout() == Some(Duration::ZERO) {
+            return true;
+        }
 
         if self.state.has_due_immutable_flush() && !self.flush_start_blocked(false) {
             return true;
@@ -155,6 +158,7 @@ impl EventLoop {
                 .is_inflight()
                 .then_some(Duration::from_millis(1)),
             authority_poll,
+            self.metadata_retention_timeout(),
             CompactionCoordinator::manual_compaction_wait_timeout(self),
         ]
         .into_iter()
@@ -233,6 +237,7 @@ impl EventLoop {
         self.retry_manifest_reclamation_if_due();
         self.drain_auto_flush_memtables();
         self.run_background_compaction_maintenance_if_due();
+        self.schedule_metadata_retention_if_due();
         self.prefetch_flush_sst_names_if_due();
     }
 

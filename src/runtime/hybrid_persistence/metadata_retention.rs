@@ -12,18 +12,29 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 const RETAIN_ORDINALS: u64 = 3;
-const INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const INTERVAL: Duration = Duration::from_secs(30);
 const LIST_BUDGET: usize = 4;
 const CANDIDATE_BUDGET: usize = 8;
 
 #[cfg(test)]
 mod tests;
 
-#[derive(Default)]
 pub(crate) struct MetadataRetentionState {
     last_run: Option<Instant>,
     cursor: u64,
     pub(crate) totals: RetentionCounters,
+    pub(crate) interval: Duration,
+}
+
+impl Default for MetadataRetentionState {
+    fn default() -> Self {
+        Self {
+            last_run: None,
+            cursor: 0,
+            totals: RetentionCounters::default(),
+            interval: INTERVAL,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -36,7 +47,10 @@ pub(crate) struct RetentionCounters {
 
 impl MetadataRetentionState {
     fn begin(&mut self, head: u64) -> Option<u64> {
-        if self.last_run.is_some_and(|last| last.elapsed() < INTERVAL) {
+        if self
+            .last_run
+            .is_some_and(|last| last.elapsed() < self.interval)
+        {
             return None;
         }
         self.last_run = Some(Instant::now());
