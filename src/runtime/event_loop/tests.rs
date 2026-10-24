@@ -2317,6 +2317,13 @@ fn write_recovered_cloud_segment_for_test(
 #[test]
 fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
 ) -> crate::common::MidgeResult<()> {
+    // Arrange: this fixture has no intentional global failpoint configuration.
+    // Act: retain its fault-free read scope through setup, deadline and cleanup.
+    // Assert: the helper keeps the exact queue/backlog/durable-frontier checks.
+    crate::failpoints::with_read_gate(verify_bounded_recovered_wal_upload_queue)
+}
+
+fn verify_bounded_recovered_wal_upload_queue() -> crate::common::MidgeResult<()> {
     // Arrange
     let db_path = unique_test_db_path("midge_recovered_wal_backlog");
     let mut state = RuntimeState::new(db_path.clone(), false);

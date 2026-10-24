@@ -252,33 +252,36 @@ fn local_debt() -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Re
 #[test]
 fn should_leave_below_threshold_local_debt_when_no_manual_obligation_exists(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let (mut el, worker) = local_debt()?;
-    el.state.set_compaction_enabled(true);
-    let plan = el
-        .actors
-        .compaction_actor
-        .check_manual_compaction(&el.state)?
-        .unwrap();
-    el.launch_compaction(plan)?;
+    crate::failpoints::with_read_gate(|| {
+        // Arrange
+        let (mut el, worker) = local_debt()?;
+        el.state.set_compaction_enabled(true);
+        let plan = el
+            .actors
+            .compaction_actor
+            .check_manual_compaction(&el.state)?
+            .unwrap();
+        el.launch_compaction(plan)?;
 
-    // Act
-    complete_compaction(&mut el, &worker);
-    el.schedule_one_background_compaction_if_needed("ordinary policy regression")?;
+        // Act
+        complete_compaction(&mut el, &worker);
+        manual_flush_tests::settle_owned_work(&mut el, &worker);
+        el.schedule_one_background_compaction_if_needed("ordinary policy regression")?;
 
-    // Assert
-    assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
-    assert_eq!(
-        el.state
-            .manifest
-            .files
-            .iter()
-            .filter(|file| file.level == 0)
-            .count(),
-        1
-    );
-    assert!(worker.try_recv().is_err());
-    Ok(())
+        // Assert
+        assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
+        assert_eq!(
+            el.state
+                .manifest
+                .files
+                .iter()
+                .filter(|file| file.level == 0)
+                .count(),
+            1
+        );
+        assert!(worker.try_recv().is_err());
+        Ok(())
+    })
 }
 
 #[test]
