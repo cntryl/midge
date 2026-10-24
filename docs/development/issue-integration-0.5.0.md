@@ -412,3 +412,27 @@ fixtures plus external compatibility/CLI assumptions still need updating
 before the compatibility gate can pass. Existing FORMAT 8 bytes stay as an
 explicit rejected fixture. #914's new committed cloud chain is not part of
 this codec commit.
+
+### #912: TTL compaction candidate implemented
+
+Compaction captures the engine's observed clock at plan launch. The newest
+expired version and its selected older versions are removed only with complete
+point-overlap coverage and retained original snapshot sources (or no active
+snapshot for standalone callers). Expiration never selects an older non-TTL
+value as a replacement. Uncertain coverage keeps the expired masking value.
+
+Writers, flush publication, metadata conversion and independent SST summaries
+carry an advisory earliest expiration. Existing periodic maintenance uses it
+to pay cold TTL debt below normal size/count thresholds: bounded ordinary
+closures drain shallower levels before a bottom-level rewrite can prove no
+resurrection. Files without recorded TTL debt avoid periodic rewrites. This
+may promote extra files in an expired family; write-amplification measurements
+remain required.
+
+Active raw-output tests cover captured clock, overlap proof and snapshot
+retention conditions. Public local/simulated-cloud tests require physical
+manifest reclamation, a held pre-expiry snapshot, no older-value resurrection
+on restart, and idle reclamation without new writes/manual compaction.
+`cargo check --locked --tests --features failpoints` passes on the combined
+working tree. Test execution, crash campaigns and space measurements remain
+pending.

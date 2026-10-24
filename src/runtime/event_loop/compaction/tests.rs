@@ -25,6 +25,7 @@ fn should_reject_stale_repair_publication_state() -> MidgeResult<()> {
         smallest_key: Some(start.to_vec()),
         largest_key: Some(end.to_vec()),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
         ..Default::default()
     };
     event_loop
@@ -237,6 +238,7 @@ fn published_output(event_loop: &mut EventLoop) -> String {
                 smallest_seq: None,
                 largest_seq: None,
                 key_bounds_complete: false,
+                earliest_expiration_millis: None,
             }],
         });
     output_name
@@ -362,6 +364,7 @@ fn should_defer_failed_repair_until_the_next_maintenance_backoff() -> MidgeResul
                 smallest_key: Some(start.to_vec()),
                 largest_key: Some(end.to_vec()),
                 key_bounds_complete: true,
+                earliest_expiration_millis: None,
                 ..Default::default()
             });
     }

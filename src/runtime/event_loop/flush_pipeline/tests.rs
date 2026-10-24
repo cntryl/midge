@@ -264,6 +264,7 @@ fn should_resume_built_flush_when_compaction_publication_releases_the_gate(
             smallest_seq: Some(1),
             largest_seq: Some(1),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
         },
     );
 
@@ -481,6 +482,7 @@ fn assert_rejected_flush_metadata(expire_on_validation: bool) -> crate::common::
             smallest_seq: Some(1),
             largest_seq: Some(1),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
         },
         next_sst_seq: 2,
     };
@@ -754,6 +756,7 @@ fn should_fence_metadata_when_flush_commit_result_is_uncertain() -> crate::commo
                 smallest_seq: Some(1),
                 largest_seq: Some(1),
                 key_bounds_complete: true,
+                earliest_expiration_millis: None,
             },
             next_sst_seq: 2,
         }),
@@ -873,6 +876,7 @@ fn should_release_fenced_failed_publish_admission_only_when_all_owned_outputs_ar
                 smallest_seq: Some(1),
                 largest_seq: Some(1),
                 key_bounds_complete: true,
+                earliest_expiration_millis: None,
             },
         });
         if residue == "unknown owner" {
@@ -950,6 +954,7 @@ fn should_keep_flush_admission_for_retry_when_publication_fails_after_output_is_
             smallest_seq: Some(1),
             largest_seq: Some(1),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
         },
     });
 
@@ -1051,6 +1056,7 @@ fn should_settle_storage_reservation_when_published_output_lost_immutable_owner(
             smallest_seq: Some(1),
             largest_seq: Some(1),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
         },
         next_sst_seq: 2,
     };
@@ -1723,6 +1729,7 @@ fn should_reject_publication_completion_after_lease_loss() -> crate::common::Mid
                     smallest_seq: Some(1),
                     largest_seq: Some(1),
                     key_bounds_complete: true,
+                    earliest_expiration_millis: None,
                 },
                 next_sst_seq: 2,
             }),

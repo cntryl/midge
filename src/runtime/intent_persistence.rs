@@ -254,6 +254,7 @@ mod tests {
                 smallest_seq: None,
                 largest_seq: None,
                 key_bounds_complete: false,
+                earliest_expiration_millis: None,
             },
         }];
 

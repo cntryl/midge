@@ -900,6 +900,7 @@ fn write_side_request_response_messages() -> Vec<RuntimeMsg> {
         smallest_seq: None,
         largest_seq: None,
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     };
     let compaction_plan = CompactionPlan {
         input_files: vec!["input.sst".to_string()],
@@ -1437,6 +1438,7 @@ fn should_clone_file_meta_preserving_all_fields() {
         smallest_seq: Some(1),
         largest_seq: Some(100),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
     };
 
     // Act
@@ -1625,6 +1627,7 @@ fn should_classify_test_hooks_through_the_test_table_when_publication_gate_class
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
         },
     });
     let inert_hook = RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 2 });

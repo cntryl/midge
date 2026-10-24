@@ -244,6 +244,7 @@ mod tests {
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
         }
     }
 
@@ -434,6 +435,7 @@ mod tests {
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
         };
 
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
@@ -472,6 +474,7 @@ mod tests {
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
         };
 
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
@@ -517,6 +520,7 @@ mod tests {
             smallest_seq: Some(10),
             largest_seq: Some(10),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
         };
 
         assert_eq!(

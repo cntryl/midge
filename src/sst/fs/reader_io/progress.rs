@@ -11,6 +11,15 @@ pub(crate) struct SstSummaryProgress {
 }
 
 impl SstSummaryProgress {
+    pub(super) fn observe_expiration(&mut self, expiration: Option<u64>) {
+        if let (Some(expiration), Some(summary)) = (expiration, &mut self.summary) {
+            summary.earliest_expiration_millis = Some(
+                summary
+                    .earliest_expiration_millis
+                    .map_or(expiration, |previous| previous.min(expiration)),
+            );
+        }
+    }
     pub(super) fn observe(
         &mut self,
         size: u64,
@@ -33,6 +42,7 @@ impl SstSummaryProgress {
                     .map(|budget| budget.reserve(key.len(), "SST resume maximum key"))
                     .transpose()?;
                 self.summary = Some(SstFileSummary {
+                    earliest_expiration_millis: None,
                     size_bytes: size,
                     smallest_key: key.to_vec(),
                     largest_key: key.to_vec(),

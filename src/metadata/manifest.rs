@@ -205,6 +205,9 @@ pub struct FileMeta {
     /// bounds.
     #[serde(default)]
     pub key_bounds_complete: bool,
+    /// Advisory earliest persisted TTL deadline; never deletion authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_expiration_millis: Option<u64>,
     #[serde(default)]
     pub sublevel: u32,
     /// Read counter for compaction prioritization (not persisted)

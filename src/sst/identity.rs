@@ -310,6 +310,7 @@ mod tests {
             ..meta(4, Some(crc32c::crc32c(b"data")))
         };
         let summary = SstFileSummary {
+            earliest_expiration_millis: None,
             size_bytes: 4,
             smallest_key: b"z".to_vec(),
             largest_key: b"z".to_vec(),

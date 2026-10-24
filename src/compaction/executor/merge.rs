@@ -21,6 +21,7 @@ pub(crate) struct TombstoneGcPolicy {
     pub(crate) point_eligible: bool,
     pub(crate) range_eligible: bool,
     pub(crate) retained_snapshot_sources: bool,
+    pub(crate) compaction_time_millis: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

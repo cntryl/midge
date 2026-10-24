@@ -65,6 +65,7 @@ impl EventLoop {
         // capture/registration sampling boundary. Rewriting cannot remove the
         // source of a pre-delete read until its final snapshot unpins.
         plan.retained_snapshot_sources = true;
+        plan.compaction_time_millis = Some(self.state.observed_time_millis());
         let grandparent_level = plan.target_level.saturating_add(1);
         plan.grandparent_overlap = crate::compaction::GrandparentOverlap::from_files(
             self.state
@@ -386,6 +387,7 @@ impl CompactionCoordinator {
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
             retained_snapshot_sources: false,
+            compaction_time_millis: None,
             grandparent_overlap: Default::default(),
         };
 

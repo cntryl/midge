@@ -263,6 +263,7 @@ fn summarize_output_partition(
             smallest_seq: Some(summary.smallest_seq),
             largest_seq: Some(summary.largest_seq),
             key_bounds_complete: true,
+            earliest_expiration_millis: summary.earliest_expiration_millis,
         },
         size,
         crc,
@@ -568,6 +569,16 @@ impl CompactionActor {
                 return Err(MidgeError::Internal(format!(
                     "compaction debt remains for column family {cf_id}, but no valid plan exists"
                 )));
+            }
+        }
+
+        for cf_id in self.round_robin_cf_ids(state) {
+            if let Some(plan) = self.compactor.pick_expired_compaction(
+                &state.manifest.files,
+                cf_id,
+                state.observed_time_millis(),
+            )? {
+                return Ok(Some(self.record_scheduled_plan(plan)));
             }
         }
 

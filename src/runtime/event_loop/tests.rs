@@ -876,6 +876,7 @@ fn test_manifest_l0_file_meta(name: &str, largest_seq: u64) -> crate::metadata::
         smallest_seq: Some(largest_seq),
         largest_seq: Some(largest_seq),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
         ..Default::default()
     }
 }
@@ -900,6 +901,7 @@ fn write_runtime_l0_sst_for_test(
         smallest_seq: Some(largest_seq),
         largest_seq: Some(largest_seq),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
     }
 }
 

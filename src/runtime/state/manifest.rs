@@ -731,6 +731,7 @@ mod l0_level_order_tests {
             smallest_seq: Some(seqs.0),
             largest_seq: Some(seqs.1),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             sublevel: 0,
             read_count: std::sync::Arc::default(),
         }
@@ -832,6 +833,7 @@ mod checkpoint_bound_tests {
                 smallest_seq: Some(u64::MAX),
                 largest_seq: Some(u64::MAX),
                 key_bounds_complete: true,
+                earliest_expiration_millis: None,
             };
 
             // Act

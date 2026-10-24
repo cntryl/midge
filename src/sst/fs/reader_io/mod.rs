@@ -21,6 +21,7 @@ type IndexEntries = Arc<Vec<(Vec<u8>, BlockHandle)>>;
 /// Stable summary of the physical contents of a single SST file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SstFileSummary {
+    pub earliest_expiration_millis: Option<u64>,
     pub size_bytes: u64,
     pub smallest_key: Vec<u8>,
     pub largest_key: Vec<u8>,
@@ -885,6 +886,7 @@ impl SstFileIo {
         for version in &mut cursor {
             let version = version?;
             accumulator.observe(size_bytes, &version.key, version.seq, budget.as_ref())?;
+            accumulator.observe_expiration(version.expiration);
         }
         accumulator
             .summary

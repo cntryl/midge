@@ -83,6 +83,7 @@ fn should_report_family_frontiers_when_one_family_is_dropped() {
         smallest_seq: None,
         largest_seq: Some(3),
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     };
     state
         .commit_flush_publication(family, 4, &output, 2, false)
@@ -327,6 +328,7 @@ fn write_sst_entries_for_recovery_test(
         smallest_seq: entries.iter().map(|(_, sequence)| *sequence).min(),
         largest_seq: entries.iter().map(|(_, sequence)| *sequence).max(),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
     }
 }
 
@@ -421,6 +423,7 @@ fn should_reject_corrupt_remote_publication_with_bounded_checksum_ranges() {
         smallest_seq: Some(7),
         largest_seq: Some(7),
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     };
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(
@@ -484,6 +487,7 @@ fn should_preserve_column_family_identity_given_sst_add_is_appended_to_manifest(
         smallest_seq: Some(7),
         largest_seq: Some(9),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
     };
 
     // Act
@@ -1421,6 +1425,7 @@ fn should_not_mutate_compaction_intent_when_persistence_rejects_output() {
         smallest_seq: None,
         largest_seq: None,
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     };
 
     // Act
@@ -1792,6 +1797,7 @@ fn should_supersede_stale_output_durable_intent_when_retrying_same_compaction_in
         smallest_seq: Some(2),
         largest_seq: Some(2),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
     };
     let retry_output = crate::runtime::FileMeta {
         name: crate::cloud_layout::file_name(0, 1, 3),
@@ -1804,6 +1810,7 @@ fn should_supersede_stale_output_durable_intent_when_retrying_same_compaction_in
         smallest_seq: Some(3),
         largest_seq: Some(3),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
     };
     state
         .record_compaction_publication_intent(0, vec![input_name.clone()], vec![first_output])
@@ -2295,6 +2302,7 @@ fn should_keep_a_worker_published_sst_when_the_event_loop_publishes_next() {
                 smallest_seq: None,
                 largest_seq: None,
                 key_bounds_complete: false,
+                earliest_expiration_millis: None,
             },
         }],
     )
@@ -2348,6 +2356,7 @@ fn state_with_worker_intent(
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
         },
     };
     crate::runtime::IntentPersistence::save(&state.db_path, std::slice::from_ref(&intent))
@@ -2749,6 +2758,7 @@ fn measure_flush_publication_io_with_sst_size(
             smallest_seq: None,
             largest_seq: Some(n),
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
         };
         state
             .commit_flush_publication_for(super::manifest::FlushManifestPublication {
@@ -2857,6 +2867,7 @@ fn should_stop_journal_growth_when_deferred_checkpoint_cannot_be_saved() {
                 smallest_seq: None,
                 largest_seq: Some(n),
                 key_bounds_complete: false,
+                earliest_expiration_millis: None,
             };
             state.commit_flush_publication_for(super::manifest::FlushManifestPublication {
                 origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
@@ -2953,6 +2964,7 @@ fn should_recover_durable_flush_frontier_when_optional_checkpoint_fails() {
         smallest_seq: None,
         largest_seq: Some(17),
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     };
     let checkpoint = state
         .manifest_store
@@ -2999,6 +3011,7 @@ fn cheap_flush_file(n: u64) -> crate::runtime::FileMeta {
         smallest_seq: None,
         largest_seq: Some(n),
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     }
 }
 
@@ -3157,6 +3170,7 @@ fn should_avoid_extra_manifest_stats_when_cheap_flush_keeps_forced_cadence() {
                 smallest_seq: None,
                 largest_seq: Some(n),
                 key_bounds_complete: false,
+                earliest_expiration_millis: None,
             };
             // Prime one forced checkpoint before counting either path.
             state
@@ -3231,6 +3245,7 @@ fn should_preserve_complete_batch_journal_cost_when_healthy_cheap_flush_is_check
                 smallest_seq: None,
                 largest_seq: Some(n),
                 key_bounds_complete: false,
+                earliest_expiration_millis: None,
             };
             if original {
                 // Compare the public flush path with the explicit complete
@@ -3324,6 +3339,7 @@ fn should_stop_journal_growth_when_cheap_flush_checkpoint_cannot_be_saved() {
                 smallest_seq: None,
                 largest_seq: Some(n),
                 key_bounds_complete: false,
+                earliest_expiration_millis: None,
             };
             state.commit_flush_publication_for(super::manifest::FlushManifestPublication {
                 origin: crate::metadata::accounting::Origin::OrdinaryLocalFlush,
@@ -3383,6 +3399,7 @@ fn should_preserve_intervening_edits_when_cheap_flush_uses_forced_path() {
         smallest_seq: None,
         largest_seq: Some(n),
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     };
     let publish = |state: &mut RuntimeState, n: u64| {
         state.commit_flush_publication_for(super::manifest::FlushManifestPublication {

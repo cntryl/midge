@@ -767,6 +767,138 @@ mod engine_ttl {
         .expect("open TTL fixture")
     }
 
+    #[test]
+    fn should_reclaim_expired_sst_while_pre_expiry_snapshot_retains_original_sources() {
+        for_each_storage_mode(durable_storage_modes(), |mode, opts| {
+            // Arrange
+            let clock = Arc::new(ManualClock::new(10_000));
+            let mut engine = open_mode_with_clock(&opts, Arc::clone(&clock));
+            let cf = engine
+                .create_column_family("ttl-gc")
+                .expect("create family");
+            for ttl in [None, Some(1)] {
+                let mut write = engine
+                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                    .unwrap();
+                write
+                    .put(
+                        b"key".to_vec(),
+                        if ttl.is_some() {
+                            b"new".to_vec()
+                        } else {
+                            b"old".to_vec()
+                        },
+                        ttl,
+                    )
+                    .unwrap();
+                write.commit(buffered_write_options(mode)).unwrap();
+                engine.flush_cf(&cf).expect("flush version");
+            }
+            let snapshot = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+            assert!(engine
+                .metrics()
+                .get_storage_layout()
+                .unwrap()
+                .levels
+                .iter()
+                .any(|level| !level.files.is_empty()));
+            clock.set(11_000);
+
+            // Act
+            engine.compact_all().expect("reclaim expired values");
+
+            // Assert: this requires physical reclamation, not just TTL reads.
+            assert!(engine
+                .metrics()
+                .get_storage_layout()
+                .unwrap()
+                .levels
+                .iter()
+                .all(|level| level.files.is_empty()));
+            assert_eq!(
+                snapshot.get(b"key").unwrap().as_deref(),
+                Some(b"new".as_slice())
+            );
+            assert_eq!(
+                engine
+                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                    .unwrap()
+                    .get(b"key")
+                    .unwrap(),
+                None
+            );
+            drop(snapshot);
+            engine
+                .shutdown(std::time::Duration::from_secs(10))
+                .expect("shutdown");
+            let reopened = open_mode_with_clock(&opts, Arc::clone(&clock));
+            assert_eq!(
+                reopened
+                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                    .unwrap()
+                    .get(b"key")
+                    .unwrap(),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn should_reclaim_cold_expired_sst_without_new_writes_or_manual_compaction() {
+        for_each_storage_mode(durable_storage_modes(), |mode, mut opts| {
+            // Arrange
+            opts.enable_compaction = true;
+            let clock = Arc::new(ManualClock::new(10_000));
+            let engine = open_mode_with_clock(&opts, Arc::clone(&clock));
+            let cf = engine
+                .create_column_family("cold-ttl-gc")
+                .expect("create family");
+            let mut write = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .unwrap();
+            write
+                .put(b"cold".to_vec(), b"expired".to_vec(), Some(1))
+                .unwrap();
+            write.commit(buffered_write_options(mode)).unwrap();
+            engine.flush_cf(&cf).expect("flush cold data");
+            assert!(engine
+                .metrics()
+                .get_storage_layout()
+                .unwrap()
+                .levels
+                .iter()
+                .any(|level| !level.files.is_empty()));
+
+            // Act
+            clock.set(11_000);
+
+            // Assert: existing periodic maintenance pays TTL debt when idle.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while engine
+                .metrics()
+                .get_storage_layout()
+                .unwrap()
+                .levels
+                .iter()
+                .any(|level| !level.files.is_empty())
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "expired cold SST was never reclaimed in {mode}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(
+                engine
+                    .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                    .unwrap()
+                    .get(b"cold")
+                    .unwrap(),
+                None
+            );
+        });
+    }
+
     fn assert_ttl_survives_restart(mode: &str, opts: &MidgeOptions, flush: bool) {
         let clock = Arc::new(ManualClock::new(10_000));
         let mut engine = open_mode_with_clock(opts, Arc::clone(&clock));

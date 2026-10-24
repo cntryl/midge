@@ -1711,6 +1711,7 @@ fn add_valid_versions_manifest_sst_for_test(
             smallest_seq: Some(*sequences.start()),
             largest_seq: Some(*sequences.end()),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             ..Default::default()
         });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
@@ -1737,6 +1738,7 @@ fn add_valid_manifest_sst_for_test(
             smallest_seq: Some(max_sequence),
             largest_seq: Some(max_sequence),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             ..Default::default()
         });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
@@ -3507,6 +3509,7 @@ fn should_prune_remote_wal_when_flush_intent_clear_is_mirrored() -> crate::commo
         smallest_seq: Some(max_sequence),
         largest_seq: Some(max_sequence),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
     };
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
@@ -8598,6 +8601,7 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
                 smallest_seq: Some(11),
                 largest_seq: Some(11),
                 key_bounds_complete: true,
+                earliest_expiration_millis: None,
             },
             proof: Some(proof),
         },

@@ -63,6 +63,7 @@ fn install_underfull_overlap_fixture(
                     .chain((name == &names[0]).then_some(2))
                     .max(),
                 key_bounds_complete: true,
+                earliest_expiration_millis: None,
                 ..Default::default()
             },
         ));
@@ -1722,6 +1723,7 @@ fn should_exclude_unrelated_manifest_inventory_when_staging_interrupted_publicat
         smallest_seq: None,
         largest_seq: None,
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     };
     state
         .intent_log
@@ -2135,6 +2137,7 @@ fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
                 smallest_seq: Some(1),
                 largest_seq: Some(1),
                 key_bounds_complete: true,
+                earliest_expiration_millis: None,
             },
         });
     let cloud = cloud_with_stale_sst_listing();

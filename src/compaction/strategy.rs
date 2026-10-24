@@ -25,6 +25,7 @@ mod range_gc_tests {
         let selected = FileMeta {
             name: "selected.sst".into(),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             smallest_key: Some(b"a".to_vec()),
             largest_key: Some(b"m".to_vec()),
             ..Default::default()
@@ -32,6 +33,7 @@ mod range_gc_tests {
         let outside = FileMeta {
             name: "outside.sst".into(),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             smallest_key: Some(b"x".to_vec()),
             largest_key: Some(b"z".to_vec()),
             ..Default::default()
@@ -51,6 +53,7 @@ mod range_gc_tests {
         let selected = FileMeta {
             name: "selected.sst".into(),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             smallest_key: Some(b"a".to_vec()),
             largest_key: Some(b"m".to_vec()),
             ..Default::default()
@@ -58,6 +61,7 @@ mod range_gc_tests {
         let legacy = FileMeta {
             name: "legacy.sst".into(),
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
             smallest_key: Some(b"x".to_vec()),
             largest_key: Some(b"z".to_vec()),
             ..Default::default()
@@ -124,6 +128,8 @@ pub struct CompactionPlan {
     /// Production snapshots retain their original immutable sources until
     /// unpin, so rewritten outputs need not retain ranges for those readers.
     pub retained_snapshot_sources: bool,
+    /// Engine-observed TTL clock fixed at plan admission, never worker time.
+    pub compaction_time_millis: Option<u64>,
     /// Soft next-level overlap target. Oversized individual grandparents or
     /// indivisible key coverage may exceed it; source key groups stay whole.
     pub grandparent_overlap: super::executor::GrandparentOverlap,
@@ -152,6 +158,7 @@ impl CompactionPlan {
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
             retained_snapshot_sources: false,
+            compaction_time_millis: None,
             grandparent_overlap: Default::default(),
         }
     }
@@ -344,6 +351,7 @@ impl Compactor {
                 point_tombstone_gc_eligible: false,
                 range_tombstone_gc_eligible: false,
                 retained_snapshot_sources: false,
+                compaction_time_millis: None,
                 grandparent_overlap: Default::default(),
             }));
         }
@@ -398,6 +406,80 @@ impl Compactor {
             levels[file.level as usize].push(file);
         }
         Ok(Some(levels))
+    }
+
+    /// Expired cold families must make progress even below size/L0 thresholds.
+    /// Drain their shallower levels through ordinary bounded closures before
+    /// rewriting a bottom-level file with a complete no-resurrection proof.
+    pub(crate) fn pick_expired_compaction(
+        &self,
+        files: &[FileMeta],
+        cf_id: u32,
+        now_millis: u64,
+    ) -> MidgeResult<Option<CompactionPlan>> {
+        if !files.iter().any(|file| {
+            file.cf_id == cf_id
+                && file
+                    .earliest_expiration_millis
+                    .is_some_and(|expiration| expiration <= now_millis)
+        }) {
+            return Ok(None);
+        }
+        let Some(levels) = self.validated_levels(files, cf_id)? else {
+            return Ok(None);
+        };
+        let Some(last) = levels.len().checked_sub(1).filter(|last| *last > 0) else {
+            return Ok(None);
+        };
+        if !levels[0].is_empty() {
+            return self.plan_zero_level(&levels, cf_id);
+        }
+        for level in 1..last {
+            if !levels[level].is_empty() {
+                return self.plan_inner_level(&levels, cf_id, level);
+            }
+        }
+        let Some(expired) = levels[last]
+            .iter()
+            .filter(|file| {
+                file.earliest_expiration_millis
+                    .is_some_and(|expiration| expiration <= now_millis)
+            })
+            .min_by(|left, right| {
+                left.smallest_key
+                    .cmp(&right.smallest_key)
+                    .then_with(|| left.name.cmp(&right.name))
+            })
+        else {
+            return Ok(None);
+        };
+        let input_files = vec![expired.name.clone()];
+        let (point_tombstone_gc_eligible, range_tombstone_gc_eligible) =
+            Self::tombstone_gc_eligibility(&levels, &input_files)?;
+        // A legacy/uncertain bound cannot justify repeatedly rewriting the
+        // same cold file without dropping its expiration marker.
+        if !point_tombstone_gc_eligible {
+            return Ok(None);
+        }
+        let level = u32::try_from(last).expect("validated level fits u32");
+        Ok(Some(CompactionPlan {
+            purpose: CompactionPurpose::Repair,
+            source_files: input_files.clone(),
+            input_files,
+            target_files: Vec::new(),
+            source_level: level,
+            target_level: level,
+            cf_id,
+            output_seq: 0,
+            target_sst_size: super::DEFAULT_TARGET_SST_SIZE,
+            compaction_memory_limit: super::DEFAULT_COMPACTION_MEMORY_LIMIT,
+            snapshot_horizon: None,
+            point_tombstone_gc_eligible,
+            range_tombstone_gc_eligible,
+            retained_snapshot_sources: false,
+            compaction_time_millis: None,
+            grandparent_overlap: Default::default(),
+        }))
     }
 
     fn validate_file_metadata(&self, files: &[&FileMeta], cf_id: u32) -> MidgeResult<()> {
@@ -492,6 +574,7 @@ impl Compactor {
             point_tombstone_gc_eligible,
             range_tombstone_gc_eligible,
             retained_snapshot_sources: false,
+            compaction_time_millis: None,
             grandparent_overlap: Default::default(),
         }))
     }
@@ -568,6 +651,7 @@ impl Compactor {
             point_tombstone_gc_eligible,
             range_tombstone_gc_eligible,
             retained_snapshot_sources: false,
+            compaction_time_millis: None,
             grandparent_overlap: Default::default(),
         }))
     }
@@ -642,6 +726,7 @@ impl Compactor {
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
             retained_snapshot_sources: false,
+            compaction_time_millis: None,
             grandparent_overlap: Default::default(),
         }
     }
@@ -976,6 +1061,7 @@ mod tests {
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
             sublevel: 0,
             read_count: std::sync::Arc::default(),
         }

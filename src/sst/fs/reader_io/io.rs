@@ -79,6 +79,7 @@ impl SstFileIo {
                 }
                 let entry = decoded.entry(index);
                 summary.observe(file_size, &entry.key, entry.sequence, None)?;
+                summary.observe_expiration(entry.expiration);
             }
         }
 

@@ -77,6 +77,7 @@ pub(super) struct BlockPipeline {
     pub(super) smallest_sequence: Option<u64>,
     pub(super) largest_sequence: u64,
     pub(super) point_count: u64,
+    pub(super) earliest_expiration_millis: Option<u64>,
 }
 
 impl BlockPipeline {
@@ -96,6 +97,7 @@ impl BlockPipeline {
             smallest_sequence: None,
             largest_sequence: 0,
             point_count: 0,
+            earliest_expiration_millis: None,
         }
     }
 
@@ -250,6 +252,12 @@ impl BlockPipeline {
         );
         self.largest_sequence = self.largest_sequence.max(entry.sequence);
         self.point_count = self.point_count.saturating_add(1);
+        if let Some(expiration) = entry.expiration {
+            self.earliest_expiration_millis = Some(
+                self.earliest_expiration_millis
+                    .map_or(expiration, |previous| previous.min(expiration)),
+            );
+        }
         self.last_sequence = entry.sequence;
         self.last_key = Some(entry.key);
         sink.retain_entry(entry_reservation);

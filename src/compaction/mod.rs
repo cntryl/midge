@@ -8,6 +8,8 @@ pub mod strategy;
 mod fragment_tests;
 #[cfg(test)]
 mod grandparent_tests;
+#[cfg(test)]
+mod ttl_gc_tests;
 
 pub(crate) use config::{
     OpenCompactionConfig, DEFAULT_COMPACTION_MEMORY_LIMIT, DEFAULT_TARGET_SST_SIZE,
@@ -178,6 +180,7 @@ pub(crate) fn execute_compaction_at_target(
             point_eligible: plan.point_tombstone_gc_eligible,
             range_eligible: plan.range_tombstone_gc_eligible,
             retained_snapshot_sources: plan.retained_snapshot_sources,
+            compaction_time_millis: plan.compaction_time_millis,
         },
         abort_check,
         output_sink,
@@ -2523,6 +2526,7 @@ mod tests {
                 point_eligible: false,
                 range_eligible: false,
                 retained_snapshot_sources: false,
+                compaction_time_millis: None,
             },
             None,
             None,

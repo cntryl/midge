@@ -1312,6 +1312,7 @@ mod tests {
             smallest_seq: Some(5),
             largest_seq: Some(15),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             ..Default::default()
         });
 
@@ -1653,6 +1654,7 @@ mod tests {
             smallest_seq: Some(10),
             largest_seq: Some(20),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             sublevel: 0,
             read_count: std::sync::Arc::default(),
         });

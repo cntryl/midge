@@ -132,6 +132,7 @@ fn should_not_read_ssts_to_decide_wal_replay_or_retention() {
         smallest_seq: Some(1),
         largest_seq: Some(1),
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     };
     state
         .commit_flush_publication(0, 2, &output, 2, false)

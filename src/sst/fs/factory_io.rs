@@ -499,14 +499,22 @@ impl FsSstWriter {
         let mut largest_key = None;
         let mut smallest_seq = None;
         let mut largest_seq = 0;
+        let mut earliest_expiration_millis = None;
         let point_count = if let Some(streaming) = &self.streaming {
             smallest_key.clone_from(&streaming.pipeline.smallest_key);
             largest_key.clone_from(&streaming.pipeline.largest_key);
             smallest_seq = streaming.pipeline.smallest_sequence;
             largest_seq = streaming.pipeline.largest_sequence;
+            earliest_expiration_millis = streaming.pipeline.earliest_expiration_millis;
             streaming.pipeline.point_count
         } else {
             for entry in &self.entries {
+                if let Some(expiration) = entry.expiration {
+                    earliest_expiration_millis = Some(
+                        earliest_expiration_millis
+                            .map_or(expiration, |previous: u64| previous.min(expiration)),
+                    );
+                }
                 Self::update_key_bounds(&mut smallest_key, &mut largest_key, &entry.key);
                 smallest_seq =
                     Some(smallest_seq.map_or(entry.sequence, |seq: u64| seq.min(entry.sequence)));
@@ -524,6 +532,7 @@ impl FsSstWriter {
             summary: smallest_key
                 .zip(largest_key)
                 .map(|(smallest_key, largest_key)| super::SstFileSummary {
+                    earliest_expiration_millis,
                     size_bytes: 0,
                     smallest_key,
                     largest_key,
