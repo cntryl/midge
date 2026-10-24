@@ -107,14 +107,15 @@ impl RuntimeLifecycle {
     }
 
     pub(crate) fn release(&self) {
-        // Pair the counter transition with the same mutex used by the waiter.
-        // Without this lock, the final transaction can notify between the
-        // waiter's condition check and `Condvar::wait`, losing the wakeup.
-        let _wait_guard = self
-            .wait_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.active_transactions.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // Only the final release takes the wait mutex. A waiter either
+            // observes zero, or atomically releases this mutex when sleeping
+            // before we can acquire it and notify. Intermediate releases need
+            // no notification and never contend on the mutex.
+            let _wait_guard = self
+                .wait_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.wait_cv.notify_all();
         }
     }
@@ -238,5 +239,62 @@ pub(crate) struct RuntimeTransactionGuard {
 impl Drop for RuntimeTransactionGuard {
     fn drop(&mut self) {
         self.lifecycle.release();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_release_nonfinal_transaction_while_shutdown_wait_mutex_is_held() {
+        // Arrange
+        let lifecycle = Arc::new(RuntimeLifecycle::new());
+        let first = lifecycle.acquire().expect("first transaction");
+        let last = lifecycle.acquire().expect("last transaction");
+        let wait_guard = lifecycle.wait_lock.lock().unwrap();
+        let (completed, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        let worker = std::thread::spawn(move || {
+            drop(first);
+            completed.send(()).expect("report release");
+        });
+        let result = receiver.recv_timeout(Duration::from_secs(1));
+        drop(wait_guard);
+        worker.join().expect("release worker");
+
+        // Assert
+        assert!(result.is_ok(), "nonfinal release waited on global mutex");
+        assert_eq!(lifecycle.active_transaction_count(), 1);
+        drop(last);
+        lifecycle.begin_shutdown();
+        lifecycle.wait_for_transactions();
+    }
+
+    #[test]
+    fn should_wake_shutdown_when_final_release_races_wait_setup() {
+        for _ in 0..100 {
+            // Arrange
+            let lifecycle = Arc::new(RuntimeLifecycle::new());
+            let transaction = lifecycle.acquire().expect("transaction");
+            lifecycle.begin_shutdown();
+            let waiting = Arc::clone(&lifecycle);
+            let (completed, receiver) = std::sync::mpsc::channel();
+
+            // Act
+            let worker = std::thread::spawn(move || {
+                waiting.wait_for_transactions();
+                completed.send(()).expect("report drained transactions");
+            });
+            drop(transaction);
+
+            // Assert
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("final release must wake waiter");
+            worker.join().expect("shutdown waiter");
+            assert_eq!(lifecycle.active_transaction_count(), 0);
+        }
     }
 }

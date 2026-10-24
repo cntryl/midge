@@ -28,6 +28,10 @@ std::thread_local! {
 /// Shared lease validity watched independently from provider renewal I/O.
 pub(crate) struct LeaseValidity {
     state: Mutex<LeaseValidityState>,
+    /// Immutable coherent publication for read authority. Mutations are still
+    /// serialized by state; the ArcSwap release precedes condition notification.
+    /// Readers acquire one complete epoch/deadline/terminal tuple.
+    published: arc_swap::ArcSwap<LeaseValidityState>,
     changed: Condvar,
 }
 
@@ -35,6 +39,7 @@ impl LeaseValidity {
     pub(crate) fn new() -> Self {
         Self {
             state: Mutex::new(LeaseValidityState::Inactive),
+            published: arc_swap::ArcSwap::from_pointee(LeaseValidityState::Inactive),
             changed: Condvar::new(),
         }
     }
@@ -55,7 +60,7 @@ impl LeaseValidity {
             ));
         }
         *state = LeaseValidityState::Active { epoch, valid_until };
-        self.changed.notify_all();
+        self.publish_state(*state);
         Ok(())
     }
 
@@ -74,7 +79,7 @@ impl LeaseValidity {
                     epoch,
                     valid_until: candidate_until,
                 };
-                self.changed.notify_all();
+                self.publish_state(*state);
                 Ok(())
             }
             LeaseValidityState::Active {
@@ -84,7 +89,7 @@ impl LeaseValidity {
                 *state = LeaseValidityState::Fenced {
                     epoch: active_epoch,
                 };
-                self.changed.notify_all();
+                self.publish_state(*state);
                 Err(LeaseError::RenewalFailed(
                     "cloud lease renewal completed after monotonic validity was lost".to_string(),
                 ))
@@ -111,7 +116,7 @@ impl LeaseValidity {
             } if active_epoch == epoch
         ) {
             *state = LeaseValidityState::Fenced { epoch };
-            self.changed.notify_all();
+            self.publish_state(*state);
         }
     }
 
@@ -137,7 +142,7 @@ impl LeaseValidity {
                 if active_epoch == epoch
         ) {
             *state = LeaseValidityState::Inactive;
-            self.changed.notify_all();
+            self.publish_state(*state);
         }
     }
 
@@ -150,13 +155,16 @@ impl LeaseValidity {
         if let LeaseValidityState::Active { valid_until, .. } = &mut *state {
             *valid_until = Instant::now();
         }
+        self.publish_state(*state);
     }
 
     pub(crate) fn snapshot(&self) -> LeaseValidityState {
-        *self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        **self.published.load()
+    }
+
+    fn publish_state(&self, state: LeaseValidityState) {
+        self.published.store(Arc::new(state));
+        self.changed.notify_all();
     }
 
     pub(crate) fn remaining(&self, epoch: u64) -> Result<Duration, LeaseError> {
@@ -179,7 +187,7 @@ impl LeaseValidity {
                 let remaining = valid_until.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
                     *state = LeaseValidityState::Fenced { epoch };
-                    self.changed.notify_all();
+                    self.publish_state(*state);
                     Err(LeaseError::RenewalFailed(
                         "lease renewal crossed monotonic expiry".to_string(),
                     ))
@@ -206,7 +214,7 @@ impl LeaseValidity {
                 if active_epoch == epoch && valid_until <= Instant::now()
         ) {
             *state = LeaseValidityState::Fenced { epoch };
-            self.changed.notify_all();
+            self.publish_state(*state);
             true
         } else {
             false
@@ -1188,6 +1196,38 @@ mod lease_validity_tests {
     use super::{LeaseValidity, LeaseValidityState, REMAINING_CHECK_HOOK};
     use std::sync::{mpsc, Arc};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn should_capture_coherent_read_authority_while_renewal_mutex_is_held() {
+        // Arrange
+        let validity = Arc::new(LeaseValidity::new());
+        let deadline = Instant::now() + Duration::from_secs(60);
+        validity.activate(7, deadline).expect("activate");
+        let writer_guard = validity.state.lock().unwrap();
+        let reader = Arc::clone(&validity);
+        let (completed, receiver) = mpsc::channel();
+
+        // Act
+        let worker = std::thread::spawn(move || {
+            completed.send(reader.snapshot()).expect("report authority");
+        });
+        let captured = receiver.recv_timeout(Duration::from_secs(1));
+        drop(writer_guard);
+        worker.join().expect("authority reader");
+
+        // Assert
+        assert_eq!(
+            captured.expect("read authority must not lock renewal"),
+            LeaseValidityState::Active {
+                epoch: 7,
+                valid_until: deadline
+            }
+        );
+        validity.fence(7);
+        assert_eq!(validity.snapshot(), LeaseValidityState::Fenced { epoch: 7 });
+        validity.deactivate(7);
+        assert_eq!(validity.snapshot(), LeaseValidityState::Inactive);
+    }
 
     #[test]
     fn should_fence_only_current_expiry_when_acquisitions_change() {

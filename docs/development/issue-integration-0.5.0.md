@@ -488,3 +488,21 @@ fail closed. Active takeover/initialization regressions cover these boundaries.
 Failpoint test targets compile. Versioned shared-codec delta objects, cached
 common-path request counts, retention on their exact dependency closure and the
 crash campaign remain pending.
+
+### #923: read-path contention candidate implemented
+
+Only the final transaction release takes the shutdown wait mutex; its
+condition-check/notification ordering still excludes a lost wakeup. Lease
+mutations publish an immutable ArcSwap tuple of epoch, deadline and terminal
+state before notifying waiters, so ordinary read-authority snapshots avoid the
+renewal mutex. Existing before/after read and per-row checks remain intact.
+Normal unpin updates one generation count instead of scanning all active
+snapshots. Last-generation release tracks every filename across distinct live
+generations; GC still samples the authoritative active-pin union under the
+capture/registration exclusion boundary.
+
+Active regressions cover nonfinal release with the wait mutex held, final
+release racing wait setup, coherent authority reads with renewal locked, and
+10,000 snapshots across generations sharing a filename. Failpoint test targets
+compile. Existing read-fencing and #341/#342 tests are retained unchanged;
+execution and the named 32-client A/B target/evidence remain pending acceptance.
