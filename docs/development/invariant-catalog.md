@@ -5,10 +5,11 @@ across writes, reads, background work, recovery, and provider operations. It
 extends the narrower [storage invariants](storage-invariants.md) page. It does
 not attempt to list every local helper precondition or Rust type invariant.
 
-The initial inventory was recorded during the #707/#708 work. This update
-refreshes only WAL-2/3/4/5 and CLOUD-3/5 for the WAL redesign contracts; other
-rows retain their existing references. Source references and SHA256 postimages
-identify the implementation revision recorded in the accompanying inventory.
+The initial inventory was recorded during the #707/#708 work. The current
+reference refresh retains all catalog IDs and records current symbols,
+assertions, fixture scopes and explicit deferrals across the 0.5.0 changes.
+Source references and SHA256 postimages identify the implementation revision
+recorded in the accompanying inventory; they do not qualify its behavior.
 Historical qualification objects retain their recorded source and outcomes;
 they do not qualify a later revision.
 The retained nine-cell outcome, original readback digest and #730/#731
@@ -59,6 +60,11 @@ Owners: `src/engine/api/transaction.rs`, `src/runtime/read_snapshot.rs`,
 `tests/discovery_model.rs`. The public contract is in
 [`transaction-durability-contract.md`](../user-guides/transaction-durability-contract.md)
 and [`transactions-and-mvcc.md`](../transactions-and-mvcc.md).
+
+TTL visibility follows the reader's captured clock. Compaction preserves raw
+expiration metadata so permitted clock correction does not become permanent
+data loss. Destructive TTL-driven SST reclamation is deferred under #912;
+elapsed expiry alone is not a claim of physical purge.
 
 ### Commit durability and WAL recovery
 
@@ -124,6 +130,14 @@ Evidence includes `tests/cloud_core.rs`, provider contract and engine
 qualification suites, cloud recovery tests, and the native Sqrzl evidence in
 [`roadmap-0.3.1.md`](roadmap-0.3.1.md). The boundary of emulator evidence is
 defined in [`cloud-qualification-policy.md`](cloud-qualification-policy.md).
+
+The #910 overlap regressions separate controlled storage latency from real
+filesystem evidence. The controlled cases require the actual flush response
+within 100 ms while an earlier provider effect remains held for two seconds;
+separate real-filesystem schedules require owner release and exact cold recovery
+before that effect is released. They do not establish a real hardware latency
+bound. The [publication guide](metadata-publication-910.md) keeps #910's hardware
+timing and performance acceptance open.
 
 ### Column-family lifecycle and backup/restore
 
@@ -265,7 +279,7 @@ device bytes. Final fourteen hours follow the final merged #711 source.
 | Transaction spill lookup scaling | The accepted #681 design retains matching-run point probes and does not implement the original eight-source sorted spill view or upfront auxiliary scratch reservation. Correctness and configured-budget checks passed, but the original stronger read-work bound was not shipped. | Add deterministic lookup-work/read-source counters to any future scaling claim and measure resident plus heavily spilled transactions. |
 | Cloud replay locality | The accepted #682 design bounds retained readers/blocks but clears them at checkpoints. Release cold-recovery evidence improved ranges and bytes substantially; it is not a same-host latency comparison or production SLO. | Keep the configured budget as the safety gate and rerun the native cold-recovery workload when changing cache retention. |
 | Compaction caller deadline | Delivered #714 captures one immutable manual origin through queueing, multi-CF work, cooperative compute/output staging, native operations and publication phases. Later waiters cannot replace the owner. Background None keeps its ordinary callerless policy. A caller can still time out while accepted work retains storage/lease ownership. | Preserve typed Timeout, ambiguous CAS recovery and safe joins; do not interpret deadline expiry as provider cancellation or claim preemption of a blocked local syscall. |
-| Startup aggregate deadline | Delivered #713 adds optional open_timeout (default None), one original deadline, scoped native/local recovery and prepared-runtime acceptance. Expired startup cannot admit a late runtime, and genuinely uncertain lease acquisition stays LeaseIndeterminate while cleanup retains ownership. | Preserve None/Complete compatibility and typed Timeout through strict/salvage; local calls are checked cooperatively rather than forcibly interrupted. |
+| Startup aggregate deadline | Delivered #713 adds optional open_timeout (default None), one original deadline, scoped native/local recovery and prepared-runtime acceptance. Expired startup cannot admit a late runtime, and genuinely uncertain lease acquisition stays LeaseIndeterminate while cleanup retains ownership. | Preserve None/Complete compatibility and typed Timeout through strict/salvage. #982 separates real 600 ms native elapsed-time checks from controlled prepared-runtime cancellation; see [fixture scope](startup-deadline-982.md). Local calls are checked cooperatively rather than forcibly interrupted. |
 | Directory-entry durability for deletion | Unix object deletion does not sync the parent directory. A crash can resurrect obsolete bytes. Manifest/catalog authority keeps them inactive, so the classified risk is a storage leak rather than data loss; bounded cleanup is not guaranteed by this behavior. | Revisit if a hard storage-reclamation bound becomes a supported contract. |
 | Provider environment scope | Sqrzl qualifies modeled provider protocol behavior. It cannot establish a deployment's IAM, quotas, network policy, lifecycle rules, availability, or capacity. | Treat environment-specific qualification as a deployment acceptance item, not as repository CI evidence. |
 | Documentation freshness | #724 aligns identified present-tense current-version claims to Cargo.toml 0.3.1 and labels the superseded historical roadmap section. Historical and migration 0.3.0 references remain intentional. | Continue distinguishing current contracts, historical examples and final exact-source qualification; do not rewrite history as current evidence. |
