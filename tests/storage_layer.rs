@@ -417,7 +417,7 @@ mod sst_regressions {
                     assert_eq!(after.wal_append_count, before.wal_append_count);
                     let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
                     assert_eq!(read.get(&index.to_be_bytes()).unwrap(), None);
-                    let previous_anchor = index.checked_sub(1).map(|index| index.to_be_bytes());
+                    let previous_anchor = index.checked_sub(1).map(u32::to_be_bytes);
                     assert_eq!(
                         read.get(L0_PRESSURE_ANCHOR).unwrap().as_deref(),
                         previous_anchor.as_ref().map(<[u8; 4]>::as_slice)
