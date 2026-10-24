@@ -15,6 +15,9 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+const MAX_SST_DELETE_WORKERS: usize = 2;
+const MAX_SSTS_PER_DELETE_WORKER: usize = 8;
+
 struct SstDeleteWorker {
     worker: JoinHandle<()>,
     names: Vec<String>,
@@ -212,6 +215,13 @@ impl GcActor {
                     );
                     continue;
                 };
+                if cloud_sst_deletes.len() >= MAX_SSTS_PER_DELETE_WORKER
+                    || self.cloud_delete_workers.len() >= MAX_SST_DELETE_WORKERS
+                {
+                    self.retain_protected_sst_delete(sst_name);
+                    skipped_count += 1;
+                    continue;
+                }
                 if self.inflight_sst_deletes.lock().insert(sst_name.clone()) {
                     cloud_sst_deletes.push(original.clone());
                 }

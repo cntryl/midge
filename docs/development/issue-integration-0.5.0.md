@@ -864,3 +864,15 @@ and ignore unrelated stale errors without settling active ownership or files.
 Test targets compile cleanly. Held-two-worker/fairness/budget production-loop
 regressions are the next slice; execution, crash and A/B qualification remain
 pending. The global publication gate remains for #910's protocol change.
+
+#943's general SST sweep now captures immutable per-family startup allocation
+floors before replay/prewarm and binds them to the acquired epoch. Only canonical
+older generations with complete exclusion from local/selected manifests,
+snapshots, intents, retired obligations, active jobs and pending names can be
+probed. Class-specific inventory owners feed bounded pages and an eight-probe
+conditional-deletion pass on the existing worker. Unknown proof retains data;
+late predecessor PUTs can recreate only an unreachable leak for a later pass.
+Active tests cover floor/prewarm separation, pin/intent/pending-job protection,
+malformed references, bounded page tails, replacement identity and rediscovery.
+Combined test targets compile; execution/crash/provider gates remain pending.
+Catalog-anchor WAL rediscovery is the next isolated slice.

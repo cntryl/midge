@@ -394,6 +394,12 @@ pub struct RuntimeMetricsSnapshot {
     /// Elapsed nanoseconds in the currently active stall, or zero. Gauge.
     pub write_stall_active_ns: u64,
     pub cloud_async_wal_segments_sealed: u64,
+    /// Bounded remote orphan discovery attempts, including deferred work.
+    pub cloud_orphan_list_attempts: u64,
+    pub cloud_orphan_probes: u64,
+    pub cloud_orphan_delete_attempts: u64,
+    pub cloud_orphan_retained: u64,
+    pub cloud_orphan_inventory_unavailable: u64,
     pub cloud_async_wal_bytes_sealed: u64,
     pub cloud_async_wal_seal_latency_us: u64,
     pub cloud_async_wal_uploads_started: u64,

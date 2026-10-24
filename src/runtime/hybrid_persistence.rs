@@ -21,6 +21,7 @@ mod catalog;
 pub(crate) mod metadata_chain;
 mod metadata_retention;
 mod metadata_snapshot;
+mod orphan_sweep;
 mod retired_sst;
 use crate::storage::hybrid::backend::ControlObject;
 pub(crate) use catalog::refusal_error;
@@ -33,6 +34,11 @@ pub(crate) use metadata_snapshot::{
     read_committed_metadata_bodies_within, CloudMetadataMirrorAuthority,
     CloudMetadataMirrorContext, MetadataMirrorCache, SharedMetadataSnapshot,
     SharedRetirementAuthority,
+};
+pub(crate) use orphan_sweep::visit_intent_sources;
+pub(crate) use orphan_sweep::{
+    sweep_sst_orphans_within, InventoryCursor, OrphanSweepContext, OrphanSweepProgress,
+    SstOrphanProtection,
 };
 
 /// Why a WAL upload could not be verified or published (#841).

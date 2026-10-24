@@ -70,6 +70,10 @@ impl EventLoop {
         let publication_lock = self.publication.metadata_publication_lock.clone();
         let storage = self.actors.cloud_coordinator.hybrid_storage.clone();
         let epoch = self.state.writer_epoch;
+        let sweep = match &continuation {
+            MirrorContinuation::OrphanSweep(task) => Some(task.clone()),
+            _ => None,
+        };
         let (result_tx, result) = crossbeam::channel::bounded(1);
         let worker = std::thread::Builder::new()
             .name("midge-metadata-mirror".into())
@@ -91,7 +95,16 @@ impl EventLoop {
                     },
                     |deadline| fence.validate_within(deadline),
                 )
-                .and_then(|()| fence.check_health());
+                .and_then(|()| fence.check_health())
+                .and_then(|()| {
+                    if let Some(sweep) = sweep {
+                        let storage = storage.as_deref().ok_or_else(|| {
+                            MidgeError::Fenced("orphan sweep lost its storage owner".into())
+                        })?;
+                        sweep.execute(storage, &cloud, &publication_lock, &fence, &deadline)?;
+                    }
+                    fence.check_health()
+                });
                 crate::failpoints::fail_point!("midge::metadata_mirror::before_completion");
                 let _ = result_tx.send(outcome);
                 if let Some(storage) = storage {

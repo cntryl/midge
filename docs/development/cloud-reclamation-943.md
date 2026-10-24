@@ -34,18 +34,47 @@ hydration, original-only bounded reads, replacement retention, missing checksums
 final writer fencing, stale completion identities and snapshot pin release.
 The implementation-first pass has not executed these tests or crash campaigns.
 
-General orphan discovery remains disabled. A proposed conservative discovery
-policy would freeze each family's durable allocation floor immediately after
-takeover and hydration, before successor prewarming or reservation. Only names
-below that immutable floor could be candidates. The current manifest, live
-snapshot sources, compaction inputs, every durable publication intent, pending
-mirror continuations and admitted effects must be captured under publication
-and pin-acquisition exclusion. Current-epoch unpublished uploads stay protected
-until a later takeover establishes a floor. A delayed predecessor upload can
-recreate an unreachable object, so repeated bounded discovery is still needed.
+General SST orphan discovery freezes each family's durable allocation floor
+during recovery, before successor replay output, prewarming or reservation.
+The runtime binds this immutable floor to its acquired epoch. A moving
+`next_sst_seqs` counter never expands orphan authority. Missing family bounds,
+unrecognized names and an epoch mismatch retain objects.
+
+The periodic mirror continuation captures current manifest names, durable
+retired proofs, live snapshot sources, all publication intents, concurrent
+compaction inputs/prepared names/output generations and pending mirror
+compaction/flush work. Snapshot acquisition exclusion closes the source-capture
+to pin-registration gap. The manifest publication gate stays owned through the
+worker. Before deletion, the worker also reads and verifies the current selected
+metadata closure and intent bytes, and freshly validates both lease and pointer.
+Uncertain reference reads retain the candidate. Maintenance memory bounds the
+captured set and decoded shared references.
+
+Only canonical names strictly below the frozen floor and absent from every
+protected source are candidates. Successor admissions start at or above that
+floor. A new compaction cannot reference an absent source; existing jobs and
+pending cuts were captured. A later successor claims the selected metadata
+before serving work. Consequently these keys cannot become selected after the
+final check. This is distinct from a known-retired identity: the sweeper can
+HEAD and conditionally delete a permanently unreachable key, while the known
+queue still requires its original checksum and never upgrades a replacement.
+Current-epoch unpublished uploads stay protected until a later takeover
+establishes a floor. A delayed predecessor PUT can recreate only an unreachable
+leak; repeated bounded inventory cycles revisit it.
+
+Each interval retains at most one 32-key inventory page and performs at most
+eight candidate probes/deletes. Unprobed keys remain with the cursor until the
+next interval. Unsupported bounded-page inventories retain/defer; full-prefix
+LIST is never a fallback. Native LIST pages make one physical request with
+retries disabled and a 64 KiB response limit. Engine runtime metrics report
+`cloud_orphan_list_attempts`, `cloud_orphan_probes`,
+`cloud_orphan_delete_attempts`, `cloud_orphan_retained` and
+`cloud_orphan_inventory_unavailable`. Probe/delete transport failures retain
+the durable discovery source; their existing provider retry/deadline policy
+remains applicable. Known-retired work admits at most two workers and eight
+identities per worker, retaining the rest for scheduled retry.
 
 The durable catalog anchor can separately rediscover retired WAL objects; that
-discovery scan is also outstanding. Neither metadata retention nor the durable
-SST queue enables these broader scans. Public hybrid snapshot-across-compaction,
+discovery scan is still outstanding. Public hybrid snapshot-across-compaction,
 delayed predecessor effects, failure campaigns and request-budget qualification
 remain #943 acceptance gates.

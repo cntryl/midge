@@ -1,6 +1,6 @@
 //! Idle scheduling keeps bounded cleanup independent of future metadata writes.
 
-use super::{EventLoop, MirrorContinuation};
+use super::EventLoop;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
@@ -31,12 +31,8 @@ impl EventLoop {
             return;
         }
         let deadline = self.event_loop_cloud_deadline();
-        let result = self.start_metadata_mirror(
-            MirrorContinuation::Auxiliary {
-                context: "periodic cloud metadata retention".into(),
-            },
-            deadline,
-        );
+        let continuation = self.periodic_retention_continuation();
+        let result = self.start_metadata_mirror(continuation, deadline);
         let pipeline = &mut self.actors.cloud_coordinator.metadata_mirror;
         let delay = if let Err(error) = result {
             tracing::debug!(%error, "cloud metadata retention remains scheduled");

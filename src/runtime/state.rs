@@ -149,6 +149,10 @@ pub(crate) struct SstNameAllocation {
     pub(crate) cursor: HashMap<crate::types::ColumnFamilyId, u64>,
     pub(crate) reserved_through: HashMap<crate::types::ColumnFamilyId, u64>,
     pub(crate) prefetch_retry_at: Option<std::time::Instant>,
+    /// Captured from recovered authority before this session reserves any
+    /// output name. Never derive orphan eligibility from the moving counter.
+    pub(crate) startup_floor: HashMap<crate::types::ColumnFamilyId, u64>,
+    pub(crate) startup_floor_epoch: Option<u64>,
 }
 
 /// WAL state
@@ -826,6 +830,11 @@ impl RuntimeState {
             write_stall_ns_max: gauges.write_stall_ns_max,
             write_stall_active_ns: gauges.write_stall_active_ns,
             cloud_async_wal_segments_sealed: telemetry.cloud_async_wal_segments_sealed,
+            cloud_orphan_list_attempts: telemetry.cloud_orphan_list_attempts,
+            cloud_orphan_probes: telemetry.cloud_orphan_probes,
+            cloud_orphan_delete_attempts: telemetry.cloud_orphan_delete_attempts,
+            cloud_orphan_retained: telemetry.cloud_orphan_retained,
+            cloud_orphan_inventory_unavailable: telemetry.cloud_orphan_inventory_unavailable,
             cloud_async_wal_bytes_sealed: telemetry.cloud_async_wal_bytes_sealed,
             cloud_async_wal_seal_latency_us: telemetry.cloud_async_wal_seal_latency_us,
             cloud_async_wal_uploads_started: telemetry.cloud_async_wal_uploads_started,

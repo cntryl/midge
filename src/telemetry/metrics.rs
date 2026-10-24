@@ -120,6 +120,11 @@ pub struct Metrics {
     #[cfg(test)]
     pub cloud_downloads: Arc<AtomicU64>,
     pub cloud_bytes_uploaded: Arc<AtomicU64>,
+    pub cloud_orphan_list_attempts: Arc<AtomicU64>,
+    pub cloud_orphan_probes: Arc<AtomicU64>,
+    pub cloud_orphan_delete_attempts: Arc<AtomicU64>,
+    pub cloud_orphan_retained: Arc<AtomicU64>,
+    pub cloud_orphan_inventory_unavailable: Arc<AtomicU64>,
     #[cfg(test)]
     pub cloud_bytes_downloaded: Arc<AtomicU64>,
 
@@ -231,6 +236,11 @@ impl Metrics {
             #[cfg(test)]
             cloud_downloads: Arc::new(AtomicU64::new(0)),
             cloud_bytes_uploaded: Arc::new(AtomicU64::new(0)),
+            cloud_orphan_list_attempts: Arc::new(AtomicU64::new(0)),
+            cloud_orphan_probes: Arc::new(AtomicU64::new(0)),
+            cloud_orphan_delete_attempts: Arc::new(AtomicU64::new(0)),
+            cloud_orphan_retained: Arc::new(AtomicU64::new(0)),
+            cloud_orphan_inventory_unavailable: Arc::new(AtomicU64::new(0)),
             #[cfg(test)]
             cloud_bytes_downloaded: Arc::new(AtomicU64::new(0)),
 
@@ -807,6 +817,13 @@ impl Metrics {
             cloud_downloads: self.cloud_downloads.load(Ordering::Relaxed),
             #[cfg(test)]
             cloud_bytes_uploaded: self.cloud_bytes_uploaded.load(Ordering::Relaxed),
+            cloud_orphan_list_attempts: self.cloud_orphan_list_attempts.load(Ordering::Relaxed),
+            cloud_orphan_probes: self.cloud_orphan_probes.load(Ordering::Relaxed),
+            cloud_orphan_delete_attempts: self.cloud_orphan_delete_attempts.load(Ordering::Relaxed),
+            cloud_orphan_retained: self.cloud_orphan_retained.load(Ordering::Relaxed),
+            cloud_orphan_inventory_unavailable: self
+                .cloud_orphan_inventory_unavailable
+                .load(Ordering::Relaxed),
             #[cfg(test)]
             cloud_bytes_downloaded: self.cloud_bytes_downloaded.load(Ordering::Relaxed),
             #[cfg(test)]
@@ -898,6 +915,11 @@ pub struct MetricsSnapshot {
     pub cloud_downloads: u64,
     #[cfg(test)]
     pub cloud_bytes_uploaded: u64,
+    pub cloud_orphan_list_attempts: u64,
+    pub cloud_orphan_probes: u64,
+    pub cloud_orphan_delete_attempts: u64,
+    pub cloud_orphan_retained: u64,
+    pub cloud_orphan_inventory_unavailable: u64,
     #[cfg(test)]
     pub cloud_bytes_downloaded: u64,
     #[cfg(test)]

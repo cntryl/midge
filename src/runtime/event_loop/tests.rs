@@ -231,8 +231,23 @@ pub(in crate::runtime::event_loop) fn create_test_event_loop(
 pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
     storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
 ) -> crate::common::MidgeResult<EventLoop> {
+    create_test_cloud_event_loop_with_reserved_names(storage_policy, None)
+}
+
+pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_reserved_names(
+    storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
+    next_sst: Option<u64>,
+) -> crate::common::MidgeResult<EventLoop> {
     let db_path = unique_test_db_path("midge_event_loop_cloud");
     std::fs::create_dir_all(&db_path).expect("create temp cloud event loop dir");
+    if let Some(next) = next_sst {
+        let fs = crate::io::real::test_root(&db_path);
+        crate::metadata::ensure_or_create_format_marker(&fs, &db_path)?;
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.next_sst_seqs.insert(0, next);
+        crate::metadata::ManifestPersistence::save_with_fs(&fs, &manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+    }
 
     // The history starts under the event loop's lease, so its first segment
     // stays open.
@@ -246,10 +261,12 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
         cloud.clone(),
         Duration::from_secs(5),
     ));
+    let inventory: Arc<dyn crate::storage::inventory::ObjectInventory> = cloud.clone();
     let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
         cloud,
         storage_policy,
     ));
+    hybrid_storage.configure_object_inventories(Arc::clone(&inventory), inventory)?;
     let store: Arc<dyn crate::lease::LeaderStore> =
         Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
             crate::io::real::test_root(db_path.join("cloud_store")),

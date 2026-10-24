@@ -1140,6 +1140,9 @@ impl RuntimeStorageMaterialization {
             );
         hybrid_storage.set_immutable_retry_policy(retry);
         let hybrid_storage = Arc::new(hybrid_storage);
+        hybrid_storage
+            .configure_object_inventories(wal_storage.clone(), sst_storage.clone())
+            .expect("fresh provider storage has no inventory owner");
         // The remote block cache holds its share outside this ledger (#938).
         let budget = opts.local_storage_budget_bytes();
         hybrid_storage.enable_ephemeral_sst_cache(budget - remote_block_cache_share(budget));

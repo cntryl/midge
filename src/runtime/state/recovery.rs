@@ -216,6 +216,7 @@ impl RuntimeState {
         let recovered_compaction_output_generation =
             Self::manifest_compaction_output_generation_floor(&manifest)
                 .max(wal_recovery.recovered_sequence);
+        let startup_sst_floor = manifest.next_sst_seqs.clone();
 
         let accounting = crate::metadata::accounting::Owner::new();
         let accounting_medium = if persistence.is_memory() {
@@ -242,7 +243,10 @@ impl RuntimeState {
                 accounting,
                 accounting_medium,
             )),
-            sst_names: super::SstNameAllocation::default(),
+            sst_names: super::SstNameAllocation {
+                startup_floor: startup_sst_floor,
+                ..Default::default()
+            },
             recovery_sst_fs: None,
             salvaged_local_ssts: std::collections::HashSet::new(),
             ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),

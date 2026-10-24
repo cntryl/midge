@@ -1,6 +1,7 @@
 use super::EventLoop;
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 
+mod orphans;
 mod retention;
 #[cfg(all(test, feature = "failpoints"))]
 mod tests;
@@ -11,6 +12,7 @@ pub(super) enum MirrorContinuation {
     Auxiliary { context: String },
     SstReservation { cf_id: u32, next_seq: u64 },
     Reclamation,
+    OrphanSweep(orphans::OrphanSweepTask),
 }
 
 pub(super) struct MetadataMirrorJob {
@@ -30,6 +32,7 @@ pub(super) struct MetadataMirrorPipeline {
     pub(super) pending_flush: Option<u64>,
     retention_due: std::time::Instant,
     retention_interval: std::time::Duration,
+    orphan_cursor: crate::runtime::hybrid_persistence::InventoryCursor,
 }
 
 impl Default for MetadataMirrorPipeline {
@@ -42,6 +45,7 @@ impl Default for MetadataMirrorPipeline {
             pending_flush: None,
             retention_due: std::time::Instant::now() + retention_interval,
             retention_interval,
+            orphan_cursor: Default::default(),
         }
     }
 }
@@ -243,6 +247,21 @@ impl EventLoop {
             }
             MirrorContinuation::Reclamation => {
                 super::gc::GcCoordinator::finish_manifest_reclamation(self, result)
+            }
+            MirrorContinuation::OrphanSweep(task) => {
+                if let Err(error) = result {
+                    tracing::debug!(%error, "orphan sweep retained uncertain work");
+                } else if let Some(progress) = task.take_progress() {
+                    tracing::debug!(
+                        pages = progress.pages,
+                        probes = progress.probes,
+                        deleted = progress.deleted,
+                        retained = progress.retained,
+                        unavailable = progress.unavailable,
+                        "bounded remote orphan sweep complete"
+                    );
+                    self.actors.cloud_coordinator.metadata_mirror.orphan_cursor = progress.cursor;
+                }
             }
         }
     }

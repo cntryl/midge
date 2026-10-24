@@ -240,3 +240,50 @@ fn should_retain_remote_snapshot_source_until_its_final_pin_is_released() {
     assert!(fixture.remote().is_none());
     assert!(fixture.state.manifest.retired_ssts.is_empty());
 }
+
+#[test]
+fn should_defer_retired_identity_tail_when_delete_batch_exceeds_eight() {
+    // Arrange: recovered obligations may already be physically absent, but
+    // every identity still needs its own terminal absence confirmation.
+    let mut fixture = Fixture::new();
+    let mut names = vec![fixture.file.name.clone()];
+    for sequence in 20..28 {
+        let mut file = fixture.file.clone();
+        file.name = crate::cloud_layout::file_name(0, 1, sequence);
+        file.sst_seq = sequence;
+        names.push(file.name.clone());
+        fixture
+            .state
+            .manifest
+            .test_mut()
+            .retired_ssts
+            .insert(file.name.clone(), file);
+    }
+    let checkpoint = fixture
+        .state
+        .manifest_store
+        .save_snapshot(&fixture.state.manifest)
+        .unwrap();
+    fixture.state.manifest.adopt_checkpoint(checkpoint);
+    let mut actor = GcActor::new();
+
+    // Act
+    actor.delete_ssts(
+        &mut fixture.state,
+        &names,
+        Some(Arc::clone(&fixture.storage)),
+    );
+    actor.shutdown_workers();
+
+    // Assert: eight terminal operations cannot consume the ninth obligation.
+    assert_eq!(actor.pending_obsolete.len(), 1);
+    assert!(fixture
+        .state
+        .manifest
+        .retired_ssts
+        .contains_key(names.last().unwrap()));
+    actor.retry_pending(&mut fixture.state, Some(Arc::clone(&fixture.storage)));
+    actor.shutdown_workers();
+    actor.retry_pending(&mut fixture.state, Some(Arc::clone(&fixture.storage)));
+    assert!(fixture.state.manifest.retired_ssts.is_empty());
+}

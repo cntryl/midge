@@ -289,6 +289,10 @@ impl EventLoop {
         let sst_factory = resources.factory;
         let read_resources = resources.reads;
         state.writer_epoch = config.writer_epoch;
+        state
+            .sst_names
+            .startup_floor_epoch
+            .get_or_insert(config.writer_epoch);
         let (flush_completion_tx, flush_worker_result_rx) =
             crossbeam::channel::unbounded::<FlushWorkerResult>();
         let (compaction_publish_actor, compaction_publish_result_rx) =

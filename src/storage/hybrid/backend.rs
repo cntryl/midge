@@ -56,7 +56,9 @@ use std::time::{Duration, Instant};
 mod control_io;
 pub(crate) use control_io::{ControlObject, ControlWriteFailure};
 mod file_publication;
+mod inventory;
 pub(crate) use file_publication::ImmutableFileSource;
+use inventory::ObjectInventories;
 mod object_io;
 mod proofs;
 mod publication;
@@ -176,6 +178,7 @@ pub struct HybridStorage {
     wal_catalog_cache: Mutex<Option<(ControlObject, StorageObjectMetadata)>>,
     maintenance_memory: std::sync::OnceLock<crate::common::resource_budget::ResourceBudget>,
     write_authority: std::sync::OnceLock<StorageWriteAuthority>,
+    object_inventories: std::sync::OnceLock<ObjectInventories>,
 
     /// Remote WAL prune workers are tracked so shutdown can join them before
     /// releasing the lease that fenced their conditional deletes.
@@ -374,6 +377,7 @@ impl HybridStorage {
             wal_catalog_cache: Mutex::new(None),
             maintenance_memory: std::sync::OnceLock::new(),
             write_authority: std::sync::OnceLock::new(),
+            object_inventories: std::sync::OnceLock::new(),
             prune_workers: Arc::new(Mutex::new(PruneWorkerRegistry::new(
                 limits.prune_workers,
                 limits.prune_requests,
