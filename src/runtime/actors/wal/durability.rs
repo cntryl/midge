@@ -386,13 +386,11 @@ impl WalActor {
         )
     }
 
-    /// Flush and fsync a cloud-staging WAL only when its complete configured I/O wait can
-    /// still fit inside the shared operation deadline.
+    /// Flush and fsync a cloud-staging WAL within the shared operation deadline.
     ///
-    /// The filesystem writer treats an in-progress flush timeout as a sticky
-    /// write failure because completion is ambiguous. Refusing before it starts
-    /// keeps a short caller budget from poisoning an otherwise healthy writer;
-    /// the unchanged active segment can be retried by callerless maintenance.
+    /// The per-I/O timeout caps the shared remaining budget; a shorter caller
+    /// deadline still permits a fast sync. An accepted sync timeout is sticky:
+    /// the actor fences and retains the writer until admitted effects drain.
     ///
     /// Requires a [`WalSealTicket`]: the flush leaves the actor in the
     /// `CloudFlush` transition until the paired rotate or cancel, so it may
@@ -410,23 +408,24 @@ impl WalActor {
         self.begin_io_transition(WalTransitionOperation::CloudFlush)?;
 
         if self.writer().is_some() {
-            if deadline.is_bounded() && deadline.remaining() < self.storage_io_timeout {
+            let Some(io_timeout) = deadline.clamp_nonzero(self.storage_io_timeout) else {
                 self.finish_io_transition()?;
                 return Err(crate::common::MidgeError::Timeout(format!(
-                    "insufficient operation budget for WAL flush: remaining={:?}, required={:?}",
-                    deadline.remaining(),
-                    self.storage_io_timeout
+                    "operation deadline exhausted before WAL flush: remaining={:?}",
+                    deadline.remaining()
                 )));
-            }
+            };
             // Sealing advances local_durable_seq, and cloud recovery treats a
             // local sealed segment as complete. Fsync here (one barrier per
             // sealed segment, not per write) so power loss cannot leave a
             // torn sealed file.
-            let io_timeout = self.storage_io_timeout;
-            let sync_result = self
-                .writer_mut()
-                .ok_or_else(|| MidgeError::Internal("WAL writer disappeared during flush".into()))?
-                .sync_with_timeout(io_timeout);
+            let sync_result = Self::sync_failure_boundary().and_then(|()| {
+                self.writer_mut()
+                    .ok_or_else(|| {
+                        MidgeError::Internal("WAL writer disappeared during flush".into())
+                    })?
+                    .sync_with_timeout(io_timeout)
+            });
             if let Err(error) = sync_result {
                 self.fence_transition(state, format!("WAL seal fsync failed: {error}"));
                 return Err(error);

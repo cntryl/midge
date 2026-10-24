@@ -2267,9 +2267,11 @@ fn should_fsync_active_segment_before_sealing_cloud_async_wal() -> MidgeResult<(
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     let syncs_before_seal = durable_syncs.load(std::sync::atomic::Ordering::SeqCst);
     let ticket = seal_ticket_for_test(&wal_actor, &state);
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(1));
+    assert!(deadline.remaining() < wal_actor.storage_io_timeout);
 
     // Act
-    wal_actor.flush_for_cloud_upload(&mut state, &ticket)?;
+    wal_actor.flush_for_cloud_upload_within(&mut state, &deadline, &ticket)?;
 
     // Assert
     assert!(
