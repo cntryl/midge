@@ -384,6 +384,10 @@ fn create_column_family_during_write_flood(
 
 #[test]
 fn should_process_shutdown_promptly_given_continuous_write_flood_when_shutdown_requested() {
+    crate::failpoints::with_read_gate(verify_shutdown_during_continuous_write_flood);
+}
+
+fn verify_shutdown_during_continuous_write_flood() {
     // Arrange
     let temp_dir = tempfile::TempDir::new().expect("create runtime directory");
     let (runtime, _) = Runtime::new();

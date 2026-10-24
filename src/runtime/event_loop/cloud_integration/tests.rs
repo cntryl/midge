@@ -3079,6 +3079,10 @@ fn should_keep_event_loop_responsive_when_cloud_metadata_proof_times_out(
 #[test]
 fn should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout(
 ) -> crate::common::MidgeResult<()> {
+    crate::failpoints::with_read_gate(verify_catalog_retirement_after_uncertain_prune)
+}
+
+fn verify_catalog_retirement_after_uncertain_prune() -> crate::common::MidgeResult<()> {
     // Arrange: the provider commits the catalog retirement, then withholds its
     // CAS callback until the maintenance deadline expires.
     let mut el = create_test_cloud_event_loop(

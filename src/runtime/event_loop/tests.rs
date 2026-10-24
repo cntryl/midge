@@ -2219,6 +2219,10 @@ fn should_maintain_router_reference() {
 #[test]
 fn should_sleep_until_cloud_seal_deadline_without_spinning_given_subthreshold_wal(
 ) -> crate::common::MidgeResult<()> {
+    crate::failpoints::with_read_gate(verify_subthreshold_cloud_seal_wait)
+}
+
+fn verify_subthreshold_cloud_seal_wait() -> crate::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
