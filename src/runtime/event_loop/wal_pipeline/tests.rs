@@ -9,14 +9,15 @@ use std::time::Instant;
 struct HeldSync {
     reached: Receiver<()>,
     release: Sender<()>,
+    hook: &'static str,
 }
 
 impl HeldSync {
-    fn new() -> Self {
+    fn at(hook: &'static str) -> Self {
         let (entered, reached) = crossbeam::channel::bounded(1);
         let (release, released) = crossbeam::channel::unbounded();
         let calls = Arc::new(AtomicUsize::new(0));
-        fail::cfg_callback("midge::wal::before_physical_sync", move || {
+        fail::cfg_callback(hook, move || {
             if calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 entered.send(()).expect("signal held physical sync");
                 released
@@ -25,14 +26,18 @@ impl HeldSync {
             }
         })
         .expect("configure physical sync hold");
-        Self { reached, release }
+        Self {
+            reached,
+            release,
+            hook,
+        }
     }
 }
 
 impl Drop for HeldSync {
     fn drop(&mut self) {
         let _ = self.release.send(());
-        fail::remove("midge::wal::before_physical_sync");
+        fail::remove(self.hook);
     }
 }
 
@@ -98,12 +103,33 @@ fn begin_snapshot(
 
 #[test]
 fn should_serve_old_cut_and_queue_later_writes_when_strict_fsync_is_held() -> MidgeResult<()> {
+    assert_ordered_progress_when_held("midge::wal::before_physical_sync")
+}
+
+#[test]
+fn should_serve_old_cut_and_queue_later_writes_when_writer_encoding_is_held() -> MidgeResult<()> {
+    assert_ordered_progress_when_held("midge::wal::before_writer_encode")
+}
+
+fn wait_for_hold(event_loop: &mut EventLoop, held: &HeldSync) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        event_loop.progress_wal_pipeline();
+        if held.reached.try_recv().is_ok() {
+            return;
+        }
+        assert!(Instant::now() < deadline, "writer did not reach held stage");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn assert_ordered_progress_when_held(hook: &'static str) -> MidgeResult<()> {
     // Arrange: construct the !Send loop on its owning thread. The physical
     // writer inherits this test's failpoint gate and owns the native effect.
     let _guard = crate::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
-    let held = HeldSync::new();
+    let held = HeldSync::at(hook);
     let strict = event_loop.routing.router.register(94_000, "strict group");
     let later = event_loop
         .routing
@@ -124,9 +150,7 @@ fn should_serve_old_cut_and_queue_later_writes_when_strict_fsync_is_held() -> Mi
     // Act: only physical fsync is paused. A fresh transaction and control
     // request must complete while the later write and rotation stay queued.
     event_loop.process_one(write(94_000, &[b"first", b"second"], true), &empty);
-    held.reached
-        .recv_timeout(Duration::from_secs(10))
-        .expect("held sync");
+    wait_for_hold(&mut event_loop, &held);
     event_loop.process_one(write(94_001, &[b"later"], false), &empty);
     event_loop.process_one(
         RuntimeMsg::Test(TestRuntimeMsg::WalRotate { request_id: 94_002 }),

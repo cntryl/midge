@@ -87,7 +87,7 @@ struct UnappliedOutcome {
 }
 
 struct TxnWalBatch {
-    wal_record: Option<WalRecord>,
+    unit: Option<crate::wal::sequenced::SequencedWalUnit>,
     total_wal_bytes: usize,
     pending_wal_records: usize,
 }
@@ -148,6 +148,29 @@ pub(crate) struct PendingStrictSync {
     deadline: crate::common::OperationDeadline,
 }
 
+pub(crate) struct PendingStrictAppend {
+    root: Option<crate::lease::WriterEffectGroup>,
+    physical: crate::wal::append_completion::WalPendingAppend,
+    expected: crate::wal::append_completion::WalAppendPrefix,
+    admitted: u64,
+    previous_position: u64,
+    total_wal_bytes: usize,
+    pending_wal_records: usize,
+    authority_prevalidated: bool,
+    started: std::time::Instant,
+    deadline: crate::common::OperationDeadline,
+}
+
+impl PendingStrictAppend {
+    pub(crate) fn poll(&self) -> Option<crate::wal::append_completion::AppendResult> {
+        self.physical.try_complete()
+    }
+
+    pub(crate) fn deadline_expired(&self) -> bool {
+        self.deadline.is_expired()
+    }
+}
+
 impl PendingStrictSync {
     pub(crate) fn poll(&self) -> Option<MidgeResult<crate::wal::traits::WalSyncCompletion>> {
         self.physical.try_complete()
@@ -155,6 +178,32 @@ impl PendingStrictSync {
 
     pub(crate) fn deadline_expired(&self) -> bool {
         self.deadline.is_expired()
+    }
+}
+
+pub(crate) enum PendingStrictIo {
+    Append(PendingStrictAppend),
+    Sync(PendingStrictSync),
+}
+
+pub(crate) enum StrictIoCompletion {
+    Append(crate::wal::append_completion::AppendResult),
+    Sync(MidgeResult<crate::wal::traits::WalSyncCompletion>),
+}
+
+impl PendingStrictIo {
+    pub(crate) fn poll(&self) -> Option<StrictIoCompletion> {
+        match self {
+            Self::Append(append) => append.poll().map(StrictIoCompletion::Append),
+            Self::Sync(sync) => sync.poll().map(StrictIoCompletion::Sync),
+        }
+    }
+
+    pub(crate) fn deadline_expired(&self) -> bool {
+        match self {
+            Self::Append(append) => append.deadline_expired(),
+            Self::Sync(sync) => sync.deadline_expired(),
+        }
     }
 }
 
@@ -214,6 +263,7 @@ enum WalIoState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WalTransitionOperation {
+    Append,
     Sync,
     CloudFlush,
     Rotate,
@@ -316,6 +366,7 @@ pub struct WalActor {
     append_total: Duration,
 }
 
+mod append_pipeline;
 mod apply_op;
 mod authority;
 mod durability;

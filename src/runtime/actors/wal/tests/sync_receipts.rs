@@ -85,9 +85,10 @@ fn should_record_only_captured_sync_prefix_when_later_frame_arrives_before_recei
     )?;
     let later_record = later
         .wal_batch
-        .wal_record
+        .unit
         .take()
-        .expect("encoded later unit");
+        .expect("sequenced later unit")
+        .encode_record()?;
     let expected_floor = actor.writer().expect("writer").current_pos();
     let WalIoState::Open { fs, writer } = std::mem::replace(&mut actor.io, WalIoState::Memory)
     else {

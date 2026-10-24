@@ -299,7 +299,7 @@ impl EventLoop {
                 prepared_transaction,
                 touched_cfs,
             } => {
-                batch.push_prepared(request_id, prepared_transaction, touched_cfs);
+                batch.push_prepared(request_id, *prepared_transaction, touched_cfs);
             }
             PrepareOutcome::Fallback(request) => {
                 self.apply_single_transaction_request(request);
@@ -442,7 +442,7 @@ impl EventLoop {
                         prepared_transaction,
                         touched_cfs,
                     } => {
-                        batch.push_prepared(request_id, prepared_transaction, touched_cfs);
+                        batch.push_prepared(request_id, *prepared_transaction, touched_cfs);
                         true
                     }
                     PrepareOutcome::Fallback(request) => {
@@ -782,7 +782,7 @@ impl EventLoop {
         match prepared {
             Ok(prepared) => {
                 let mut batch = CoalescedTransactionBatch::new(key);
-                batch.push_prepared(request_id, Box::new(prepared), touched_cfs);
+                batch.push_prepared(request_id, prepared, touched_cfs);
                 self.finish_coalesced_transaction_batch(batch);
             }
             Err(error) => self.finish_drained_write(request_id, Err(error)),
@@ -920,12 +920,12 @@ impl CoalescedTransactionBatch {
     fn push_prepared(
         &mut self,
         request_id: u64,
-        prepared_transaction: Box<crate::runtime::actors::wal::PreparedTransactionAppend>,
+        prepared_transaction: crate::runtime::actors::wal::PreparedTransactionAppend,
         touched_cfs: Vec<crate::types::ColumnFamilyId>,
     ) {
         self.request_ids.push(request_id);
         self.touched_cfs.insert(request_id, touched_cfs);
-        self.prepared.push(*prepared_transaction);
+        self.prepared.push(prepared_transaction);
         self.handled += 1;
     }
 }

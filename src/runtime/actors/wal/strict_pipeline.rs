@@ -1,6 +1,8 @@
 //! Split strict append, physical sync completion, and loop-owned publication.
 
-use super::{PendingStrictSync, PreparedTransactionAppend, WalActor, WalTransitionOperation};
+use super::{
+    PendingStrictIo, PendingStrictSync, PreparedTransactionAppend, WalActor, WalTransitionOperation,
+};
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition::WalSyncTicket;
@@ -39,7 +41,12 @@ impl WalActor {
             total
                 .saturating_add(std::mem::size_of::<PreparedTransactionAppend>())
                 .saturating_add(operations)
-                .saturating_add(unit.wal_batch.total_wal_bytes)
+                .saturating_add(
+                    unit.wal_batch
+                        .unit
+                        .as_ref()
+                        .map_or(0, |wal| wal.retained_memory_bound().unwrap_or(usize::MAX)),
+                )
         })
     }
 
@@ -48,7 +55,7 @@ impl WalActor {
         state: &mut RuntimeState,
         prepared: &[PreparedTransactionAppend],
         ticket: &WalSyncTicket,
-    ) -> MidgeResult<PendingStrictSync> {
+    ) -> MidgeResult<PendingStrictIo> {
         if prepared.is_empty()
             || prepared
                 .iter()
@@ -61,6 +68,14 @@ impl WalActor {
         self.preflight_prepared_group(state, prepared)?;
         let root = self.begin_strict_writer_group(state)?;
         let prevalidated = root.is_some() || self.validate_writer_admission(state)?;
+        if self
+            .writer()
+            .is_some_and(crate::wal::WalWriter::supports_sequenced_submission)
+        {
+            return self
+                .begin_sequenced_group_append(state, prepared, ticket, root, prevalidated)
+                .map(PendingStrictIo::Append);
+        }
         self.append_prepared_transaction_batches(state, prepared, root.as_ref())?;
         self.sync_authority_prevalidated = prevalidated;
         let submitted = self.submit_strict_sync(state, ticket, root.as_ref());
@@ -75,10 +90,10 @@ impl WalActor {
             Self::appended_unit_error(error)
         })?;
         pending.root = root;
-        Ok(pending)
+        Ok(PendingStrictIo::Sync(pending))
     }
 
-    fn submit_strict_sync(
+    pub(super) fn submit_strict_sync(
         &mut self,
         state: &mut RuntimeState,
         ticket: &WalSyncTicket,

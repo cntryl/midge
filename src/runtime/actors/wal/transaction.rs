@@ -12,11 +12,17 @@ use super::{
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
-use crate::wal::{DurabilityPolicy, WalOpKind, WalRecord};
-use bytes::Bytes;
+use crate::wal::DurabilityPolicy;
 #[cfg(all(test, feature = "failpoints"))]
 use std::sync::atomic::Ordering;
 use std::time::Instant;
+
+struct TransactionValidation<'a> {
+    ops: &'a [crate::runtime::TransactionOp],
+    assertions: &'a [crate::runtime::KeyAssertion],
+    start_sequence: Option<u64>,
+    conflict_policy: crate::runtime::ConflictPolicy,
+}
 
 impl WalActor {
     /// Apply a transaction's operations to the WAL as a single atomic unit.
@@ -174,10 +180,12 @@ impl WalActor {
         Self::validate_transaction_preconditions(
             state,
             self.read_resources.clone(),
-            &ops,
-            &assertions,
-            start_sequence,
-            conflict_policy,
+            TransactionValidation {
+                ops: &ops,
+                assertions: &assertions,
+                start_sequence,
+                conflict_policy,
+            },
             overlay,
             proof,
         )?;
@@ -418,7 +426,7 @@ impl WalActor {
     ) -> MidgeError {
         let logged = unapplied
             .iter()
-            .any(|prepared| prepared.wal_batch.wal_record.is_some());
+            .any(|prepared| prepared.wal_batch.unit.is_some());
         crate::common::error::classify_commit_error(error, !logged)
     }
 
@@ -430,7 +438,7 @@ impl WalActor {
     ) -> MidgeError {
         let logged = unapplied
             .iter()
-            .any(|prepared| prepared.wal_batch.wal_record.is_some());
+            .any(|prepared| prepared.wal_batch.unit.is_some());
         let plans = unapplied
             .iter()
             .map(|prepared| &prepared.sequence_plan)
@@ -449,13 +457,16 @@ impl WalActor {
     fn validate_transaction_preconditions(
         state: &RuntimeState,
         resources: Option<std::sync::Arc<crate::runtime::read_resources::ReadResources>>,
-        ops: &[crate::runtime::TransactionOp],
-        assertions: &[crate::runtime::KeyAssertion],
-        start_sequence: Option<u64>,
-        conflict_policy: crate::runtime::ConflictPolicy,
+        validation: TransactionValidation<'_>,
         overlay: &super::StagedWriteOverlay,
         proof: Option<&super::CommitValidationProof>,
     ) -> MidgeResult<()> {
+        let TransactionValidation {
+            ops,
+            assertions,
+            start_sequence,
+            conflict_policy,
+        } = validation;
         // One snapshot per family serves conflict checks and assertions.
         let mut snapshots = super::transaction_state::ValidationSnapshots::with_proof(
             state, resources, overlay, proof,
@@ -627,71 +638,57 @@ impl WalActor {
             sequence_plan.txn_id,
             state.observed_time_millis(),
         );
-        let wal_record =
-            self.build_transaction_batch_record(sequence_plan, &apply_ops, encode_wal)?;
-        let total_wal_bytes = wal_record.as_ref().map_or(0, WalRecord::estimated_size);
+        let unit = self.build_transaction_batch_unit(sequence_plan, &apply_ops, encode_wal)?;
+        let total_wal_bytes = unit
+            .as_ref()
+            .map_or(Ok(0), |unit| unit.frame_size_bound())?;
         let pending_wal_records = usize::from(!skip_wal);
         Ok((
             apply_ops,
             TxnWalBatch {
-                wal_record,
+                unit,
                 total_wal_bytes,
                 pending_wal_records,
             },
         ))
     }
 
-    fn build_transaction_batch_record(
+    fn build_transaction_batch_unit(
         &self,
         sequence_plan: &TxnSequencePlan,
         apply_ops: &[TransactionApplyOp],
         encode_wal: bool,
-    ) -> MidgeResult<Option<WalRecord>> {
+    ) -> MidgeResult<Option<crate::wal::sequenced::SequencedWalUnit>> {
         if !encode_wal {
             return Ok(None);
         }
-        let nested_records = apply_ops
-            .iter()
-            .map(|op| op.batch_record(sequence_plan.txn_id))
-            .collect::<Vec<_>>();
-
-        let payload = crate::wal::encoding::encode_txn_batch_payload_records(
-            sequence_plan.txn_id,
-            sequence_plan.begin_seq,
-            sequence_plan.commit_seq,
-            sequence_plan.cf_id,
-            &nested_records,
-        )
-        .map_err(|error| {
-            MidgeError::Corruption(format!(
-                "failed to encode transaction batch {}: {error}",
-                sequence_plan.txn_id
-            ))
-        })?;
-        if payload.len() > crate::wal::frame::WAL_MAX_VALUE_LEN {
+        let unit = crate::wal::sequenced::SequencedWalUnit {
+            txn_id: sequence_plan.txn_id,
+            begin_sequence: sequence_plan.begin_seq,
+            commit_sequence: sequence_plan.commit_seq,
+            cf_id: sequence_plan.cf_id,
+            operations: apply_ops
+                .iter()
+                .map(|op| op.wal_record(sequence_plan.txn_id))
+                .collect(),
+        };
+        let payload_len = unit.nested_payload_len()?;
+        if payload_len > crate::wal::frame::WAL_MAX_VALUE_LEN {
             return Err(MidgeError::ResourceLimit(format!(
                 "transaction batch {} encodes to {} bytes; WAL replay accepts at most {} bytes",
                 sequence_plan.txn_id,
-                payload.len(),
+                payload_len,
                 crate::wal::frame::WAL_MAX_VALUE_LEN
             )));
         }
 
         let decoded_bound =
-            crate::wal::encoding::txn_batch_decoded_bound(payload.len(), nested_records.len());
-        let mut batch_record = WalRecord::new_cf(
-            sequence_plan.cf_id,
-            WalOpKind::TxnBatch,
-            Bytes::from_static(b"txn"),
-            Some(payload),
-            sequence_plan.commit_seq,
-        );
-        batch_record.txn_id = Some(sequence_plan.txn_id);
+            crate::wal::encoding::txn_batch_decoded_bound(payload_len, apply_ops.len());
         // Replay rejects the batch if either its frame or its decoded
         // allocation exceeds the budget; check the larger of the two.
-        let frame_bound = crate::wal::encoding::record_frame_size_bound(&batch_record)?;
+        let frame_bound = unit.frame_size_bound()?;
         self.ensure_replayable_transaction(frame_bound.max(decoded_bound))?;
-        Ok(Some(batch_record))
+        Ok(Some(unit))
     }
 
     pub(super) fn append_prepared_transaction_batches(
@@ -705,8 +702,8 @@ impl WalActor {
         let mut pending_wal_records = 0usize;
 
         for prepared in prepared_transactions {
-            if let Some(record) = prepared.wal_batch.wal_record.as_ref() {
-                records.push(record.clone());
+            if let Some(unit) = prepared.wal_batch.unit.as_ref() {
+                records.push(unit.encode_record()?);
             }
             total_wal_bytes += prepared.wal_batch.total_wal_bytes;
             pending_wal_records += prepared.wal_batch.pending_wal_records;
@@ -719,20 +716,7 @@ impl WalActor {
         }
 
         if self.writer().is_some() {
-            crate::failpoints::fail_point!(
-                "midge::wal::inject_no_space_on_txn_append_batch",
-                Self::should_inject_txn_append_batch_no_space(prepared_transactions),
-                |_| Err(MidgeError::NoSpace(
-                    "failpoint: no space on transaction batch append".to_string()
-                ))
-            );
-            crate::failpoints::fail_point!(
-                "midge::wal::inject_no_space_on_txn_commit_append",
-                |_| Err(MidgeError::NoSpace(
-                    "failpoint: no space on transaction batch append".to_string()
-                ))
-            );
-            crate::failpoints::fail_point!("midge::wal::txn_after_ops_append_before_commit");
+            Self::prepared_append_failpoints(prepared_transactions)?;
         }
 
         let admitted = self.admit_wal_records(&records)?;
@@ -776,6 +760,27 @@ impl WalActor {
             .saturating_add(total_wal_bytes as u64);
         self.pending_sync_count += pending_wal_records;
         self.bytes_since_sync += total_wal_bytes;
+        Ok(())
+    }
+
+    pub(super) fn prepared_append_failpoints(
+        prepared_transactions: &[PreparedTransactionAppend],
+    ) -> MidgeResult<()> {
+        let _ = prepared_transactions;
+        crate::failpoints::fail_point!(
+            "midge::wal::inject_no_space_on_txn_append_batch",
+            Self::should_inject_txn_append_batch_no_space(prepared_transactions),
+            |_| Err(MidgeError::NoSpace(
+                "failpoint: no space on transaction batch append".into()
+            ))
+        );
+        crate::failpoints::fail_point!(
+            "midge::wal::inject_no_space_on_txn_commit_append",
+            |_| Err(MidgeError::NoSpace(
+                "failpoint: no space on transaction batch append".into()
+            ))
+        );
+        crate::failpoints::fail_point!("midge::wal::txn_after_ops_append_before_commit");
         Ok(())
     }
 

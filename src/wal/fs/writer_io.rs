@@ -32,6 +32,8 @@ use std::time::Duration;
 
 use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
+mod sequenced;
+
 const MAX_BACKOFF_MS: u64 = 100;
 const MAX_WAIT_ATTEMPTS: u32 = 50;
 const MAX_PENDING_SYNC_REQUESTS: usize = 128;
@@ -74,7 +76,9 @@ pub struct FsWalWriterIo {
     /// The header of the segment this writer appends to.
     header: SegmentHeader,
     /// The records acknowledged into the segment.
-    tail: Mutex<SegmentTail>,
+    tail: Arc<Mutex<SegmentTail>>,
+    raw_submission_pending: Arc<std::sync::atomic::AtomicBool>,
+    raw_submission_memory: crate::common::resource_budget::ResourceBudget,
     /// The digest of every byte written, shared with the runner.
     digest: Arc<Mutex<SegmentDigest>>,
     /// The footer was written: nothing more may be appended.
@@ -192,7 +196,11 @@ impl FsWalWriterIo {
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             io_timeout,
             header,
-            tail: Mutex::new(SegmentTail::default()),
+            tail: Arc::new(Mutex::new(SegmentTail::default())),
+            raw_submission_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            raw_submission_memory: crate::common::resource_budget::ResourceBudget::new(
+                64 * 1024 * 1024,
+            ),
             digest: Arc::new(Mutex::new(SegmentDigest::of(&header_bytes))),
             sealed: std::sync::atomic::AtomicBool::new(false),
         };
@@ -243,6 +251,14 @@ impl FsWalWriterIo {
         &self,
         records: impl IntoIterator<Item = &'a WalRecord>,
     ) -> Result<(), WalAppendError> {
+        if self
+            .raw_submission_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(WalAppendError::unchanged(MidgeError::WriteStall(
+                "a sequenced WAL append is still awaiting its completion".into(),
+            )));
+        }
         if self.sealed.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(WalAppendError::unchanged(MidgeError::Internal(format!(
                 "WAL segment {} is sealed; nothing more may be appended to it",
@@ -462,6 +478,20 @@ impl FsWalWriterIo {
 }
 
 impl WalWriter for FsWalWriterIo {
+    fn supports_sequenced_submission(&self) -> bool {
+        true
+    }
+
+    fn submit_sequenced_batch(
+        &self,
+        prefix: crate::wal::append_completion::WalAppendPrefix,
+        units: Vec<crate::wal::sequenced::SequencedWalUnit>,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<Result<crate::wal::append_completion::WalPendingAppend, WalAppendError>> {
+        Some(self.submit_owned_units(prefix, units, timeout, group))
+    }
+
     fn supports_sync_submission(&self) -> bool {
         true
     }
@@ -887,6 +917,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
 
+    mod sequenced_submissions;
     mod writer_groups;
 
     fn writer_without_background_worker() -> FsWalWriterIo {
@@ -910,7 +941,11 @@ mod tests {
                 first_seq: 1,
                 prev: crate::wal::format::ChainLink::GENESIS,
             },
-            tail: Mutex::new(SegmentTail::default()),
+            tail: Arc::new(Mutex::new(SegmentTail::default())),
+            raw_submission_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            raw_submission_memory: crate::common::resource_budget::ResourceBudget::new(
+                64 * 1024 * 1024,
+            ),
             digest: Arc::new(Mutex::new(SegmentDigest::of(&[]))),
             sealed: std::sync::atomic::AtomicBool::new(false),
         }

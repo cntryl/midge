@@ -535,7 +535,7 @@ fn txn_batch_len_prefixed_field_len(value: &[u8]) -> MidgeResult<usize> {
     add_capacity(4, value.len())
 }
 
-fn txn_batch_payload_records_encoded_len(
+pub(crate) fn txn_batch_payload_records_encoded_len(
     records: &[TxnBatchEncodeRecord<'_>],
 ) -> MidgeResult<usize> {
     let _ = u32::try_from(records.len()).map_err(|_| {

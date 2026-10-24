@@ -159,6 +159,22 @@ pub trait GroupedWalWriter: Send + Sync {
 }
 
 pub trait WalWriter: Send + Sync {
+    fn supports_sequenced_submission(&self) -> bool {
+        false
+    }
+
+    /// Submit sequenced logical units for writer-owned encoding and append.
+    /// Unsupported writers keep their existing synchronous path.
+    fn submit_sequenced_batch(
+        &self,
+        _prefix: crate::wal::append_completion::WalAppendPrefix,
+        _units: Vec<crate::wal::sequenced::SequencedWalUnit>,
+        _timeout: Duration,
+        _group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<Result<crate::wal::append_completion::WalPendingAppend, WalAppendError>> {
+        None
+    }
+
     /// Whether this writer implements nonblocking sync submission.
     fn supports_sync_submission(&self) -> bool {
         false

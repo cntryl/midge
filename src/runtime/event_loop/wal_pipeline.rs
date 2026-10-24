@@ -6,10 +6,9 @@ use super::write_batch::CoalescedTransactionBatch;
 use super::EventLoop;
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::common::{MidgeError, MidgeResult};
-use crate::runtime::actors::wal::PendingStrictSync;
+use crate::runtime::actors::wal::{PendingStrictIo, StrictIoCompletion};
 use crate::runtime::wal_transition::WalSyncTicket;
 use crate::runtime::{RuntimeMsg, RuntimeResponse, TransactionOp};
-use crate::wal::traits::WalSyncCompletion;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -19,17 +18,17 @@ const MAX_DEFERRED_CALLERS: usize = 128;
 
 struct PendingGroup {
     batch: CoalescedTransactionBatch,
-    sync: PendingStrictSync,
+    io: Option<PendingStrictIo>,
     ticket: WalSyncTicket,
     generation: u64,
     next_generation: Option<u64>,
-    ready: RefCell<Option<MidgeResult<WalSyncCompletion>>>,
+    ready: RefCell<Option<StrictIoCompletion>>,
     failed: bool,
     _reservation: ResourceReservation,
 }
 
 struct StartedGroup {
-    sync: PendingStrictSync,
+    io: PendingStrictIo,
     ticket: WalSyncTicket,
     generation: u64,
     next_generation: Option<u64>,
@@ -40,9 +39,15 @@ impl PendingGroup {
     fn ready(&self) -> bool {
         let mut ready = self.ready.borrow_mut();
         if ready.is_none() {
-            *ready = self.sync.poll();
+            *ready = self.io.as_ref().and_then(PendingStrictIo::poll);
         }
-        ready.is_some() || (!self.failed && self.sync.deadline_expired())
+        ready.is_some() || (!self.failed && self.deadline_expired())
+    }
+
+    fn deadline_expired(&self) -> bool {
+        self.io
+            .as_ref()
+            .is_some_and(PendingStrictIo::deadline_expired)
     }
 }
 
@@ -277,7 +282,7 @@ impl EventLoop {
         let result = self.start_strict_pipeline_io(&batch, retained);
         match result {
             Ok(StartedGroup {
-                sync,
+                io,
                 ticket,
                 generation,
                 next_generation,
@@ -285,7 +290,7 @@ impl EventLoop {
             }) => {
                 self.pipeline.wal_commits.pending = Some(PendingGroup {
                     batch,
-                    sync,
+                    io: Some(io),
                     ticket,
                     generation,
                     next_generation,
@@ -329,8 +334,8 @@ impl EventLoop {
             &batch.prepared,
             &ticket,
         ) {
-            Ok(sync) => Ok(StartedGroup {
-                sync,
+            Ok(io) => Ok(StartedGroup {
+                io,
                 ticket,
                 generation,
                 next_generation,
@@ -356,8 +361,8 @@ impl EventLoop {
             .ready
             .borrow_mut()
             .take()
-            .or_else(|| group.sync.poll());
-        if !group.failed && group.sync.deadline_expired() {
+            .or_else(|| group.io.as_ref().and_then(PendingStrictIo::poll));
+        if !group.failed && group.deadline_expired() {
             let error = MidgeError::OutcomeUnknown("strict WAL synchronization expired; admitted storage effects remain owned until completion".into());
             self.fence_wal_transition(&error, None);
             self.fail_coalesced_transaction_responses(&group.batch, &error);
@@ -388,12 +393,45 @@ impl EventLoop {
             self.restore_wal_pipeline_message();
             return;
         }
-        let receipt = self.actors.wal_actor.finish_strict_group_submission(
-            &mut self.state,
-            &group.sync,
-            &group.ticket,
-            completion,
-        );
+        let receipt = match completion {
+            StrictIoCompletion::Append(completion) => {
+                let Some(PendingStrictIo::Append(append)) = group.io.take() else {
+                    unreachable!("append receipt belongs to the parked append stage");
+                };
+                match self.actors.wal_actor.finish_sequenced_group_append(
+                    &mut self.state,
+                    append,
+                    &group.ticket,
+                    completion,
+                ) {
+                    Ok(sync) => {
+                        group.io = Some(PendingStrictIo::Sync(sync));
+                        self.pipeline.wal_commits.pending = Some(group);
+                        return;
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            StrictIoCompletion::Sync(completion) => {
+                let Some(PendingStrictIo::Sync(sync)) = group.io.as_ref() else {
+                    unreachable!("sync receipt belongs to the parked sync stage");
+                };
+                self.actors.wal_actor.finish_strict_group_submission(
+                    &mut self.state,
+                    sync,
+                    &group.ticket,
+                    completion,
+                )
+            }
+        };
+        self.complete_wal_pipeline_group(group, receipt);
+    }
+
+    fn complete_wal_pipeline_group(
+        &mut self,
+        group: PendingGroup,
+        receipt: MidgeResult<crate::runtime::actors::wal::WalSyncReceipt>,
+    ) {
         let completed = receipt.and_then(|receipt| {
             self.commit_synced_generation(
                 CompletionSource::WalSync,
@@ -404,7 +442,7 @@ impl EventLoop {
             )
         });
         let mut batch = group.batch;
-        drop(group.sync); // release lexical native root before apply/transitions
+        drop(group.io); // release lexical native root before apply/transitions
         let outcome = match completed {
             Ok(()) => self.actors.wal_actor.apply_prepared_group(
                 &mut self.state,

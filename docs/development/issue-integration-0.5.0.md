@@ -733,3 +733,15 @@ retention cursor without another metadata mutation. An active 25-snapshot
 regression exercises cooldown and multiple idle batches with an injected short
 interval rather than resetting cooldown state. Failpoint test targets compile
 cleanly; execution remains pending.
+
+#941 parks sequenced raw append, then exact append completion and Strict sync,
+before the existing ordered commit/apply handoff. The writer owns nested
+encoding, LZ4, outer framing, CRC and XXH3; the loop owns sequence allocation
+and bookkeeping. Admission charges simultaneous raw and encoded/compressor/
+coalescing ownership through physical termination, including abandoned waiters.
+Active regressions hold encoding/fsync, compare real writer bytes over six
+compression sizes and mixed TTL/insert/delete/range operations, and reject
+insufficient raw admission budgets. Test targets compile; execution and A/B
+qualification remain pending. Large/spilled/non-filesystem paths retain their
+drained synchronous compatibility barriers. Next-group append is still ordered
+behind the active group; this slice does not claim a multi-group pipeline.
