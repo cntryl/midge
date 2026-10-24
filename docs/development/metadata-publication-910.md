@@ -84,6 +84,35 @@ deadline. A delayed first-phase completion cannot settle the clear. This also
 lets an earlier capture retain a failed flush's `OutputDurable` intent while
 the same immutable retries, without weakening the selected terminal proof.
 
+A compact selected witness survives the end of its source task while that
+terminal intent can appear in a later owned cut. It records normalized intent
+digests and the exact selected epoch, session, cut digest and journal horizon.
+The cache installs it only after the matching body has selected; a locally
+durable terminal phase alone grants no receipt. Partial clears retain witnesses
+still needed by earlier owned sources.
+
+Compact witnesses use the existing maintenance pool. Their charge is split
+from the admitted source workspace rather than retaining a full old body. For
+the compact layout, UUID sessions are inline and sorted intent digests use one
+exact boxed slice. The charge includes that slice, the witness struct, both Arc
+headers and the reservation struct plus its owned parent-reservation boxes.
+It also includes three exact receipt-entry payloads per intent for the sorted
+boxed receipt registry, including when final-source Drop cannot obtain the
+registry mutex. Batch merge and binary-search lookup avoid per-entry copying.
+The allowance covers old entries, a merged candidate and final-slice
+replacement; removed receipt charges stay alive until old storage is freed.
+No bound depends on the standard library's private tree layout.
+For `E` encoded control bytes, the existing `16E + 4096` admission allowance includes
+at most `4E` of a shared selected witness and `4E` of a newly prepared witness,
+leaving at least `8E + 4096` independently charged for copied control bytes and
+body/authority decoding. Larger shared caches receive no credit. Credit is
+exclusive and remains with the last actual callback reservation owner. This is
+the control-body admission model; native transport stacks and other runtime
+resources retain their separate charges, and it is not a whole-process RSS cap.
+Both immutable PUT and its exact fallback GET carry the source reservation.
+Logical timeout or later-cut coverage cannot release the source charge while
+the real readback body/callback remains physically outstanding.
+
 GC must include admitted cuts in its protection protocol. A conservative first
 implementation may defer reclamation while cuts are admitted. Known-retired
 SST deletion, general orphan discovery and metadata-body retention each need
@@ -101,5 +130,5 @@ actual successful pointer-CAS callback while the later flush selects.
 This is cold/cache-loss recovery evidence, not a process-kill campaign.
 Other active cases cover lost epochs, checkpoint installation, exact staged
 readback with no second allocation, slot/byte contention and physical callback
-charge release. These new behaviors remain unexecuted in the code-first pass.
-Performance and crash/provider qualification follow the implementation pass.
+charge release. Focused behavioral tests have now run; full provider and
+performance qualification retain their separate evidence requirements.

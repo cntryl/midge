@@ -47,6 +47,8 @@ pub(crate) struct MetadataMirrorCache {
     pub(super) manifest: Manifest,
     pub(super) fingerprints: BTreeMap<String, FileFingerprint>,
     pub(super) cut: Option<crate::runtime::metadata_publication::MetadataCutProof>,
+    pub(super) terminal_witnesses:
+        Option<Arc<crate::runtime::metadata_publication::SelectedTerminalWitnesses>>,
 }
 
 impl MetadataMirrorCache {
@@ -62,6 +64,7 @@ impl MetadataMirrorCache {
             writer_epoch,
             manifest,
             cut: None,
+            terminal_witnesses: None,
             fingerprints: local
                 .iter()
                 .map(|(name, bytes)| {
@@ -97,11 +100,11 @@ impl MetadataMirrorCache {
 }
 
 pub(crate) fn reduce_to_authority(manifest: &mut Manifest) {
-    manifest.files.clear();
-    manifest.retired_ssts.clear();
-    manifest.next_sst_seqs.clear();
+    manifest.files = Vec::new();
+    manifest.retired_ssts = Default::default();
+    manifest.next_sst_seqs = Default::default();
     for family in &mut manifest.column_families {
-        family.dropped_sst_names.clear();
+        family.dropped_sst_names = Vec::new();
     }
 }
 
@@ -700,6 +703,60 @@ mod tests {
     use super::*;
     use crate::io::Fs;
     use crate::lease::fs_leader_store::FsLeaderStore;
+
+    #[test]
+    fn should_release_discarded_inventory_storage_when_reducing_to_authority() {
+        // Arrange
+        let mut manifest = Manifest::default();
+        manifest
+            .apply_edit(&crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: 1,
+                name: "retired-family".into(),
+                created_at: 7,
+            })
+            .unwrap();
+        for sequence in 1..=64 {
+            manifest.files.push(crate::metadata::FileMeta {
+                name: crate::cloud_layout::file_name(1, 0, sequence),
+                cf_id: 1,
+                ..crate::metadata::FileMeta::default()
+            });
+            let retired = crate::metadata::FileMeta {
+                name: crate::cloud_layout::file_name(0, 0, sequence),
+                ..crate::metadata::FileMeta::default()
+            };
+            manifest.retired_ssts.insert(retired.name.clone(), retired);
+        }
+        manifest
+            .apply_edit(&crate::metadata::ManifestEdit::DropColumnFamilyAt {
+                id: 1,
+                drop_sequence: 9,
+                dropped_sst_names: manifest
+                    .files
+                    .iter()
+                    .map(|file| file.name.clone())
+                    .collect(),
+            })
+            .unwrap();
+        manifest.next_sst_seqs.insert(1, 65);
+        manifest.edit_checkpoint_id = 17;
+        manifest.validate_persisted().unwrap();
+        let frontiers = manifest.flush_frontiers().clone();
+
+        // Act
+        reduce_to_authority(&mut manifest);
+
+        // Assert: authority survives while the discarded inventories release
+        // their backing allocations rather than retaining zero-length capacity.
+        assert_eq!(manifest.files.capacity(), 0);
+        assert_eq!(manifest.retired_ssts.capacity(), 0);
+        assert_eq!(manifest.next_sst_seqs.capacity(), 0);
+        assert_eq!(manifest.column_families[0].dropped_sst_names.capacity(), 0);
+        assert_eq!(manifest.edit_checkpoint_id, 17);
+        assert_eq!(manifest.flush_frontiers(), &frontiers);
+        assert_eq!(manifest.column_families[0].name, "retired-family");
+        assert!(manifest.column_families[0].deleted_at.is_some());
+    }
 
     struct Fixture {
         _directory: tempfile::TempDir,

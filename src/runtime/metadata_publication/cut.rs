@@ -12,6 +12,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};
 
 const MAX_CAPTURED_CUTS: usize = 64;
+const COMPACT_WITNESS_BYTES_PER_ENCODED_BYTE: usize = 4;
+// Old entries, a merged candidate and its final boxed slice can overlap during
+// replacement. Removed receipt charges survive until old storage is freed.
+const RECEIPT_COPIES: usize = 3;
 type CopiedControlFiles = (Arc<dyn Fs>, BTreeMap<String, Vec<u8>>);
 
 #[cfg(test)]
@@ -83,11 +87,15 @@ pub(crate) struct CapturedMetadataCut {
     publication_intents: PublicationIntentBoundary,
     registry: Weak<parking_lot::Mutex<CutRegistry>>,
     memory: Arc<ResourceReservation>,
+    terminal_witnesses: Option<Arc<SelectedTerminalWitnesses>>,
     _slot: ResourceReservation,
     staged: parking_lot::Mutex<Option<crate::runtime::hybrid_persistence::MetadataMirrorCache>>,
 }
 
 impl CapturedMetadataCut {
+    pub(crate) fn terminal_witnesses(&self) -> Option<Arc<SelectedTerminalWitnesses>> {
+        self.terminal_witnesses.clone()
+    }
     pub(crate) fn fs(&self) -> &Arc<dyn Fs> {
         &self.fs
     }
@@ -109,17 +117,12 @@ impl CapturedMetadataCut {
     pub(crate) fn mark_committed(&self) {
         if let Some(registry) = self.registry.upgrade() {
             let mut registry = registry.lock();
-            for digest in &self.publication_intents.manifest_published {
-                registry
-                    .published_intents
-                    .entry(*digest)
-                    .and_modify(|receipt| {
-                        receipt.horizon = receipt.horizon.max(self.manifest.edit_checkpoint_id);
-                    })
-                    .or_insert_with(|| PublishedIntentReceipt {
-                        horizon: self.manifest.edit_checkpoint_id,
-                        _memory: Arc::clone(&self.memory),
-                    });
+            if let Some(witnesses) = &self.terminal_witnesses {
+                registry.published_intents.record(
+                    &self.publication_intents.manifest_published,
+                    self.manifest.edit_checkpoint_id,
+                    &witnesses.memory,
+                );
             }
             registry
                 .pending
@@ -146,7 +149,148 @@ impl Drop for CapturedMetadataCut {
 
 struct PublishedIntentReceipt {
     horizon: u64,
-    _memory: Arc<ResourceReservation>,
+    memory: Arc<ResourceReservation>,
+}
+
+type ReceiptEntry = ([u8; 32], PublishedIntentReceipt);
+
+#[derive(Default)]
+struct PublishedIntentReceipts(Box<[ReceiptEntry]>);
+
+impl PublishedIntentReceipts {
+    fn record(
+        &mut self,
+        digests: &BTreeSet<[u8; 32]>,
+        horizon: u64,
+        memory: &Arc<ResourceReservation>,
+    ) {
+        if digests.is_empty() {
+            return;
+        }
+        let mut old = std::mem::take(&mut self.0)
+            .into_vec()
+            .into_iter()
+            .peekable();
+        let mut merged = Vec::with_capacity(old.len().saturating_add(digests.len()));
+        for digest in digests {
+            while old.peek().is_some_and(|(key, _)| key < digest) {
+                merged.push(old.next().expect("peeked receipt"));
+            }
+            if old.peek().is_some_and(|(key, _)| key == digest) {
+                let (key, mut receipt) = old.next().expect("peeked receipt");
+                receipt.horizon = receipt.horizon.max(horizon);
+                merged.push((key, receipt));
+            } else {
+                merged.push((
+                    *digest,
+                    PublishedIntentReceipt {
+                        horizon,
+                        memory: Arc::clone(memory),
+                    },
+                ));
+            }
+        }
+        merged.extend(&mut old);
+        drop(old);
+        self.0 = merged.into_boxed_slice();
+    }
+
+    fn get(&self, digest: &[u8; 32]) -> Option<&PublishedIntentReceipt> {
+        self.0
+            .binary_search_by_key(digest, |(key, _)| *key)
+            .ok()
+            .map(|index| &self.0[index].1)
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&[u8; 32]) -> bool) {
+        let mut entries = std::mem::take(&mut self.0).into_vec();
+        let mut removed = Vec::with_capacity(entries.len());
+        entries.retain(|(digest, receipt)| {
+            if keep(digest) {
+                true
+            } else {
+                removed.push(Arc::clone(&receipt.memory));
+                false
+            }
+        });
+        self.0 = entries.into_boxed_slice();
+        // Release removed charges after their old allocation, including the
+        // final empty box, has actually been freed by into_boxed_slice.
+        drop(removed);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+/// Compact evidence derived from one exact control body/cut. It becomes
+/// authoritative only when the matching cache is installed after selection.
+pub(crate) struct SelectedTerminalWitnesses {
+    writer_epoch: u64,
+    session: uuid::Uuid,
+    ordinal: u64,
+    digest: [u8; 32],
+    horizon: u64,
+    digests: Box<[[u8; 32]]>,
+    memory: Arc<ResourceReservation>,
+}
+
+impl SelectedTerminalWitnesses {
+    fn prepare(
+        memory: &mut Arc<ResourceReservation>,
+        proof: &MetadataCutProof,
+        horizon: u64,
+        digests: &BTreeSet<[u8; 32]>,
+        encoded: usize,
+    ) -> MidgeResult<Option<Arc<Self>>> {
+        if digests.is_empty() {
+            return Ok(None);
+        }
+        // Account the exact retained digest payload and requested struct/
+        // reservation storage, plus any receipt nodes whose final source Drop
+        // cannot prune immediately. UUID and boxed digests avoid a separate
+        // compact-tree allocation even for a single terminal intent.
+        let bytes = digests
+            .len()
+            .checked_mul(
+                std::mem::size_of::<[u8; 32]>()
+                    + RECEIPT_COPIES * std::mem::size_of::<ReceiptEntry>(),
+            )
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>()))
+            .and_then(|bytes| bytes.checked_add(memory.allocation_bytes()))
+            .and_then(|bytes| bytes.checked_add(4 * std::mem::size_of::<usize>()))
+            .ok_or_else(|| {
+                MidgeError::ResourceLimit("selected intent witness size overflow".into())
+            })?;
+        if bytes > encoded.saturating_mul(COMPACT_WITNESS_BYTES_PER_ENCODED_BYTE) {
+            return Err(MidgeError::ResourceLimit(
+                "compact selected witness exceeds its encoded metadata allowance".into(),
+            ));
+        }
+        let reservation = Arc::get_mut(memory)
+            .ok_or_else(|| {
+                MidgeError::Internal("new metadata workspace was already shared".into())
+            })?
+            .split(bytes)?;
+        Ok(Some(Arc::new(Self {
+            writer_epoch: proof.writer_epoch,
+            session: uuid::Uuid::parse_str(&proof.session).map_err(|_| {
+                MidgeError::Corruption("selected intent witness has invalid session".into())
+            })?,
+            ordinal: proof.ordinal,
+            digest: proof.digest,
+            horizon,
+            digests: digests.iter().copied().collect(),
+            memory: Arc::new(reservation),
+        })))
+    }
+}
+
+struct SelectedTerminalCache {
+    generation: crate::lease::SharedGenerationId,
+    witnesses: Option<Arc<SelectedTerminalWitnesses>>,
 }
 
 pub(super) struct CutRegistry {
@@ -157,7 +301,8 @@ pub(super) struct CutRegistry {
     pending: BTreeMap<u64, Arc<CapturedMetadataCut>>,
     /// Only selected `ManifestPublished` phases discharge an owned operation's
     /// intent. An `OutputDurable` cut receipt proves a weaker event.
-    published_intents: BTreeMap<[u8; 32], PublishedIntentReceipt>,
+    published_intents: PublishedIntentReceipts,
+    selected_terminal: Option<SelectedTerminalCache>,
 }
 
 impl Default for CutRegistry {
@@ -168,7 +313,8 @@ impl Default for CutRegistry {
             next: 1,
             owned: Vec::new(),
             pending: BTreeMap::new(),
-            published_intents: BTreeMap::new(),
+            published_intents: PublishedIntentReceipts::default(),
+            selected_terminal: None,
         }
     }
 }
@@ -208,7 +354,7 @@ impl MetadataPublicationLock {
             .capture_slots
             .get_or_init(|| ResourceBudget::new(MAX_CAPTURED_CUTS).with_contention_errors())
             .reserve(1, "owned metadata cut slot")?;
-        let memory = self.reserve_capture_memory(source, deadline)?;
+        let mut memory = self.reserve_capture_memory(source, deadline)?;
         let (fs, bodies) = copy_control_files(source, deadline)?;
         let snapshot = bodies
             .get(files::MANIFEST_SNAPSHOT)
@@ -232,7 +378,9 @@ impl MetadataPublicationLock {
             registry.epoch = epoch;
             registry.session = uuid::Uuid::new_v4().to_string();
             registry.next = 1;
+            registry.selected_terminal = None;
         }
+        restore_owned_terminal_receipts(&mut registry, manifest.edit_checkpoint_id);
         let covers = coverage_witnesses(&registry, &manifest, &publication_intents)?;
         let proof = MetadataCutProof {
             writer_epoch: epoch,
@@ -245,6 +393,13 @@ impl MetadataPublicationLock {
             .next
             .checked_add(1)
             .ok_or_else(|| MidgeError::ResourceLimit("metadata cut ordinal exhausted".into()))?;
+        let terminal_witnesses = SelectedTerminalWitnesses::prepare(
+            &mut memory,
+            &proof,
+            manifest.edit_checkpoint_id,
+            &publication_intents.manifest_published,
+            bodies.values().map(Vec::len).sum(),
+        )?;
         let cut = Arc::new(CapturedMetadataCut {
             fs,
             proof,
@@ -252,6 +407,7 @@ impl MetadataPublicationLock {
             publication_intents,
             registry: Arc::downgrade(&self.cuts),
             memory,
+            terminal_witnesses,
             _slot: slot,
             staged: parking_lot::Mutex::new(None),
         });
@@ -340,8 +496,34 @@ impl MetadataPublicationLock {
             ResourceBudget::new(crate::compaction::DEFAULT_COMPACTION_MEMORY_LIMIT)
                 .with_contention_errors()
         });
-        pool.reserve(admitted, "owned metadata capture and decoder workspace")
-            .map(Arc::new)
+        if admitted > pool.limit() {
+            return pool
+                .reserve(admitted, "owned metadata capture and decoder workspace")
+                .map(Arc::new);
+        }
+        let credit = self
+            .cuts
+            .lock()
+            .selected_terminal
+            .as_ref()
+            .and_then(|cached| cached.witnesses.as_ref())
+            .map(|witnesses| Arc::clone(&witnesses.memory));
+        // The existing 16x body allowance includes 8x for body/decoder work,
+        // at most 4x for this cut's compact witness and at most 4x for a shared
+        // selected witness. Only actually retained bytes inside that allowance
+        // may receive exclusive credit; a larger cache is separately charged.
+        let credit = credit.filter(|credit| {
+            credit.bytes() <= encoded.saturating_mul(COMPACT_WITNESS_BYTES_PER_ENCODED_BYTE)
+        });
+        match credit {
+            Some(credit) => pool.reserve_with_shared_credit(
+                admitted,
+                &credit,
+                "owned metadata capture and decoder workspace",
+            ),
+            None => pool.reserve(admitted, "owned metadata capture and decoder workspace"),
+        }
+        .map(Arc::new)
     }
 
     fn prune_released_cut_receipts(&self) {
@@ -352,6 +534,65 @@ impl MetadataPublicationLock {
         registry.owned.retain(|cut| cut.strong_count() > 0);
         prune_intent_receipts(&mut registry, &PublicationIntentBoundary::default());
     }
+}
+
+impl MetadataPublicationLock {
+    pub(crate) fn note_selected_terminal_witnesses(
+        &self,
+        generation: crate::lease::SharedGenerationId,
+        proof: &MetadataCutProof,
+        witnesses: Option<Arc<SelectedTerminalWitnesses>>,
+    ) -> MidgeResult<()> {
+        let mut registry = self.cuts.lock();
+        if registry.epoch != proof.writer_epoch || registry.session != proof.session {
+            return Ok(());
+        }
+        if witnesses.as_ref().is_some_and(|witnesses| {
+            witnesses.writer_epoch != proof.writer_epoch
+                || Some(witnesses.session) != uuid::Uuid::parse_str(&proof.session).ok()
+                || witnesses.ordinal != proof.ordinal
+                || witnesses.digest != proof.digest
+        }) {
+            return Err(MidgeError::Corruption(
+                "selected terminal witness differs from its pinned control cut".into(),
+            ));
+        }
+        if registry
+            .selected_terminal
+            .as_ref()
+            .is_none_or(|current| current.generation <= generation)
+        {
+            registry.selected_terminal = Some(SelectedTerminalCache {
+                generation,
+                witnesses,
+            });
+        }
+        Ok(())
+    }
+}
+
+fn restore_owned_terminal_receipts(registry: &mut CutRegistry, horizon: u64) {
+    let Some(selected) = registry
+        .selected_terminal
+        .as_ref()
+        .and_then(|selected| selected.witnesses.as_ref())
+        .cloned()
+    else {
+        return;
+    };
+    if selected.horizon > horizon {
+        return;
+    }
+    let needed = registry
+        .owned
+        .iter()
+        .filter_map(Weak::upgrade)
+        .flat_map(|prior| prior.publication_intents.all.clone())
+        .filter(|digest| selected.digests.binary_search(digest).is_ok())
+        .collect();
+    registry
+        .published_intents
+        .record(&needed, selected.horizon, &selected.memory);
 }
 
 fn coverage_witnesses(
@@ -419,7 +660,7 @@ fn prune_intent_receipts(registry: &mut CutRegistry, current: &PublicationIntent
     }
     registry
         .published_intents
-        .retain(|digest, _| needed.contains(digest));
+        .retain(|digest| needed.contains(digest));
 }
 
 fn publication_intents(fs: &Arc<dyn Fs>) -> MidgeResult<PublicationIntentBoundary> {

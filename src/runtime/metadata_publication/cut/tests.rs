@@ -23,6 +23,19 @@ struct InlineCloudBackend {
 
 impl crate::storage::cloud::CloudReadCapability for InlineCloudBackend {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+
+    fn read(
+        &self,
+        key: &str,
+        options: crate::storage::cloud::CloudReadOptions,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        // This fixture only requests whole immutable bodies. Its real mock
+        // GET sends the complete body synchronously, so no relay stack or
+        // payload remains after the reservation-carrying options are dropped.
+        self.inner.submit_get(key, callback);
+        drop(options);
+    }
 }
 
 impl crate::storage::cloud::CloudWriteCapability for InlineCloudBackend {
@@ -58,6 +71,7 @@ struct DroppedSource {
     lock: MetadataPublicationLock,
     memory: ResourceBudget,
     encoded: u64,
+    witness_bytes: usize,
 }
 
 fn select_source_before_contended_drop() -> DroppedSource {
@@ -129,10 +143,23 @@ fn select_source_before_contended_drop() -> DroppedSource {
     assert_eq!(lock.pending_captures(), 0);
     let registry = lock.cuts.lock();
     assert_eq!(registry.published_intents.len(), 1);
+    let witness_bytes = registry
+        .selected_terminal
+        .as_ref()
+        .unwrap()
+        .witnesses
+        .as_ref()
+        .unwrap()
+        .memory
+        .bytes();
     let source = Arc::downgrade(&cut);
     drop(cut);
     assert!(source.upgrade().is_none());
-    assert_eq!(memory.used(), memory.limit());
+    assert_eq!(memory.used(), witness_bytes);
+    assert!(
+        witness_bytes < memory.limit(),
+        "finished source workspace must be released even while registry cleanup is blocked"
+    );
     drop(registry);
     DroppedSource {
         _directory: directory,
@@ -140,13 +167,15 @@ fn select_source_before_contended_drop() -> DroppedSource {
         lock,
         memory,
         encoded,
+        witness_bytes,
     }
 }
 
 #[test]
 fn should_admit_next_capture_when_final_source_drop_could_not_prune_its_receipt() {
     // Arrange: a selected ManifestPublished receipt owns the entire one-cut
-    // pool after its final source drop lost the registry mutex race.
+    // pool's selected compact witness after its final source drop lost the
+    // registry mutex race. Full body workspace is already released.
     let fixture = select_source_before_contended_drop();
 
     // Act
@@ -164,6 +193,19 @@ fn should_admit_next_capture_when_final_source_drop_could_not_prune_its_receipt(
     assert_eq!(fixture.lock.cuts.lock().published_intents.len(), 0);
     assert_eq!(fixture.lock.pending_captures(), 1);
     assert_eq!(fixture.memory.used(), fixture.memory.limit());
+    assert!(next.memory_reservation().bytes()
+        >= usize::try_from(fixture.encoded).unwrap() * 8 + 4096,
+        "shared witness credit must leave the full body and decoder allowance independently charged");
+    let witness = next.terminal_witnesses.as_ref().unwrap();
+    let owned_allocations = std::mem::size_of_val(witness.as_ref())
+        + std::mem::size_of_val(witness.digests.as_ref())
+        + witness.memory.allocation_bytes()
+        + 4 * std::mem::size_of::<usize>()
+        + super::RECEIPT_COPIES
+            * std::mem::size_of::<super::ReceiptEntry>()
+            * witness.digests.len();
+    assert!(witness.memory.bytes() >= owned_allocations);
+    assert!(witness.memory.bytes() <= usize::try_from(fixture.encoded).unwrap() * 4);
     assert_eq!(next.cut_ordinal(), 2);
 }
 
@@ -184,5 +226,5 @@ fn should_admit_selected_body_read_when_final_source_drop_could_not_prune_its_re
     assert_eq!(fixture.lock.pending_captures(), 0);
     assert_eq!(fixture.memory.used(), fixture.memory.limit());
     drop(selected);
-    assert_eq!(fixture.memory.used(), 0);
+    assert_eq!(fixture.memory.used(), fixture.witness_bytes);
 }

@@ -59,6 +59,7 @@ pub(crate) fn mirror_captured_control_metadata_within(
             &local,
         );
         staged.cut = Some(cut.proof.clone());
+        staged.terminal_witnesses = cut.terminal_witnesses();
         cut.remember_staged(staged.clone());
         validate_publication_authority(&context, &mut validate_lease)?;
         match context.authority.store.publish_committed_metadata(
@@ -324,6 +325,13 @@ fn install_cache(
             || (current.writer_epoch == cache.writer_epoch
                 && current.generation.id <= cache.generation.id)
     }) {
+        if let Some(proof) = &cache.cut {
+            context.publication_lock.note_selected_terminal_witnesses(
+                cache.generation.id,
+                proof,
+                cache.terminal_witnesses.clone(),
+            )?;
+        }
         guard.cached = Some(cache);
     }
     Ok(())

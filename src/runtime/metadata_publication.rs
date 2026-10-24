@@ -8,7 +8,7 @@ use parking_lot::{Mutex, MutexGuard};
 use std::sync::{Arc, OnceLock};
 
 mod cut;
-pub(crate) use cut::{CapturedMetadataCut, MetadataCutProof};
+pub(crate) use cut::{CapturedMetadataCut, MetadataCutProof, SelectedTerminalWitnesses};
 
 #[derive(Clone, Default)]
 pub(crate) struct MetadataPublicationLock {

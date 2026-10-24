@@ -352,8 +352,8 @@ fn publish_bytes(
     let (tx, rx) = std::sync::mpsc::channel();
     let mut request = StorageRequest::new(key, *deadline, cloud.callback_timeout())
         .with_precondition(StoragePrecondition::IfAbsent);
-    if let Some(reservation) = reservation {
-        request = request.with_reservation(reservation);
+    if let Some(reservation) = &reservation {
+        request = request.with_reservation(std::sync::Arc::clone(reservation));
     }
     cloud.submit_write_receipt_request(request, bytes.to_vec(), tx);
     let timeout = deadline
@@ -371,7 +371,11 @@ fn publish_bytes(
     }
     // A missing receipt or a lost conditional PUT response needs exact bytes
     // under the operation's stable immutable key before pointer publication.
-    let actual = BlockingCloud::new(cloud, deadline).get_optional(key)?;
+    let mut io = BlockingCloud::new(cloud, deadline);
+    if let Some(reservation) = reservation {
+        io = io.with_reservation(reservation);
+    }
+    let actual = io.get_optional(key)?;
     if actual.as_deref() == Some(bytes) {
         Ok(())
     } else {

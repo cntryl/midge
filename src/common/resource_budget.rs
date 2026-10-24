@@ -337,6 +337,19 @@ impl ResourceReservation {
         self.bytes
     }
 
+    /// Payload retained by this reservation and its owned parent Boxes.
+    /// The caller accounts for its outer Arc header separately. Shared pool
+    /// objects and borrowed-credit allocations already have separate owners.
+    pub(crate) fn allocation_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Self>();
+        let mut parent = self.parent.as_deref();
+        while let Some(reservation) = parent {
+            bytes = bytes.saturating_add(std::mem::size_of::<Self>());
+            parent = reservation.parent.as_deref();
+        }
+        bytes
+    }
+
     /// Hold `bytes` of independent charge. Growth is admitted like a new
     /// reservation and a refusal leaves the charge unchanged; a smaller total
     /// releases the rest. Any borrowed credit remains separately owned.

@@ -61,6 +61,64 @@ impl crate::storage::cloud::CloudHeadCapability for HeldManifestBackend {
 }
 impl CloudBackend for HeldManifestBackend {}
 
+struct HeldReadbackBackend {
+    inner: Arc<MockCloudBackend>,
+    hold: AtomicBool,
+    entered: mpsc::Sender<()>,
+    released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl CloudReadCapability for HeldReadbackBackend {
+    fn submit_get(&self, key: &str, callback: CloudCallback) {
+        if !key.contains("manifest/") || !self.hold.swap(false, Ordering::AcqRel) {
+            self.inner.submit_get(key, callback);
+            return;
+        }
+        // Fetch the genuine immutable body before delaying its callback. The
+        // default typed read boundary retains any source reservation until
+        // this physical payload/callback owner actually completes.
+        let (tx, rx) = mpsc::channel();
+        self.inner.submit_get(key, tx);
+        let event = rx.recv().unwrap();
+        assert!(matches!(
+            &event,
+            crate::storage::cloud::CloudEvent::Get { result: Ok(bytes), .. } if !bytes.is_empty()
+        ));
+        let released = Arc::clone(&self.released);
+        let entered = self.entered.clone();
+        std::thread::spawn(move || {
+            entered.send(()).unwrap();
+            let (lock, changed) = &*released;
+            let _ready = changed
+                .wait_while(lock.lock().unwrap(), |ready| !*ready)
+                .unwrap();
+            let _ = callback.send(event);
+        });
+    }
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
+impl CloudWriteCapability for HeldReadbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+}
+impl crate::storage::cloud::CloudDeleteCapability for HeldReadbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+impl crate::storage::cloud::CloudListCapability for HeldReadbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+impl crate::storage::cloud::CloudHeadCapability for HeldReadbackBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+impl CloudBackend for HeldReadbackBackend {}
+
+impl Drop for HeldReadbackBackend {
+    fn drop(&mut self) {
+        let (lock, changed) = &*self.released;
+        *lock.lock().unwrap() = true;
+        changed.notify_all();
+    }
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     fs: Arc<dyn Fs>,
@@ -313,13 +371,21 @@ fn should_keep_unknown_physical_put_charged_after_later_cut_covers_its_capture()
     let released = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
     let backend = Arc::new(HeldManifestBackend {
         inner: Arc::new(MockCloudBackend::new()),
-        hold: AtomicBool::new(true),
+        hold: AtomicBool::new(false),
         entered,
         released: Arc::clone(&released),
     });
-    let fixture = Fixture::new(CloudStorage::new(backend, "physical-capture-budget".into()));
+    let fixture = Fixture::new(CloudStorage::new(
+        backend.clone(),
+        "physical-capture-budget".into(),
+    ));
     let memory = crate::common::resource_budget::ResourceBudget::new(256 * 1024);
     fixture.lock.configure_capture_memory(memory.clone());
+    install_terminal_flush_fixture(&fixture, 1);
+    let predecessor = fixture.cut();
+    fixture.mirror(&predecessor).unwrap();
+    drop(predecessor);
+    backend.hold.store(true, Ordering::Release);
     let first = fixture.cut();
     assert!(matches!(
         fixture.mirror_for(&first, Duration::from_millis(20)),
@@ -327,6 +393,7 @@ fn should_keep_unknown_physical_put_charged_after_later_cut_covers_its_capture()
     ));
     arrived.recv_timeout(Duration::from_secs(1)).unwrap();
     drop(first);
+    IntentPersistence::save_with_fs(&fixture.fs, &[]).unwrap();
 
     // Act: the later selected proof settles the logical capture while the
     // earlier actual transport still retains its payload/reservation callback.
@@ -348,6 +415,148 @@ fn should_keep_unknown_physical_put_charged_after_later_cut_covers_its_capture()
 
     // Assert
     assert_eq!(memory.used(), 0);
+}
+
+#[test]
+fn should_keep_readback_payload_charged_until_its_actual_callback_finishes() {
+    // Arrange: the provider has fetched the real immutable body, but its
+    // callback remains held beyond the logical publication deadline.
+    let (entered, arrived) = mpsc::channel();
+    let released = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let backend = Arc::new(HeldReadbackBackend {
+        inner: Arc::new(MockCloudBackend::new()),
+        hold: AtomicBool::new(false),
+        entered,
+        released: Arc::clone(&released),
+    });
+    let fixture = Fixture::new(CloudStorage::new(
+        backend.clone(),
+        "physical-readback-budget".into(),
+    ));
+    let memory = crate::common::resource_budget::ResourceBudget::new(256 * 1024);
+    fixture.lock.configure_capture_memory(memory.clone());
+    install_terminal_flush_fixture(&fixture, 1);
+    let predecessor = fixture.cut();
+    fixture.mirror(&predecessor).unwrap();
+    drop(predecessor);
+    backend.hold.store(true, Ordering::Release);
+    let first = fixture.cut();
+    assert!(matches!(
+        fixture.mirror_for(&first, Duration::from_millis(20)),
+        Err(MidgeError::Timeout(_))
+    ));
+    arrived.recv_timeout(Duration::from_secs(1)).unwrap();
+    drop(first);
+
+    // Act: a later selected cut clears the intent and settles logical coverage
+    // while the actual earlier GET payload/callback is still owned.
+    IntentPersistence::save_with_fs(&fixture.fs, &[]).unwrap();
+    let second = fixture.cut();
+    fixture.mirror(&second).unwrap();
+    drop(second);
+    assert_eq!(fixture.lock.pending_captures(), 0);
+    let until = std::time::Instant::now() + Duration::from_secs(1);
+    while memory.used() > 64 * 1024 && std::time::Instant::now() < until {
+        std::thread::yield_now();
+    }
+
+    // Assert: logical settlement cannot release either the source charge or
+    // its exclusive witness credit until the real readback callback drains.
+    assert!(
+        memory.used() > 0,
+        "held readback body must retain source accounting after coalescence"
+    );
+    let (lock, changed) = &*released;
+    *lock.lock().unwrap() = true;
+    changed.notify_all();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while memory.used() != 0 && std::time::Instant::now() < until {
+        std::thread::yield_now();
+    }
+    assert_eq!(memory.used(), 0);
+}
+
+fn install_terminal_flush_fixture(fixture: &Fixture, count: u64) -> Vec<IntentLogEntry> {
+    let mut edits = Vec::new();
+    let mut intents = Vec::new();
+    for index in 1..=count {
+        let mut intent = flush_intent();
+        let IntentLogEntry::FlushPublish {
+            phase,
+            sequence,
+            file_meta,
+            ..
+        } = &mut intent
+        else {
+            unreachable!()
+        };
+        *phase = PublicationPhase::ManifestPublished;
+        *sequence = index * 10;
+        file_meta.name = crate::cloud_layout::file_name(0, 0, *sequence);
+        file_meta.smallest_seq = Some(*sequence);
+        file_meta.largest_seq = Some(*sequence);
+        edits.push(crate::metadata::ManifestEdit::AddSst(
+            crate::metadata::FileMeta::from(&*file_meta),
+        ));
+        intents.push(intent);
+    }
+    edits.push(crate::metadata::ManifestEdit::BumpNextSstSeq {
+        cf_id: 0,
+        next_seq: count * 10 + 1,
+    });
+    edits.push(crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+        cf_id: 0,
+        freeze_sequence: count * 10,
+    });
+    crate::metadata::store::ManifestStore::new(Arc::clone(&fixture.fs))
+        .append(&crate::metadata::ManifestEdit::Batch(edits))
+        .unwrap();
+    IntentPersistence::save_with_fs(&fixture.fs, &intents).unwrap();
+    intents
+}
+
+#[test]
+fn should_retain_remaining_terminal_witnesses_when_a_selected_cut_clears_only_some_intents() {
+    // Arrange: many genuine selected terminal phases occupy a compact cache,
+    // while a later owned source can outlive several partial intent clears.
+    let fixture = Fixture::new(CloudStorage::with_mock());
+    let intents = install_terminal_flush_fixture(&fixture, 32);
+    let encoded = files::CLOUD_MIRRORED
+        .iter()
+        .map(|name| usize::try_from(fixture.fs.metadata(&FsPath::new(*name)).unwrap().len).unwrap())
+        .sum::<usize>();
+    let limit = (encoded * 16 + 4096) * 3 + 128 * 1024;
+    let root = crate::common::resource_budget::ResourceBudget::new(limit);
+    let memory = root.child(limit);
+    fixture.lock.configure_capture_memory(memory.clone());
+    let selected = fixture.cut();
+    fixture.mirror(&selected).unwrap();
+    drop(selected);
+    let retained = fixture.cut();
+
+    // Act: the later selected cache drops most IDs, but those receipts remain
+    // necessary until every earlier owned source can settle its exact coverage.
+    IntentPersistence::save_with_fs(&fixture.fs, &intents[31..]).unwrap();
+    let partial = fixture.cut();
+    fixture.mirror(&partial).unwrap();
+    IntentPersistence::save_with_fs(&fixture.fs, &[]).unwrap();
+    let clear = fixture.cut();
+    fixture.mirror(&clear).unwrap();
+    fixture.mirror(&retained).unwrap();
+
+    // Assert: shared witness credit never spends the private body/decoder
+    // floor or escapes its parent pool, even with several source callbacks.
+    assert!(retained.memory_reservation().bytes() >= encoded * 8 + 4096);
+    assert!(root.used() >= memory.used());
+    assert!(root.peak() <= limit);
+    assert_eq!(fixture.lock.pending_captures(), 0);
+    drop((retained, partial, clear));
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while root.used() != 0 && std::time::Instant::now() < until {
+        std::thread::yield_now();
+    }
+    assert_eq!(memory.used(), 0);
+    assert_eq!(root.used(), 0);
 }
 
 #[test]
@@ -504,6 +713,75 @@ fn should_retain_unsettled_intent_when_new_capture_attempts_to_drop_it() {
     assert!(IntentPersistence::load_with_fs_and_policy(
         second.fs(),
         crate::config::RecoveryPolicy::Strict
+    )
+    .unwrap()
+    .is_empty());
+}
+
+#[test]
+fn should_transfer_selected_terminal_witness_when_its_source_finishes_before_later_capture() {
+    // Arrange: a real selected cut proves the terminal phase. Its source can
+    // finish before a later task captures the still durable local intent.
+    let fixture = Fixture::new(CloudStorage::with_mock());
+    let mut intent = flush_intent();
+    let IntentLogEntry::FlushPublish {
+        phase, file_meta, ..
+    } = &mut intent
+    else {
+        unreachable!()
+    };
+    *phase = PublicationPhase::ManifestPublished;
+    let store = crate::metadata::store::ManifestStore::new(Arc::clone(&fixture.fs));
+    store
+        .append(&crate::metadata::ManifestEdit::Batch(vec![
+            crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta::from(&*file_meta)),
+            crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                cf_id: 0,
+                freeze_sequence: 10,
+            },
+        ]))
+        .unwrap();
+    IntentPersistence::save_with_fs(&fixture.fs, &[intent]).unwrap();
+    let selected = fixture.cut();
+    fixture.mirror(&selected).unwrap();
+    drop(selected);
+    // A later durable edit means whole-body equality is insufficient proof.
+    store
+        .append(&crate::metadata::ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 100,
+        })
+        .unwrap();
+    let later = fixture.cut();
+
+    // Act: only the already selected terminal intent is removed. The new
+    // capture must keep its exact historical selected witness across ownership.
+    IntentPersistence::save_with_fs(&fixture.fs, &[]).unwrap();
+    let cleared = fixture.cut();
+    fixture.mirror(&cleared).unwrap();
+
+    // Assert: the clear selects without pretending the retained later task
+    // selected; its exact coverage can then settle against the genuine head.
+    fixture.mirror(&later).unwrap();
+    assert_eq!(fixture.lock.pending_captures(), 0);
+    let (_, bodies) = fixture.selected_bodies();
+    let recovered: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+    let mut file = recovered
+        .open(
+            &FsPath::new(files::INTENT_LOG),
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: true,
+                create_new: true,
+                truncate: false,
+            },
+        )
+        .unwrap();
+    file.append(bodies[files::INTENT_LOG].clone().into())
+        .unwrap();
+    assert!(IntentPersistence::load_with_fs_and_policy_typed(
+        &recovered,
+        crate::config::RecoveryPolicy::Strict,
     )
     .unwrap()
     .is_empty());
