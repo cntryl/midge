@@ -34,14 +34,23 @@ pub(super) enum Extent {
 #[derive(Clone, Copy)]
 pub(crate) struct ValidationPointState {
     pub(crate) sequence: Option<u64>,
-    pub(crate) value_expiration: Option<Option<u64>>,
+    pub(crate) value: ValidationValue,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ValidationValue {
+    Absent,
+    Present { expiration: Option<u64> },
 }
 
 impl ValidationPointState {
     pub(crate) fn exists_at(self, read_time_millis: u64) -> bool {
-        self.value_expiration.is_some_and(|expiration| {
-            !crate::common::time::is_expired_at(expiration, read_time_millis)
-        })
+        match self.value {
+            ValidationValue::Absent => false,
+            ValidationValue::Present { expiration } => {
+                !crate::common::time::is_expired_at(expiration, read_time_millis)
+            }
+        }
     }
 }
 
@@ -200,19 +209,21 @@ impl ReadSnapshot {
         #[cfg(any(test, feature = "internal-testing"))]
         self.audit_point_walk(key, sequence, &walk)?;
         let latest = walk.decided_sequence().filter(|sequence| *sequence > 0);
-        let value_expiration = match &walk.best_state {
+        let value = match &walk.best_state {
             Some(KeyState::Value(_, sequence, expiration, _))
                 if walk
                     .covering_tombstone_seq
                     .is_none_or(|cover| cover < *sequence) =>
             {
-                Some(*expiration)
+                ValidationValue::Present {
+                    expiration: *expiration,
+                }
             }
-            _ => None,
+            _ => ValidationValue::Absent,
         };
         Ok(ValidationPointState {
             sequence: latest,
-            value_expiration,
+            value,
         })
     }
 

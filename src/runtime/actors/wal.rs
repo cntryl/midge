@@ -374,6 +374,7 @@ mod memtable_apply;
 pub(crate) use memtable_apply::{MemtableApplyAuthority, MemtableApplyJob, MemtableApplyPlan};
 mod rotation;
 mod spill;
+mod spill_validation;
 mod staged_writes;
 mod strict_pipeline;
 #[cfg(test)]
@@ -381,6 +382,7 @@ mod test_append;
 mod transaction;
 mod transaction_state;
 mod validation_proof;
+pub(crate) use spill_validation::{SpilledValidationInput, SpilledValidationProof};
 pub(crate) use staged_writes::StagedWriteOverlay;
 pub(crate) use validation_proof::CommitValidationProof;
 

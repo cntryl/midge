@@ -21,6 +21,9 @@ use std::thread::JoinHandle;
 const MAX_VALIDATION_JOBS: usize = 16;
 const VALIDATION_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 
+mod spilled;
+use spilled::SpilledValidationJob;
+
 #[cfg(all(test, feature = "failpoints"))]
 mod tests;
 
@@ -34,23 +37,85 @@ struct ValidationJob {
     _reservation: ResourceReservation,
 }
 
-struct ValidationCompletion {
-    job: ValidationJob,
-    proof: MidgeResult<CommitValidationProof>,
+enum ValidationTask {
+    Resident(ValidationJob),
+    Spilled(SpilledValidationJob),
+}
+
+enum ValidationCompletion {
+    Resident {
+        job: ValidationJob,
+        proof: MidgeResult<CommitValidationProof>,
+    },
+    Spilled {
+        job: SpilledValidationJob,
+        proof: MidgeResult<crate::runtime::actors::wal::SpilledValidationProof>,
+    },
+}
+
+impl ValidationCompletion {
+    fn request_id(&self) -> u64 {
+        match self {
+            Self::Resident { job, .. } => job.request.request_id,
+            Self::Spilled { job, .. } => job.request.request_id,
+        }
+    }
+}
+
+impl ValidationTask {
+    fn read(self, cancelled: &std::sync::atomic::AtomicBool) -> ValidationCompletion {
+        match self {
+            Self::Spilled(job) => job.read(cancelled),
+            Self::Resident(job) => {
+                let proof = read_resident_validation(&job, cancelled);
+                ValidationCompletion::Resident { job, proof }
+            }
+        }
+    }
+}
+
+fn read_resident_validation(
+    job: &ValidationJob,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> MidgeResult<CommitValidationProof> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::failpoints::fail_point!("midge::validation::before_snapshot_reads");
+        if job.deadline.is_expired() || cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(MidgeError::Timeout(
+                "transaction validation expired before storage reads".into(),
+            ));
+        }
+        CommitValidationProof::read(
+            job.applied_sequence,
+            &job.snapshots,
+            &job.request.ops,
+            &job.request.assertions,
+            job.request.conflict_policy,
+            job.request.start_sequence,
+            job.deadline,
+        )
+    }))
+    .unwrap_or_else(|_| {
+        Err(MidgeError::Internal(
+            "detached transaction validation panicked".into(),
+        ))
+    })
 }
 
 struct ValidationWorker {
-    requests: Option<Sender<ValidationJob>>,
+    requests: Option<Sender<ValidationTask>>,
     completions: Receiver<ValidationCompletion>,
     handle: Option<JoinHandle<()>>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    continue_after_completion: Option<Sender<()>>,
 }
 
 impl ValidationWorker {
     fn new() -> MidgeResult<Self> {
         let (requests, incoming) =
-            crossbeam::channel::bounded::<ValidationJob>(MAX_VALIDATION_JOBS);
+            crossbeam::channel::bounded::<ValidationTask>(MAX_VALIDATION_JOBS);
         let (completed, completions) = crossbeam::channel::unbounded();
+        let (continue_after_completion, continued) = crossbeam::channel::bounded(1);
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancellation = Arc::clone(&cancelled);
         let gate = crate::failpoints::worker_gate();
@@ -59,33 +124,13 @@ impl ValidationWorker {
             .spawn(move || {
                 gate.run(|| {
                     for job in incoming {
-                        let proof = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            crate::failpoints::fail_point!(
-                                "midge::validation::before_snapshot_reads"
-                            );
-                            if job.deadline.is_expired()
-                                || cancellation.load(std::sync::atomic::Ordering::Acquire)
-                            {
-                                return Err(MidgeError::Timeout(
-                                    "transaction validation expired before storage reads".into(),
-                                ));
-                            }
-                            CommitValidationProof::read(
-                                job.applied_sequence,
-                                &job.snapshots,
-                                &job.request.ops,
-                                &job.request.assertions,
-                                job.request.conflict_policy,
-                                job.request.start_sequence,
-                                job.deadline,
-                            )
-                        }))
-                        .unwrap_or_else(|_| {
-                            Err(MidgeError::Internal(
-                                "detached transaction validation panicked".into(),
-                            ))
-                        });
-                        if completed.send(ValidationCompletion { job, proof }).is_err() {
+                        if completed.send(job.read(&cancellation)).is_err() {
+                            break;
+                        }
+                        // One streaming workspace may survive in a completed
+                        // first-error key. Wait until the loop consumes it
+                        // before reading another job's payloads.
+                        if continued.recv().is_err() {
                             break;
                         }
                     }
@@ -97,6 +142,7 @@ impl ValidationWorker {
             completions,
             handle: Some(handle),
             cancelled,
+            continue_after_completion: Some(continue_after_completion),
         })
     }
 }
@@ -104,6 +150,7 @@ impl ValidationWorker {
 impl Drop for ValidationWorker {
     fn drop(&mut self) {
         self.requests.take();
+        self.continue_after_completion.take();
         if let Some(handle) = self.handle.take() {
             // Reads have no mutation effects, but their sources remain pinned
             // in each job until the final provider callback has returned.
@@ -267,7 +314,7 @@ impl EventLoop {
             .requests
             .as_ref()
             .expect("validation worker open")
-            .try_send(job)
+            .try_send(ValidationTask::Resident(job))
             .map_err(|_| {
                 MidgeError::WriteStall("detached transaction validation worker unavailable".into())
             })?;
@@ -337,20 +384,43 @@ impl EventLoop {
                 .pipeline
                 .validation
                 .callers
-                .remove(&completion.job.request.request_id)
+                .remove(&completion.request_id())
             {
+                drop(completion);
+                self.release_validation_worker();
                 continue;
             }
-            self.complete_validation(completion, msg_rx);
+            match completion {
+                ValidationCompletion::Resident { job, proof } => {
+                    self.complete_validation(job, proof, msg_rx);
+                }
+                ValidationCompletion::Spilled { job, proof } => {
+                    self.complete_spilled_validation(job, proof, msg_rx);
+                }
+            }
+            self.release_validation_worker();
+        }
+    }
+
+    fn release_validation_worker(&self) {
+        if let Some(continued) = self
+            .pipeline
+            .validation
+            .worker
+            .as_ref()
+            .and_then(|worker| worker.continue_after_completion.as_ref())
+        {
+            let _ = continued.try_send(());
         }
     }
 
     fn complete_validation(
         &mut self,
-        completion: ValidationCompletion,
+        job: ValidationJob,
+        proof: MidgeResult<CommitValidationProof>,
         msg_rx: &Receiver<RuntimeMsg>,
     ) {
-        let ValidationCompletion { mut job, proof } = completion;
+        let mut job = job;
         let request_id = job.request.request_id;
         let result = self.check_lease_health().and_then(|()| {
             if job.writer_epoch != self.state.writer_epoch {

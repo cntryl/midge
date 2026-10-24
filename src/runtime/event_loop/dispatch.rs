@@ -214,6 +214,7 @@ impl RuntimeDispatcher {
                     durability_policy,
                     start_sequence,
                     conflict_policy,
+                    validation: None,
                 },
                 response_tx,
             ),
