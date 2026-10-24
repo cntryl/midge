@@ -497,6 +497,25 @@ pub trait CloudReadCapability: Send + Sync {
 /// impl CloudWriteCapability for MissingWrite {}
 /// ```
 pub trait CloudWriteCapability: Send + Sync {
+    fn supports_file_upload(&self) -> bool {
+        false
+    }
+
+    fn write_file_with_receipt(
+        &self,
+        key: &str,
+        _source: crate::storage::StorageFileUpload,
+        _options: CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        let _ = callback.send(CloudEvent::PutReceipt {
+            key: key.into(),
+            result: Err(CloudError::Protocol(
+                "backend has no conditional streaming upload capability".into(),
+            )),
+        });
+    }
+
     /// Configure retries; this does not authorize replay of shared-key mutations.
     fn set_retry_policy(&self, _policy: super::CloudRetryPolicy) {}
 

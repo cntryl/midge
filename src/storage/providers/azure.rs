@@ -1131,6 +1131,36 @@ impl crate::storage::cloud::CloudReadCapability for AzureBackend {
 }
 
 impl crate::storage::cloud::CloudWriteCapability for AzureBackend {
+    fn supports_file_upload(&self) -> bool {
+        true
+    }
+
+    fn write_file_with_receipt(
+        &self,
+        key: &str,
+        source: crate::storage::StorageFileUpload,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        if crate::storage::cloud::reject_exhausted_receipt(key, &options, &callback) {
+            return;
+        }
+        self.executor.spawn_file_upload(
+            crate::storage::cloud::multipart::FileUploadRequest {
+                key: key.into(),
+                url: self.object_url(key),
+                kind: crate::storage::cloud::multipart::FileUploadKind::Azure,
+                source,
+                options,
+                error_mapper: Arc::new(|response, conditional| {
+                    azure_response_error(response, "Azure block upload", conditional)
+                }),
+                receipt_mapper: Arc::new(|_, _, _| Ok(None)),
+            },
+            callback,
+        );
+    }
+
     fn set_retry_policy(&self, policy: crate::storage::cloud::CloudRetryPolicy) {
         self.executor.set_retry_policy(policy);
     }

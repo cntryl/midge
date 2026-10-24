@@ -569,3 +569,21 @@ behavior. Active held-worker/native-root and wrong-prefix regressions are
 included; failpoint test targets compile without warnings. No behavioral tests
 have executed for this slice. Event-loop pipeline enablement, append completion
 events and writer-thread encoding are still being implemented.
+
+### #915: bounded native streaming candidate implemented
+
+Native immutable-file publication now streams owned file handles in bounded
+5 MiB parts, reserves retained part/provider workspace, and checks the final
+source CRC before committing the object. S3 multipart and Azure block sessions
+carry checked part/session identities; GCS uses generation-conditional resumable
+upload and validates its whole-object CRC because that protocol has no checked
+intermediate-chunk receipt. Same-deadline aborts retain uncertainty as residue,
+never authoritative metadata. Conditional final commitment preserves IfAbsent.
+
+Active native HTTP regressions cover64MiB publication, corruption and changed
+finalized source across S3, Azure, GCS JSON/XML. Full failpoint test targets and
+restricted provider library configurations compile. Tests, missing/wrong receipt
+fallback, unknown final results, abort/retry campaigns and Sqrzl remain pending
+qualification. No actual provider request/peak-memory performance result is
+claimed from compile checks. Provider protocol details and limits are recorded
+in cloud-file-publication-915.md.

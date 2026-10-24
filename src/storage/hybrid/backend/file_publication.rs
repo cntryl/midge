@@ -49,6 +49,12 @@ impl HybridStorage {
     /// from repeatedly failing when its input cursors retain more than half of
     /// the shared maintenance budget.
     pub(crate) fn immutable_file_partition_target(&self, pool: usize) -> usize {
+        let streaming_workspace = crate::storage::FILE_UPLOAD_PART_BYTES
+            .saturating_mul(self.publication_copies())
+            .saturating_add(FIXED_WORKSPACE);
+        if self.stores.sst.supports_file_upload() && pool >= streaming_workspace.saturating_mul(2) {
+            return usize::MAX;
+        }
         (pool.saturating_sub(FIXED_WORKSPACE) / (self.publication_copies() * 4)).max(1)
     }
 
@@ -87,6 +93,11 @@ impl HybridStorage {
             self.callback_timeout,
             &deadline,
         )?;
+        if size >= (crate::storage::FILE_UPLOAD_PART_BYTES as u64).saturating_mul(2)
+            && self.stores.sst.supports_file_upload()
+        {
+            return self.publish_streaming_file(source, budget, deadline);
+        }
         let length = usize::try_from(size).map_err(|_| {
             MidgeError::ResourceLimit("immutable upload size exceeds address space".into())
         })?;
@@ -323,3 +334,6 @@ impl HybridStorage {
 #[cfg(test)]
 #[path = "file_publication_tests.rs"]
 mod tests;
+
+#[path = "file_publication_stream.rs"]
+mod stream;

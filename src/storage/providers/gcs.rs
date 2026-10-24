@@ -1433,6 +1433,55 @@ impl crate::storage::cloud::CloudReadCapability for GcsBackend {
 }
 
 impl crate::storage::cloud::CloudWriteCapability for GcsBackend {
+    fn supports_file_upload(&self) -> bool {
+        true
+    }
+
+    fn write_file_with_receipt(
+        &self,
+        key: &str,
+        source: crate::storage::StorageFileUpload,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        if crate::storage::cloud::reject_exhausted_receipt(key, &options, &callback) {
+            return;
+        }
+        let mode = self.mode;
+        let url = if mode == GcsBackendMode::Json {
+            let url = self
+                .upload_url(key)
+                .replace("uploadType=media", "uploadType=resumable");
+            append_query_param(&url, "ifGenerationMatch", "0")
+        } else {
+            self.upload_url(key)
+        };
+        self.executor.spawn_file_upload(
+            crate::storage::cloud::multipart::FileUploadRequest {
+                key: key.into(),
+                url,
+                kind: crate::storage::cloud::multipart::FileUploadKind::Gcs {
+                    json: mode == GcsBackendMode::Json,
+                },
+                source,
+                options,
+                error_mapper: Arc::new(move |response, conditional| {
+                    gcs_response_error(response, "GCS resumable", mode, conditional)
+                }),
+                receipt_mapper: Arc::new(move |response, size, checksum| {
+                    gcs_write_receipt(
+                        response,
+                        mode,
+                        size,
+                        &BASE64.encode(checksum.to_be_bytes()),
+                        checksum,
+                    )
+                }),
+            },
+            callback,
+        );
+    }
+
     fn set_retry_policy(&self, policy: crate::storage::cloud::CloudRetryPolicy) {
         self.executor.set_retry_policy(policy);
     }

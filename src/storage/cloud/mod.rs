@@ -31,6 +31,13 @@ mod config;
     feature = "cloud-gcp",
     feature = "cloud-oci"
 ))]
+pub(crate) mod multipart;
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
 pub(crate) mod range;
 #[cfg(test)]
 mod test_support;

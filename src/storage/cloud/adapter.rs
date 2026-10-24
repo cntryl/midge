@@ -162,6 +162,48 @@ impl CloudStorage {
 }
 
 impl StorageBackend for CloudStorage {
+    fn supports_file_upload(&self) -> bool {
+        self.writes.supports_file_upload()
+    }
+
+    fn submit_file_write_receipt_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        source: crate::storage::StorageFileUpload,
+        callback: crate::storage::WriteReceiptCallback,
+    ) {
+        let result = (|| {
+            if request.precondition != crate::storage::StoragePrecondition::IfAbsent {
+                return Err(crate::storage::StorageError::protocol(
+                    "streaming publication requires IfAbsent",
+                ));
+            }
+            let timeout = self.scoped_timeout(request.remaining_timeout());
+            let deadline = crate::common::OperationDeadline::from_budget(timeout);
+            let key = self.full_path(&request.key);
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.writes.write_file_with_receipt(
+                &key,
+                source,
+                CloudRequestOptions::default()
+                    .with_deadline(deadline)
+                    .with_headers(request.precondition.headers()?)
+                    .with_reservation(request.reservation),
+                tx,
+            );
+            match await_cloud_event(self, &rx, &deadline, "streaming PUT receipt")? {
+                CloudEvent::PutReceipt {
+                    key: actual,
+                    result,
+                } if actual == key => result.map_err(storage_error_from_cloud),
+                _ => Err(crate::storage::StorageError::protocol(
+                    "streaming upload completed a different operation",
+                )),
+            }
+        })();
+        let _ = callback.send(result);
+    }
+
     fn write_payload_copies(&self) -> usize {
         self.writes.write_payload_copies()
     }

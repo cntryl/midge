@@ -25,6 +25,7 @@ pub struct CloudRequest {
     pub timeout: Option<Duration>,
     response_limit: usize,
     retry_conditional_conflicts: bool,
+    staged_part_retry: bool,
     retry_policy: Option<CloudRetryPolicy>,
     reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
 }
@@ -39,6 +40,7 @@ impl CloudRequest {
             timeout: None,
             response_limit: MAX_CLOUD_RESPONSE_BYTES,
             retry_conditional_conflicts: false,
+            staged_part_retry: false,
             retry_policy: None,
             reservation: None,
         }
@@ -96,6 +98,14 @@ impl CloudRequest {
     /// conditional PUT race; other providers do not share that contract.
     pub fn with_conditional_conflict_retries(mut self) -> Self {
         self.retry_conditional_conflicts = true;
+        self
+    }
+
+    /// Isolated upload parts can be repeated with the same operation/part id
+    /// and body. This never authorizes replay of a shared object commit.
+    #[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-azure"))]
+    pub(super) fn with_staged_part_retries(mut self) -> Self {
+        self.staged_part_retry = true;
         self
     }
 
@@ -197,6 +207,39 @@ pub struct CloudExecutor {
 }
 
 impl CloudExecutor {
+    pub(crate) fn spawn_file_upload(
+        &self,
+        upload: super::multipart::FileUploadRequest,
+        callback: CloudCallback,
+    ) {
+        let key = upload.key.clone();
+        let timeout = upload
+            .options
+            .timeout()
+            .unwrap_or_else(|| self.default_timeout())
+            .min(self.default_timeout());
+        let http = super::multipart::UploadHttp::new(
+            self.client.clone(),
+            self.signer.clone(),
+            self.retry_policy(),
+            timeout,
+            &upload,
+        );
+        let Some(runtime) = self.rt.as_ref() else {
+            let _ = callback.send(CloudEvent::PutReceipt {
+                key,
+                result: Err(super::CloudError::Transport(
+                    "cloud executor is shut down".into(),
+                )),
+            });
+            return;
+        };
+        runtime.spawn(async move {
+            let result = super::multipart::run(upload, http).await;
+            let _ = callback.send(CloudEvent::PutReceipt { key, result });
+        });
+    }
+
     pub fn new(signer: Option<Arc<dyn CloudSigner>>) -> MidgeResult<Self> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
@@ -475,7 +518,7 @@ impl CloudExecutor {
         Self::execute_request_with_signer_at(client, signer, request, deadline).await
     }
 
-    async fn execute_request_with_signer_at(
+    pub(super) async fn execute_request_with_signer_at(
         client: Client,
         signer: Option<Arc<dyn CloudSigner>>,
         request: CloudRequest,
@@ -561,7 +604,9 @@ impl CloudExecutor {
                     // generic transient retries. Provider-specific conflict
                     // responses are handled above when their contract explicitly
                     // guarantees that replay is safe.
-                    if request.is_mutation() || attempt >= retry_policy.max_retries {
+                    if (request.is_mutation() && !request.staged_part_retry)
+                        || attempt >= retry_policy.max_retries
+                    {
                         return Ok(response);
                     }
                     tokio::time::sleep(retry_policy.delay(attempt)).await;
@@ -570,7 +615,7 @@ impl CloudExecutor {
                 Ok(response) => return Ok(response),
                 Err(error)
                     if error.transient
-                        && !request.is_mutation()
+                        && (!request.is_mutation() || request.staged_part_retry)
                         && attempt < retry_policy.max_retries =>
                 {
                     tokio::time::sleep(retry_policy.delay(attempt)).await;
