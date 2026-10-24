@@ -112,28 +112,21 @@ impl CloudStorage {
     ) {
         let deadline = crate::common::OperationDeadline::from_budget(self.scoped_timeout(timeout));
         let (tx, rx) = std::sync::mpsc::channel();
-        self.head_with_timeout(key, deadline.remaining(), &tx);
-        let result = match deadline.clamp_nonzero(self.scoped_timeout(timeout)) {
-            Some(remaining) => rx.recv_timeout(remaining),
-            None => Err(std::sync::mpsc::RecvTimeoutError::Timeout),
-        };
-        let result = match result {
-            Ok(StorageEvent::HeadComplete {
+        let full_key = self.full_path(key);
+        self.heads.head_for_range(
+            &full_key,
+            CloudRequestOptions::default().with_deadline(deadline),
+            tx,
+        );
+        let result = match await_cloud_event(self, &rx, &deadline, "range HEAD") {
+            Ok(CloudEvent::Head {
                 key: actual,
                 result,
-            }) if actual == key => {
-                if deadline.is_expired() || self.scoped_timeout(timeout).is_zero() {
-                    StorageOutcome::Err(crate::storage::storage_timeout_error(
-                        "range HEAD crossed its deadline",
-                    ))
-                } else {
-                    result
-                }
-            }
+            }) if actual == full_key => cloud_to_storage_outcome(result),
             Ok(event) => StorageOutcome::Err(
                 format!("range HEAD returned a different object: {event:?}").into(),
             ),
-            Err(error) => StorageOutcome::Err(crate::storage::storage_timeout_error(error)),
+            Err(error) => StorageOutcome::Err(error),
         };
         let _ = callback.send(StorageEvent::HeadComplete {
             key: key.to_string(),

@@ -441,6 +441,33 @@ impl crate::storage::cloud::CloudListCapability for ObjectStoreBackend {
 }
 
 impl crate::storage::cloud::CloudHeadCapability for ObjectStoreBackend {
+    fn head_for_range(
+        &self,
+        key: &str,
+        options: super::CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        let result = self
+            .request(key, &options.headers_with_deadline())
+            .and_then(|request| {
+                let (tx, rx) = mpsc::channel();
+                self.store.submit_range_head_request(request.clone(), tx);
+                match wait(&rx, &request)? {
+                    StorageEvent::HeadComplete {
+                        key: actual,
+                        result,
+                    } if actual == key => outcome(result),
+                    _ => Err(CloudError::Protocol(
+                        "unexpected object store range HEAD callback".into(),
+                    )),
+                }
+            });
+        let _ = callback.send(CloudEvent::Head {
+            key: key.into(),
+            result,
+        });
+    }
+
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.submit_head_with_headers(key, Vec::new(), callback);
     }
@@ -477,6 +504,46 @@ impl CloudBackend for ObjectStoreBackend {}
 mod tests {
     use super::*;
     use crate::storage::cloud::{BlockingCloud, CloudReadCapability, CloudWriteCapability};
+    use crate::storage::StorageBackend;
+
+    #[test]
+    fn should_read_pinned_range_when_cloud_storage_wraps_a_filesystem_store() {
+        // Arrange: ordinary metadata and range identities are intentionally
+        // distinct for the filesystem backend. Only the range HEAD may pin a read.
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
+        let cloud = CloudStorage::from_object_store(store, Duration::from_secs(5));
+        let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+        BlockingCloud::new(&cloud, &deadline)
+            .put_with_precondition(
+                "manifest/body",
+                b"selected-body".to_vec(),
+                &StoragePrecondition::IfAbsent,
+            )
+            .unwrap();
+        let request = StorageRequest::new("manifest/body", deadline, Duration::from_secs(5));
+        let (head_tx, head_rx) = mpsc::channel();
+        cloud.submit_range_head_request(request.clone(), head_tx);
+        let StorageEvent::HeadComplete {
+            result: StorageOutcome::Ok(identity),
+            ..
+        } = head_rx.recv().unwrap()
+        else {
+            panic!("range HEAD must pin the real filesystem object");
+        };
+
+        // Act
+        let (read_tx, read_rx) = mpsc::channel();
+        cloud.submit_range_read_request(
+            request.with_precondition(StoragePrecondition::IfMatch(identity.clone())),
+            0..identity.size,
+            read_tx,
+        );
+
+        // Assert
+        assert_eq!(read_rx.recv().unwrap().unwrap(), b"selected-body");
+    }
 
     #[test]
     fn should_reject_stale_read_headers_when_read_options_select_object_version() {

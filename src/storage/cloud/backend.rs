@@ -680,6 +680,12 @@ pub trait CloudListCapability: Send + Sync {
 /// impl CloudHeadCapability for MissingHead {}
 /// ```
 pub trait CloudHeadCapability: Send + Sync {
+    /// Pin the identity used by conditional range reads. Native object stores
+    /// use ordinary HEAD; adapters may expose a distinct immutable-read token.
+    fn head_for_range(&self, key: &str, options: CloudRequestOptions, callback: CloudCallback) {
+        self.head(key, options, callback);
+    }
+
     /// Submit a HEAD with typed deadline controls.
     fn head(&self, key: &str, options: CloudRequestOptions, callback: CloudCallback) {
         if options.timeout().is_some_and(|timeout| timeout.is_zero()) {
