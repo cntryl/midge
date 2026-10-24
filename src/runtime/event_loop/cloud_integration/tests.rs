@@ -9533,6 +9533,7 @@ fn should_keep_local_progress_and_fence_stale_completions_when_cloud_publication
         entered_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("worker reached boundary");
+        assert_eq!(el.actors.cloud_coordinator.held_uploads().entries, 1);
         WalCoordinator::apply_transaction(
             &mut el,
             &receiver,
@@ -9586,5 +9587,43 @@ fn should_keep_local_progress_and_fence_stale_completions_when_cloud_publication
         }
     }
     scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_keep_catalog_authority_contiguous_when_four_worker_acknowledgements_reorder(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let mut segments = Vec::new();
+    for _ in 0..4 {
+        append_cloud_async_put(&mut el)?;
+        let segment = el.seal_cloud_wal_without_enqueue_for_test()?;
+        copy_local_segment_to_remote_wal_for_test(&el, segment.0);
+        segments.push(segment);
+    }
+    el.pipeline.inline_flush_worker = false;
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+
+    // Act: later verified uploads cannot bridge the first missing acknowledgement.
+    for &(segment_id, max_sequence) in segments[1..].iter().rev() {
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id,
+            max_sequence,
+        });
+    }
+    el.drain_cloud_publication_within(&deadline)?;
+
+    // Assert
+    assert!(el.state.wal.frontiers.cloud_durable() < segments[0].1);
+    let (segment_id, max_sequence) = segments[0];
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+    el.drain_cloud_publication_within(&deadline)?;
+    assert!(el.state.wal.frontiers.cloud_durable() >= segments[3].1);
     Ok(())
 }

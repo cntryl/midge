@@ -201,6 +201,7 @@ impl HybridStorage {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn stable_object_proof_from_backend(
         backend: &Arc<dyn StorageBackend>,
         key: &str,

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 /// Write-authority state owned independently from message dispatch.
+#[derive(Clone)]
 pub struct RuntimeFence {
     pub(super) lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     pub(super) lease_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,

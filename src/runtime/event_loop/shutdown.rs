@@ -212,6 +212,15 @@ impl EventLoop {
         shutdown_error: &mut Option<MidgeError>,
     ) {
         let join_deadline = cloud_async.then_some(cloud_shutdown_deadline);
+        if let Err(error) =
+            trace_shutdown_phase("cloud-catalog-publication-drain", join_deadline, || {
+                self.drain_cloud_publication_within(cloud_shutdown_deadline)
+            })
+        {
+            if shutdown_error.is_none() {
+                *shutdown_error = Some(error);
+            }
+        }
         if let Err(error) = trace_shutdown_phase("flush-worker-join", join_deadline, || {
             self.actors.flush_actor.shutdown_and_join()
         }) {

@@ -68,9 +68,7 @@ impl EventLoop {
                 .hybrid_storage
                 .as_ref()
                 .is_some_and(|storage| {
-                    storage.is_wal_upload_stalled(
-                        self.actors.cloud_coordinator.cloud_wal.held_uploads(),
-                    )
+                    storage.is_wal_upload_stalled(self.actors.cloud_coordinator.held_uploads())
                 })
     }
 
@@ -102,9 +100,7 @@ impl EventLoop {
                 .hybrid_storage
                 .as_ref()
                 .is_some_and(|storage| {
-                    storage.is_wal_upload_stalled(
-                        self.actors.cloud_coordinator.cloud_wal.held_uploads(),
-                    )
+                    storage.is_wal_upload_stalled(self.actors.cloud_coordinator.held_uploads())
                 })
             {
                 mask |= PRESSURE_UPLOAD_STALLED;

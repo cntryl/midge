@@ -329,6 +329,12 @@ pub enum StorageEvent {
     /// Cloud upload acknowledged - segment is now durable
     /// WAL Actor MUST apply pending writes to memtable on receipt
     CloudAck { segment_id: u64, max_sequence: u64 },
+    /// A runtime-owned cloud WAL publication worker has a terminal result.
+    /// The operation owner retains the typed result and applies it once.
+    CloudWalPublicationComplete {
+        operation_id: u64,
+        writer_epoch: u64,
+    },
     /// Cloud upload attempt failed - segment NOT durable.
     ///
     /// `HybridStorage` keeps a failed WAL upload queued and retries it with

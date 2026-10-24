@@ -436,3 +436,22 @@ on restart, and idle reclamation without new writes/manual compaction.
 `cargo check --locked --tests --features failpoints` passes on the combined
 working tree. Test execution, crash campaigns and space measurements remain
 pending.
+
+### #907/#916: WAL publication worker and upload pool implemented candidates
+
+WAL verification/catalog CAS runs on an owned worker. Completion matches its
+operation and epoch, revalidates authority, and advances only a verified
+contiguous prefix. In-flight verification retains upload pressure credit until
+its acknowledgement is owned. Shutdown explicitly drains publication; a timed
+out admitted worker remains owned and joins before lease resources can release.
+Immutable WAL uploads use a fixed configurable pool (default four) with a
+256 MiB retained-memory cap. Body/provider-copy/fallback-readback reservations
+are acquired before reading, and backend requests retain their admission.
+
+Active regressions hold the publication worker while local writes/read progress,
+fence stale completion, reorder four upload acknowledgements, and exercise
+pool failures/retries and memory bounds. Combined failpoint test targets compile
+without warnings; execution and provider/crash qualification are pending.
+Metadata mirror and remaining seal-provider offload are still required by #907.
+No publication batching interval is selected before #916's measurements justify
+one. Mirror authority/repair semantics remain synchronous and unchanged.

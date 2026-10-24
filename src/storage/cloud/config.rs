@@ -31,6 +31,10 @@ impl CloudRetryPolicy {
 pub struct CloudWritePolicy {
     /// Transient read and reconciled immutable-publication retry budget.
     pub transient_retry: CloudRetryPolicy,
+    /// Immutable WAL uploads may run concurrently; catalog commits stay serial.
+    pub wal_upload_concurrency: usize,
+    /// Retained bodies, provider copies and fallback verification workspace.
+    pub wal_upload_memory_bytes: usize,
     /// Flush a column family whose active memtable started this many WAL
     /// segments ago, bounding the cloud WAL catalog. Local mode bounds WAL
     /// retention in bytes instead (four memtable flush triggers' worth).
@@ -44,6 +48,8 @@ impl Default for CloudWritePolicy {
     fn default() -> Self {
         Self {
             transient_retry: CloudRetryPolicy::default(),
+            wal_upload_concurrency: 4,
+            wal_upload_memory_bytes: 256 * 1024 * 1024,
             eventual_flush_segment_gap: 128,
             wal_seal_min_segment_bytes: 16 * 1024 * 1024,
             wal_seal_max_flush_delay: Duration::from_millis(500),
@@ -54,6 +60,11 @@ impl Default for CloudWritePolicy {
 
 impl CloudWritePolicy {
     pub(crate) fn validate(&self) -> MidgeResult<()> {
+        if !(1..=64).contains(&self.wal_upload_concurrency) || self.wal_upload_memory_bytes == 0 {
+            return Err(MidgeError::InvalidArgument(
+                "cloud WAL uploads need 1..=64 workers and a nonzero memory budget".into(),
+            ));
+        }
         if self.eventual_flush_segment_gap == 0 {
             return Err(MidgeError::InvalidArgument(
                 "eventual-flush segment gap must be greater than zero".to_string(),

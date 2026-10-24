@@ -1127,12 +1127,13 @@ impl RuntimeStorageMaterialization {
             storage.set_retry_policy(retry);
         }
         let mut hybrid_storage =
-            crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+            crate::storage::HybridStorage::new_with_class_stores_upload_policy_and_event_sender(
                 wal_backend,
                 sst_backend,
                 control_backend,
                 tx,
                 opts.storage_io_timeout(),
+                opts.cloud_write_policy_value(),
             );
         hybrid_storage.set_immutable_retry_policy(retry);
         let hybrid_storage = Arc::new(hybrid_storage);
