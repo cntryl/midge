@@ -55,8 +55,12 @@ feature and dedicated Tier 4 workflow modes. Run the actual same-SHA
 construction smoke before its nine fresh release processes, then retain the
 native diagnostic trust and all invalid attempts during readback. See
 [Checkpoint Write Amplification](checkpoint-write-amplification.md) for the
-fixed cells, commands, gate and filesystem-issued byte limits. Measurement is
-pending.
+fixed cells, commands, gate and filesystem-issued byte limits. The
+[recorded hosted outcome](checkpoint-write-amplification.md#recorded-hosted-outcome)
+has nine fresh release attempts: cells B and C miss the snapshot payload
+target in all three repeats, and A has one time miss. This is historical
+engine-Fs evidence, not approval to change checkpoint cadence or a physical
+device cost measurement.
 
 The Tier 2 read amplification target opens a local Engine with three overlapping
 flushed SSTs. It records Engine point-read amplification and block-cache deltas
@@ -76,13 +80,14 @@ the lag in time; provider requests and uploaded WAL bytes come from the
 simulator. A row refuses to report when the sampler managed fewer than half
 the expected ticks. The local `sync()` row is the floor.
 
-The Tier 2 baseline matrix target is the fixed reference the 0.5.0 milestone
-measures against: fillseq, fillrandom (buffered and sync), readrandom against a
+The Tier 2 baseline matrix target supplies the 0.5.0 absolute reference rows:
+fillseq, fillrandom (buffered and sync), readrandom against a
 memtable-resident set and after a cold reopen, and seekrandom, each one
 operation per transaction with 16-byte keys and 100-byte values on a fresh
 local directory with production defaults. Its rows are named after the
 `db_bench` workloads they are shaped like; a `db_bench` run is context, not a
-parity claim. How runs become committed evidence is in
+parity claim. Performance PRs use three alternating base/candidate pairs;
+the absolute matrix remains release evidence. Both procedures are in
 [the baseline procedure](baseline-procedure.md).
 
 Each tier has one workflow, `bench-tier1.yml` through `bench-tier6.yml`,
