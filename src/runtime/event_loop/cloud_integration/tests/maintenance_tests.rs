@@ -287,26 +287,29 @@ fn should_leave_below_threshold_local_debt_when_no_manual_obligation_exists(
 #[test]
 fn should_finish_requested_local_debt_when_background_compaction_is_disabled(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let (mut el, worker) = local_debt()?;
-    el.state.set_compaction_enabled(false);
-    let response = el.routing.router.register(91_007, "CompactAll");
+    crate::failpoints::with_read_gate(|| {
+        // Arrange
+        let (mut el, worker) = local_debt()?;
+        el.state.set_compaction_enabled(false);
+        let response = el.routing.router.register(91_007, "CompactAll");
 
-    // Act
-    CompactionCoordinator::compact_all(&mut el, 91_007);
-    complete_compaction(&mut el, &worker);
-    assert!(
-        response.try_recv().is_err(),
-        "the other CF still needs compaction"
-    );
-    complete_compaction(&mut el, &worker);
+        // Act
+        CompactionCoordinator::compact_all(&mut el, 91_007);
+        complete_compaction(&mut el, &worker);
+        assert!(
+            response.try_recv().is_err(),
+            "the other CF still needs compaction"
+        );
+        complete_compaction(&mut el, &worker);
+        manual_flush_tests::settle_owned_work(&mut el, &worker);
 
-    // Assert
-    assert!(matches!(
-        response.try_recv(),
-        Ok(RuntimeResponse::Ok { request_id: 91_007 })
-    ));
-    assert!(el.state.manifest.files.iter().all(|file| file.level > 0));
-    assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
-    Ok(())
+        // Assert
+        assert!(matches!(
+            response.try_recv(),
+            Ok(RuntimeResponse::Ok { request_id: 91_007 })
+        ));
+        assert!(el.state.manifest.files.iter().all(|file| file.level > 0));
+        assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
+        Ok(())
+    })
 }

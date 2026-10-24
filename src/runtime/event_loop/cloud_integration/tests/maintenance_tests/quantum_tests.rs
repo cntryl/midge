@@ -219,56 +219,60 @@ fn should_retain_wal_when_shutdown_completion_requests_optional_reclamation(
 #[test]
 fn should_join_owned_wal_retirement_head_before_acknowledging_shutdown(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange: hold one already-admitted target HEAD open. Its worker owns the
-    // publication gate before shutdown begins, so it must retain that ownership
-    // until the provider completes rather than being detached at shutdown.
-    let (read_started, started) = crossbeam::channel::bounded(1);
-    let (release, read_release) = crossbeam::channel::bounded(1);
-    let (shutdown_started, shutdown_entered) = crossbeam::channel::bounded(1);
-    let (response_sent, response_ready) = crossbeam::channel::bounded(1);
-    let (begin_shutdown, shutdown_release) = crossbeam::channel::bounded(1);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let control = RetirementShutdownControl {
-        read_started,
-        read_release,
-        shutdown_started,
-        response_sent,
-        shutdown_release,
-        calls: Arc::clone(&calls),
-    };
-    let shutdown = std::thread::spawn(move || run_owned_retirement_shutdown(control));
-    let response = response_ready
-        .recv_timeout(Duration::from_secs(10))
-        .expect("shutdown fixture initialized");
-    started
-        .recv_timeout(Duration::from_secs(1))
-        .expect("the owned retirement entered its target HEAD");
-    begin_shutdown
-        .send(())
-        .expect("allow shutdown after HEAD admission");
+    crate::failpoints::with_read_gate(|| {
+        // Arrange: hold one already-admitted target HEAD open. Its worker owns the
+        // publication gate before shutdown begins, so it must retain that ownership
+        // until the provider completes rather than being detached at shutdown.
+        let (read_started, started) = crossbeam::channel::bounded(1);
+        let (release, read_release) = crossbeam::channel::bounded(1);
+        let (shutdown_started, shutdown_entered) = crossbeam::channel::bounded(1);
+        let (response_sent, response_ready) = crossbeam::channel::bounded(1);
+        let (begin_shutdown, shutdown_release) = crossbeam::channel::bounded(1);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let control = RetirementShutdownControl {
+            read_started,
+            read_release,
+            shutdown_started,
+            response_sent,
+            shutdown_release,
+            calls: Arc::clone(&calls),
+        };
+        let inherited = crate::failpoints::worker_gate();
+        let shutdown =
+            std::thread::spawn(move || inherited.run(|| run_owned_retirement_shutdown(control)));
+        let response = response_ready
+            .recv_timeout(Duration::from_secs(10))
+            .expect("shutdown fixture initialized");
+        started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the owned retirement entered its target HEAD");
+        begin_shutdown
+            .send(())
+            .expect("allow shutdown after HEAD admission");
 
-    // Act: the negative receive is bounded coordination with a deliberately
-    // held provider callback, not an assertion about provider throughput.
-    shutdown_entered
-        .recv_timeout(Duration::from_secs(1))
-        .expect("shutdown entered the owned preflight join");
-    let premature_response = response.recv_timeout(Duration::from_millis(100));
-    release.send(()).expect("finish the owned provider read");
-    let (outcome, worker_reaped) = shutdown.join().expect("shutdown joined owned workers")?;
+        // Act: the negative receive is bounded coordination with a deliberately
+        // held provider callback, not an assertion about provider throughput.
+        shutdown_entered
+            .recv_timeout(Duration::from_secs(1))
+            .expect("shutdown entered the owned preflight join");
+        let premature_response = response.recv_timeout(Duration::from_millis(100));
+        release.send(()).expect("finish the owned provider read");
+        let (outcome, worker_reaped) = shutdown.join().expect("shutdown joined owned workers")?;
 
-    // Assert: Engine may release its lease only after the owner returns.
-    assert!(matches!(
-        premature_response,
-        Err(crossbeam::channel::RecvTimeoutError::Timeout)
-    ));
-    assert_eq!(outcome, crate::runtime::event_loop::HandleOutcome::Break);
-    assert!(matches!(
-        response.try_recv(),
-        Ok(RuntimeResponse::Ok { request_id: 91_204 })
-    ));
-    assert!(calls.load(Ordering::Acquire) > 0);
-    assert!(worker_reaped);
-    Ok(())
+        // Assert: Engine may release its lease only after the owner returns.
+        assert!(matches!(
+            premature_response,
+            Err(crossbeam::channel::RecvTimeoutError::Timeout)
+        ));
+        assert_eq!(outcome, crate::runtime::event_loop::HandleOutcome::Break);
+        assert!(matches!(
+            response.try_recv(),
+            Ok(RuntimeResponse::Ok { request_id: 91_204 })
+        ));
+        assert!(calls.load(Ordering::Acquire) > 0);
+        assert!(worker_reaped);
+        Ok(())
+    })
 }
 
 struct RetirementShutdownControl {
