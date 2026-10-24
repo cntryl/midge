@@ -211,6 +211,81 @@ impl Fixture {
             crate::runtime::event_loop::tests::create_test_state(),
         );
         drop(original);
+        Self::from_parts(state, hybrid, provider, metadata, lease, guard)
+    }
+
+    fn controlled() -> MidgeResult<Self> {
+        // Seed identical encoded SST/control bytes before the latency clock.
+        // Keep persistence enabled: MockFs replaces device latency, not the
+        // real journal, intent, codec, upload, actor or conditional-CAS paths.
+        let Self {
+            el: mut original,
+            provider,
+            metadata,
+            lease,
+            _guard: guard,
+            ..
+        } = Self::new()?;
+        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        original.drain_metadata_mirror_within(&deadline)?;
+        let root: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+        root.create_dir_all(&crate::io::FsPath::new("sst"))
+            .map_err(FsError::into_midge)?;
+        for name in crate::metadata::files::CLOUD_MIRRORED {
+            let path = crate::io::FsPath::new(*name);
+            match crate::io::read_all(original.state.fs.as_ref(), &path) {
+                Ok(bytes) => write_controlled_file(&root, &path, bytes)?,
+                Err(FsError::NotFound(_)) => {}
+                Err(error) => return Err(error.into_midge()),
+            }
+        }
+        let data = Arc::new(CloudStorage::with_mock());
+        for file in &original.state.manifest.files {
+            let bytes = read_remote_sst(&original, &file.name)?.expect("seeded authoritative SST");
+            write_controlled_file(
+                &root,
+                &crate::sst::fs::sst_key(&file.name),
+                bytes.clone().into(),
+            )?;
+            crate::storage::cloud::BlockingCloud::new(&data, &deadline).put_with_headers(
+                &format!("sst/{}", file.name),
+                bytes,
+                Vec::new(),
+            )?;
+        }
+        let state = crate::runtime::RuntimeState::recover(
+            std::path::Path::new(""),
+            false,
+            root,
+            crate::config::RecoveryPolicy::Strict,
+            crate::runtime::state::RecoveryWal::Replay {
+                writer_epoch: lease.epoch(),
+            },
+            None,
+            None,
+        )?;
+        assert!(
+            !state.is_memory_mode(),
+            "durable publication paths stay enabled"
+        );
+        drop(original);
+        let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+            data,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ));
+        crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::clone(&hybrid))
+            .fence_cloud_wal_catalog(lease.epoch())?;
+        Self::from_parts(state, hybrid, provider, metadata, lease, guard)
+    }
+
+    fn from_parts(
+        state: crate::runtime::RuntimeState,
+        hybrid: Arc<crate::storage::HybridStorage>,
+        provider: Arc<MetadataProvider>,
+        metadata: Arc<CloudStorage>,
+        lease: Arc<crate::lease::CloudStorageLease>,
+        guard: crate::lease::LeaseGuard,
+    ) -> MidgeResult<Self> {
         let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
             Arc::clone(&state.fs),
             hybrid.remote_sst_backend(),
@@ -257,29 +332,59 @@ impl Fixture {
     fn reserve_names(&mut self) -> MidgeResult<()> {
         // Actual ahead-use reservation settles before the timed publication;
         // this regression measures contention between admitted control cuts.
-        if let Err(error) = self.el.reserve_sst_name_durably(0, 1024) {
-            if !matches!(error, MidgeError::Busy(_)) {
-                return Err(error);
+        let mut families = vec![0];
+        families.extend(
+            self.el
+                .state
+                .manifest
+                .column_families
+                .iter()
+                .filter_map(|family| family.deleted_at.is_none().then_some(family.id)),
+        );
+        families.sort_unstable();
+        families.dedup();
+        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        for cf_id in families {
+            while self
+                .el
+                .state
+                .sst_names
+                .reserved_through
+                .get(&cf_id)
+                .copied()
+                .unwrap_or(0)
+                <= 1024
+            {
+                crate::common::DeadlineScope::new(deadline).check("fixture name coverage")?;
+                if !self
+                    .el
+                    .actors
+                    .cloud_coordinator
+                    .metadata_mirror
+                    .is_running()
+                    && !self.el.publication.publication_gate.is_active()
+                {
+                    if let Err(error) = self
+                        .el
+                        .reserve_sst_name_durably_within(cf_id, 1024, &deadline)
+                    {
+                        if !matches!(error, MidgeError::Busy(_))
+                            || !self
+                                .el
+                                .actors
+                                .cloud_coordinator
+                                .metadata_mirror
+                                .is_running()
+                        {
+                            return Err(error);
+                        }
+                    }
+                }
+                self.progress();
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
-        let until = Instant::now() + Duration::from_secs(5);
-        while self
-            .el
-            .state
-            .sst_names
-            .reserved_through
-            .get(&0)
-            .copied()
-            .unwrap_or(0)
-            <= 1024
-        {
-            self.progress();
-            assert!(
-                Instant::now() < until,
-                "actual name reservation must commit"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        self.el.drain_metadata_mirror_within(&deadline)?;
         Ok(())
     }
 
@@ -367,6 +472,7 @@ impl Fixture {
             );
             std::thread::sleep(Duration::from_millis(1));
         };
+        self.held_output_names(true)?;
         Ok((PutRelease(Some(release)), held_at))
     }
 
@@ -467,9 +573,8 @@ impl Fixture {
         }
         std::fs::create_dir_all(cold.path().join("sst"))?;
         for name in sources {
-            let source = remote_sst_path_for_test(&self.el, &name);
-            if source.exists() {
-                std::fs::copy(source, cold.path().join("sst").join(&name))?;
+            if let Some(bytes) = read_remote_sst(&self.el, &name)? {
+                std::fs::write(cold.path().join("sst").join(&name), bytes)?;
             }
         }
         let mut reopened = crate::Engine::open(
@@ -512,6 +617,51 @@ impl Fixture {
         drop(transaction);
         reopened.shutdown(Duration::from_secs(5))?;
         Ok(())
+    }
+}
+
+fn write_controlled_file(
+    root: &Arc<dyn crate::io::Fs>,
+    path: &crate::io::FsPath,
+    bytes: Bytes,
+) -> MidgeResult<()> {
+    root.open(
+        path,
+        crate::io::OpenOptions {
+            mode: crate::io::OpenMode::ReadWrite,
+            create: true,
+            create_new: true,
+            truncate: false,
+        },
+    )
+    .and_then(|mut file| file.append(bytes))
+    .map(|_| ())
+    .map_err(FsError::into_midge)
+}
+
+fn read_remote_sst(el: &EventLoop, name: &str) -> MidgeResult<Option<Vec<u8>>> {
+    let backend = el
+        .actors
+        .cloud_coordinator
+        .hybrid_storage
+        .as_ref()
+        .unwrap()
+        .remote_sst_backend();
+    let (sent, received) = std::sync::mpsc::channel();
+    backend.submit_metadata_read_request(
+        crate::storage::StorageRequest::new(
+            format!("sst/{name}"),
+            crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+            Duration::from_secs(5),
+        ),
+        sent,
+    );
+    match received.recv_timeout(Duration::from_secs(5)) {
+        Ok(Ok((bytes, _))) => Ok(Some(bytes)),
+        Ok(Err(error)) if error.is_not_found() => Ok(None),
+        actual => Err(MidgeError::Internal(format!(
+            "read fixture SST {name}: {actual:?}"
+        ))),
     }
 }
 
@@ -617,19 +767,191 @@ fn should_preserve_later_flush_when_successful_earlier_pointer_cas_callback_is_l
     verify_held_publication(HoldKind::PointerLost)
 }
 
-fn verify_held_publication(kind: HoldKind) -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| verify_held_publication_with_stable_failpoints(kind))
+#[test]
+fn should_recover_real_files_while_compaction_immutable_put_remains_held() -> MidgeResult<()> {
+    verify_real_held_publication(HoldKind::ImmutablePut)
 }
 
-fn verify_held_publication_with_stable_failpoints(kind: HoldKind) -> MidgeResult<()> {
+#[test]
+fn should_recover_real_files_when_successful_compaction_pointer_callback_is_duplicated(
+) -> MidgeResult<()> {
+    verify_real_held_publication(HoldKind::PointerDuplicate)
+}
+
+#[test]
+fn should_recover_real_files_when_successful_compaction_pointer_callback_is_lost() -> MidgeResult<()>
+{
+    verify_real_held_publication(HoldKind::PointerLost)
+}
+
+fn verify_held_publication(kind: HoldKind) -> MidgeResult<()> {
+    // Setup/recovery I/O of another latency fixture is outside this clock.
+    // This fixture's own compactor and flush remain concurrent.
+    static LATENCY_FIXTURE: Mutex<()> = Mutex::new(());
+    let _fixture = LATENCY_FIXTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::failpoints::with_read_gate(|| {
+        let evidence = exercise_held_publication(Fixture::controlled()?, kind)?;
+        assert!(
+            evidence.acknowledged < Duration::from_millis(100),
+            "controlled-storage ACK took {:?}; progress observer saw {:?}",
+            evidence.acknowledged,
+            evidence.observed,
+        );
+        Ok(())
+    })
+}
+
+fn verify_real_held_publication(kind: HoldKind) -> MidgeResult<()> {
+    crate::failpoints::with_read_gate(|| {
+        exercise_held_publication(Fixture::new()?, kind).map(|_| ())
+    })
+}
+
+struct PublicationEvidence {
+    acknowledged: Duration,
+    observed: Duration,
+}
+
+struct FlushReceipt {
+    received_at: Instant,
+    result: Result<RuntimeResponse, crossbeam::channel::RecvTimeoutError>,
+}
+
+struct ObservedFlush {
+    receipt: FlushReceipt,
+    observed_at: Instant,
+    work: FlushWork,
+}
+
+struct FlushWork {
+    build_ns: u64,
+    publish_ns: u64,
+    retries: u64,
+    metadata: crate::metadata::accounting::Snapshot,
+}
+
+impl FlushWork {
+    fn capture(fixture: &Fixture) -> Self {
+        let metrics = &fixture.el.state.flush_metrics;
+        Self {
+            build_ns: metrics.build_ns_total,
+            publish_ns: metrics.publish_ns_total,
+            retries: metrics.retries_total,
+            metadata: fixture.el.state.metadata_accounting().handle().snapshot(),
+        }
+    }
+
+    fn log_delta(&self, after: &Self) {
+        eprintln!(
+            "flush worker build={:?}, upload={:?}, retries={}",
+            Duration::from_nanos(after.build_ns - self.build_ns),
+            Duration::from_nanos(after.publish_ns - self.publish_ns),
+            after.retries - self.retries,
+        );
+        match after.metadata.delta(&self.metadata) {
+            Ok(delta) => {
+                let counters = &delta
+                    .bucket(
+                        crate::metadata::accounting::Origin::CloudFlush,
+                        crate::metadata::accounting::Medium::Persistent,
+                    )
+                    .counters;
+                eprintln!(
+                    "flush metadata attempt={:?}, full publication={:?}, journal={:?}, checkpoint={:?}, attempts={}, journal appends={}, checkpoints={}",
+                    Duration::from_nanos(counters.publication_attempt_elapsed_ns),
+                    Duration::from_nanos(counters.flush_full_publication_elapsed_ns),
+                    Duration::from_nanos(counters.journal_elapsed_ns),
+                    Duration::from_nanos(counters.checkpoint_elapsed_ns),
+                    counters.publication_attempts,
+                    counters.journal_append_attempts,
+                    counters.checkpoint_attempts,
+                );
+            }
+            Err(error) => eprintln!("flush metadata diagnostics unavailable: {error}"),
+        }
+    }
+}
+
+fn exercise_held_publication(
+    mut fixture: Fixture,
+    kind: HoldKind,
+) -> MidgeResult<PublicationEvidence> {
     // Arrange: both flush and compaction use the real Background actors and
     // one conditional metadata provider; only its actual earlier PUT is held.
-    let mut fixture = Fixture::new()?;
     fixture.acknowledge_row()?;
     let deferred_before = fixture.el.state.flush_metrics.publication_deferred_by_gate;
-    let (mut release, held_at) = fixture.hold_compaction_publication(kind)?;
-    let started = Instant::now();
-    let response = submit_manual_flush(&mut fixture.el, 0, 91_951);
+    let (release, held_at) = fixture.hold_compaction_publication(kind)?;
+    std::thread::scope(|scope| {
+        // This owner drops before the scope joins a failed/timed-out receiver.
+        let mut release = release;
+        let response = fixture.el.routing.router.register(91_951, "FlushMemtable");
+        let (ready, armed) = crossbeam::channel::bounded(1);
+        let (completed, observed) = crossbeam::channel::bounded(1);
+        let watcher = scope.spawn(move || {
+            let _ = ready.send(());
+            let result = response.recv_timeout(Duration::from_secs(5));
+            let received_at = Instant::now();
+            let _ = completed.send(FlushReceipt {
+                received_at,
+                result,
+            });
+        });
+        armed.recv_timeout(Duration::from_secs(5)).unwrap();
+        let before_work = FlushWork::capture(&fixture);
+        let started = Instant::now();
+        fixture.el.handle_runtime_msg(
+            RuntimeMsg::FlushMemtable {
+                request_id: 91_951,
+                cf_id: 0,
+            },
+            &fixture.messages,
+        );
+        let flush_id = fixture
+            .el
+            .state
+            .get_cf(0)
+            .unwrap()
+            .immutable_flushes
+            .last()
+            .unwrap()
+            .flush_id;
+        let (flush_result, recovered_before_release) =
+            drive_held_publication(&mut fixture, held_at, &observed, flush_id)?;
+        release.release();
+        finish_released_publication(&mut fixture)?;
+        watcher.join().unwrap();
+
+        // Assert: sample the actual receiver, independently of post-ACK work
+        // that the same production background pass may finish before returning.
+        let observation = flush_result.expect("later flush commits before earlier PUT release");
+        let elapsed = observation.receipt.received_at.duration_since(started);
+        let observer_elapsed = observation.observed_at.duration_since(started);
+        before_work.log_delta(&observation.work);
+        assert!(
+            matches!(
+                &observation.receipt.result,
+                Ok(RuntimeResponse::Ok { request_id: 91_951 })
+            ),
+            "actual flush response: {:?}",
+            observation.receipt.result
+        );
+        eprintln!("flush ACK={elapsed:?}; progress observer={observer_elapsed:?}");
+        assert_settled_publication(&fixture, deferred_before, recovered_before_release)?;
+        Ok(PublicationEvidence {
+            acknowledged: elapsed,
+            observed: observer_elapsed,
+        })
+    })
+}
+
+fn drive_held_publication(
+    fixture: &mut Fixture,
+    held_at: Instant,
+    observed: &crossbeam::channel::Receiver<FlushReceipt>,
+    flush_id: u64,
+) -> MidgeResult<(Option<ObservedFlush>, bool)> {
     let mut flush_result = None;
     let mut recovered_before_release = false;
 
@@ -638,11 +960,17 @@ fn verify_held_publication_with_stable_failpoints(kind: HoldKind) -> MidgeResult
     while held_at.elapsed() < Duration::from_secs(2) {
         fixture.progress();
         if flush_result.is_none() {
-            if let Ok(result) = response.try_recv() {
-                flush_result = Some((started.elapsed(), result));
+            if let Ok(receipt) = observed.try_recv() {
+                flush_result = Some(ObservedFlush {
+                    receipt,
+                    observed_at: Instant::now(),
+                    work: FlushWork::capture(fixture),
+                });
             }
         }
         if flush_result.is_some() && !recovered_before_release {
+            assert!(fixture.el.state.immutable_flush_by_id(flush_id).is_none());
+            assert!(!fixture.el.actors.flush_actor.has_pipeline(flush_id));
             fixture.assert_rows()?;
             // Recover the selected cut and all manifest/intent SST sources
             // into an empty cache while the earlier effect remains unresolved.
@@ -652,7 +980,10 @@ fn verify_held_publication_with_stable_failpoints(kind: HoldKind) -> MidgeResult
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    release.release();
+    Ok((flush_result, recovered_before_release))
+}
+
+fn finish_released_publication(fixture: &mut Fixture) -> MidgeResult<()> {
     let until = Instant::now() + Duration::from_secs(5);
     loop {
         fixture.progress();
@@ -668,15 +999,16 @@ fn verify_held_publication_with_stable_failpoints(kind: HoldKind) -> MidgeResult
         );
         std::thread::sleep(Duration::from_millis(1));
     }
+    Ok(())
+}
 
+fn assert_settled_publication(
+    fixture: &Fixture,
+    deferred_before: u64,
+    recovered_before_release: bool,
+) -> MidgeResult<()> {
     // Assert: stale work cannot install an earlier full snapshot, regress the
     // selected frontier, resurrect settled intents, or lose the later row.
-    let (elapsed, result) = flush_result.expect("later flush commits before earlier PUT release");
-    assert!(
-        elapsed < Duration::from_millis(100),
-        "later flush took {elapsed:?} while compaction provider was held"
-    );
-    assert!(matches!(result, RuntimeResponse::Ok { request_id: 91_951 }));
     assert_eq!(
         fixture.el.state.flush_metrics.publication_deferred_by_gate - deferred_before,
         0,
