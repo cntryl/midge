@@ -625,3 +625,21 @@ Active checkpoint/recovery and orphan-high-ordinal regressions are included.
 Library compilation passes; behavioral execution is pending. Cached common-path
 request reduction, #913/#943 retention and crash/provider qualification remain
 required; this commit does not claim the two-request target.
+
+### #909: job reservations and immediate follow-up candidate
+
+Compaction admission now owns an explicit job reservation through publication.
+It binds input identities/order and source/target publication ranges. Conflicting
+ranges are excluded even with disjoint input names; unknown bounds reserve
+conservatively, one L0 job per family is enforced, and repair/fragment jobs
+remain exclusive. Publication rechecks captured identity and L0 ordering fields.
+The production slot limit remains1 until the bounded pool/coordinator is wired.
+
+Every successful publication requests the next normal picker turn, including
+deep-level debt with no critical L0 pressure. Active coverage includes range
+conflicts, unknown bounds, disjoint levels/families and stale input ordering.
+A real compute/publication/restart regression requires a second deep-level job
+before a deliberately one-hour timer, without another flush. The shared check
+currently stops in concurrent metadata-cache and !Send fixture updates; no test
+execution is claimed. Configurable multi-job scheduling, shared memory admission
+and per-family flush concurrency remain pending.

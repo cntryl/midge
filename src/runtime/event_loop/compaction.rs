@@ -733,6 +733,10 @@ impl CompactionCoordinator {
         Vec<PreparedCompactionOutput>,
         Vec<crate::runtime::FileMeta>,
     )> {
+        event_loop
+            .actors
+            .compaction_actor
+            .validate_reserved_inputs(&event_loop.state.manifest.files)?;
         if event_loop.state.get_cf(cf_id).is_none() {
             return Err(crate::common::MidgeError::Corruption(format!(
                 "compaction completed for inactive column family {cf_id}; retained inputs and rejected outputs"
@@ -1487,15 +1491,12 @@ impl CompactionCoordinator {
         event_loop.schedule_next_flush_worker();
         event_loop.drain_auto_flush_memtables();
         event_loop.wake_write_stall_waiters();
-        // Stalled writers cannot produce a flush publication to wake the
-        // next pressure turn. Continue through the normal scheduler instead
-        // of waiting for the periodic check after each successful worker.
-        if !event_loop.cloud_maintenance_enabled() && event_loop.state.has_any_critical_l0_debt() {
-            event_loop
-                .pipeline
-                .background_compaction_schedule
-                .mark_due();
-        }
+        // Re-run the picker after every completed publication. Deep-level and
+        // ordinary L0 debt must not wait for another flush or a 30s timer.
+        event_loop
+            .pipeline
+            .background_compaction_schedule
+            .mark_due();
     }
 
     fn finish_failed_start(

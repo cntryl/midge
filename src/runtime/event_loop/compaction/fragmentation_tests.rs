@@ -518,3 +518,64 @@ fn should_recover_fragment_when_publication_stops_after_durable_manifest_batch()
     scenario.teardown();
     Ok(())
 }
+
+#[test]
+fn should_start_next_deep_level_job_after_publication_without_flush_or_timer() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = FragmentFixture::new()?;
+    fixture.seed(1, 8, &[b"z0"], 128)?;
+    fixture.persist()?;
+    fixture
+        .el
+        .actors
+        .compaction_actor
+        .set_l0_file_count_threshold(1);
+    fixture
+        .el
+        .pipeline
+        .background_compaction_schedule
+        .defer_for(Duration::from_secs(3600));
+    assert!(!fixture.el.state.has_any_critical_l0_debt());
+    let first = fixture
+        .el
+        .actors
+        .compaction_actor
+        .check_compaction(&fixture.el.state)?
+        .expect("first deep-level debt");
+    fixture.el.launch_compaction(first)?;
+    let completion = fixture
+        .completions
+        .recv_timeout(WAIT)
+        .expect("first compute completion");
+    assert!(matches!(
+        completion,
+        RuntimeMsg::CompactionComplete {
+            succeeded: true,
+            ..
+        }
+    ));
+
+    // Act
+    fixture.publish(completion);
+    fixture.el.run_background_compaction_maintenance_if_due();
+    let next = fixture
+        .completions
+        .recv_timeout(WAIT)
+        .expect("follow-up before the one-hour timer");
+
+    // Assert: a real second job publishes and both generations survive restart.
+    assert!(matches!(
+        next,
+        RuntimeMsg::CompactionComplete {
+            succeeded: true,
+            ..
+        }
+    ));
+    fixture.publish(next);
+    let recovered = fixture.recover_rows()?;
+    for key in SOURCE_KEYS {
+        assert!(recovered.iter().any(|row| row.key == key && row.seq == 7));
+    }
+    assert!(recovered.iter().any(|row| row.key == b"z0"));
+    Ok(())
+}

@@ -38,11 +38,13 @@ mod publication_error_tests;
 #[path = "compaction/publication.rs"]
 pub(crate) mod publication;
 
+#[path = "compaction/jobs.rs"]
+mod jobs;
+
 /// A finished compaction partition, summarized where it was written.
 ///
-/// Summarizing re-reads the partition and CRCs it, so it belongs on the
-/// compaction worker. On the event loop a 64 MiB output would stall every
-/// queued read, write, ack and shutdown behind it.
+/// Filesystem writers supply the finalized bounds and CRC. Capability fallback
+/// verification remains on the worker, as does exact source validation/upload.
 #[derive(Clone)]
 pub(crate) struct PreparedCompactionOutput {
     pub(crate) metadata: crate::runtime::FileMeta,
@@ -317,6 +319,8 @@ fn record_staged_output_partition(
 
 /// Actor handling SST compaction
 pub struct CompactionActor {
+    jobs: Arc<jobs::CompactionJobs>,
+    active_job_reservation: Option<jobs::CompactionJobGuard>,
     /// Whether a compaction is currently running
     compaction_running: bool,
     /// SST factory for creating readers/writers
@@ -372,6 +376,8 @@ impl CompactionActor {
         config: LeveledCompactionConfig,
     ) -> Self {
         Self {
+            jobs: jobs::CompactionJobs::new(1),
+            active_job_reservation: None,
             compaction_running: false,
             sst_factory,
             compactor: Compactor::with_config(config),
@@ -738,6 +744,16 @@ impl CompactionActor {
         &self.active_input_metadata
     }
 
+    pub(crate) fn validate_reserved_inputs(
+        &self,
+        files: &[crate::metadata::FileMeta],
+    ) -> MidgeResult<()> {
+        if let Some(job) = &self.active_job_reservation {
+            job.validate_inputs(files)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn accepted_output_generation(
         &self,
         cf_id: u32,
@@ -985,6 +1001,7 @@ impl CompactionActor {
         }
         self.active_input_ssts.clear();
         self.active_input_metadata.clear();
+        self.active_job_reservation = None;
         self.active_same_level_repair = false;
         self.active_source_fragmentation = None;
         self.active_manual_deadline = None;
@@ -1005,6 +1022,7 @@ impl CompactionActor {
         }
 
         self.prepared_outputs.lock().clear();
+        let job_reservation = self.jobs.reserve(plan, &state.manifest.files)?;
         self.storage_reservation =
             if let Some(hybrid) = sba.filter(|hybrid| hybrid.ephemeral_sst_cache_enabled()) {
                 Some(
@@ -1021,6 +1039,7 @@ impl CompactionActor {
             };
 
         self.compaction_running = true;
+        self.active_job_reservation = Some(job_reservation);
         self.active_manual_deadline = None;
         self.active_started_at = Some(std::time::Instant::now());
         self.active_output_generation = Some((plan.cf_id, plan.target_level, plan.output_seq));
