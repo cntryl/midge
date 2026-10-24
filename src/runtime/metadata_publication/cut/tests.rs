@@ -14,6 +14,44 @@ use crate::storage::cloud::CloudStorage;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// This synchronous provider has no completion thread or retained transport
+/// buffer. Its admitted reservation remains owned until the real mock PUT
+/// completes, allowing the regression's pool to hold exactly one source.
+struct InlineCloudBackend {
+    inner: crate::storage::cloud::MockCloudBackend,
+}
+
+impl crate::storage::cloud::CloudReadCapability for InlineCloudBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for InlineCloudBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+
+    fn submit_put_with_reservation(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        self.inner.submit_put(key, data, headers, callback);
+        drop(reservation);
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for InlineCloudBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+impl crate::storage::cloud::CloudListCapability for InlineCloudBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+impl crate::storage::cloud::CloudHeadCapability for InlineCloudBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+impl crate::storage::cloud::CloudBackend for InlineCloudBackend {}
+
 struct DroppedSource {
     _directory: tempfile::TempDir,
     fs: Arc<dyn Fs>,
@@ -31,6 +69,8 @@ fn select_source_before_contended_drop() -> DroppedSource {
         name: crate::cloud_layout::file_name(0, 0, 1),
         size_bytes: 3,
         content_crc32c: Some(crc32c::crc32c(b"sst")),
+        smallest_seq: Some(1),
+        largest_seq: Some(1),
         ..crate::metadata::FileMeta::default()
     };
     crate::metadata::store::ManifestStore::new(Arc::clone(&fs))
@@ -61,7 +101,12 @@ fn select_source_before_contended_drop() -> DroppedSource {
     lock.configure_capture_memory(memory.clone());
     let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
     let cut = lock.capture_control_cut(&fs, 1, &deadline).unwrap();
-    let cloud = CloudStorage::with_mock();
+    let cloud = CloudStorage::new(
+        Arc::new(InlineCloudBackend {
+            inner: crate::storage::cloud::MockCloudBackend::new(),
+        }),
+        "one-cut".into(),
+    );
     let store = FsLeaderStore::new(Arc::clone(&fs), crate::lease::LeaseClock::default());
     store.acquire_leadership("writer").unwrap();
     mirror_captured_control_metadata_within(
