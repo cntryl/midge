@@ -372,10 +372,22 @@ fn coverage_witnesses(
                     .get(digest)
                     .is_none_or(|receipt| receipt.horizon > manifest.edit_checkpoint_id)
             {
-                return Err(MidgeError::Busy(
-                    "new metadata cut removes an intent without selected ManifestPublished proof"
-                        .into(),
-                ));
+                return Err(MidgeError::Busy(format!(
+                    "new metadata cut removes an intent without selected ManifestPublished proof \
+                     (intent={digest:02x?}, prior_cut={}, prior_horizon={}, candidate_horizon={}, \
+                     selected_horizon={:?}, prior_manifest_published={})",
+                    prior.cut_ordinal(),
+                    prior.manifest.edit_checkpoint_id,
+                    manifest.edit_checkpoint_id,
+                    registry
+                        .published_intents
+                        .get(digest)
+                        .map(|receipt| receipt.horizon),
+                    prior
+                        .publication_intents
+                        .manifest_published
+                        .contains(digest),
+                )));
             }
             if prior
                 .publication_intents

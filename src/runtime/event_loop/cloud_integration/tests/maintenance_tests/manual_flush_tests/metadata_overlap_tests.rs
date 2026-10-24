@@ -114,6 +114,55 @@ struct Fixture {
 }
 
 impl Fixture {
+    #[cfg(feature = "failpoints")]
+    fn fail_flush_manifest_after_actual_upload(&mut self) -> MidgeResult<u64> {
+        self.acknowledge_row()?;
+        let flush_id = self.el.freeze_active_memtable(0)?.unwrap();
+        self.el.schedule_next_flush_worker_during_shutdown();
+        let built = self
+            .el
+            .pipeline
+            .flush_worker_result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("real flush build completes");
+        assert!(matches!(
+            built,
+            crate::runtime::actors::flush::FlushWorkerResult::Build(_)
+        ));
+        self.el.handle_flush_worker_result(built);
+        let published = self
+            .el
+            .pipeline
+            .flush_worker_result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("real SST upload completes");
+        assert!(
+            matches!(&published, crate::runtime::actors::flush::FlushWorkerResult::Publish(completion)
+            if completion.identity.flush_id == flush_id && completion.result.is_ok())
+        );
+        fail::cfg(
+            "midge::manifest::inject_no_space_on_append_edit_batch",
+            "return",
+        )
+        .unwrap();
+        self.el.handle_flush_worker_result(published);
+        fail::remove("midge::manifest::inject_no_space_on_append_edit_batch");
+        self.el.state.retry_metadata_reload()?;
+        let intents = crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+            &self.el.state.fs,
+            crate::config::RecoveryPolicy::Strict,
+        )?;
+        assert!(intents.iter().any(|intent| matches!(
+            intent,
+            crate::runtime::IntentLogEntry::FlushPublish {
+                phase: crate::runtime::PublicationPhase::OutputDurable,
+                ..
+            }
+        )));
+        assert!(self.el.state.immutable_flush_by_id(flush_id).is_some());
+        Ok(flush_id)
+    }
+
     fn new() -> MidgeResult<Self> {
         let (mut original, _, _) = cloud_debt(4)?;
         original
@@ -464,6 +513,90 @@ impl Fixture {
         reopened.shutdown(Duration::from_secs(5))?;
         Ok(())
     }
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_finish_flush_retry_when_earlier_capture_retains_its_failed_manifest_intent(
+) -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let _scenario = fail::FailScenario::setup();
+    // Arrange: an actual upload succeeds, but its manifest journal append
+    // fails. A different admitted metadata owner captures that durable intent.
+    let mut fixture = Fixture::new()?;
+    let flush_id = fixture.fail_flush_manifest_after_actual_upload()?;
+    fixture
+        .el
+        .drain_metadata_mirror_within(&crate::common::OperationDeadline::from_budget(
+            Duration::from_secs(5),
+        ))?;
+    let (entered, arrived) = crossbeam::channel::bounded(1);
+    let (release, resumed) = crossbeam::channel::bounded(1);
+    *fixture.provider.next_manifest.lock().unwrap() = Some(HeldPut {
+        entered,
+        release: resumed,
+    });
+    let mut held = PutRelease(Some(release));
+    fixture.el.start_metadata_mirror(
+        crate::runtime::event_loop::metadata_mirror::MirrorContinuation::Auxiliary {
+            context: "captured failed flush publication".into(),
+        },
+        crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
+    )?;
+    arrived.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // Act: the same accepted immutable retries through production build,
+    // upload, journal and metadata workers while the older cut remains owned.
+    let until = Instant::now() + Duration::from_secs(2);
+    while fixture.el.state.immutable_flush_by_id(flush_id).is_some() && Instant::now() < until {
+        fixture.el.schedule_next_flush_worker_during_shutdown();
+        fixture.el.drain_flush_worker_results();
+        fixture.el.retry_flush_mirrors_if_due();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    // Assert: selected terminal authority settles the flush without dropping
+    // the earlier source or weakening its exact intent-removal requirement.
+    assert!(fixture.provider.held.load(Ordering::Acquire));
+    if fixture.el.state.immutable_flush_by_id(flush_id).is_some() {
+        let capture = fixture
+            .el
+            .publication
+            .metadata_publication_lock
+            .capture_control_cut(
+                &fixture.el.state.fs,
+                fixture.el.state.writer_epoch,
+                &crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+            );
+        if let Err(error) = capture {
+            eprintln!("failed flush retry coverage: {error}");
+        }
+        let intents = crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+            &fixture.el.state.fs,
+            crate::config::RecoveryPolicy::Strict,
+        )?;
+        assert!(
+            !intents.iter().any(|intent| matches!(
+                intent,
+                crate::runtime::IntentLogEntry::FlushPublish { .. }
+            )),
+            "the retry actually cleared its original durable flush intent"
+        );
+    }
+    assert!(
+        fixture.el.state.immutable_flush_by_id(flush_id).is_none(),
+        "real flush retry must finish while its earlier intent capture remains owned"
+    );
+    fixture.assert_rows()?;
+    fixture.assert_cloud_restart(false)?;
+    held.release();
+    fixture
+        .el
+        .drain_metadata_mirror_within(&crate::common::OperationDeadline::from_budget(
+            Duration::from_secs(5),
+        ))?;
+    fixture.assert_rows()?;
+    Ok(())
 }
 
 #[test]

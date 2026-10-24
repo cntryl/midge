@@ -2779,7 +2779,8 @@ fn measure_flush_publication_io_with_sst_size(
         .expect("reconstruct published authority");
         assert_eq!(live_frontier(&recovered, 0), n);
         if sst_bytes == 2 * 1024 * 1024 {
-            let snapshot: serde_json::Value = serde_json::from_slice(
+            let snapshot: crate::metadata::Manifest = crate::metadata::codec::decode(
+                crate::metadata::codec::MANIFEST,
                 &std::fs::read(
                     temp_dir
                         .path()
@@ -2789,7 +2790,8 @@ fn measure_flush_publication_io_with_sst_size(
             )
             .unwrap();
             assert_eq!(
-                snapshot["flushed_through"][0]["through_sequence"], n,
+                live_frontier(&snapshot, 0),
+                n,
                 "cheap checkpoint must remain forced at each publication"
             );
         }
