@@ -8,6 +8,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, Layer};
 #[derive(Default)]
 pub(super) struct Counters {
     active: AtomicBool,
+    poisoned: AtomicBool,
     requests: AtomicU64,
     puts: AtomicU64,
     bytes: AtomicU64,
@@ -20,12 +21,21 @@ pub(super) struct Counters {
 pub(super) struct Window(Arc<Counters>);
 impl Drop for Window {
     fn drop(&mut self) {
+        // An unwinding engine may still own a shutdown reaper. A later row
+        // cannot attribute its completions to a new engine window.
+        if std::thread::panicking() {
+            self.0.poisoned.store(true, Ordering::Release);
+        }
         self.0.active.store(false, Ordering::Release);
     }
 }
 
 impl Counters {
     pub(super) fn begin(self: &Arc<Self>) -> Window {
+        assert!(
+            !self.poisoned.load(Ordering::Acquire),
+            "a failed provider window requires a fresh benchmark process"
+        );
         assert!(
             !self.active.swap(true, Ordering::AcqRel),
             "provider measurement windows must not overlap"

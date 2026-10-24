@@ -36,6 +36,9 @@ records PUTs, total request-body bytes, response-body bytes, transport failures
 and cancellations. No URL, object key, credential or body content is retained.
 Missing fields, zero native observations or unsettled attempts invalidate the
 cost row. Body-byte counts exclude HTTP headers and are not billing estimates.
+An unwinding measurement poisons subsequent windows in that process, since an
+engine reaper could still emit completions. Repeat in a fresh process rather
+than attributing those effects to another row.
 
 The simulator's byte observation remains resident WAL object bytes; native
 bytes include every engine request body. Their units are declared, and those
