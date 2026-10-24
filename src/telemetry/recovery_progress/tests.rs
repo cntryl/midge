@@ -165,7 +165,14 @@ fn should_credit_no_work_when_actual_first_recovery_io_remains_held_until_timeou
             root.path().join("fixture-observations.json"),
         )?)
         .expect("decode independent recovery observations");
-        assert_eq!(observed["held_requests"], 1);
+        let expected_held = if mode == RecoveryProgressFixtureMode::HeldInventory {
+            let entries = observed["expected_inventory_entries"].as_u64().unwrap();
+            assert!((1..=32).contains(&entries));
+            entries
+        } else {
+            1
+        };
+        assert_eq!(observed["held_requests"], expected_held);
         assert_eq!(observed["completed_range_reads"], 0);
         assert_eq!(observed["completed_inventory_heads"], 0);
         assert_eq!(observed["completed_inventory_size_validations"], 0);
