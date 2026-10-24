@@ -27,11 +27,12 @@ pub(crate) const RENEWAL_WRITE_DEADLINE_MARGIN: Duration = Duration::from_secs(1
 /// Key used for the lease object in cloud storage.
 const LEASE_OBJECT_KEY: &str = crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY;
 const AUTHORITY_SENTINEL_KEY: &str = "metadata/authority-initialized.v1";
-const AUTHORITY_SENTINEL_PENDING_BODY: &[u8] = b"midge cloud metadata authority v2 pending\n";
-const AUTHORITY_SENTINEL_BODY: &[u8] = b"midge cloud metadata authority v2 initialized\n";
+const AUTHORITY_SENTINEL_PENDING_BODY: &[u8] = b"midge cloud metadata authority v3 pending\n";
+const AUTHORITY_SENTINEL_BODY: &[u8] = b"midge cloud metadata authority v3 initialized\n";
 const METADATA_GENERATIONS_PREFIX: &str = "metadata/generations/";
 pub(crate) const MAX_LEASE_DOCUMENT_BYTES: usize = 4096;
 const BACKUP_EXPIRED_TIMESTAMP: &str = "1970-01-01T00:00:00Z";
+mod metadata_pointer;
 
 /// Cloud storage lease configuration.
 #[derive(Debug, Clone)]
@@ -50,11 +51,6 @@ struct ProviderLeaderStore {
     validity: Arc<LeaseValidity>,
     clock_skew_tolerance: Mutex<Duration>,
     clock: LeaseClock,
-}
-
-enum MetadataPointerCasOutcome {
-    Committed,
-    Retry,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,92 +78,6 @@ impl ProviderLeaderStore {
             clock,
         }
     }
-
-    fn require_live_authority(
-        &self,
-        document: &LeaseDocument,
-        expected_epoch: u64,
-    ) -> Result<(), LeaseError> {
-        self.validity.remaining(expected_epoch)?;
-        if document.is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())? {
-            return Err(LeaseError::RenewalFailed(
-                "cloud lease expired during metadata publication".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn write_metadata_pointer(
-        &self,
-        replacement: &LeaseDocument,
-        metadata: &ObjectMetadata,
-        generation: &CloudMetadataGeneration,
-        holder_id: &str,
-        expected_epoch: u64,
-        deadline: Instant,
-    ) -> Result<MetadataPointerCasOutcome, LeaseError> {
-        if format_lease_document(replacement).len() > MAX_LEASE_DOCUMENT_BYTES {
-            return Err(LeaseError::Internal(
-                "cloud metadata generation exceeds lease document size bound".to_string(),
-            ));
-        }
-        let validity_write_budget = self
-            .validity
-            .remaining(expected_epoch)?
-            .checked_sub(RENEWAL_WRITE_DEADLINE_MARGIN)
-            .filter(|budget| !budget.is_zero())
-            .ok_or_else(|| {
-                LeaseError::RenewalFailed(
-                    "insufficient monotonic validity remains for metadata publication".to_string(),
-                )
-            })?;
-        let write_timeout = deadline
-            .saturating_duration_since(Instant::now())
-            .min(self.cloud.callback_timeout())
-            .min(validity_write_budget);
-        if write_timeout.is_zero() {
-            return Err(LeaseError::Timeout(
-                "cloud metadata publication deadline exhausted before conditional commit"
-                    .to_string(),
-            ));
-        }
-        let headers = mutation_precondition_headers(metadata).ok_or_else(|| {
-            LeaseError::IoError(
-                "cloud lease has no conditional metadata publication token".to_string(),
-            )
-        })?;
-        match provider_write_doc_with_timeout(&self.cloud, replacement, headers, write_timeout) {
-            Ok(()) => {
-                self.require_live_authority(replacement, expected_epoch)?;
-                Ok(MetadataPointerCasOutcome::Committed)
-            }
-            Err(LeaseError::AcquisitionFailed(_)) => {
-                // Definite rejection requires a fresh authority read before retry.
-                Ok(MetadataPointerCasOutcome::Retry)
-            }
-            Err(error) => {
-                // The provider may have applied the CAS but lost its response,
-                // while a heartbeat renewed the same pointer. Readback proves
-                // success only if the caller still owns this exact epoch.
-                let read_timeout = deadline
-                    .saturating_duration_since(Instant::now())
-                    .min(self.cloud.callback_timeout());
-                if !read_timeout.is_zero() {
-                    if let Ok(Some(actual)) =
-                        provider_read_doc_with_timeout(&self.cloud, read_timeout)
-                    {
-                        if owns_document(&actual, holder_id, &self.owner_token, expected_epoch)
-                            && actual.committed_metadata.as_ref() == Some(generation)
-                        {
-                            self.require_live_authority(&actual, expected_epoch)?;
-                            return Ok(MetadataPointerCasOutcome::Committed);
-                        }
-                    }
-                }
-                Err(error)
-            }
-        }
-    }
 }
 
 impl ProviderLeaderStore {
@@ -180,10 +90,9 @@ impl ProviderLeaderStore {
             Some((document, metadata)) => (Some(document), Some(metadata)),
             None => (None, None),
         };
-        if existing
-            .as_ref()
-            .is_some_and(|document| document.version == LeaseDocumentVersion::Legacy)
-        {
+        if existing.as_ref().is_some_and(|document| {
+            document.version != LeaseDocumentVersion::V4 || document.committed_metadata.is_some()
+        }) {
             return Err(legacy_metadata_migration_error());
         }
         let sentinel = provider_read_authority_sentinel(cloud, cloud.callback_timeout())?;
@@ -235,13 +144,13 @@ impl ProviderLeaderStore {
         let now = self.clock.now();
         let valid_until = monotonic_now + self.ttl;
         let document = LeaseDocument {
-            version: LeaseDocumentVersion::V3,
+            version: LeaseDocumentVersion::V4,
             epoch: Some(epoch),
             holder_id: holder_id.to_string(),
             owner_token: Some(self.owner_token.clone()),
             acquired_at: now.to_rfc3339(),
             expires_at: (now + CloudStorageLease::persisted_lease_duration(self.ttl)).to_rfc3339(),
-            committed_metadata: existing.and_then(|document| document.committed_metadata),
+            committed_metadata: None,
         };
         let headers = match metadata {
             Some(metadata) => mutation_precondition_headers(&metadata).ok_or_else(|| {
@@ -273,7 +182,6 @@ impl ProviderLeaderStore {
         valid_until: Instant,
         scope: Option<&crate::common::DeadlineScope>,
     ) -> Result<(), LeaseError> {
-        provider_activate_authority_sentinel(cloud, cloud.callback_timeout())?;
         if provider_read_doc_with_timeout(cloud, cloud.callback_timeout())?.as_ref()
             != Some(document)
         {
@@ -284,6 +192,13 @@ impl ProviderLeaderStore {
         if let Some(scope) = scope {
             scope
                 .check("cloud lease authority acceptance")
+                .map_err(super::traits::scope_lease_error)?;
+        }
+        self.claim_metadata_pointer(cloud, document, cloud.callback_timeout())?;
+        provider_activate_authority_sentinel(cloud, cloud.callback_timeout())?;
+        if let Some(scope) = scope {
+            scope
+                .check("cloud metadata pointer claim acceptance")
                 .map_err(super::traits::scope_lease_error)?;
         }
         self.validity.activate(epoch, valid_until)
@@ -338,55 +253,7 @@ impl LeaderStore for ProviderLeaderStore {
     }
 
     fn read_committed_metadata(&self, timeout: Duration) -> Result<CloudMetadataHead, LeaseError> {
-        if timeout.is_zero() {
-            return Err(LeaseError::Timeout(
-                "cloud metadata authority read deadline exhausted".to_string(),
-            ));
-        }
-        let started = Instant::now();
-        match provider_read_doc_with_timeout(
-            &self.cloud,
-            timeout.min(self.cloud.callback_timeout()),
-        )? {
-            None => {
-                let remaining = timeout.saturating_sub(started.elapsed());
-                if remaining.is_zero() {
-                    return Err(LeaseError::Timeout(
-                        "cloud metadata authority read deadline exhausted before sentinel check"
-                            .to_string(),
-                    ));
-                }
-                match provider_read_authority_sentinel(
-                    &self.cloud,
-                    remaining.min(self.cloud.callback_timeout()),
-                )? {
-                    AuthoritySentinelState::Active => Err(missing_initialized_lease_error()),
-                    AuthoritySentinelState::Missing => Ok(CloudMetadataHead::MissingLease),
-                    AuthoritySentinelState::Pending => Err(LeaseError::Indeterminate(
-                        "pending cloud metadata authority marker has no lease document".to_string(),
-                    )),
-                }
-            }
-            Some(document) if document.version == LeaseDocumentVersion::Legacy => {
-                Err(legacy_metadata_migration_error())
-            }
-            Some(document) => {
-                let remaining = timeout.saturating_sub(started.elapsed());
-                if remaining.is_zero() {
-                    return Err(LeaseError::Timeout(
-                        "cloud metadata authority read deadline exhausted before sentinel check"
-                            .to_string(),
-                    ));
-                }
-                provider_require_authority_sentinel(
-                    &self.cloud,
-                    remaining.min(self.cloud.callback_timeout()),
-                )?;
-                Ok(document
-                    .committed_metadata
-                    .map_or(CloudMetadataHead::Uncommitted, CloudMetadataHead::Committed))
-            }
-        }
+        self.read_separate_metadata_head(timeout)
     }
 
     fn publish_committed_metadata(
@@ -397,73 +264,13 @@ impl LeaderStore for ProviderLeaderStore {
         generation: CloudMetadataGeneration,
         timeout: Duration,
     ) -> Result<(), LeaseError> {
-        validate_metadata_generation(&generation)?;
-        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
-            LeaseError::Internal("cloud metadata publication deadline is out of range".to_string())
-        })?;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(LeaseError::Timeout(
-                    "cloud metadata publication deadline exhausted".to_string(),
-                ));
-            }
-            let read_timeout = remaining
-                .min(self.cloud.callback_timeout())
-                .min(self.validity.remaining(expected_epoch)?);
-            let (current, metadata) = provider_read_doc_with_metadata(&self.cloud, read_timeout)?
-                .ok_or_else(|| {
-                LeaseError::RenewalFailed(
-                    "cloud lease disappeared before metadata publication".to_string(),
-                )
-            })?;
-            if current.version == LeaseDocumentVersion::Legacy {
-                return Err(legacy_metadata_migration_error());
-            }
-            let sentinel_timeout = deadline
-                .saturating_duration_since(Instant::now())
-                .min(self.cloud.callback_timeout());
-            if sentinel_timeout.is_zero() {
-                return Err(LeaseError::Timeout(
-                    "cloud metadata publication deadline exhausted before sentinel check"
-                        .to_string(),
-                ));
-            }
-            provider_require_authority_sentinel(&self.cloud, sentinel_timeout)?;
-            if !owns_document(&current, holder_id, &self.owner_token, expected_epoch) {
-                return Err(LeaseError::RenewalFailed(
-                    "cloud lease ownership changed before metadata publication".to_string(),
-                ));
-            }
-            self.require_live_authority(&current, expected_epoch)?;
-            if current.committed_metadata.as_ref() != expected_previous {
-                if current.committed_metadata.as_ref() == Some(&generation) {
-                    return Ok(());
-                }
-                return Err(LeaseError::RenewalFailed(
-                    "cloud metadata authority changed during publication".to_string(),
-                ));
-            }
-            generation.validate_successor(current.committed_metadata.as_ref())?;
-            if current.committed_metadata.as_ref() == Some(&generation) {
-                return Ok(());
-            }
-            let replacement = LeaseDocument {
-                committed_metadata: Some(generation.clone()),
-                ..current
-            };
-            match self.write_metadata_pointer(
-                &replacement,
-                &metadata,
-                &generation,
-                holder_id,
-                expected_epoch,
-                deadline,
-            )? {
-                MetadataPointerCasOutcome::Committed => return Ok(()),
-                MetadataPointerCasOutcome::Retry => {}
-            }
-        }
+        self.publish_separate_metadata(
+            holder_id,
+            expected_epoch,
+            expected_previous,
+            generation,
+            timeout,
+        )
     }
 
     fn validate_epoch_with_timeout(
@@ -475,7 +282,7 @@ impl LeaderStore for ProviderLeaderStore {
         let read_timeout = timeout.min(self.validity.remaining(expected_epoch)?);
         match provider_read_doc_with_timeout(&self.cloud, read_timeout)? {
             Some(document)
-                if document.version == LeaseDocumentVersion::V3
+                if document.version == LeaseDocumentVersion::V4
                     && owns_document(
                         &document,
                         expected_holder_id,
@@ -565,7 +372,7 @@ impl LeaderStore for ProviderLeaderStore {
                 .ok_or_else(|| {
                     LeaseError::RenewalFailed("cloud lease document disappeared".to_string())
                 })?;
-            if existing.version != LeaseDocumentVersion::V3
+            if existing.version != LeaseDocumentVersion::V4
                 || !owns_document(&existing, holder_id, &self.owner_token, expected_epoch)
             {
                 return Err(LeaseError::RenewalFailed(format!(
@@ -665,7 +472,7 @@ impl LeaderStore for ProviderLeaderStore {
             else {
                 return Ok(());
             };
-            if current.version != LeaseDocumentVersion::V3 {
+            if current.version != LeaseDocumentVersion::V4 {
                 tracing::warn!(%holder_id, "skipping cloud lease release after legacy document replacement");
                 return Ok(());
             }
@@ -1094,6 +901,7 @@ unsafe impl Sync for CloudStorageLease {}
 enum LeaseDocumentVersion {
     Legacy,
     V3,
+    V4,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1162,6 +970,14 @@ fn format_lease_document(doc: &LeaseDocument) -> String {
                 doc.expires_at,
             )
         }
+        LeaseDocumentVersion::V4 => format!(
+            "lease_version: 4\nfencing_epoch: {}\nholder: {}\nowner: {}\nacquired: {}\nexpires: {}\n",
+            doc.epoch.expect("V4 lease has an epoch"),
+            doc.holder_id,
+            doc.owner_token.as_deref().expect("V4 lease has an owner token"),
+            doc.acquired_at,
+            doc.expires_at,
+        ),
     }
 }
 
@@ -1259,9 +1075,11 @@ fn parse_v3_lease_document(content: &str) -> Option<LeaseDocument> {
             _ => return None,
         }
     }
-    if version? != "3" {
-        return None;
-    }
+    let version = match version? {
+        "3" => LeaseDocumentVersion::V3,
+        "4" if committed_metadata.is_none() => LeaseDocumentVersion::V4,
+        _ => return None,
+    };
     let epoch = epoch?;
     let holder_id = holder_id?;
     let owner_token = owner_token?;
@@ -1270,12 +1088,16 @@ fn parse_v3_lease_document(content: &str) -> Option<LeaseDocument> {
     if epoch == 0 || holder_id.is_empty() || owner_token.is_empty() || acquired_at.is_empty() {
         return None;
     }
-    let committed_metadata = committed_metadata?;
+    let committed_metadata = if version == LeaseDocumentVersion::V3 {
+        committed_metadata?
+    } else {
+        None
+    };
     if let Some(generation) = committed_metadata.as_ref() {
         validate_metadata_generation(generation).ok()?;
     }
     Some(LeaseDocument {
-        version: LeaseDocumentVersion::V3,
+        version,
         epoch: Some(epoch),
         holder_id,
         owner_token: Some(owner_token),
@@ -1347,7 +1169,7 @@ pub(super) fn validate_metadata_generation(
 
 fn legacy_metadata_migration_error() -> LeaseError {
     LeaseError::Indeterminate(
-        "legacy cloud lease document requires an offline metadata-authority migration".to_string(),
+        "legacy cloud lease layout is unsupported; rebuild or re-import into FORMAT 9".to_string(),
     )
 }
 
@@ -1446,19 +1268,6 @@ fn provider_read_authority_sentinel_with_metadata(
         Err(error) => Err(LeaseError::Timeout(format!(
             "cloud metadata authority sentinel GET: {error}"
         ))),
-    }
-}
-
-fn provider_require_authority_sentinel(
-    cloud: &CloudStorage,
-    timeout: Duration,
-) -> Result<(), LeaseError> {
-    match provider_read_authority_sentinel(cloud, timeout)? {
-        AuthoritySentinelState::Active => Ok(()),
-        AuthoritySentinelState::Missing => Err(missing_authority_sentinel_error()),
-        AuthoritySentinelState::Pending => Err(LeaseError::Indeterminate(
-            "cloud metadata authority sentinel has not been activated".to_string(),
-        )),
     }
 }
 

@@ -471,3 +471,20 @@ Another regression isolates transaction/validation pin IDs. Failpoint test
 targets compile. Spilled validation still needs off-loop handoff; the complete
 operation-kind interleaving matrix and earlier in-flight group overlay remain
 pending with #940. No test execution or performance evidence is claimed.
+
+### #914: separate pointer and takeover claim implemented candidate
+
+Metadata commitment now CASes an independent pointer. Acquisition claims that
+same identity with epoch/owner before activating lease validity, preserving the
+predecessor's committed generation. A delayed predecessor either commits before
+the claim and is preserved or loses its old pointer identity; learning a new
+identity does not authorize its old epoch. Heartbeat changes no longer share
+the metadata CAS object.
+
+The initialization protocol distinguishes a new pending namespace from an
+initialized authority: crashes after lease CAS or pointer claim can resume
+safely, while an initialized missing pointer and the prior embedded layout
+fail closed. Active takeover/initialization regressions cover these boundaries.
+Failpoint test targets compile. Versioned shared-codec delta objects, cached
+common-path request counts, retention on their exact dependency closure and the
+crash campaign remain pending.

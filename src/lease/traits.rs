@@ -902,7 +902,7 @@ pub trait LeaderStore: Send + Sync {
         self.read_current()
     }
 
-    /// Read the committed cloud control-metadata generation from the lease.
+    /// Read the committed cloud control-metadata generation from its authority.
     ///
     /// Stores without a provider-backed metadata authority fail closed.
     fn read_committed_metadata(&self, _timeout: Duration) -> Result<CloudMetadataHead, LeaseError> {
@@ -911,11 +911,11 @@ pub trait LeaderStore: Send + Sync {
         ))
     }
 
-    /// Commit a complete immutable generation through the lease object's CAS.
+    /// Commit a complete immutable generation through the metadata pointer CAS.
     ///
     /// The caller must upload and verify every referenced immutable body first.
-    /// A newer holder cannot be overwritten because acquisition and publication
-    /// compare-exchange the same lease object.
+    /// Acquisition must claim this same pointer before activating a writer;
+    /// publication checks that claim's epoch and owner as well as its identity.
     fn publish_committed_metadata(
         &self,
         _holder_id: &str,
