@@ -920,7 +920,7 @@ fn exercise_held_publication(
         let (flush_result, recovered_before_release) =
             drive_held_publication(&mut fixture, held_at, &observed, flush_id)?;
         release.release();
-        finish_released_publication(&mut fixture)?;
+        finish_released_publication(&mut fixture);
         watcher.join().unwrap();
 
         // Assert: sample the actual receiver, independently of post-ACK work
@@ -983,7 +983,7 @@ fn drive_held_publication(
     Ok((flush_result, recovered_before_release))
 }
 
-fn finish_released_publication(fixture: &mut Fixture) -> MidgeResult<()> {
+fn finish_released_publication(fixture: &mut Fixture) {
     let until = Instant::now() + Duration::from_secs(5);
     loop {
         fixture.progress();
@@ -999,7 +999,6 @@ fn finish_released_publication(fixture: &mut Fixture) -> MidgeResult<()> {
         );
         std::thread::sleep(Duration::from_millis(1));
     }
-    Ok(())
 }
 
 fn assert_settled_publication(
