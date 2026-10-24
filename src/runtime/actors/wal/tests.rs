@@ -3182,9 +3182,10 @@ fn should_reuse_cached_sst_readers_when_validating_conflicting_transaction_ops()
 }
 
 #[test]
-fn should_fence_as_local_failure_when_wal_state_changes_under_a_sync_receipt() -> MidgeResult<()> {
-    // Arrange: a receipt whose WAL state moved before commit is a local
-    // invariant failure, not lost authority (#537).
+fn should_fence_as_local_failure_when_pending_wal_count_regresses_under_sync_receipt(
+) -> MidgeResult<()> {
+    // Arrange: consumed bookkeeping cannot cover an outstanding captured
+    // prefix. Later sequence allocation alone is allowed by exact receipts.
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
     let mut wal_actor = WalActor::open(
@@ -3205,12 +3206,13 @@ fn should_fence_as_local_failure_when_wal_state_changes_under_a_sync_receipt() -
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     let sync_ticket = WalSyncTicket::for_test(0);
     let receipt = wal_actor.begin_sync_transition(&mut state, &sync_ticket)?;
-    state.sequence += 1;
+    assert!(state.wal.pending_writes > 0);
 
     // Act
+    state.wal.pending_writes = 0;
     let error = wal_actor
         .commit_sync_transition(&mut state, receipt, &sync_ticket)
-        .expect_err("a moved WAL state must reject the receipt");
+        .expect_err("regressed WAL bookkeeping must reject the receipt");
 
     // Assert
     assert!(matches!(error, MidgeError::Internal(_)), "{error:?}");

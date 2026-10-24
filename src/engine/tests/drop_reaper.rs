@@ -53,10 +53,12 @@ fn should_fence_outliving_transactions_when_drop_transaction_wait_expires() -> M
         assert!(matches!(frozen.get(b"a"), Err(MidgeError::Fenced(_))));
         assert!(matches!(writer.get(b"own"), Err(MidgeError::Fenced(_))));
         assert!(matches!(scan.next(), Some(Err(MidgeError::Fenced(_)))));
-        assert!(matches!(
-            writer.commit(WriteOptions::buffered()),
-            Err(MidgeError::Fenced(_))
-        ));
+        let commit = writer.commit(if cloud {
+            WriteOptions::cloud_async()
+        } else {
+            WriteOptions::buffered()
+        });
+        assert!(matches!(commit, Err(MidgeError::Fenced(_))), "{commit:?}");
         let current = successor.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
         assert_eq!(current.get(b"a")?.as_deref(), Some(b"committed".as_slice()));
         assert_eq!(current.get(b"own")?, None);
