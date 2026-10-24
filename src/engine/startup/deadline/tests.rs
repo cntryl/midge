@@ -7,7 +7,7 @@ use tracing_subscriber::Layer;
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_inherit_caller_failpoint_scope_through_timed_startup_and_runtime() {
+fn should_inherit_caller_failpoint_scope_when_timed_open_starts_runtime() {
     // Arrange: a real timed open creates both startup and runtime threads.
     let guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
