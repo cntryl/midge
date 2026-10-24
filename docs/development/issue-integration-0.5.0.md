@@ -31,7 +31,7 @@ boundaries with the final outcome.
 
 The implementation-pass runtime/test source checkpoint was
 `0bb7f09df6eaadd92ebba6870434acc30ba3a69d`. Its initial evidence map and checks
-are historical; the final reference map is pinned to `d771b179`, after the
+are historical; the final reference map is pinned to `1c74f03a`, after the
 review fixes recorded below.
 Validation at that historical source checkpoint:
 
@@ -274,13 +274,23 @@ and pass 2/2 (0.34 s); production acquisition creates the separate pointer.
 
 Production source is frozen at
 `f27419f92d5c1cf06524e6aac882cfb6b7ee12b7`; later commits are test-only. The final
-code/reference checkpoint is `d771b1791022db15138a402e759ad145b6cfea45`.
+code/reference checkpoint is `1c74f03a818ba15611bce675e71a6e0811760d19`.
 Strict all-target/all-feature pedantic Clippy passes with zero warnings
 (20.84 s); all-target/all-feature check and build pass (22.91 s and 59.83 s).
 Formatting passes, 4,542 test declarations are structurally compliant and all
 72 Markdown documents validate. These static results do not establish runtime
 qualification. Final aggregate, serial fault and renewed Sqrzl execution, and
 the separate exact-head hosted merge gates, are recorded on PR #983.
+
+The fresh aggregate at `d771b179` passed 3,639 library tests and failed two
+fault-free fixture waits during unrelated global fault scopes. All phase and
+overlap cases passed. Commit `1c74f03a` acquires the existing read scope before
+shutdown/debt setup and clocks, carries its worker context onto the owning
+thread, and settles already-accepted local compaction work before final actor
+assertions. Exact focused cases pass 1/1 each (1.67 s and 0.16 s). Original
+10 s/1 s/100 ms/3 s bounds and authority/manifest assertions remain unchanged.
+The failed aggregate remains attributed to its source; final full-suite hosted
+verification is recorded separately on PR #983.
 
 The implementation retains Midge's ordered whole-unit applied prefix, exact
 WAL durable floors, storage-enforced epoch fencing and conservative physical
