@@ -12,6 +12,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 tempfile = "3.27"
+bytes = "1.12"
 cntryl-midge = { path = "..", features = ["internal-testing"] }
 
 [[bin]]
@@ -38,6 +39,13 @@ bench = false
 [[bin]]
 name = "sst_block_decode"
 path = "fuzz_targets/sst_block_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine_differential"
+path = "fuzz_targets/engine_differential.rs"
 test = false
 doc = false
 bench = false
