@@ -109,6 +109,12 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 
+# Model checking for the lock-free skiplist (#931): `RUSTFLAGS="--cfg midge_loom"`.
+# The crate-specific name keeps dependencies that react to `cfg(loom)`, such
+# as tokio, building normally.
+[target.'cfg(midge_loom)'.dependencies]
+loom = "0.7"
+
 [dev-dependencies]
 proptest = "1.12"
 cntryl-stress = "0.5.1"
@@ -443,6 +449,9 @@ required-features = ["stress-soak"]
 name = "checkpoint_campaign_readback"
 path = "examples/checkpoint_campaign_readback.rs"
 required-features = ["internal-testing"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(midge_loom)'] }
 
 [lints.clippy]
 too_many_lines = "forbid"
