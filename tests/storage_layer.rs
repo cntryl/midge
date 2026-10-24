@@ -1720,7 +1720,8 @@ mod compatibility_fixtures {
             );
             // Assert
             assert!(
-                matches!(verification, Err(MidgeError::CompatibilityError(ref message)) if message.contains("SST format version 4") && message.contains("V5"))
+                matches!(verification, Err(MidgeError::CompatibilityError(ref message)) if message.contains("SST format version 4") && message.contains("V5")),
+                "{verification:?}"
             );
             let error = match opened {
                 Err(error) => error,

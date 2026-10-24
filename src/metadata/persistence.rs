@@ -766,7 +766,8 @@ mod tests {
             .unwrap();
         let mut encoded = serde_json::to_value(&manifest).unwrap();
         encoded["flushed_through"].as_array_mut().unwrap().pop();
-        let bytes = serde_json::to_vec(&encoded).unwrap();
+        let bytes =
+            crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &encoded).unwrap();
         std::fs::write(
             directory
                 .path()

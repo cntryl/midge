@@ -583,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn should_reuse_same_view_until_manifest_is_invalidated() {
+    fn should_refresh_view_when_invalidated_manifest_membership_changes() {
         // Arrange
         let mut manifest = Manifest::default();
         manifest.files.push(complete_file(1, 1));
@@ -593,11 +593,17 @@ mod tests {
         let first = cache.view_for(&manifest, 7);
         let second = cache.view_for(&manifest, 7);
         cache.invalidate();
+        let unchanged = cache.view_for(&manifest, 7);
+        manifest.files.push(complete_file(1, 2));
+        cache.invalidate();
         let third = cache.view_for(&manifest, 7);
 
         // Assert
         assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&second, &unchanged));
         assert!(!Arc::ptr_eq(&second, &third));
+        assert_eq!(second.file_count(), 1);
+        assert_eq!(third.file_count(), 2);
     }
 
     #[test]

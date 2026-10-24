@@ -1480,7 +1480,8 @@ fn should_reject_checksums_valid_but_malformed_committed_manifest_in_every_recov
             &lease,
             42,
             current_test_format_marker(),
-            b"not a manifest".to_vec(),
+            crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &42_u64)
+                .expect("valid binary frame containing an invalid manifest value"),
         );
 
         // Act
