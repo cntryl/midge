@@ -284,10 +284,10 @@ pub struct FlushActor {
 impl FlushActor {
     #[cfg(test)]
     pub fn new(
-        fs: Arc<dyn crate::io::Fs>,
+        fs: &Arc<dyn crate::io::Fs>,
         memory_mode: bool,
-        compression_policy: crate::codec::CompressionPolicy,
-        completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
+        compression_policy: &crate::codec::CompressionPolicy,
+        completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
     ) -> MidgeResult<Self> {
         Self::new_with_memory_limit(
             fs,
@@ -301,10 +301,10 @@ impl FlushActor {
     /// Start the worker. It builds SSTs through `fs`, the database root, so
     /// staging, scratch and final outputs are all root-relative paths in it.
     pub(crate) fn new_with_memory_limit(
-        fs: Arc<dyn crate::io::Fs>,
+        fs: &Arc<dyn crate::io::Fs>,
         memory_mode: bool,
-        compression_policy: crate::codec::CompressionPolicy,
-        completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
+        compression_policy: &crate::codec::CompressionPolicy,
+        completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
         memory_bytes: usize,
     ) -> MidgeResult<Self> {
         Self::new_with_write_limiter(
@@ -318,12 +318,12 @@ impl FlushActor {
     }
 
     pub(crate) fn new_with_write_limiter(
-        fs: Arc<dyn crate::io::Fs>,
+        fs: &Arc<dyn crate::io::Fs>,
         memory_mode: bool,
-        compression_policy: crate::codec::CompressionPolicy,
-        completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
+        compression_policy: &crate::codec::CompressionPolicy,
+        completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
         memory_bytes: usize,
-        limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+        limiter: Option<&Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
     ) -> MidgeResult<Self> {
         Self::new_with_worker_count(
             fs,
@@ -337,12 +337,12 @@ impl FlushActor {
     }
 
     pub(crate) fn new_with_worker_count(
-        fs: Arc<dyn crate::io::Fs>,
+        fs: &Arc<dyn crate::io::Fs>,
         memory_mode: bool,
-        compression_policy: crate::codec::CompressionPolicy,
-        completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
+        compression_policy: &crate::codec::CompressionPolicy,
+        completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
         memory_bytes: usize,
-        limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+        limiter: Option<&Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
         workers: usize,
     ) -> MidgeResult<Self> {
         if !(1..=64).contains(&workers) {
@@ -351,7 +351,7 @@ impl FlushActor {
             ));
         }
         let mut actor = Self {
-            owners: Default::default(),
+            owners: std::collections::HashMap::new(),
             worker_limit: workers,
             submitted: 0,
             memory_mode,
@@ -368,8 +368,8 @@ impl FlushActor {
             // Scratch cleanup belongs to this worker, while memory and write
             // throttling share their original engine-wide admission ledgers.
             let factory = Arc::new(
-                crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 64 * 1024)
-                    .with_write_limiter(limiter.clone())
+                crate::sst::FsSstFactoryIo::new(Arc::clone(fs), 64 * 1024)
+                    .with_write_limiter(limiter.cloned())
                     .with_compression_policy(compression_policy.clone())
                     .with_compaction_scratch_directory(PathBuf::from(
                         crate::sst::fs::FLUSH_STAGING_DIR,
@@ -1630,10 +1630,10 @@ mod tests {
 
         // Act
         let mut actor = FlushActor::new(
-            crate::io::real::test_root(directory.path()),
+            &crate::io::real::test_root(directory.path()),
             false,
-            crate::codec::CompressionPolicy::default(),
-            completion_tx,
+            &crate::codec::CompressionPolicy::default(),
+            &completion_tx,
         )?;
 
         // Assert
@@ -1650,10 +1650,10 @@ mod tests {
 
         // Act
         let actor = FlushActor::new(
-            Arc::new(crate::io::MockFs::new()),
+            &(Arc::new(crate::io::MockFs::new()) as Arc<dyn crate::io::Fs>),
             true,
-            crate::codec::CompressionPolicy::default(),
-            completion_tx,
+            &crate::codec::CompressionPolicy::default(),
+            &completion_tx,
         )?;
 
         // Assert

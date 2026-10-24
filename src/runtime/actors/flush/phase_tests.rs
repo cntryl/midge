@@ -98,10 +98,10 @@ fn should_retain_cf_owner_until_exact_physical_phase_and_epoch_complete() -> Mid
     let fs = crate::io::real::test_root(directory.path());
     let (completed, results) = crossbeam::channel::unbounded();
     let mut actor = FlushActor::new_with_worker_count(
-        Arc::clone(&fs),
+        &fs,
         false,
-        crate::codec::CompressionPolicy::default(),
-        completed,
+        &crate::codec::CompressionPolicy::default(),
+        &completed,
         16 * 1024 * 1024,
         None,
         1,

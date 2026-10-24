@@ -120,10 +120,10 @@ impl CloudReplay {
             .or_else(|| materialized.state.startup_scope.clone());
         let (tx, rx) = crossbeam::channel::bounded(1);
         let mut actor = FlushActor::new_with_memory_limit(
-            Arc::clone(&materialized.state.fs),
+            &materialized.state.fs,
             false,
-            materialized.runtime_config.compression_policy.clone(),
-            tx,
+            &materialized.runtime_config.compression_policy,
+            &tx,
             materialized.runtime_config.flush_memory_limit,
         )?;
         let mut memtables = HashMap::new();

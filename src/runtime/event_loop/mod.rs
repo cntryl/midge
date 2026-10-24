@@ -303,12 +303,12 @@ impl EventLoop {
 
         // Create actors - they handle memory_mode internally
         let flush_actor = FlushActor::new_with_worker_count(
-            Arc::clone(&state.fs),
+            &state.fs,
             memory_mode,
-            config.compression_policy.clone(),
-            flush_completion_tx,
+            &config.compression_policy,
+            &flush_completion_tx,
             config.flush_memory_limit,
-            state.write_pressure.admission.limiter(),
+            state.write_pressure.admission.limiter().as_ref(),
             config.flush_concurrency,
         )?;
         let mut wal_actor = WalActor::open(
