@@ -17,6 +17,7 @@ use crate::wal::DurabilityPolicy;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+#[derive(Clone, Copy)]
 struct TransactionValidation<'a> {
     ops: &'a [crate::runtime::TransactionOp],
     assertions: &'a [crate::runtime::KeyAssertion],
@@ -258,7 +259,7 @@ impl WalActor {
             .iter()
             .all(|prepared| matches!(prepared.effective_durability, DurabilityPolicy::Strict));
         self.append_prepared_group_wal(state, &prepared_transactions, strict_group)?;
-        self.apply_prepared_group(state, prepared_transactions, strict_group)
+        Ok(self.apply_prepared_group(state, prepared_transactions, strict_group))
     }
 
     pub(super) fn preflight_prepared_group(
@@ -284,7 +285,7 @@ impl WalActor {
         state: &mut RuntimeState,
         prepared_transactions: Vec<PreparedTransactionAppend>,
         strict_group: bool,
-    ) -> MidgeResult<PreparedGroupOutcome> {
+    ) -> PreparedGroupOutcome {
         let mut results = Vec::with_capacity(prepared_transactions.len());
         let mut pending = prepared_transactions.into_iter();
         while let Some(prepared) = pending.next() {
@@ -297,10 +298,10 @@ impl WalActor {
                     let unapplied = std::iter::once(&prepared)
                         .chain(pending.as_slice())
                         .collect::<Vec<_>>();
-                    return Ok(PreparedGroupOutcome {
+                    return PreparedGroupOutcome {
                         applied: results,
                         failure: Some(Self::group_durability_error(&unapplied, error)),
-                    });
+                    };
                 }
             }
             crate::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
@@ -312,10 +313,10 @@ impl WalActor {
                 let unapplied = std::iter::once(&prepared)
                     .chain(pending.as_slice())
                     .collect::<Vec<_>>();
-                return Ok(PreparedGroupOutcome {
+                return PreparedGroupOutcome {
                     applied: results,
                     failure: Some(self.fail_unapplied_group(state, &unapplied, error)),
-                });
+                };
             }
             let PreparedTransactionAppend {
                 request_id,
@@ -354,10 +355,10 @@ impl WalActor {
             });
         }
 
-        Ok(PreparedGroupOutcome {
+        PreparedGroupOutcome {
             applied: results,
             failure: None,
-        })
+        }
     }
 
     fn append_prepared_group_wal(
@@ -639,9 +640,10 @@ impl WalActor {
             state.observed_time_millis(),
         );
         let unit = self.build_transaction_batch_unit(sequence_plan, &apply_ops, encode_wal)?;
-        let total_wal_bytes = unit
-            .as_ref()
-            .map_or(Ok(0), |unit| unit.frame_size_bound())?;
+        let total_wal_bytes = unit.as_ref().map_or(
+            Ok(0),
+            crate::wal::sequenced::SequencedWalUnit::frame_size_bound,
+        )?;
         let pending_wal_records = usize::from(!skip_wal);
         Ok((
             apply_ops,

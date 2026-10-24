@@ -72,7 +72,7 @@ impl EventLoop {
             match ApplyPool::new() {
                 Ok(pool) => self.pipeline.memtable_apply.pool = Some(pool),
                 Err(error) => {
-                    self.fail_unstarted_memtable_apply(batch, reservation, error);
+                    self.fail_unstarted_memtable_apply(batch, reservation, &error);
                     return;
                 }
             }
@@ -85,7 +85,7 @@ impl EventLoop {
         {
             Ok(plan) => self.install_memtable_apply_group(batch, plan, reservation),
             Err(error) => {
-                self.fail_unstarted_memtable_apply(batch, reservation, error);
+                self.fail_unstarted_memtable_apply(batch, reservation, &error);
                 return;
             }
         }
@@ -231,10 +231,10 @@ impl EventLoop {
         &mut self,
         batch: CoalescedTransactionBatch,
         reservation: ResourceReservation,
-        error: MidgeError,
+        error: &MidgeError,
     ) {
         self.pipeline.memtable_apply.terminal_prefix = true;
-        self.fence_wal_transition(&error, None);
+        self.fence_wal_transition(error, None);
         self.actors
             .wal_actor
             .release_fenced_writer_after_completion();

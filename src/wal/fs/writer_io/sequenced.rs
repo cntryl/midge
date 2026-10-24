@@ -1,7 +1,12 @@
-use super::*;
+use super::{FsWalWriterIo, WalWriter};
+use crate::common::MidgeError;
 use crate::wal::append_completion::{WalAppendPrefix, WalPendingAppend};
 use crate::wal::sequenced::SequencedWalUnit;
+use crate::wal::traits::WalAppendError;
+use crate::wal::writer_authority::PendingWriterEffect;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
 
 impl FsWalWriterIo {
     pub(super) fn submit_owned_units(
@@ -125,8 +130,6 @@ impl FsWalWriterIo {
                 &self.header,
                 units.iter().map(SequencedWalUnit::last_sequence),
             )
-            .map_err(|error| {
-                WalAppendError::unchanged(MidgeError::InvalidArgument(error.to_string()))
-            })
+            .map_err(|error| WalAppendError::unchanged(MidgeError::InvalidArgument(error)))
     }
 }

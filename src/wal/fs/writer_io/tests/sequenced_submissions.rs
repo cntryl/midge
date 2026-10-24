@@ -170,13 +170,6 @@ fn should_reject_raw_encoding_before_enqueue_when_memory_budget_is_too_small() -
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_keep_raw_memory_until_terminal_when_append_waiter_is_abandoned() -> MidgeResult<()> {
-    // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
-    let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
-    create_test_segment(fs.as_ref(), "wal.log")?;
-    let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs))?;
-    let (entered, reached) = crossbeam::channel::bounded(1);
-    let (release, released) = crossbeam::channel::unbounded();
     struct Release(crossbeam::channel::Sender<()>);
     impl Drop for Release {
         fn drop(&mut self) {
@@ -184,6 +177,14 @@ fn should_keep_raw_memory_until_terminal_when_append_waiter_is_abandoned() -> Mi
             fail::remove("midge::wal::before_writer_encode");
         }
     }
+
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+    create_test_segment(fs.as_ref(), "wal.log")?;
+    let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs))?;
+    let (entered, reached) = crossbeam::channel::bounded(1);
+    let (release, released) = crossbeam::channel::unbounded();
     let release = Release(release);
     fail::cfg_callback("midge::wal::before_writer_encode", move || {
         let _ = entered.send(());

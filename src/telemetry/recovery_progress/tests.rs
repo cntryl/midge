@@ -14,10 +14,15 @@ use tracing_subscriber::layer::{Layer, SubscriberExt};
 #[path = "../../../benches/bench_support/stress_scenarios/recovery_progress.rs"]
 mod workload_listener;
 
+// Keep the production ProgressHandle adapter type-checked while the same
+// scope/visitor is exercised below with an observable completion callback.
+const _: fn(
+    &cntryl_stress::ProgressHandle,
+    &Arc<AtomicU64>,
+    &str,
+) -> workload_listener::RecoveryScope = workload_listener::RecoveryScope::enter;
+
 fn with_listener<T>(operation: impl FnOnce() -> T) -> T {
-    // Keep the production ProgressHandle adapter type-checked while the same
-    // scope/visitor is exercised below with an observable completion callback.
-    let _production_adapter = workload_listener::RecoveryScope::enter;
     let subscriber = tracing_subscriber::registry()
         .with(workload_listener::RecoveryProgressLayer.with_filter(
             tracing_subscriber::filter::filter_fn(workload_listener::is_recovery_work),

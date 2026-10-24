@@ -1,5 +1,5 @@
 //! Ordered strict synchronization. A later write never publishes across an
-//! unapplied earlier group, including an explicitly BestEffort write.
+//! unapplied earlier group, including an explicitly `BestEffort` write.
 
 use super::durability_sync::CompletionSource;
 use super::write_batch::CoalescedTransactionBatch;
@@ -24,7 +24,7 @@ struct PendingGroup {
     next_generation: Option<u64>,
     ready: RefCell<Option<StrictIoCompletion>>,
     failed: bool,
-    _reservation: ResourceReservation,
+    reservation: ResourceReservation,
 }
 
 struct StartedGroup {
@@ -53,7 +53,7 @@ impl PendingGroup {
 
 struct DeferredMutation {
     message: RuntimeMsg,
-    _reservation: Option<ResourceReservation>,
+    reservation: Option<ResourceReservation>,
 }
 
 pub(super) struct WalCommitPipeline {
@@ -165,7 +165,7 @@ impl EventLoop {
 
     fn take_deferred_wal_message(&mut self) -> Option<RuntimeMsg> {
         let pending = self.pipeline.wal_commits.deferred.pop_front()?;
-        if let Some(reservation) = pending._reservation {
+        if let Some(reservation) = pending.reservation {
             self.pipeline.wal_commits.admitting.push(reservation);
         }
         Some(pending.message)
@@ -260,20 +260,19 @@ impl EventLoop {
             return;
         }
         let reservation = if message.is_mutation() || (request_id.is_some() && !shutdown) {
-            match self
+            if let Ok(reservation) = self
                 .pipeline
                 .wal_commits
                 .queued_memory
                 .reserve(mutation_bytes(&message), "ordered WAL deferred writes")
             {
-                Ok(reservation) => Some(reservation),
-                Err(_) => {
-                    self.reject_pipeline_message(
-                        &message,
-                        MidgeError::WriteStall("ordered WAL admission byte limit is full".into()),
-                    );
-                    return;
-                }
+                Some(reservation)
+            } else {
+                self.reject_pipeline_message(
+                    &message,
+                    MidgeError::WriteStall("ordered WAL admission byte limit is full".into()),
+                );
+                return;
             }
         } else {
             None
@@ -283,7 +282,7 @@ impl EventLoop {
             .deferred
             .push_back(DeferredMutation {
                 message,
-                _reservation: reservation,
+                reservation,
             });
     }
 
@@ -334,7 +333,7 @@ impl EventLoop {
                     next_generation,
                     ready: RefCell::new(None),
                     failed: false,
-                    _reservation: reservation,
+                    reservation,
                 });
                 if self.pipeline.inline_flush_worker {
                     // Deterministic fixtures execute the same receipt protocol
@@ -488,7 +487,7 @@ impl EventLoop {
         drop(group.io); // release lexical native root before apply/transitions
         let error = match completed {
             Ok(()) => {
-                self.begin_memtable_apply_group(batch, group._reservation);
+                self.begin_memtable_apply_group(batch, group.reservation);
                 return;
             }
             Err(error) => error,
@@ -497,7 +496,7 @@ impl EventLoop {
         self.actors
             .wal_actor
             .release_fenced_writer_after_completion();
-        self.finish_coalesced_transaction_outcome(batch, Err(error), Some(group._reservation));
+        self.finish_coalesced_transaction_outcome(batch, Err(error), Some(group.reservation));
         self.restore_wal_pipeline_message();
     }
 

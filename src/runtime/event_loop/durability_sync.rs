@@ -307,10 +307,10 @@ impl EventLoop {
     }
 
     fn sync_batched_wal(&mut self, msg_rx: Option<&Receiver<RuntimeMsg>>) {
+        const MAX_DRAIN_WRITES_BEFORE_SYNC: usize = 4096;
         if self.wal_group_in_flight() {
             return;
         }
-        const MAX_DRAIN_WRITES_BEFORE_SYNC: usize = 4096;
 
         if self.actors.wal_actor.is_cloud_async() {
             return; // CloudAsync has separate logic
