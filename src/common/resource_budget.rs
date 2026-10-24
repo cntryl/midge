@@ -337,6 +337,10 @@ impl ResourceReservation {
         self.bytes
     }
 
+    pub(crate) fn limit(&self) -> usize {
+        self.budget.limit()
+    }
+
     /// Payload retained by this reservation and its owned parent Boxes.
     /// The caller accounts for its outer Arc header separately. Shared pool
     /// objects and borrowed-credit allocations already have separate owners.

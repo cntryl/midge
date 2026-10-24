@@ -20,6 +20,7 @@ type CopiedControlFiles = (Arc<dyn Fs>, BTreeMap<String, Vec<u8>>);
 
 #[cfg(test)]
 mod tests;
+mod workspace;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CutWitness {
@@ -35,7 +36,42 @@ pub(crate) struct MetadataCutProof {
     session: String,
     pub(crate) ordinal: u64,
     digest: [u8; 32],
+    #[serde(deserialize_with = "deserialize_cut_witnesses")]
     covers: Vec<CutWitness>,
+}
+
+fn deserialize_cut_witnesses<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<Vec<CutWitness>, D::Error> {
+    struct Witnesses;
+    impl<'de> serde::de::Visitor<'de> for Witnesses {
+        type Value = Vec<CutWitness>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("fewer than 64 metadata cut witnesses")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            let hint = sequence.size_hint().unwrap_or(0);
+            if hint >= MAX_CAPTURED_CUTS {
+                return Err(serde::de::Error::custom(
+                    "metadata cut witness count exceeds limit",
+                ));
+            }
+            let mut witnesses = Vec::with_capacity(hint);
+            while let Some(witness) = sequence.next_element()? {
+                if witnesses.len() == MAX_CAPTURED_CUTS - 1 {
+                    return Err(serde::de::Error::custom(
+                        "metadata cut witness count exceeds limit",
+                    ));
+                }
+                witnesses.push(witness);
+            }
+            Ok(witnesses)
+        }
+    }
+    decoder.deserialize_seq(Witnesses)
 }
 
 impl MetadataCutProof {
@@ -86,10 +122,10 @@ pub(crate) struct CapturedMetadataCut {
     manifest: Manifest,
     publication_intents: PublicationIntentBoundary,
     registry: Weak<parking_lot::Mutex<CutRegistry>>,
+    staged: parking_lot::Mutex<Option<crate::runtime::hybrid_persistence::MetadataMirrorCache>>,
     memory: Arc<ResourceReservation>,
     terminal_witnesses: Option<Arc<SelectedTerminalWitnesses>>,
     _slot: ResourceReservation,
-    staged: parking_lot::Mutex<Option<crate::runtime::hybrid_persistence::MetadataMirrorCache>>,
 }
 
 impl CapturedMetadataCut {
@@ -238,6 +274,23 @@ pub(crate) struct SelectedTerminalWitnesses {
 }
 
 impl SelectedTerminalWitnesses {
+    fn allocation_bytes(memory: &ResourceReservation, entries: usize) -> MidgeResult<usize> {
+        if entries == 0 {
+            return Ok(0);
+        }
+        entries
+            .checked_mul(
+                std::mem::size_of::<[u8; 32]>()
+                    + RECEIPT_COPIES * std::mem::size_of::<ReceiptEntry>(),
+            )
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>()))
+            .and_then(|bytes| bytes.checked_add(memory.allocation_bytes()))
+            .and_then(|bytes| bytes.checked_add(4 * std::mem::size_of::<usize>()))
+            .ok_or_else(|| {
+                MidgeError::ResourceLimit("selected intent witness size overflow".into())
+            })
+    }
+
     fn prepare(
         memory: &mut Arc<ResourceReservation>,
         proof: &MetadataCutProof,
@@ -252,18 +305,7 @@ impl SelectedTerminalWitnesses {
         // reservation storage, plus any receipt nodes whose final source Drop
         // cannot prune immediately. UUID and boxed digests avoid a separate
         // compact-tree allocation even for a single terminal intent.
-        let bytes = digests
-            .len()
-            .checked_mul(
-                std::mem::size_of::<[u8; 32]>()
-                    + RECEIPT_COPIES * std::mem::size_of::<ReceiptEntry>(),
-            )
-            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Self>()))
-            .and_then(|bytes| bytes.checked_add(memory.allocation_bytes()))
-            .and_then(|bytes| bytes.checked_add(4 * std::mem::size_of::<usize>()))
-            .ok_or_else(|| {
-                MidgeError::ResourceLimit("selected intent witness size overflow".into())
-            })?;
+        let bytes = Self::allocation_bytes(memory, digests.len())?;
         if bytes > encoded.saturating_mul(COMPACT_WITNESS_BYTES_PER_ENCODED_BYTE) {
             return Err(MidgeError::ResourceLimit(
                 "compact selected witness exceeds its encoded metadata allowance".into(),
@@ -356,6 +398,7 @@ impl MetadataPublicationLock {
             .reserve(1, "owned metadata cut slot")?;
         let mut memory = self.reserve_capture_memory(source, deadline)?;
         let (fs, bodies) = copy_control_files(source, deadline)?;
+        self.ensure_capture_workspace(&mut memory, &bodies, deadline)?;
         let snapshot = bodies
             .get(files::MANIFEST_SNAPSHOT)
             .ok_or_else(|| MidgeError::Corruption("metadata cut lacks manifest snapshot".into()))?;
@@ -508,10 +551,11 @@ impl MetadataPublicationLock {
             .as_ref()
             .and_then(|cached| cached.witnesses.as_ref())
             .map(|witnesses| Arc::clone(&witnesses.memory));
-        // The existing 16x body allowance includes 8x for body/decoder work,
-        // at most 4x for this cut's compact witness and at most 4x for a shared
-        // selected witness. Only actually retained bytes inside that allowance
-        // may receive exclusive credit; a larger cache is separately charged.
+        // This minimum admits raw copies before shape preflight; it is not a
+        // universal typed-decoder bound. Preflight grows independent charge
+        // before allocating typed structures. Credit only includes an actual
+        // retained compact witness, capped at 4x encoded bytes; larger caches
+        // remain separately charged.
         let credit = credit.filter(|credit| {
             credit.bytes() <= encoded.saturating_mul(COMPACT_WITNESS_BYTES_PER_ENCODED_BYTE)
         });

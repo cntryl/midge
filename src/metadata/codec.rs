@@ -13,6 +13,8 @@ const HEADER_BYTES: usize = 13;
 const CHECKSUM_BYTES: usize = 4;
 const MAX_PAYLOAD_BYTES: usize = 256 * 1024 * 1024;
 mod framing;
+pub(crate) mod manifest_workspace;
+pub(crate) mod workspace;
 pub(crate) const MANIFEST: u8 = 1;
 pub(crate) const JOURNAL: u8 = 2;
 pub(crate) const INTENT: u8 = 3;

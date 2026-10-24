@@ -31,9 +31,49 @@ struct ManifestVersion {
     writer_epoch: u64,
     operation_id: String,
     parent: Option<CloudMetadataObject>,
+    #[serde(deserialize_with = "deserialize_control_changes")]
     changes: BTreeMap<String, FileEdit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cut: Option<crate::runtime::metadata_publication::MetadataCutProof>,
+}
+
+fn deserialize_control_changes<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> Result<BTreeMap<String, FileEdit>, D::Error> {
+    struct Changes;
+    impl<'de> serde::de::Visitor<'de> for Changes {
+        type Value = BTreeMap<String, FileEdit>;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("at most four known control-file changes")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            if map
+                .size_hint()
+                .is_some_and(|hint| hint > files::CLOUD_MIRRORED.len())
+            {
+                return Err(serde::de::Error::custom(
+                    "cloud control change count exceeds limit",
+                ));
+            }
+            let mut changes = BTreeMap::new();
+            while let Some(name) = map.next_key::<String>()? {
+                if changes.len() == files::CLOUD_MIRRORED.len()
+                    || !files::CLOUD_MIRRORED.contains(&name.as_str())
+                    || changes.contains_key(&name)
+                {
+                    return Err(serde::de::Error::custom(
+                        "cloud manifest repeats or names an unknown control file",
+                    ));
+                }
+                changes.insert(name, map.next_value()?);
+            }
+            Ok(changes)
+        }
+    }
+    decoder.deserialize_map(Changes)
 }
 
 pub(super) fn reclaimable_version(
@@ -382,5 +422,50 @@ fn publish_bytes(
         Err(MidgeError::Corruption(
             "cloud manifest PUT was not proven by readback".into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod decoder_tests {
+    use super::*;
+
+    #[test]
+    fn should_bound_control_change_storage_before_decoding_announced_members() {
+        // Arrange: malformed member values must not be decoded before an
+        // oversized map count is rejected.
+        let raw = serde_json::json!({
+            "id": 1,
+            "writer_epoch": 1,
+            "operation_id": uuid::Uuid::new_v4().to_string(),
+            "parent": null,
+            "changes": {"bad0": null, "bad1": null, "bad2": null, "bad3": null, "bad4": null},
+        });
+        let oversized = codec::encode(CHAIN_KIND, &raw).unwrap();
+        let valid = ManifestVersion {
+            id: SharedGenerationId::FIRST,
+            writer_epoch: 1,
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            parent: None,
+            changes: files::CLOUD_MIRRORED
+                .iter()
+                .map(|name| {
+                    (
+                        (*name).into(),
+                        FileEdit::Replace(Bytes::from_static(b"body")),
+                    )
+                })
+                .collect(),
+            cut: None,
+        };
+        let maximum = codec::encode(CHAIN_KIND, &valid).unwrap();
+
+        // Act
+        let rejected = codec::decode::<ManifestVersion>(CHAIN_KIND, &oversized);
+        let accepted = codec::decode::<ManifestVersion>(CHAIN_KIND, &maximum).unwrap();
+
+        // Assert
+        assert!(matches!(rejected, Err(MidgeError::Corruption(message))
+            if message.contains("control change count exceeds limit")));
+        assert_eq!(accepted.changes.len(), files::CLOUD_MIRRORED.len());
     }
 }

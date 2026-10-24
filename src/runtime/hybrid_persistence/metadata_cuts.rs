@@ -10,13 +10,14 @@ use crate::runtime::CapturedMetadataCut;
 use std::collections::BTreeMap;
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 struct SelectedCut {
     generation: Option<CloudMetadataGeneration>,
     cache: Option<MetadataMirrorCache>,
     bodies: Option<BTreeMap<String, Vec<u8>>>,
     _memory: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
+    _decode_memory: Option<crate::common::resource_budget::ResourceReservation>,
 }
 
 /// Upload and CAS run without the local publication mutex. A rejected CAS is
@@ -171,6 +172,7 @@ fn selected_cut(context: &CloudMetadataMirrorContext<'_>, fresh: bool) -> MidgeR
                 cache: None,
                 bodies: None,
                 _memory: None,
+                _decode_memory: None,
             })
         }
         CloudMetadataHead::MissingLease => {
@@ -193,6 +195,7 @@ fn selected_cut(context: &CloudMetadataMirrorContext<'_>, fresh: bool) -> MidgeR
             cache: Some(cache),
             bodies: None,
             _memory: None,
+            _decode_memory: None,
         });
     }
     if let Some((cache, memory)) = context
@@ -205,6 +208,7 @@ fn selected_cut(context: &CloudMetadataMirrorContext<'_>, fresh: bool) -> MidgeR
             cache: Some(cache),
             bodies: None,
             _memory: Some(memory),
+            _decode_memory: None,
         });
     }
     let encoded = generation
@@ -241,6 +245,11 @@ fn load_selected_cut(
             None,
         )
     };
+    let decode_memory = context.publication_lock.reserve_selected_decode_workspace(
+        &memory,
+        &bodies,
+        context.deadline,
+    )?;
     let manifest = decode_generation_manifest(&generation, &bodies, context.deadline)?;
     let mut cache = MetadataMirrorCache::new(
         generation.clone(),
@@ -255,6 +264,7 @@ fn load_selected_cut(
         cache: Some(cache),
         bodies: Some(bodies),
         _memory: Some(memory),
+        _decode_memory: decode_memory,
     })
 }
 

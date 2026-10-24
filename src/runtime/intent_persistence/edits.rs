@@ -8,6 +8,15 @@ use std::sync::Arc;
 
 const COMPACT_BYTES: usize = 1024 * 1024;
 const COMPACT_RECORDS: u64 = 1024;
+mod workspace;
+pub(crate) use workspace::IntentDecodeWorkspace;
+
+pub(super) fn decoded_workspace_bound(
+    bytes: &[u8],
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<IntentDecodeWorkspace> {
+    workspace::decoded_workspace_bound(bytes, deadline)
+}
 
 #[derive(Serialize, Deserialize)]
 struct IntentEdit {

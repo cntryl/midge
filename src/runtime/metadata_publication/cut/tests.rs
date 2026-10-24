@@ -228,3 +228,36 @@ fn should_admit_selected_body_read_when_final_source_drop_could_not_prune_its_re
     drop(selected);
     assert_eq!(fixture.memory.used(), fixture.witness_bytes);
 }
+
+#[test]
+fn should_bound_cut_witness_storage_before_decoding_announced_members() {
+    // Arrange: an oversized array contains an invalid first member, so a
+    // count error proves rejection precedes member decode/allocation.
+    let bodies = std::collections::BTreeMap::new();
+    let mut raw = serde_json::json!({
+        "writer_epoch": 1,
+        "session": uuid::Uuid::new_v4().to_string(),
+        "ordinal": 64,
+        "digest": super::digest_bodies(&bodies),
+        "covers": vec![serde_json::json!({}); 64],
+    });
+    let oversized = crate::metadata::codec::encode(5, &raw).unwrap();
+    raw["covers"] = serde_json::json!((1..64)
+        .map(|ordinal| serde_json::json!({
+            "ordinal": ordinal, "digest": vec![0_u8; 32],
+        }))
+        .collect::<Vec<_>>());
+    let maximum = crate::metadata::codec::encode(5, &raw).unwrap();
+
+    // Act
+    let rejected = crate::metadata::codec::decode::<super::MetadataCutProof>(5, &oversized);
+    let accepted = crate::metadata::codec::decode::<super::MetadataCutProof>(5, &maximum).unwrap();
+
+    // Assert
+    assert!(
+        matches!(rejected, Err(crate::common::MidgeError::Corruption(message))
+        if message.contains("witness count exceeds limit"))
+    );
+    assert_eq!(accepted.covers.len(), 63);
+    accepted.validate(&bodies).unwrap();
+}

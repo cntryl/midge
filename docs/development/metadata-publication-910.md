@@ -102,13 +102,30 @@ registry mutex. Batch merge and binary-search lookup avoid per-entry copying.
 The allowance covers old entries, a merged candidate and final-slice
 replacement; removed receipt charges stay alive until old storage is freed.
 No bound depends on the standard library's private tree layout.
-For `E` encoded control bytes, the existing `16E + 4096` admission allowance includes
-at most `4E` of a shared selected witness and `4E` of a newly prepared witness,
-leaving at least `8E + 4096` independently charged for copied control bytes and
-body/authority decoding. Larger shared caches receive no credit. Credit is
-exclusive and remains with the last actual callback reservation owner. This is
-the control-body admission model; native transport stacks and other runtime
-resources retain their separate charges, and it is not a whole-process RSS cap.
+For `E` encoded control bytes, `16E + 4096` is the minimum admission for raw
+copies before typed preflight. It includes at most `4E` of a shared selected
+witness and `4E` of a newly prepared witness; that arithmetic alone is not a
+typed-decoder bound. Borrowed visitors count the accepted enum slots, nested
+owned fields and replay-vector peaks before allocating those structures.
+Admission grows the independent source charge in the same maintenance pool
+when its concrete phase bound is larger. A refusal retains the original
+control files and publication obligations.
+
+Manifest replay, intent replay, normalization and physical publication have
+separate peaks. Normalization owns the retained intent state and encodes one
+publication at a time after the decoded append vector has dropped. Legacy
+scalar intents contribute no publication guards or compact witnesses. Reduced
+authority counts families/frontiers rather than discarded SST inventories.
+Cold selected-body reconstruction also admits its typed decode before loading
+the manifest; the raw GET keeps its original physical source reservation.
+Oversized witness arrays and control-change maps are rejected before their
+announced collection storage is allocated.
+
+Larger shared caches receive no credit. Credit is exclusive and remains with
+the last actual callback reservation owner. These bounds model requested
+control-body allocations for the locked Serde implementation and supported
+Rust collection behavior; native transport stacks and other runtime resources
+retain separate charges. They are not a whole-process RSS cap.
 Both immutable PUT and its exact fallback GET carry the source reservation.
 Logical timeout or later-cut coverage cannot release the source charge while
 the real readback body/callback remains physically outstanding.

@@ -13,10 +13,20 @@ use std::path::{Path, PathBuf};
 
 pub struct IntentPersistence;
 mod edits;
+pub(crate) use edits::IntentDecodeWorkspace;
 
 impl IntentPersistence {
     const INTENT_FILE: &'static str = crate::metadata::files::INTENT_LOG;
     const INTENT_FILE_TEMP: &'static str = "intent_log.json.tmp";
+
+    /// Bound owned typed replay allocations before decoding immutable bytes.
+    /// Raw input ownership and later serialization scratch belong to the caller.
+    pub(crate) fn decoded_workspace_bound(
+        bytes: &[u8],
+        deadline: &crate::common::OperationDeadline,
+    ) -> MidgeResult<IntentDecodeWorkspace> {
+        edits::decoded_workspace_bound(bytes, deadline)
+    }
 
     #[cfg(test)]
     pub(crate) fn intent_path(db_path: &Path) -> PathBuf {
