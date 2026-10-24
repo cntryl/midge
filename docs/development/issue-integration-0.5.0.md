@@ -760,3 +760,13 @@ compile through the existing fuzz package. Restart/conformance regressions,
 fuzz time budgets, performance and system footprint qualification remain
 pending. Redundant unsafe lease auto-trait declarations were removed and a
 compiler trait-bound assertion retains the requirement.
+
+#947 borrows passthrough and incompressible WAL values until final framing,
+removing the intermediate owned-value allocation/copy. Compressed values keep
+the existing owned LZ4 output. Active tests check borrowed pointer identity,
+reference LZ4 bytes/replay and a legacy-owned versus borrowed frame/CRC matrix.
+Test targets compile (the shared snapshot still reported unfinished #908
+warnings); these tests and allocation/A/B measurements have not executed.
+The preregistered construction target is one allocation and 4096 copied value
+bytes on the incompressible 4 KiB fixture; the existing rotation row is
+compressible and cannot establish that saving.

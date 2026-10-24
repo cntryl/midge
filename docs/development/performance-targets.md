@@ -156,6 +156,14 @@ remain inconclusive. Use the existing benchmark facilities without a new runner.
 Held-worker read/control progress, byte-compatible WAL, ordered whole-transaction
 visibility, fencing and terminal memory ownership remain hard correctness gates.
 
+#947 uses `90eb0b5c` as its writer-encoding reference. Its raw/fallback value
+path targets one fewer allocation and 4096 fewer copied value bytes for the
+deterministic incompressible 4 KiB fixture before final frame construction.
+Borrowed pointer identity and byte-equal frames cover the construction claim;
+allocation/copy measurements remain required where existing facilities expose
+them. The rotation benchmark uses compressible repeated bytes, so its A/B
+result is an end-to-end guardrail and does not prove this raw-value saving.
+
 Run focused checks before broad suites:
 
 ```bash
