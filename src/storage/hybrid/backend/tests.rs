@@ -1000,6 +1000,114 @@ fn should_confirm_filesystem_wal_upload_when_range_identity_is_unchanged() -> Mi
 
 #[cfg(feature = "failpoints")]
 #[test]
+fn should_complete_wal_upload_when_spawner_owns_failpoint_gate() -> MidgeResult<()> {
+    // Arrange: the real worker must finish while its test owner holds the
+    // global write gate, exactly as an engine's failpoint fixture does.
+    let local = tempfile::tempdir()?;
+    let remote = tempfile::tempdir()?;
+    let bytes = b"owned upload";
+    let path = local.path().join("segment.wal");
+    std::fs::write(&path, bytes)?;
+    let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(remote.path())?);
+    let (terminal, events) = cb::bounded(4);
+    let guard = crate::failpoints::test_failpoint_guard();
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        cloud,
+        policy::StorageBudgetPolicy::default(),
+        Some(terminal),
+        HybridQueueLimits {
+            worker_concurrency: 1,
+            callback_timeout: Duration::from_secs(2),
+            ..HybridQueueLimits::default()
+        },
+    );
+
+    // Act: release the guard only to clean up a red run's blocked worker.
+    let queued = storage.enqueue_object_upload(
+        42,
+        "wal/owned".into(),
+        crate::io::FsLocation::host_file(&path),
+        43,
+    );
+    storage.process_uploads();
+    let completed = events.recv_timeout(Duration::from_secs(2));
+    if completed.is_ok() {
+        drop(storage);
+        drop(guard);
+    } else {
+        drop(guard);
+        drop(storage);
+    }
+
+    // Assert: actual immutable upload and byte proof completed before release.
+    assert!(queued.is_ok(), "{queued:?}");
+    assert!(
+        matches!(
+            completed,
+            Ok(StorageEvent::CloudAck {
+                segment_id: 42,
+                max_sequence: 43,
+            })
+        ),
+        "{completed:?}"
+    );
+    assert_eq!(std::fs::read(remote.path().join("wal/owned"))?, bytes);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_complete_conditional_delete_when_spawner_owns_failpoint_gate() -> MidgeResult<()> {
+    // Arrange: capture the real immutable file's exact range identity.
+    let remote = tempfile::tempdir()?;
+    let key = "retired.wal";
+    let path = remote.path().join(key);
+    std::fs::write(&path, b"retired")?;
+    let cloud: Arc<dyn StorageBackend> =
+        Arc::new(crate::storage::filesystem::FileSystem::new(remote.path())?);
+    let identity =
+        HybridStorage::head_range_object_from_backend(&cloud, key, Duration::from_secs(2))
+            .expect("retired file range identity");
+    let (terminal, events) = cb::bounded(4);
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        cloud,
+        policy::StorageBudgetPolicy::default(),
+        Some(terminal),
+        HybridQueueLimits::default(),
+    );
+    let guard = crate::failpoints::test_failpoint_guard();
+
+    // Act: the physical deletion must settle under the current owner.
+    let queued = storage.delete_remote_objects_by_identity(vec![(42, key.into(), identity)]);
+    storage.process_uploads();
+    let completed = events.recv_timeout(Duration::from_secs(2));
+    if completed.is_ok() {
+        drop(storage);
+        drop(guard);
+    } else {
+        drop(guard);
+        drop(storage);
+    }
+
+    // Assert: red cleanup releases the guard before join, but cannot turn a
+    // late actual deletion into an on-time terminal completion.
+    assert!(queued.is_ok(), "{queued:?}");
+    assert!(
+        matches!(
+            completed,
+            Ok(StorageEvent::CloudWalPruneComplete {
+                segment_id: 42,
+                result: StorageOutcome::Ok(()),
+            })
+        ),
+        "{completed:?}"
+    );
+    assert!(!path.exists());
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
 fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
     // Arrange
     let _test_guard = crate::failpoints::test_failpoint_guard();

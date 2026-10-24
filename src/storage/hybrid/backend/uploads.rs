@@ -419,10 +419,11 @@ impl HybridStorage {
             let external_event_tx = external_event_tx.cloned();
             let verified_uploads = Arc::clone(verified_uploads);
             let config = config.clone();
+            let gate = crate::failpoints::worker_gate();
             let spawn_result = thread::Builder::new()
                 .name(format!("midge-wal-uploader-{ordinal}"))
                 .spawn(move || {
-                    loop {
+                    gate.run(|| loop {
                         // Release the receive lock before any filesystem/provider
                         // work, allowing the other fixed workers to make progress.
                         let Ok(upload) = receiver.lock().recv() else {
@@ -454,7 +455,7 @@ impl HybridStorage {
                             },
                             &verified_uploads,
                         );
-                    }
+                    });
                 });
 
             match spawn_result {

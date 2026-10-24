@@ -734,6 +734,7 @@ impl HybridStorage {
         let callback_timeout = self.callback_timeout;
         let write_authority = self.write_authority.get().cloned();
         let registry = Arc::clone(&self.prune_workers);
+        let gate = crate::failpoints::worker_gate();
 
         let mut workers = self.prune_workers.lock();
         workers.reserved_requests -= request_count;
@@ -747,56 +748,59 @@ impl HybridStorage {
                 "midge-object-pruner-{first_request_id}-{last_request_id}"
             ))
             .spawn(move || {
-                // Catalog retirement already established and atomically
-                // published every semantic coverage dependency. Re-reading
-                // mutable manifest metadata here would race the next valid
-                // publication without adding safety. Physical cleanup only
-                // needs the retired target's conditional provider identity.
-                let deadline = OperationDeadline::from_budget(callback_timeout);
+                gate.run(|| {
+                    // Catalog retirement already established and atomically
+                    // published every semantic coverage dependency. Re-reading
+                    // mutable manifest metadata here would race the next valid
+                    // publication without adding safety. Physical cleanup only
+                    // needs the retired target's conditional provider identity.
+                    let deadline = OperationDeadline::from_budget(callback_timeout);
 
-                for target in prepared {
-                    let request_id = target.request_id;
-                    let target_key = &target.target_key;
-                    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        Self::delete_conditional_target(
-                            &target,
-                            callback_timeout,
-                            &deadline,
-                            write_authority.as_ref(),
-                        )
-                    }));
-                    let outcome = match attempt {
-                        Ok(result) => result,
-                        Err(_) => Err(crate::storage::StorageError::io(format!(
-                            "conditional delete worker panicked for '{target_key}'"
-                        ))),
-                    };
-                    if outcome.as_ref().is_err_and(|error| {
-                        !matches!(
-                            error.kind(),
-                            crate::storage::StorageErrorKind::PreconditionFailed
-                                | crate::storage::StorageErrorKind::Unauthorized
-                                | crate::storage::StorageErrorKind::Corruption
-                        )
-                    }) {
-                        let mut workers = registry.lock();
-                        if !workers.shutting_down {
-                            workers.pending.push_back(PendingDelete {
-                                target: target.clone(),
-                                retry_at: Instant::now() + Duration::from_millis(200),
-                            });
+                    for target in prepared {
+                        let request_id = target.request_id;
+                        let target_key = &target.target_key;
+                        let attempt =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                Self::delete_conditional_target(
+                                    &target,
+                                    callback_timeout,
+                                    &deadline,
+                                    write_authority.as_ref(),
+                                )
+                            }));
+                        let outcome = match attempt {
+                            Ok(result) => result,
+                            Err(_) => Err(crate::storage::StorageError::io(format!(
+                                "conditional delete worker panicked for '{target_key}'"
+                            ))),
+                        };
+                        if outcome.as_ref().is_err_and(|error| {
+                            !matches!(
+                                error.kind(),
+                                crate::storage::StorageErrorKind::PreconditionFailed
+                                    | crate::storage::StorageErrorKind::Unauthorized
+                                    | crate::storage::StorageErrorKind::Corruption
+                            )
+                        }) {
+                            let mut workers = registry.lock();
+                            if !workers.shutting_down {
+                                workers.pending.push_back(PendingDelete {
+                                    target: target.clone(),
+                                    retry_at: Instant::now() + Duration::from_millis(200),
+                                });
+                            }
                         }
+                        let result = match outcome {
+                            Ok(()) => StorageOutcome::Ok(()),
+                            Err(error) => StorageOutcome::Err(error),
+                        };
+                        let event = StorageEvent::CloudWalPruneComplete {
+                            segment_id: request_id,
+                            result,
+                        };
+                        Self::queue_storage_event(&event_queue, external_event_tx.as_ref(), event);
                     }
-                    let result = match outcome {
-                        Ok(()) => StorageOutcome::Ok(()),
-                        Err(error) => StorageOutcome::Err(error),
-                    };
-                    let event = StorageEvent::CloudWalPruneComplete {
-                        segment_id: request_id,
-                        result,
-                    };
-                    Self::queue_storage_event(&event_queue, external_event_tx.as_ref(), event);
-                }
+                });
             })
             .map_err(|error| {
                 workers.reserved_requests += request_count;
