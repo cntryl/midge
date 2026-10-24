@@ -229,6 +229,12 @@ impl EventLoop {
     }
 
     pub(super) fn schedule_compaction_after_flush_publication(&mut self, sst_name: &str) {
+        let next_check = self.next_background_compaction_delay();
+        if self.background_maintenance_timeout() > next_check {
+            self.pipeline
+                .background_compaction_schedule
+                .defer_for(next_check);
+        }
         match self.schedule_one_background_compaction_if_needed("flush publication") {
             Ok(true) => tracing::debug!(
                 sst_name,
@@ -250,6 +256,26 @@ impl EventLoop {
             .unwrap_or(Duration::ZERO)
     }
 
+    fn next_background_compaction_delay(&self) -> Duration {
+        if !self.state.compaction_enabled() {
+            return BACKGROUND_COMPACTION_CHECK_INTERVAL;
+        }
+        let now = self.state.observed_time_millis();
+        self.state
+            .manifest
+            .files
+            .iter()
+            .filter_map(|file| file.earliest_expiration_millis)
+            .min()
+            .map_or(BACKGROUND_COMPACTION_CHECK_INTERVAL, |expiration| {
+                // Recheck due/uncertain TTL debt at a bounded cadence instead
+                // of busy-spinning when a job or publication owns the pool.
+                Duration::from_millis(expiration.saturating_sub(now))
+                    .max(Duration::from_secs(1))
+                    .min(BACKGROUND_COMPACTION_CHECK_INTERVAL)
+            })
+    }
+
     pub(super) fn run_background_compaction_maintenance_if_due(&mut self) {
         // A restored request owns the publication turn that released it.
         if self.routing.pending_msg.is_some()
@@ -258,9 +284,10 @@ impl EventLoop {
             return;
         }
 
+        let next_check = self.next_background_compaction_delay();
         self.pipeline
             .background_compaction_schedule
-            .defer_for(BACKGROUND_COMPACTION_CHECK_INTERVAL);
+            .defer_for(next_check);
         match self.schedule_one_background_compaction_if_needed("periodic maintenance") {
             Ok(true) => tracing::debug!("Scheduled background compaction during maintenance"),
             Ok(false) => {}

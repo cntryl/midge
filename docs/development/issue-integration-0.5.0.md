@@ -587,3 +587,11 @@ fallback, unknown final results, abort/retry campaigns and Sqrzl remain pending
 qualification. No actual provider request/peak-memory performance result is
 claimed from compile checks. Provider protocol details and limits are recorded
 in cloud-file-publication-915.md.
+
+TTL maintenance also advances the next periodic check toward the earliest
+recorded expiration, bounded between1second and the normal30second interval.
+Flush publication shortens a later scheduled check. Due or uncertain TTL debt
+retries at that bounded cadence instead of busy-spinning behind an occupied
+worker/publication. This makes the existing idle-reclamation regression's
+bounded wait meaningful; the previous30second-only schedule would not do so.
+Failpoint test targets compile for this follow-up; execution is still pending.
