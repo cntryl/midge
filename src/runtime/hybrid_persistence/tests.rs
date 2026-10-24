@@ -2663,6 +2663,7 @@ impl SharedRetirementFixture {
             self.store.clone(),
             "writer".into(),
             2,
+            self.lock.clone(),
         )
         .committed_retirement_authority_within(&crate::common::OperationDeadline::unbounded())
         .unwrap()

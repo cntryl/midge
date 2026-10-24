@@ -30,6 +30,20 @@ struct ManifestVersion {
     changes: BTreeMap<String, FileEdit>,
 }
 
+pub(super) fn reclaimable_version(
+    encoded: &[u8],
+    key: &str,
+    ordinal: u64,
+    writer_epoch: u64,
+) -> MidgeResult<bool> {
+    crate::metadata::cloud_manifest::validate_key(key, ordinal)?;
+    let version: ManifestVersion = codec::decode(CHAIN_KIND, encoded)?;
+    Ok(version.id.get() == ordinal
+        && version.writer_epoch != 0
+        && version.writer_epoch <= writer_epoch
+        && key.rsplit('/').next() == Some(version.operation_id.as_str()))
+}
+
 pub(crate) fn is_chain(generation: &CloudMetadataGeneration) -> bool {
     generation
         .objects

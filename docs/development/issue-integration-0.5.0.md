@@ -700,3 +700,13 @@ then releases its queue/sync locks before notifying the caller. This closes the
 window where immediate typed sync admission could reject an append the caller
 had already been told completed. The held-fsync stage regression exercises that
 handoff; its execution remains pending with the rest of the implementation pass.
+
+#913 adds bounded metadata-generation retirement under the same publication
+lock used from head capture through body decoding. The selected chain closure
+and current plus three older ordinals remain protected; every deletion checks
+decoded lineage, fresh lease/head authority and the original object identity.
+Each pass permits four LISTs and eight candidates. Active regressions cover
+snapshot retention/restart, required delta history, pointer replacement and
+capture exclusion. Shared test targets compile; these tests have not executed.
+An idle continuation is still required so the bounded cursor progresses after
+the final write or a cooldown, and is being implemented separately.

@@ -83,12 +83,41 @@ receipts and the writer cache are available. It remains to be executed during
 the batch qualification pass. Cold starts, checkpoint publications, missing
 receipts and retention runs can require additional requests.
 
-Retention (#913) will operate on the new pointer-selected snapshot/edit
-closure. It must protect pending publication and predecessor history before
-using retention windows; no legacy-generation deletion is enabled by this
-pointer slice. General orphan collection (#943) additionally needs active
-snapshot sources, compaction inputs and admitted effects, with final authority
-revalidation under capture-to-pin exclusion.
+Retention (#913) operates only on the new `manifest/` versions. It retains the
+head and three preceding ordinals, plus every object in the pointer's exact
+snapshot/edit closure regardless of age. A publication holds the shared
+metadata lock through its admitted operation and retention. Metadata retirement
+readers hold that same lock from pointer capture through complete body decoding
+and final pointer verification. The lock therefore excludes same-runtime
+pending publication and body-fetch races. A decoded retirement proof no longer
+needs its old encoded objects and must still verify the fresh pointer before
+retiring WAL history.
+
+Takeover claims preserve the predecessor's selected closure before a successor
+recovers. A future publication may only extend that exact closure or replace it
+with a complete snapshot; it never adopts an orphan found by LIST. A candidate
+below the retained ordinal window and absent from the selected closure cannot
+become selected after the final check. This also covers a delayed predecessor
+PUT or DELETE: UUID keys and pointer identity exclusion prevent it from changing
+successor-selected history. Startup fetches occur after acquisition and before
+the runtime starts its collector. Old-epoch cleanup proofs fail their writer
+checks after takeover.
+
+Collection is attempted at most every 30 seconds following a successful mirror,
+with at most four ordinal-prefix LISTs and eight candidate probes per attempt.
+Each probe pins a bounded exact identity, decodes and checks its ordinal,
+operation and writer epoch, then freshly validates the lease and selected
+pointer before an identity-conditional DELETE. Unknown reads and conditional
+failures retain data. The scan cursor and counters live with the publication
+owner; restart resets the cursor and rediscovers obligations by canonical
+ordinal prefix. Legacy `metadata/generations/` cleanup is deliberately omitted
+because the new layout replaces that protocol. An idle runtime with no mirrors
+does not run a separate collector timer in this candidate.
+
+General orphan collection (#943) remains separate: SST deletion additionally
+needs live snapshot sources, compaction inputs, durable obligations and admitted
+effects, with final authority revalidation under capture-to-pin exclusion. The
+metadata-only dependency proof does not authorize an SST sweep.
 
 Active tests cover stale writers learning successor identities, delayed
 predecessor CAS, initialization crashes, bounded snapshot/edit replay and an

@@ -160,6 +160,7 @@ pub(crate) struct SharedMetadataSnapshot {
     store: Arc<dyn LeaderStore>,
     holder_id: String,
     writer_epoch: u64,
+    publication_lock: crate::runtime::MetadataPublicationLock,
 }
 
 impl SharedMetadataSnapshot {
@@ -169,6 +170,7 @@ impl SharedMetadataSnapshot {
         store: Arc<dyn LeaderStore>,
         holder_id: String,
         writer_epoch: u64,
+        publication_lock: crate::runtime::MetadataPublicationLock,
     ) -> Self {
         Self {
             cloud,
@@ -176,6 +178,7 @@ impl SharedMetadataSnapshot {
             store,
             holder_id,
             writer_epoch,
+            publication_lock,
         }
     }
 
@@ -183,6 +186,14 @@ impl SharedMetadataSnapshot {
         &self,
         deadline: &OperationDeadline,
     ) -> MidgeResult<SharedRetirementAuthority> {
+        // Selection and its exact body closure are one protected fetch. A
+        // retention worker cannot unlink this cut before decoding finishes.
+        let _capture = self
+            .publication_lock
+            .lock_for(deadline.remaining().min(self.cloud.callback_timeout()))
+            .ok_or_else(|| {
+                MidgeError::Timeout("shared metadata capture waits for publication".into())
+            })?;
         self.store
             .validate_epoch_with_timeout(&self.holder_id, self.writer_epoch, deadline.remaining())
             .map_err(|error| error.into_validation_error("shared metadata snapshot lease"))?;
@@ -505,7 +516,16 @@ pub(crate) fn mirror_control_metadata_within(
     let mut guard = context.publication_lock.lock_for(timeout).ok_or_else(|| {
         MidgeError::Timeout("metadata mirror timed out acquiring publication lock".into())
     })?;
-    mirror_under_lock(&context, &mut guard.cached, &mut validate_lease)
+    mirror_under_lock(&context, &mut guard.cached, &mut validate_lease)?;
+    if let Some(cached) = &guard.cached {
+        let generation = cached.generation.clone();
+        super::metadata_retention::collect_after_commit(
+            &context,
+            &generation,
+            &mut guard.retention,
+        );
+    }
+    Ok(())
 }
 
 fn mirror_under_lock(
@@ -826,6 +846,7 @@ mod tests {
             fixture.store.clone(),
             "writer".into(),
             1,
+            fixture.lock.clone(),
         );
         // Act
         let authority = snapshot
@@ -853,6 +874,7 @@ mod tests {
             fixture.store.clone(),
             "writer".into(),
             1,
+            fixture.lock.clone(),
         );
         // Act
         let result = snapshot.committed_retirement_authority_within(

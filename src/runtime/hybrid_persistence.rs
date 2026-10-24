@@ -19,11 +19,13 @@ use std::sync::Arc;
 
 mod catalog;
 pub(crate) mod metadata_chain;
+mod metadata_retention;
 mod metadata_snapshot;
 use crate::storage::hybrid::backend::ControlObject;
 pub(crate) use catalog::refusal_error;
 pub(crate) use catalog::AdmittedCatalog;
 use catalog::{load_and_repair_catalog_within, mutate_wal_catalog_within, Missing, Mutation};
+pub(crate) use metadata_retention::MetadataRetentionState;
 pub(crate) use metadata_snapshot::{
     decode_generation_manifest, mirror_control_metadata_within,
     read_committed_metadata_bodies_within, CloudMetadataMirrorAuthority,

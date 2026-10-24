@@ -14,6 +14,7 @@ pub(crate) struct MetadataPublicationLock(Arc<Mutex<MetadataPublicationState>>);
 #[derive(Default)]
 pub(crate) struct MetadataPublicationState {
     pub(crate) cached: Option<crate::runtime::hybrid_persistence::MetadataMirrorCache>,
+    pub(crate) retention: crate::runtime::hybrid_persistence::MetadataRetentionState,
 }
 
 impl MetadataPublicationLock {

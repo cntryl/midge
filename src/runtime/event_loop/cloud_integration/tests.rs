@@ -2690,6 +2690,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
             .unwrap()
             .clone(),
         el.state.writer_epoch,
+        el.publication.metadata_publication_lock.clone(),
     );
     let authority = loader.committed_retirement_authority_within(
         &crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
@@ -8052,6 +8053,7 @@ fn should_defer_metadata_cleanup_before_body_reads_when_shared_budget_is_exhaust
         lease.get_leader_store().expect("shared authority"),
         lease.holder_id(),
         lease.epoch(),
+        crate::runtime::MetadataPublicationLock::default(),
     );
 
     // Act
