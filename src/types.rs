@@ -386,7 +386,7 @@ pub struct RuntimeMetricsSnapshot {
     pub sst_bloom_checks_total: u64,
     /// Checksummed SST data blocks read through the point/range read path.
     pub sst_data_blocks_read_total: u64,
-    /// Immutable flushes waiting for the single worker. Gauge.
+    /// Immutable flushes waiting for an available worker. Gauge.
     pub flush_queue_depth: usize,
     /// Whether any immutable flush is building, built, or publishing. Gauge (zero or one).
     pub flush_inflight: usize,
@@ -398,6 +398,9 @@ pub struct RuntimeMetricsSnapshot {
     pub flush_publish_count: u64,
     pub flush_publish_ns_total: u64,
     pub flush_publish_ns_max: u64,
+    /// Verified flush publication phases first parked behind another local
+    /// publication owner. Re-polls and capture-memory waits are excluded.
+    pub flush_publication_deferred_by_gate: u64,
     pub flush_failures_total: u64,
     pub flush_retries_total: u64,
     pub write_stall_ns_total: u64,

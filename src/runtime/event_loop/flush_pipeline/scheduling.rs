@@ -330,6 +330,13 @@ impl EventLoop {
                 .iter()
                 .any(|held| held.identity().flush_id == identity.flush_id)
             {
+                if !fixture {
+                    self.state.flush_metrics.publication_deferred_by_gate = self
+                        .state
+                        .flush_metrics
+                        .publication_deferred_by_gate
+                        .saturating_add(1);
+                }
                 self.pipeline.deferred_flush_results.push_back(result);
             }
             return;

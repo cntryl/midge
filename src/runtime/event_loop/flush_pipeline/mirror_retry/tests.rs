@@ -117,6 +117,14 @@ fn should_retain_uploaded_flush_owner_and_waiters_until_shared_capture_memory_is
         0
     );
     assert!(!fixture.el.publication.publication_gate.is_active());
+    assert_eq!(
+        fixture
+            .el
+            .state
+            .runtime_metrics_snapshot()
+            .flush_publication_deferred_by_gate,
+        0
+    );
     drop(fixture.held.take());
     fixture.retry_due();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -173,5 +181,83 @@ fn should_expire_original_flush_mirror_deadline_without_resetting_queued_allowan
         1
     );
     fixture.assert_local_bytes_retained()?;
+    Ok(())
+}
+
+#[test]
+fn should_count_verified_flush_gate_parking_once_without_counting_capture_memory_waits(
+) -> MidgeResult<()> {
+    use crate::runtime::actors::flush::{FlushMirrorCompletion, FlushWorkerResult};
+    // Arrange: capture contention has not consumed a local publication turn.
+    let mut fixture = ContendedFlush::new(Duration::from_secs(5))?;
+    assert_eq!(
+        fixture
+            .el
+            .state
+            .runtime_metrics_snapshot()
+            .flush_publication_deferred_by_gate,
+        0
+    );
+    drop(fixture.held.take());
+    fixture.retry_due();
+    let owner = crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
+    assert!(fixture
+        .el
+        .publication
+        .publication_gate
+        .try_acquire(owner.clone()));
+    let completion = fixture
+        .el
+        .pipeline
+        .flush_worker_result_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap();
+    let FlushWorkerResult::Mirror(mirror) = &completion else {
+        panic!("physical mirror result");
+    };
+    let duplicate = FlushWorkerResult::Mirror(FlushMirrorCompletion {
+        delta: mirror.delta.clone(),
+        reservation: mirror.reservation,
+        result: Ok(*mirror
+            .result
+            .as_ref()
+            .expect("actual metadata mirror succeeded")),
+    });
+    // Act: the genuine result and its identical redelivery see the held turn.
+    fixture.el.handle_flush_worker_result(completion);
+    fixture.el.handle_flush_worker_result(duplicate);
+    fixture.el.drain_flush_worker_results();
+    // Assert: physical completion identity/phase admits one parked result and
+    // one counter increment, regardless of repeated held-result polling.
+    assert_eq!(fixture.el.pipeline.deferred_flush_results.len(), 1);
+    assert_eq!(
+        fixture
+            .el
+            .state
+            .runtime_metrics_snapshot()
+            .flush_publication_deferred_by_gate,
+        1
+    );
+    assert!(fixture.response.try_recv().is_err());
+    fixture.el.publication.publication_gate.release(&owner);
+    fixture.el.drain_flush_worker_results();
+    assert_eq!(
+        fixture
+            .el
+            .state
+            .runtime_metrics_snapshot()
+            .flush_publication_deferred_by_gate,
+        1
+    );
+    assert!(matches!(
+        fixture.response.recv_timeout(Duration::from_secs(1)),
+        Ok(RuntimeResponse::Ok { request_id: 91001 })
+    ));
+    assert!(fixture.el.state.immutable_flush_by_id(fixture.id).is_none());
+    let snapshot = fixture.el.create_read_snapshot(0).unwrap();
+    assert_eq!(
+        snapshot.get(b"key", 1)?.as_deref(),
+        Some(b"value".as_slice())
+    );
     Ok(())
 }

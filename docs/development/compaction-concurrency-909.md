@@ -35,3 +35,12 @@ larger-default qualification remain pending in the batch validation phase.
 
 Cloud metadata publication independence is tracked separately by #910. Logical
 level moves with no SST rewrite are tracked by #926.
+
+`RuntimeMetricsSnapshot.flush_publication_deferred_by_gate` counts the first
+parking of each verified flush publication phase behind another local owner.
+Repeated delivery/polling and capture-memory admission waits do not increment
+it. The existing `tier4_system_compaction_backpressure` benchmark now includes
+local and `cloud_simulated` rows and reports the counter delta as a count
+observation. The cloud row uses the existing simulated backend and explicitly
+labels that evidence; no live-provider qualification or zero-stall result is
+claimed before the benchmark runs.
