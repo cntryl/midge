@@ -486,7 +486,7 @@ struct ControlledPreparation {
 
 #[cfg(feature = "failpoints")]
 fn controlled_prepared_open(fixture: &Fixture, trace: &Arc<StartupTrace>) -> ControlledPreparation {
-    let (expiry, expire) = crossbeam::channel::bounded(1);
+    let (cancel_sender, cancellation) = crossbeam::channel::bounded(1);
     let (owner_finished, finished) = crossbeam::channel::bounded(1);
     let (returned, response) = crossbeam::channel::bounded(1);
     let options = fixture.options(Some(OPEN_BUDGET), Arc::clone(trace));
@@ -494,16 +494,16 @@ fn controlled_prepared_open(fixture: &Fixture, trace: &Arc<StartupTrace>) -> Con
         let hold = PreparedHold::until_release(Arc::clone(trace));
         let caller_trace = Arc::clone(trace);
         let caller = scope.spawn(move || {
-            let _installation = install_manual_caller_expiry(expire, owner_finished);
+            let _installation = install_manual_caller_expiry(cancellation, owner_finished);
             let result = Engine::open(options);
-            let held = *caller_trace.prepared_hold.lock().unwrap();
+            let barrier_active = *caller_trace.prepared_hold.lock().unwrap();
             let admitted = caller_trace.admitted.load(Ordering::Acquire);
-            let _ = returned.send((result, held, admitted));
+            let _ = returned.send((result, barrier_active, admitted));
         });
         let prepared_before_expiry = trace.wait_for_prepared();
         // Even a missing phase is cancelled before cleanup, then fails its
         // exact positive observation assertion; it cannot leak a caller.
-        let _ = expiry.send(());
+        let _ = cancel_sender.send(());
         let first = response.recv_timeout(CLEANUP_WAIT);
         drop(hold);
         let (result, held_at_return, admitted_at_return) = first
