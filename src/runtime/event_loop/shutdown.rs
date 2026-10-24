@@ -20,6 +20,7 @@ impl EventLoop {
         self.trace_shutdown_start();
         let mut shutdown_error = None;
         self.shutdown.shutting_down = true;
+        self.fail_validation_requests_on_shutdown();
 
         // Local mode does not checkpoint memtables on shutdown, so the WAL
         // tail is the only copy of buffered commits from the last batch

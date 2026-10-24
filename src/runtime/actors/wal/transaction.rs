@@ -32,10 +32,20 @@ impl WalActor {
     /// If None, uses the actor's configured durability policy.
     ///
     /// Returns the last allocated sequence number for the batch.
+    #[cfg(test)]
     pub fn append_transaction(
         &mut self,
         state: &mut RuntimeState,
         params: TransactionAppendParams,
+    ) -> MidgeResult<(u64, usize, bool)> {
+        self.append_transaction_with_proof(state, params, None)
+    }
+
+    pub(crate) fn append_transaction_with_proof(
+        &mut self,
+        state: &mut RuntimeState,
+        params: TransactionAppendParams,
+        proof: Option<&super::CommitValidationProof>,
     ) -> MidgeResult<(u64, usize, bool)> {
         self.ensure_lease_validity()?;
         if params.ops.is_empty() {
@@ -48,9 +58,12 @@ impl WalActor {
                         "assert_value requires transaction start_sequence".to_string(),
                     )
                 })?;
-                let mut snapshots = super::transaction_state::ValidationSnapshots::new(
+                let overlay = super::StagedWriteOverlay::default();
+                let mut snapshots = super::transaction_state::ValidationSnapshots::with_proof(
                     state,
                     self.read_resources.clone(),
+                    &overlay,
+                    proof,
                 );
                 Self::ensure_no_assertion_conflicts(
                     state,
@@ -62,7 +75,12 @@ impl WalActor {
             return Ok((state.applied_sequence, 0, false));
         }
 
-        let prepared = self.prepare_transaction_append(state, params)?;
+        let prepared = self.prepare_transaction_append_with_proof(
+            state,
+            params,
+            &super::StagedWriteOverlay::default(),
+            proof,
+        )?;
         let last_sequence = prepared.sequence_plan.commit_seq;
         let apply_op_count = prepared.apply_ops.len();
         let txn_id = prepared.sequence_plan.txn_id;
@@ -83,6 +101,7 @@ impl WalActor {
         Ok((last_sequence, apply_op_count, deferred))
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_transaction_append(
         &mut self,
         state: &mut RuntimeState,
@@ -95,12 +114,28 @@ impl WalActor {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn prepare_transaction_append_with_overlay(
         &mut self,
         state: &mut RuntimeState,
         params: TransactionAppendParams,
         overlay: &super::StagedWriteOverlay,
     ) -> MidgeResult<PreparedTransactionAppend> {
+        self.prepare_transaction_append_with_proof(state, params, overlay, None)
+    }
+
+    pub(crate) fn prepare_transaction_append_with_proof(
+        &mut self,
+        state: &mut RuntimeState,
+        params: TransactionAppendParams,
+        overlay: &super::StagedWriteOverlay,
+        proof: Option<&super::CommitValidationProof>,
+    ) -> MidgeResult<PreparedTransactionAppend> {
+        if proof.is_some_and(|proof| proof.applied_sequence != state.applied_sequence) {
+            return Err(MidgeError::Internal(
+                "detached transaction validation has a stale applied cut".into(),
+            ));
+        }
         self.ensure_lease_validity()?;
         let TransactionAppendParams {
             request_id,
@@ -144,6 +179,7 @@ impl WalActor {
             start_sequence,
             conflict_policy,
             overlay,
+            proof,
         )?;
         let sequence_plan = Self::allocate_transaction_sequences(state, ops.len(), cf_id)?;
         let (apply_ops, wal_batch) = match self.build_transaction_wal_batch(
@@ -395,10 +431,12 @@ impl WalActor {
         start_sequence: Option<u64>,
         conflict_policy: crate::runtime::ConflictPolicy,
         overlay: &super::StagedWriteOverlay,
+        proof: Option<&super::CommitValidationProof>,
     ) -> MidgeResult<()> {
         // One snapshot per family serves conflict checks and assertions.
-        let mut snapshots =
-            super::transaction_state::ValidationSnapshots::with_overlay(state, resources, overlay);
+        let mut snapshots = super::transaction_state::ValidationSnapshots::with_proof(
+            state, resources, overlay, proof,
+        );
         if matches!(
             conflict_policy,
             crate::runtime::ConflictPolicy::AbortOnWriteConflict

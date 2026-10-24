@@ -455,3 +455,19 @@ without warnings; execution and provider/crash qualification are pending.
 Metadata mirror and remaining seal-provider offload are still required by #907.
 No publication batching interval is selected before #916's measurements justify
 one. Mirror authority/repair semantics remain synchronous and unchanged.
+
+The next #946 slice moves resident conflict/assertion/insert-only SST queries
+to a fixed worker with bounded pending jobs and retained memory. Captured source
+pins have a separate internal ID domain. Completion carries the applied cut and
+writer epoch; intervening applied writes invalidate positive and negative
+results and trigger a fresh read pass, including writes already flushed to SST.
+Final loop admission evaluates current TTL and the staged overlay before any
+sequence allocation or WAL effect. Shutdown cancels queued caller routes while
+retaining ownership of active read work and its pins.
+
+Active regressions hold a read worker while blind writes and flush progress,
+then require a stale negative proof to retry and detect the flushed conflict.
+Another regression isolates transaction/validation pin IDs. Failpoint test
+targets compile. Spilled validation still needs off-loop handoff; the complete
+operation-kind interleaving matrix and earlier in-flight group overlay remain
+pending with #940. No test execution or performance evidence is claimed.

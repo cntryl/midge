@@ -15,6 +15,34 @@ use std::time::{Duration, Instant};
 /// counter to increment.
 const PIN_REF_COUNT: usize = 1;
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum PinId {
+    Transaction(u64),
+    Validation(u64),
+}
+
+impl PinId {
+    fn number(self) -> u64 {
+        match self {
+            Self::Transaction(id) | Self::Validation(id) => id,
+        }
+    }
+}
+
+/// An internal read job owns its source pin through its final storage read.
+pub(crate) struct OwnedSnapshotPin {
+    registry: Arc<SnapshotPinRegistry>,
+    id: u64,
+}
+
+impl Drop for OwnedSnapshotPin {
+    fn drop(&mut self) {
+        let _guard = self.registry.acquisition.read();
+        self.registry.active.remove(&PinId::Validation(self.id));
+        self.registry.gc_deferred.store(true, Ordering::SeqCst);
+    }
+}
+
 struct SnapshotPin {
     sequence: u64,
     created_at: Instant,
@@ -23,7 +51,8 @@ struct SnapshotPin {
 
 #[derive(Default)]
 pub(crate) struct SnapshotPinRegistry {
-    active: DashMap<u64, SnapshotPin>,
+    active: DashMap<PinId, SnapshotPin>,
+    next_validation: std::sync::atomic::AtomicU64,
     /// Serializes snapshot capture/pin registration with GC's pin sampling.
     acquisition: RwLock<()>,
     /// Lower bounds of snapshots being captured but not yet registered, keyed
@@ -74,7 +103,7 @@ impl SnapshotPinRegistry {
         sequence: u64,
         pinned_ssts: Arc<HashSet<String>>,
     ) -> bool {
-        match self.active.entry(snapshot_id) {
+        match self.active.entry(PinId::Transaction(snapshot_id)) {
             Entry::Occupied(_) => false,
             Entry::Vacant(entry) => {
                 entry.insert(SnapshotPin {
@@ -98,7 +127,7 @@ impl SnapshotPinRegistry {
         // transactions concurrent while a GC pass obtains the exclusive guard
         // before sampling pins and deleting obsolete files.
         let _guard = self.acquisition.read();
-        let Some((_, pin)) = self.active.remove(&snapshot_id) else {
+        let Some((_, pin)) = self.active.remove(&PinId::Transaction(snapshot_id)) else {
             return (false, false);
         };
         (true, self.released_last_pin(&pin.pinned_ssts))
@@ -182,6 +211,43 @@ impl SnapshotPinRegistry {
         }
     }
 
+    /// Register an internally captured source view in its own ID domain.
+    /// The caller must hold capture-to-registration exclusion for this registry.
+    pub(crate) fn pin_sources_while_acquiring(
+        self: &Arc<Self>,
+        sequence: u64,
+        pinned_ssts: Arc<HashSet<String>>,
+        acquisition: &SnapshotAcquisitionGuard<'_>,
+    ) -> crate::common::MidgeResult<OwnedSnapshotPin> {
+        if !std::ptr::eq(self.as_ref(), acquisition.registry) {
+            return Err(crate::common::MidgeError::Internal(
+                "validation pin belongs to a different snapshot registry".into(),
+            ));
+        }
+        let id = self
+            .next_validation
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| {
+                crate::common::MidgeError::ResourceLimit(
+                    "validation pin identity space exhausted".into(),
+                )
+            })?;
+        self.active.insert(
+            PinId::Validation(id),
+            SnapshotPin {
+                sequence,
+                created_at: Instant::now(),
+                pinned_ssts,
+            },
+        );
+        Ok(OwnedSnapshotPin {
+            registry: Arc::clone(self),
+            id,
+        })
+    }
+
     pub(crate) fn active_count(&self) -> usize {
         self.active.len()
     }
@@ -255,7 +321,7 @@ impl SnapshotPinRegistry {
         let mut generations: Vec<Arc<HashSet<String>>> = Vec::new();
 
         for entry in &self.active {
-            let snapshot_id = *entry.key();
+            let snapshot_id = entry.key().number();
             let snapshot = entry.value();
             let age = now.duration_since(snapshot.created_at);
             if age > max_lifetime {
@@ -310,7 +376,7 @@ impl SnapshotPinRegistry {
         let now = Instant::now();
         let mut timed_out = 0usize;
         for entry in &self.active {
-            let snapshot_id = *entry.key();
+            let snapshot_id = entry.key().number();
             let snapshot = entry.value();
             let age = now.duration_since(snapshot.created_at);
             if age > max_lifetime {
@@ -333,7 +399,7 @@ impl SnapshotPinRegistry {
             .map(|entry| {
                 let snapshot = entry.value();
                 SnapshotPinSnapshot {
-                    snapshot_id: *entry.key(),
+                    snapshot_id: entry.key().number(),
                     sequence: snapshot.sequence,
                     age_seconds: now.duration_since(snapshot.created_at).as_secs(),
                     ref_count: PIN_REF_COUNT,
@@ -643,5 +709,46 @@ mod tests {
             !registry.take_gc_deferred(),
             "a successful sample must not leave a stale retry request"
         );
+    }
+}
+
+#[cfg(test)]
+mod validation_pin_tests {
+    use super::*;
+
+    #[test]
+    fn should_keep_internal_and_transaction_sources_pinned_when_their_numeric_ids_match() {
+        // Arrange
+        let registry = Arc::new(SnapshotPinRegistry::default());
+        assert!(registry.register(0, 7, vec!["transaction.sst".into()]));
+        let acquisition = registry.begin_acquisition(3);
+
+        // Act
+        let internal = registry
+            .pin_sources_while_acquiring(
+                3,
+                Arc::new(HashSet::from(["validation.sst".into()])),
+                &acquisition,
+            )
+            .expect("register internal pin");
+        drop(acquisition);
+
+        // Assert
+        assert_eq!(registry.oldest_sequence(), Some(3));
+        assert_eq!(
+            registry.pinned_sst_names(Duration::from_secs(30)),
+            HashSet::from(["transaction.sst".into(), "validation.sst".into()])
+        );
+        assert!(registry.unregister(0));
+        assert_eq!(registry.oldest_sequence(), Some(3));
+        assert_eq!(
+            registry.pinned_sst_names(Duration::from_secs(30)),
+            HashSet::from(["validation.sst".into()])
+        );
+        drop(internal);
+        assert_eq!(registry.oldest_sequence(), None);
+        assert!(registry
+            .pinned_sst_names(Duration::from_secs(30))
+            .is_empty());
     }
 }

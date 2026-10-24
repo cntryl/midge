@@ -25,6 +25,7 @@ pub(super) struct ValidationSnapshots<'a> {
     /// The event loop's reader and block caches, when running under it.
     resources: Option<Arc<crate::runtime::read_resources::ReadResources>>,
     overlay: Option<&'a super::StagedWriteOverlay>,
+    proof: Option<&'a super::CommitValidationProof>,
     by_cf: std::collections::HashMap<
         crate::types::ColumnFamilyId,
         Option<crate::runtime::ReadSnapshot>,
@@ -40,6 +41,7 @@ impl<'a> ValidationSnapshots<'a> {
             state,
             resources,
             overlay: None,
+            proof: None,
             by_cf: std::collections::HashMap::new(),
         }
     }
@@ -52,6 +54,18 @@ impl<'a> ValidationSnapshots<'a> {
         Self {
             overlay: Some(overlay),
             ..Self::new(state, resources)
+        }
+    }
+
+    pub(super) fn with_proof(
+        state: &'a RuntimeState,
+        resources: Option<Arc<crate::runtime::read_resources::ReadResources>>,
+        overlay: &'a super::StagedWriteOverlay,
+        proof: Option<&'a super::CommitValidationProof>,
+    ) -> Self {
+        Self {
+            proof,
+            ..Self::with_overlay(state, resources, overlay)
         }
     }
 
@@ -350,6 +364,9 @@ impl WalActor {
         {
             return Ok(Some(sequence));
         }
+        if let Some(proof) = snapshots.proof {
+            return proof.point(cf_id, key).map(|point| point.sequence);
+        }
         let Some(snapshot) = snapshots.get(cf_id) else {
             return Ok(None);
         };
@@ -408,6 +425,9 @@ impl WalActor {
             .filter(|sequence| *sequence > threshold)
         {
             return Ok(Some(sequence));
+        }
+        if let Some(proof) = snapshots.proof {
+            return proof.range(cf_id, start_key, end_key);
         }
         let Some(snapshot) = snapshots.get(cf_id) else {
             return Ok(None);
@@ -484,6 +504,11 @@ impl WalActor {
             overlay.key_exists(cf_id, key, snapshots.state.observed_time_millis())
         }) {
             return Ok(exists);
+        }
+        if let Some(proof) = snapshots.proof {
+            return proof
+                .point(cf_id, key)
+                .map(|point| point.exists_at(snapshots.state.observed_time_millis()));
         }
         let Some(snapshot) = snapshots.get(cf_id) else {
             return Ok(false);

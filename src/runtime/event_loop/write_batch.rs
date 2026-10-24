@@ -243,6 +243,7 @@ impl EventLoop {
                         durability_policy,
                         start_sequence,
                         conflict_policy,
+                        validation: None,
                     },
                     max,
                 );
@@ -267,6 +268,9 @@ impl EventLoop {
         if max == 0 {
             return 0;
         }
+        let Some(initial) = self.prepare_detached_validation(initial) else {
+            return 1;
+        };
 
         let Some(coalescing_key) = self.transaction_coalescing_key(&initial) else {
             self.apply_single_transaction_request(initial);
@@ -416,6 +420,7 @@ impl EventLoop {
                     durability_policy,
                     start_sequence,
                     conflict_policy,
+                    validation: None,
                 };
                 match self.prepare_transaction_for_coalescing(
                     request,
@@ -563,6 +568,7 @@ impl EventLoop {
     ) -> PrepareOutcome {
         if request.ops.is_empty()
             || self.transaction_coalescing_key(&request) != Some(coalescing_key)
+            || self.validation_would_defer(&request)
         {
             return PrepareOutcome::Fallback(request);
         }
@@ -577,21 +583,22 @@ impl EventLoop {
             Ok(false) => return PrepareOutcome::Fallback(request),
             Err(error) => return PrepareOutcome::Error { request_id, error },
         }
-        let result = self
-            .actors
-            .wal_actor
-            .prepare_transaction_append_with_overlay(
-                &mut self.state,
-                crate::runtime::actors::wal::TransactionAppendParams {
-                    request_id,
-                    ops: request.ops,
-                    assertions: request.assertions,
-                    durability_policy: request.durability_policy,
-                    start_sequence: request.start_sequence,
-                    conflict_policy: request.conflict_policy,
-                },
-                staged_writes,
-            );
+        if self.validation_would_defer(&request) {
+            return PrepareOutcome::Fallback(request);
+        }
+        let result = self.actors.wal_actor.prepare_transaction_append_with_proof(
+            &mut self.state,
+            crate::runtime::actors::wal::TransactionAppendParams {
+                request_id,
+                ops: request.ops,
+                assertions: request.assertions,
+                durability_policy: request.durability_policy,
+                start_sequence: request.start_sequence,
+                conflict_policy: request.conflict_policy,
+            },
+            staged_writes,
+            request.validation.as_deref(),
+        );
 
         match result {
             Ok(prepared_transaction) => {
@@ -617,6 +624,21 @@ impl EventLoop {
     }
 
     fn apply_single_transaction_request(&mut self, request: ApplyTransactionRequest) {
+        let Some(request) = self.prepare_detached_validation(request) else {
+            return;
+        };
+        let request_id = request.request_id;
+        let touched_cfs = Self::transaction_cf_ids(&request.ops);
+        if let Err(error) = self
+            .admit_drained_transaction(&touched_cfs)
+            .and_then(|()| self.prepare_cloud_transaction_memtables(&request.ops))
+        {
+            self.finish_drained_write(request_id, Err(error));
+            return;
+        }
+        let Some(request) = self.prepare_detached_validation(request) else {
+            return;
+        };
         let ApplyTransactionRequest {
             request_id,
             ops,
@@ -624,19 +646,12 @@ impl EventLoop {
             durability_policy,
             start_sequence,
             conflict_policy,
+            validation,
         } = request;
-        let touched_cfs = Self::transaction_cf_ids(&ops);
-        if let Err(error) = self
-            .admit_drained_transaction(&touched_cfs)
-            .and_then(|()| self.prepare_cloud_transaction_memtables(&ops))
-        {
-            self.finish_drained_write(request_id, Err(error));
-            return;
-        }
         let result = self
             .actors
             .wal_actor
-            .append_transaction(
+            .append_transaction_with_proof(
                 &mut self.state,
                 crate::runtime::actors::wal::TransactionAppendParams {
                     request_id,
@@ -646,6 +661,7 @@ impl EventLoop {
                     start_sequence,
                     conflict_policy,
                 },
+                validation.as_deref(),
             )
             .map(|(last_sequence, op_count, deferred)| WriteResult {
                 last_sequence,

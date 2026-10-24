@@ -42,6 +42,11 @@ impl EventLoop {
         if !self.pipeline.flush_worker_result_rx.is_empty() {
             return true;
         }
+        if !self.publication.publication_gate.is_active()
+            && self.pipeline.validation.has_ready_result()
+        {
+            return true;
+        }
 
         if !self.publication.compaction_publish_result_rx.is_empty() {
             return true;
@@ -118,6 +123,10 @@ impl EventLoop {
                 .flush_actor
                 .is_inflight()
                 .then_some(Duration::from_millis(1)),
+            self.pipeline
+                .validation
+                .is_pending()
+                .then_some(Duration::from_millis(1)),
             self.actors
                 .compaction_publish_actor
                 .is_inflight()
@@ -175,6 +184,11 @@ impl EventLoop {
         self.wake_flush_waiters_for_terminal_fencing();
         CompactionCoordinator::drain_publish_results(self);
         self.drain_flush_worker_results();
+        if let Some(msg_rx) = drain_writes_from {
+            self.drain_validation_results(msg_rx);
+        } else {
+            self.drain_validation_results(&crossbeam::channel::never());
+        }
         match drain_writes_from {
             Some(msg_rx) => self.sync_batched_wal_if_needed(msg_rx),
             None => self.sync_batched_wal_without_draining(),

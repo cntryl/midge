@@ -106,6 +106,7 @@ fn txn_request(
     durability_policy: Option<DurabilityPolicy>,
 ) -> ApplyTransactionRequest {
     ApplyTransactionRequest {
+        validation: None,
         request_id,
         ops,
         assertions: Vec::new(),
@@ -123,6 +124,7 @@ fn ordered_txn_request(
     conflict_policy: ConflictPolicy,
 ) -> ApplyTransactionRequest {
     ApplyTransactionRequest {
+        validation: None,
         request_id,
         ops,
         assertions: Vec::new(),

@@ -39,6 +39,7 @@ mod scheduler;
 mod shutdown;
 mod snapshot;
 mod sst_names;
+mod validation;
 mod verification;
 mod wal;
 mod wal_retention;
@@ -196,6 +197,7 @@ struct PublicationCoordination {
 }
 
 struct PipelineCoordination {
+    validation: validation::ValidationCoordinator,
     durability: DurabilityCoordinator,
     wal_transition: crate::runtime::wal_transition::WalTransitionProtocol,
     flush_worker_result_rx: crossbeam::channel::Receiver<FlushWorkerResult>,
@@ -339,6 +341,7 @@ impl EventLoop {
                 flush_barrier_waiters: HashMap::new(),
             },
             pipeline: PipelineCoordination {
+                validation: validation::ValidationCoordinator::default(),
                 durability,
                 wal_transition: crate::runtime::wal_transition::WalTransitionProtocol::new(),
                 flush_worker_result_rx,

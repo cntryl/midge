@@ -318,6 +318,7 @@ mod tests {
                     &mut event_loop,
                     &message_rx,
                     ApplyTransactionRequest {
+                        validation: None,
                         request_id: 7201,
                         ops: vec![put(0, b"accepted", 8)],
                         assertions: Vec::new(),
@@ -397,6 +398,7 @@ mod tests {
             event_loop.apply_transaction_with_coalescing(
                 &message_rx,
                 ApplyTransactionRequest {
+                    validation: None,
                     request_id: 7301,
                     ops: vec![put(b"first")],
                     assertions: Vec::new(),
@@ -533,6 +535,7 @@ mod tests {
             }]
         };
         let request = |request_id| super::super::wal::ApplyTransactionRequest {
+            validation: None,
             request_id,
             ops: ops(),
             assertions: Vec::new(),

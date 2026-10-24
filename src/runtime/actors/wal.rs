@@ -296,7 +296,9 @@ mod staged_writes;
 mod test_append;
 mod transaction;
 mod transaction_state;
+mod validation_proof;
 pub(crate) use staged_writes::StagedWriteOverlay;
+pub(crate) use validation_proof::CommitValidationProof;
 
 impl WalActor {
     #[cfg(test)]
