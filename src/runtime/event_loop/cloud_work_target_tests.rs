@@ -137,7 +137,7 @@ fn should_shrink_cloud_source_batch_when_observed_overlap_exceeds_publication_wo
     let mut el = observed_cloud_layout(
         StorageBudgetPolicy::default(),
         128 * MIB,
-        Default::default(),
+        crate::compaction::LeveledCompactionConfig::default(),
     )?;
     let storage = el.actors.cloud_coordinator.hybrid_storage.as_ref().unwrap();
     let work_target = storage.immutable_file_partition_target(256 * MIB) * 4;
@@ -239,7 +239,7 @@ fn disjoint_cloud_layout(local_bytes: u64, configured_target: usize) -> MidgeRes
     let mut el = observed_cloud_layout(
         StorageBudgetPolicy::new(local_bytes),
         configured_target,
-        Default::default(),
+        crate::compaction::LeveledCompactionConfig::default(),
     )?;
     // Eleven healthy, disjoint 4 MiB inputs leave L1 over its 40 MiB goal.
     // The default four-source batch costs 16 MiB, with no target overlap.
