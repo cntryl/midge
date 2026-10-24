@@ -845,3 +845,10 @@ PROG-1/2 remain explicit active-Cargo coverage gaps pending the next test slice.
 Postimage hashes describe the captured working-tree sources based on
 `2494eff5`; concurrent sibling edits mean a final anchor/hash refresh is still
 required at the completed code checkpoint. This audit is not test execution.
+
+#910's design is recorded in `metadata-publication-910.md`: arrival-ordered
+validated local edits, immutable epoch/cut captures, optimistic exact-identity
+pointer CAS and monotonic covered-cut acknowledgement. The provider-duration
+gate stays until that protocol and GC capture protection are wired. Releasing
+it around the current live-Fs/full-image publishers would be unsafe. This is
+the remaining publication implementation, not a delivered independence claim.
