@@ -212,7 +212,7 @@ impl EventLoop {
                     let completion = run_work(&persistence, &fence, acknowledged, deadline, work);
                     let _ = result_tx.send(completion);
                     storage.queue_cloud_wal_publication_complete(id, epoch);
-                })
+                });
             });
         match worker {
             Ok(worker) => {
