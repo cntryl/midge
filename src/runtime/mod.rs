@@ -43,6 +43,7 @@ mod router;
 mod runtime_worker;
 mod startup_gate;
 mod startup_observer;
+pub(crate) mod write_admission;
 
 pub use event_loop::EventLoop;
 pub use intent_persistence::IntentPersistence;

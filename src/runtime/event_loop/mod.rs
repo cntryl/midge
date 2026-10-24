@@ -281,7 +281,7 @@ impl EventLoop {
         );
         let (memory_mode, initial_segment_id) = (state.is_memory_mode(), state.wal.open_segment());
         let recovered_cloud_wal = RecoveredCloudWalConfig::with_sealed_tail(&config, sealed_tail);
-        Self::apply_runtime_state_config(&mut state, &config);
+        Self::apply_runtime_state_config(&mut state, &config)?;
 
         let resources = resources::assemble_sst_resources(&state, memory_mode, &config);
         let sst_factory = resources.factory;
@@ -293,12 +293,13 @@ impl EventLoop {
             Self::create_compaction_publish_actor(inline_flush_worker)?;
 
         // Create actors - they handle memory_mode internally
-        let flush_actor = FlushActor::new_with_memory_limit(
+        let flush_actor = FlushActor::new_with_write_limiter(
             Arc::clone(&state.fs),
             memory_mode,
             config.compression_policy.clone(),
             flush_completion_tx,
             config.flush_memory_limit,
+            state.write_pressure.admission.limiter(),
         )?;
         let mut wal_actor = WalActor::open(
             &state,
@@ -459,12 +460,24 @@ impl EventLoop {
         }
     }
 
-    fn apply_runtime_state_config(state: &mut RuntimeState, config: &super::RuntimeConfig) {
+    fn apply_runtime_state_config(
+        state: &mut RuntimeState,
+        config: &super::RuntimeConfig,
+    ) -> crate::common::MidgeResult<()> {
         state.install_ttl_clock(Arc::clone(&config.ttl_clock));
         state.limits.eventual_flush_segment_gap =
             config.cloud_runtime_policy.eventual_flush_segment_gap;
         state.set_compaction_enabled(config.background_compaction);
         state.limits.l0_compaction_trigger = config.l0_compaction_trigger.max(1);
+        config.write_backpressure.validate(
+            state.l0_hard_ceiling(),
+            state.limits.memtable_flush_threshold.saturating_mul(2),
+        )?;
+        state
+            .write_pressure
+            .admission
+            .configure(&config.write_backpressure);
+        Ok(())
     }
 
     fn initialize_recovered_cloud_wal(
@@ -616,6 +629,21 @@ impl EventLoop {
     /// `begin_tx` can capture snapshots without event loop round-trip.
     #[inline]
     pub(super) fn publish_snapshot(&self) {
+        if self.state.write_pressure.admission.tracks_pending_bytes() {
+            self.state.write_pressure.admission.update_manifest(
+                self.actors
+                    .compaction_actor
+                    .estimated_pending_bytes(&self.state.manifest.files),
+            );
+        }
+        if self.state.write_pressure.admission.enabled()
+            || self.state.write_pressure.admission.tracks_background_io()
+        {
+            self.state.write_pressure.admission.retain_families(|cf| self.state.column_families.contains_key(&cf));
+            for &cf_id in self.state.column_families.keys() {
+                self.publish_write_pressure(cf_id);
+            }
+        }
         let Some(cache) = &self.authority.snapshot_cache else {
             return;
         };
@@ -639,6 +667,9 @@ impl EventLoop {
     /// Ordinary commits update only their families. Lifecycle and manifest
     /// publication use the full pass above, retaining unchanged source Arcs.
     pub(super) fn publish_snapshots_for(&self, cf_ids: &[crate::types::ColumnFamilyId]) {
+        for &cf_id in cf_ids {
+            self.publish_write_pressure(cf_id);
+        }
         let Some(cache) = &self.authority.snapshot_cache else {
             return;
         };
@@ -646,6 +677,20 @@ impl EventLoop {
             self.publish_family_snapshot(cache, cf_id);
         }
         cache.finish_publication(self.state.applied_sequence);
+    }
+
+    fn publish_write_pressure(&self, cf_id: u32) {
+        let admission = &self.state.write_pressure.admission;
+        if admission.enabled() {
+            admission.update_family(
+                cf_id,
+                self.state.l0_slot_usage(cf_id),
+                self.state.total_memtable_bytes,
+            );
+        }
+        if admission.tracks_background_io() {
+            admission.update_urgent(cf_id, self.state.should_hard_stall_writes(cf_id));
+        }
     }
 
     fn publish_family_snapshot(&self, cache: &SnapshotCache, cf_id: u32) {

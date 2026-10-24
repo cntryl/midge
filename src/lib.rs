@@ -312,6 +312,7 @@ pub use sst::cache::CacheFill;
 
 // Observability and diagnostics
 pub use config::{
+    WriteBackpressureConfig,
     AwsS3Config, AzureBlobConfig, AzureCredentialSource, CloudCheckCode, CloudCheckOutcome,
     CloudPreflightOptions, CloudProviderConfig, CloudProviderKind, CloudStorageLocation,
     CloudStorageRole, CloudStorageTopology, CloudValidationFinding, CloudValidationMode,

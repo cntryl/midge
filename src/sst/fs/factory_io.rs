@@ -20,6 +20,7 @@ use crate::types::{EntryType, RangeTombstone};
 /// that publish an SST. Writers map their target onto `fs` and refuse a target
 /// outside its root rather than publishing somewhere the caller did not name.
 pub struct FsSstFactoryIo {
+    write_limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
     fs: Arc<dyn Fs>,
     block_size: usize,
     compression_policy: CompressionPolicy,
@@ -44,17 +45,27 @@ impl FsSstFactoryIo {
             Arc::clone(&self.scratch_outstanding),
             self.compaction_scratch_directory.as_deref(),
         )?);
+        writer.set_write_limiter(self.write_limiter.clone());
         Ok(Box::new(writer))
     }
     /// Create a new factory with a custom filesystem implementation
     pub fn new(fs: Arc<dyn Fs>, block_size: usize) -> Self {
         Self {
+            write_limiter: None,
             fs,
             block_size,
             compression_policy: CompressionPolicy::default(),
             scratch_outstanding: Arc::default(),
             compaction_scratch_directory: None,
         }
+    }
+
+    pub(crate) fn with_write_limiter(
+        mut self,
+        limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+    ) -> Self {
+        self.write_limiter = limiter;
+        self
     }
 
     /// Keep build scratch in `directory`, a location in the output filesystem.
@@ -178,6 +189,7 @@ impl std::ops::Deref for RetainedRanges {
 
 /// Simple in-memory SST writer that applies block-level compression.
 struct FsSstWriter {
+    write_limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
     /// Filesystem this writer publishes through, injected by the factory so
     /// staging writes, fsyncs, the rename, and the directory sync all reach
     /// the same backend the factory reads from.
@@ -506,6 +518,16 @@ impl DynSstWriter for FsSstWriter {
 }
 
 impl FsSstWriter {
+    fn set_write_limiter(
+        &mut self,
+        limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+    ) {
+        self.write_limiter = limiter.clone();
+        if let Some(streaming) = &mut self.streaming {
+            streaming.sink.set_write_limiter(limiter);
+        }
+    }
+
     fn logical_summary(&self) -> crate::sst::traits::FinalizedSst {
         let mut smallest_key = None;
         let mut largest_key = None;
@@ -576,6 +598,7 @@ impl FsSstWriter {
         }
 
         let FsSstWriter {
+            write_limiter,
             fs,
             entries,
             range_tombstones,
@@ -592,8 +615,11 @@ impl FsSstWriter {
             &range_tombstones,
             &compression_policy,
         )?;
-        let result =
-            crate::sst::fs::persist_sst_stream_with_identity(&fs, &mut scratch.reader(), path);
+        let mut reader = crate::common::write_rate::RateLimitedReader {
+            inner: scratch.reader(),
+            limiter: write_limiter,
+        };
+        let result = crate::sst::fs::persist_sst_stream_with_identity(&fs, &mut reader, path);
         let cleanup = scratch.close();
         let (size, crc) = result?;
         cleanup?;
@@ -645,6 +671,7 @@ impl SstFactory for FsSstFactoryIo {
             self.compaction_scratch_directory.as_deref(),
         )?);
         writer.preserve_legacy_entries = true;
+        writer.set_write_limiter(self.write_limiter.clone());
         Ok(Box::new(writer))
     }
 

@@ -297,6 +297,14 @@ pub struct RuntimeLatencySummaries {
 /// Stable operator-facing snapshot of runtime metrics.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RuntimeMetricsSnapshot {
+    /// Caller time spent in admission slowdown before submission.
+    pub write_slowdown_ns_total: u64,
+    /// Submissions which entered caller-side slowdown.
+    pub write_slowdown_count: u64,
+    /// Encoded background bytes admitted through the shared rate limiter.
+    pub background_rate_limited_bytes: u64,
+    /// Estimated excess bytes assigned to compactable levels.
+    pub estimated_pending_compaction_bytes: u64,
     pub health: EngineHealth,
     pub current_sequence: u64,
     pub active_memtables: usize,

@@ -58,6 +58,7 @@ impl Runtime {
         let lifecycle = Arc::new(RuntimeLifecycle::new());
 
         let handle = RuntimeHandle {
+            write_admission: Arc::default(),
             msg_tx: msg_tx.clone(),
             router: router.clone(),
             snapshot_cache,
@@ -130,6 +131,7 @@ impl Runtime {
 
         // Handle for callers to use.
         let handle = RuntimeHandle {
+            write_admission: Arc::clone(&state.write_pressure.admission),
             msg_tx: self.msg_tx.clone(),
             router: router.clone(),
             snapshot_cache: snapshot_cache.clone(),

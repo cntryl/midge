@@ -953,6 +953,7 @@ impl RuntimeStorageMaterialization {
         scope: Option<&DeadlineScope>,
     ) -> crate::runtime::RuntimeConfig {
         crate::runtime::RuntimeConfig {
+            write_backpressure: opts.write_backpressure().clone(),
             ttl_clock: opts.ttl_clock(),
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
             storage_io_timeout: opts.storage_io_timeout(),
@@ -1278,6 +1279,7 @@ impl RuntimeStorageMaterialization {
         let batch_config = opts.wal_batch_config().unwrap_or_default();
 
         let runtime_config = crate::runtime::RuntimeConfig {
+            write_backpressure: opts.write_backpressure().clone(),
             ttl_clock: opts.ttl_clock(),
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             wal_batch_config: batch_config,

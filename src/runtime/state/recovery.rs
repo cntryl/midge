@@ -278,7 +278,10 @@ impl RuntimeState {
             next_flush_id: 1,
             writer_epoch: 0,
             flush_metrics: super::FlushRuntimeMetrics::default(),
-            write_pressure: WritePressureState { stalled: false },
+            write_pressure: WritePressureState {
+                stalled: false,
+                admission: Arc::default(),
+            },
             total_memtable_bytes: recovered_memtable_bytes,
             recovery_stats: super::RecoveryStats {
                 wal_recovery_records_replayed: wal_recovery.records_replayed,

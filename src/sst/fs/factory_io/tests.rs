@@ -7,6 +7,7 @@ use crate::sst::SstStateReader;
 use crate::types::{EntryType, KeyState};
 use crate::MidgeError;
 use std::path::PathBuf;
+mod write_rate;
 
 #[test]
 fn should_reject_valueless_put_when_writing_sst() -> MidgeResult<()> {

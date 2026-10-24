@@ -28,10 +28,10 @@ pub(super) fn assemble_sst_resources(
         )
         .unwrap_or(fs)
     };
-    let factory: Arc<dyn crate::sst::SstFactory> = Arc::new(compaction_sst_factory(
-        fs,
-        config.compression_policy.clone(),
-    ));
+    let factory: Arc<dyn crate::sst::SstFactory> = Arc::new(
+        compaction_sst_factory(fs, config.compression_policy.clone())
+            .with_write_limiter(state.write_pressure.admission.limiter()),
+    );
     let reads = if memory_mode {
         None
     } else {

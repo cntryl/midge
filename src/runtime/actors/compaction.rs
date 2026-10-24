@@ -365,6 +365,43 @@ pub struct CompactionActor {
 }
 
 impl CompactionActor {
+    /// Conservative excess bytes in levels which can move to a deeper level.
+    /// This is an admission estimate, not a prediction of physical rewrite I/O.
+    pub(crate) fn estimated_pending_bytes(&self, files: &[crate::metadata::FileMeta]) -> u64 {
+        let mut levels = std::collections::BTreeMap::<(u32, u32), (u64, usize)>::new();
+        for file in files {
+            let entry = levels.entry((file.cf_id, file.level)).or_default();
+            entry.0 = entry.0.saturating_add(file.size_bytes);
+            entry.1 = entry.1.saturating_add(1);
+        }
+        let config = &self.compactor.config;
+        levels
+            .into_iter()
+            .fold(0_u64, |total, ((_, level), (bytes, count))| {
+                if usize::try_from(level).unwrap_or(usize::MAX)
+                    >= config.max_levels.saturating_sub(1)
+                {
+                    return total;
+                }
+                let excess = if level == 0 {
+                    if count >= config.l0_file_count_threshold
+                        || bytes > config.l0_compaction_threshold
+                    {
+                        bytes
+                    } else {
+                        0
+                    }
+                } else {
+                    bytes.saturating_sub(
+                        config
+                            .l1_target_size
+                            .saturating_mul(config.level_multiplier.saturating_pow(level - 1)),
+                    )
+                };
+                total.saturating_add(excess)
+            })
+    }
+
     pub(crate) fn max_grandparent_overlap_bytes(&self) -> u64 {
         self.compactor.config.max_grandparent_overlap_bytes
     }

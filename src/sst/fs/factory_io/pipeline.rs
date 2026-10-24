@@ -357,6 +357,7 @@ impl FsSstWriter {
         budget: Option<crate::common::resource_budget::ResourceBudget>,
     ) -> Self {
         Self {
+            write_limiter: None,
             fs,
             entries: Vec::new(),
             range_tombstones: super::RetainedRanges::default(),

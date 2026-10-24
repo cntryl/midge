@@ -292,6 +292,9 @@ impl RuntimeState {
     /// This intentionally excludes active memtable size: active memtable pressure
     /// should trigger flush, not block the flush that would relieve it.
     pub fn should_hard_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+        if self.write_pressure.admission.hard_pending_limit() {
+            return true;
+        }
         if self.write_pressure.stalled {
             return true;
         }
@@ -305,6 +308,9 @@ impl RuntimeState {
     }
 
     pub fn has_any_hard_write_stall(&self) -> bool {
+        if self.write_pressure.admission.hard_pending_limit() {
+            return true;
+        }
         if self.write_pressure.stalled || self.is_total_memtable_hard_limit_exceeded() {
             return true;
         }

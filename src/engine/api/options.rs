@@ -169,6 +169,7 @@ impl std::fmt::Debug for InjectedObjectStore {
 /// ```
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
+    write_backpressure: crate::config::WriteBackpressureConfig,
     drop_transaction_wait_timeout: Duration,
     storage: Storage,
     goal: Goal,
@@ -199,6 +200,7 @@ pub struct OpenOptions {
 /// once, in [`Self::build`], so setter order cannot stale a derived value.
 #[derive(Debug, Clone)]
 pub struct OpenOptionsBuilder {
+    write_backpressure: crate::config::WriteBackpressureConfig,
     drop_transaction_wait_timeout: Duration,
     storage: Storage,
     goal: Goal,
@@ -231,6 +233,11 @@ struct DerivedMemoryPools {
 }
 
 impl OpenOptions {
+    /// Optional caller admission and background output limits.
+    #[must_use]
+    pub fn write_backpressure(&self) -> &crate::config::WriteBackpressureConfig {
+        &self.write_backpressure
+    }
     /// Maximum Drop-reaper wait for client-owned transactions (default 30s).
     #[must_use]
     pub fn drop_transaction_wait_timeout(&self) -> Duration {
@@ -546,6 +553,12 @@ impl OpenOptions {
 }
 
 impl OpenOptionsBuilder {
+    /// Configure caller-side slowdown and shared background output throttling.
+    #[must_use]
+    pub fn write_backpressure(mut self, config: crate::config::WriteBackpressureConfig) -> Self {
+        self.write_backpressure = config;
+        self
+    }
     /// Bound how long dropping an Engine retains client-owned transactions.
     /// After this window they return Fenced. Admitted workers still drain
     /// before lease release, which can take longer for blocked storage I/O.
@@ -557,6 +570,7 @@ impl OpenOptionsBuilder {
 
     fn new(storage: Storage) -> Self {
         Self {
+            write_backpressure: crate::config::WriteBackpressureConfig::default(),
             drop_transaction_wait_timeout: Duration::from_secs(30),
             storage,
             goal: Goal::default(),
@@ -967,7 +981,13 @@ impl OpenOptionsBuilder {
         };
         let compression_policy = Self::derive_compression_policy(self.goal);
 
+        self.write_backpressure.validate(
+            l0_compaction_trigger + crate::config::DEFAULT_MAX_IMMUTABLE_MEMTABLES + 1,
+            pools.memtable_flush_threshold.saturating_mul(2),
+        )?;
+
         Ok(OpenOptions {
+            write_backpressure: self.write_backpressure,
             storage: self.storage,
             goal: self.goal,
             memory_budget: self.memory_budget,

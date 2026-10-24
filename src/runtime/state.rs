@@ -333,7 +333,7 @@ impl RuntimeLimits {
             memtable_flush_threshold: 64 * 1024 * 1024,
             eventual_flush_segment_gap: crate::runtime::CloudRuntimePolicy::default()
                 .eventual_flush_segment_gap,
-            max_immutable_memtables: 10,
+            max_immutable_memtables: crate::config::DEFAULT_MAX_IMMUTABLE_MEMTABLES,
             l0_compaction_trigger: crate::compaction::LeveledCompactionConfig::default()
                 .l0_file_count_threshold,
             compaction_config: CompactionConfig {
@@ -484,6 +484,7 @@ impl std::ops::Deref for ManifestRuntimeState {
 
 pub struct WritePressureState {
     pub stalled: bool,
+    pub(crate) admission: Arc<crate::runtime::write_admission::WriteAdmission>,
 }
 
 struct TransactionCoordination {
@@ -742,6 +743,22 @@ impl RuntimeState {
         read_path: &crate::diagnostics::ReadPathDiagnosticsSnapshot,
     ) -> crate::types::RuntimeMetricsSnapshot {
         crate::types::RuntimeMetricsSnapshot {
+            write_slowdown_ns_total: self
+                .write_pressure
+                .admission
+                .slowdown_ns
+                .load(Ordering::Relaxed),
+            write_slowdown_count: self
+                .write_pressure
+                .admission
+                .slowdown_count
+                .load(Ordering::Relaxed),
+            background_rate_limited_bytes: self
+                .write_pressure
+                .admission
+                .limited_bytes
+                .load(Ordering::Relaxed),
+            estimated_pending_compaction_bytes: self.write_pressure.admission.pending_bytes(),
             health: self.health(),
             current_sequence: self.sequence,
             active_memtables: gauges.active_memtables,

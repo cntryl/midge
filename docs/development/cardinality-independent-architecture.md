@@ -202,6 +202,32 @@ streamed target spans, and pre-WAL admission.
 
 ## Commands
 
+### Optional admission slowdown
+
+`OpenOptionsBuilder::write_backpressure` accepts `WriteBackpressureConfig`.
+Defaults preserve immediate admission and the existing hard stalls. Configured
+soft limits cover published/reserved L0 slots, admitted memtable bytes and
+estimated pending compaction bytes. The caller waits once, for at most the
+configured admission window within its original response deadline; the loop
+does not sleep. Expiry or lifecycle/lease cancellation before submission leaves
+no queued write. Runtime hard checks remain authoritative when pressure races
+with this advisory snapshot.
+
+Pending bytes sum L0 bytes when its count/byte trigger is reached and excess
+bytes over each compactable inner-level target, separately per family. The
+terminal level is excluded. This is a scheduling estimate, not predicted device
+I/O. An optional pending-byte hard limit participates in the existing stall
+contract and is relieved by compaction publication.
+
+Flush and compaction writers share one optional encoded-byte rate schedule.
+It charges scratch and final writes in bounded chunks on their workers. Hard
+pressure bypasses throttling so maintenance can release occupied slots; shutdown
+keeps that bypass set while admitted work drains. Provider upload bandwidth is
+outside this local output limit. Runtime metrics expose admission time/count,
+rate-limited bytes and the enabled pending-byte estimate separately from stalls.
+Sustainable-load latency, hard-stall reduction and rate tuning still require
+the #908/#935 benchmark qualification; the optional controls imply no gain.
+
 ```text
 cargo test --lib runtime::sst_read_view::tests::should_prove_read_work_bounds_across_synthetic_manifest_cardinalities -- --nocapture
 cargo test --lib compaction::tests::should_keep_compaction_work_bounded_across_ten_thousand_targets -- --nocapture

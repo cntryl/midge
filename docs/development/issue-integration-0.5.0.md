@@ -780,3 +780,16 @@ and refuses active or replaced metadata. Active tests cover durable queue
 replay, cold hydration, replacement races, writer fencing and snapshot pins.
 Test targets compile; execution/crash qualification remains pending. General
 SST orphan and catalog-anchor WAL rediscovery are still separate code gaps.
+
+#908 adds opt-in caller-side admission slowdown below existing L0/memory
+ceilings, an estimated pending-compaction byte band/hard limit and a shared
+flush/compaction output rate schedule. Defaults preserve immediate admission.
+The original response deadline covers slowdown and submitted work; expiry or
+fencing during the delay leaves no queued mutation. Worker-side rate charging
+covers bounded scratch/final write chunks, bypasses under hard pressure and
+remains bypassed through shutdown drain. New metrics separate delay and charged
+bytes from hard stalls. Active public regressions cover soft L0 success/reopen,
+hard L0 rejection, pending-byte rejection and unchanged defaults; internal
+regressions cover pre-admission expiry and shared real-writer rate/identity.
+The latest shared check is in concurrent #909/#906 declarations; execution and
+sustainable-load A/B qualification remain pending.

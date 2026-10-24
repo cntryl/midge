@@ -233,6 +233,24 @@ impl FlushActor {
         completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
         memory_bytes: usize,
     ) -> MidgeResult<Self> {
+        Self::new_with_write_limiter(
+            fs,
+            memory_mode,
+            compression_policy,
+            completion_tx,
+            memory_bytes,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_write_limiter(
+        fs: Arc<dyn crate::io::Fs>,
+        memory_mode: bool,
+        compression_policy: crate::codec::CompressionPolicy,
+        completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
+        memory_bytes: usize,
+        limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+    ) -> MidgeResult<Self> {
         if memory_mode {
             return Ok(Self {
                 in_progress: 0,
@@ -244,6 +262,7 @@ impl FlushActor {
 
         let sst_factory = Arc::new(
             crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
+                .with_write_limiter(limiter)
                 .with_compression_policy(compression_policy)
                 .with_compaction_scratch_directory(PathBuf::from(
                     crate::sst::fs::FLUSH_STAGING_DIR,

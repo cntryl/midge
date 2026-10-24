@@ -20,6 +20,9 @@ impl EventLoop {
         self.trace_shutdown_start();
         let mut shutdown_error = None;
         self.shutdown.shutting_down = true;
+        // Accepted maintenance must drain without inheriting a configured
+        // low background rate once shutdown has closed foreground admission.
+        self.state.write_pressure.admission.begin_drain();
         self.fail_validation_requests_on_shutdown();
 
         // Local mode does not checkpoint memtables on shutdown, so the WAL
