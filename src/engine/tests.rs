@@ -2589,11 +2589,18 @@ fn should_reject_predecessor_writes_when_successor_maintains_and_restarts() -> M
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         heartbeat.stop();
+        assert!(heartbeat.is_healthy());
         let validity = heartbeat.validity_for_test().unwrap();
         let old_epoch = predecessor.lease_state.lease.as_ref().unwrap().epoch();
         let remaining = validity.remaining(old_epoch)?;
         std::thread::sleep(remaining + Duration::from_millis(100));
-        assert!(heartbeat.is_healthy());
+        // The runtime shares this health flag and may correctly notice expiry
+        // even with both heartbeat workers stopped. Assert the actual authority
+        // boundary; separate tests cover expiry without any notification.
+        assert!(matches!(
+            validity.remaining(old_epoch),
+            Err(crate::lease::LeaseError::RenewalFailed(_))
+        ));
         drop(heartbeat);
         // Act
         eprintln!("takeover cloud={cloud}: open healthy successor after real expiry");
