@@ -211,6 +211,7 @@ impl PublicationFixture {
             fs: self.fs.clone(),
             hybrid_storage: Some(self.hybrid.clone()),
             cloud_metadata_storage: None,
+            metadata_cut: None,
             metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
             lease_healthy: Some(Arc::new(AtomicBool::new(true))),
             lease_validity: Some(validity),

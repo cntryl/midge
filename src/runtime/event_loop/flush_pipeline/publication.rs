@@ -208,7 +208,9 @@ impl EventLoop {
             self.state
                 .finish_flush_publication_attempt(completion.identity.flush_id, true);
             self.settle_stale_publish_reservation(&completion);
-            self.actors.flush_actor.finish_pipeline(completion.identity.flush_id);
+            self.actors
+                .flush_actor
+                .finish_pipeline(completion.identity.flush_id);
             self.publication.publication_gate.release(
                 &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
                     flush_id: completion.identity.flush_id,
@@ -296,10 +298,29 @@ impl EventLoop {
         delta: FlushPublicationDelta,
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) -> crate::common::MidgeResult<()> {
+        let metadata_cut = if !self.pipeline.inline_flush_worker
+            && self
+                .actors
+                .cloud_coordinator
+                .cloud_metadata_storage
+                .is_some()
+        {
+            let deadline = crate::common::OperationDeadline::from_budget(
+                self.routing.runtime_response_timeout,
+            );
+            Some(
+                self.publication
+                    .metadata_publication_lock
+                    .capture_control_cut(&self.state.fs, delta.identity.writer_epoch, &deadline)?,
+            )
+        } else {
+            None
+        };
         let task = FlushMirrorTask {
             delta,
             reservation,
             fs: Arc::clone(&self.state.fs),
+            metadata_cut,
             storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
                 self.actors.cloud_coordinator.hybrid_storage.clone(),
                 self.actors.cloud_coordinator.cloud_metadata_storage.clone(),
@@ -407,7 +428,9 @@ impl EventLoop {
             {
                 hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
             }
-            self.actors.flush_actor.finish_pipeline(delta.identity.flush_id);
+            self.actors
+                .flush_actor
+                .finish_pipeline(delta.identity.flush_id);
             return;
         };
         let accounting = flush.accounting;
@@ -451,7 +474,9 @@ impl EventLoop {
         if cloud_metadata_published {
             self.evict_published_sst_cache(std::slice::from_ref(&delta.file_meta.name));
         }
-        self.actors.flush_actor.finish_pipeline(delta.identity.flush_id);
+        self.actors
+            .flush_actor
+            .finish_pipeline(delta.identity.flush_id);
         self.publish_snapshot();
         self.refresh_write_stall_timing();
         self.wake_write_stall_waiters();

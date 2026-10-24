@@ -2,7 +2,6 @@
 
 use super::{EventLoop, MetadataMirrorJob, MirrorContinuation};
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crate::io::{Fs, FsError, FsPath};
 use std::sync::Arc;
 
 impl EventLoop {
@@ -66,7 +65,10 @@ impl EventLoop {
         // The loop owns journal/intent changes during this capture. A cloned
         // live Fs would allow later appends to change the admitted operation.
         // Provider work sees only this exact presence/absence and byte cut.
-        let source = capture_metadata_cut(self.state.fs.as_ref(), &deadline)?;
+        let source = self
+            .publication
+            .metadata_publication_lock
+            .capture_control_cut(&self.state.fs, self.state.writer_epoch, &deadline)?;
         let publication_lock = self.publication.metadata_publication_lock.clone();
         let storage = self.actors.cloud_coordinator.hybrid_storage.clone();
         let epoch = self.state.writer_epoch;
@@ -79,24 +81,30 @@ impl EventLoop {
             .name("midge-metadata-mirror".into())
             .spawn(move || {
                 crate::failpoints::fail_point!("midge::metadata_mirror::before_provider");
-                let outcome = crate::runtime::hybrid_persistence::mirror_control_metadata_within(
-                    crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
-                        cloud: &cloud,
-                        fs: source.as_ref(),
-                        publication_lock: &publication_lock,
-                        lock_wait_budget: cloud.callback_timeout(),
-                        deadline: &deadline,
-                        authority:
-                            crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
-                                store: fence.leader_store.as_deref().expect("admitted store"),
-                                holder_id: fence.leader_holder_id.as_deref().unwrap_or_default(),
-                                writer_epoch: epoch,
-                            },
-                    },
-                    |deadline| fence.validate_within(deadline),
-                )
-                .and_then(|()| fence.check_health())
-                .and_then(|()| {
+                let outcome =
+                    crate::runtime::hybrid_persistence::mirror_captured_control_metadata_within(
+                        crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+                            cloud: &cloud,
+                            fs: source.fs().as_ref(),
+                            publication_lock: &publication_lock,
+                            lock_wait_budget: cloud.callback_timeout(),
+                            deadline: &deadline,
+                            authority:
+                                crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                                    store: fence.leader_store.as_deref().expect("admitted store"),
+                                    holder_id: fence
+                                        .leader_holder_id
+                                        .as_deref()
+                                        .unwrap_or_default(),
+                                    writer_epoch: epoch,
+                                },
+                        },
+                        &source,
+                        |deadline| fence.validate_within(deadline),
+                    )
+                    .and_then(|()| fence.check_health());
+                drop(source);
+                let outcome = outcome.and_then(|()| {
                     if let Some(sweep) = sweep {
                         let storage = storage.as_deref().ok_or_else(|| {
                             MidgeError::Fenced("orphan sweep lost its storage owner".into())
@@ -126,34 +134,4 @@ impl EventLoop {
         });
         Ok(())
     }
-}
-
-fn capture_metadata_cut(fs: &dyn Fs, deadline: &OperationDeadline) -> MidgeResult<Arc<dyn Fs>> {
-    let captured = crate::io::MockFs::new();
-    for name in crate::metadata::files::CLOUD_MIRRORED {
-        if deadline.is_expired() {
-            return Err(MidgeError::Timeout(
-                "metadata capture deadline exhausted".into(),
-            ));
-        }
-        let path = FsPath::new(*name);
-        let bytes = match crate::io::read_all(fs, &path) {
-            Ok(bytes) => bytes,
-            Err(FsError::NotFound(_)) => continue,
-            Err(error) => return Err(error.into_midge()),
-        };
-        let mut target = captured
-            .open(
-                &path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
-                    create: true,
-                    create_new: true,
-                    truncate: false,
-                },
-            )
-            .map_err(FsError::into_midge)?;
-        target.write_at(0, bytes).map_err(FsError::into_midge)?;
-    }
-    Ok(Arc::new(captured))
 }

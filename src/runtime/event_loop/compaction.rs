@@ -1426,6 +1426,29 @@ impl CompactionCoordinator {
             )
         });
         let task = CompactionPublishTask {
+            metadata_cut: if !event_loop.pipeline.inline_flush_worker
+                && event_loop
+                    .actors
+                    .cloud_coordinator
+                    .cloud_metadata_storage
+                    .is_some()
+            {
+                let deadline = pending.manual_deadline.unwrap_or_else(|| {
+                    OperationDeadline::from_budget(event_loop.routing.runtime_response_timeout)
+                });
+                Some(
+                    event_loop
+                        .publication
+                        .metadata_publication_lock
+                        .capture_control_cut(
+                            &event_loop.state.fs,
+                            pending.token.writer_epoch,
+                            &deadline,
+                        )?,
+                )
+            } else {
+                None
+            },
             checkpoint,
             manual_deadline: pending.manual_deadline,
             token: pending.token.clone(),

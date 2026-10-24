@@ -39,6 +39,9 @@ pub(crate) enum CompactionPublishPhase {
 
 #[derive(Clone)]
 pub(crate) struct CompactionPublishTask {
+    /// Exact loop-admitted control cut; None only for serialized startup/inline
+    /// compatibility and local-only publication.
+    pub metadata_cut: Option<Arc<crate::runtime::CapturedMetadataCut>>,
     pub token: CompactionPublicationToken,
     pub phase: CompactionPublishPhase,
     pub outputs: Vec<PreparedCompactionOutput>,
@@ -359,21 +362,33 @@ fn mirror_control_metadata(
     let leader_store = task.leader_store.as_deref().ok_or_else(|| {
         MidgeError::Fenced("cloud compaction metadata mirror has no leader store".into())
     })?;
-    crate::runtime::hybrid_persistence::mirror_control_metadata_within(
-        crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
-            cloud,
-            fs: task.fs.as_ref(),
-            publication_lock: &task.metadata_publication_lock,
-            lock_wait_budget: cloud.callback_timeout(),
-            deadline,
-            authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
-                store: leader_store,
-                holder_id: task.leader_holder_id.as_deref().unwrap_or_default(),
-                writer_epoch: task.token.writer_epoch,
-            },
+    let context = crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+        cloud,
+        fs: task
+            .metadata_cut
+            .as_ref()
+            .map_or(task.fs.as_ref(), |cut| cut.fs().as_ref()),
+        publication_lock: &task.metadata_publication_lock,
+        lock_wait_budget: cloud.callback_timeout(),
+        deadline,
+        authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+            store: leader_store,
+            holder_id: task.leader_holder_id.as_deref().unwrap_or_default(),
+            writer_epoch: task.token.writer_epoch,
         },
-        |deadline| validate_task_lease(task, deadline),
-    )
+    };
+    let result = if let Some(cut) = &task.metadata_cut {
+        crate::runtime::hybrid_persistence::mirror_captured_control_metadata_within(
+            context,
+            cut,
+            |deadline| validate_task_lease(task, deadline),
+        )
+    } else {
+        crate::runtime::hybrid_persistence::mirror_control_metadata_within(context, |deadline| {
+            validate_task_lease(task, deadline)
+        })
+    };
+    result
     .map_err(|error| {
         if matches!(error, MidgeError::Busy(_))
             && task.manual_deadline.is_some_and(|deadline| deadline.is_expired())
@@ -428,6 +443,7 @@ mod tests {
             fs: Arc::new(crate::io::MockFs::new()),
             hybrid_storage: None,
             cloud_metadata_storage: None,
+            metadata_cut: None,
             metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
             lease_healthy: Some(Arc::new(AtomicBool::new(true))),
             lease_validity: Some(Arc::clone(&validity)),

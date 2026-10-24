@@ -131,7 +131,10 @@ impl EventLoop {
     ) -> bool {
         (self.shutdown.shutting_down && !allow_during_shutdown)
             || self.state.is_memory_mode()
-            || (!self.actors.flush_actor.has_capacity() && !self.state.has_due_immutable_flush_matching(|cf, id| self.actors.flush_actor.owns_pipeline(cf, id)))
+            || (!self.actors.flush_actor.has_capacity()
+                && !self.state.has_due_immutable_flush_matching(|cf, id| {
+                    self.actors.flush_actor.owns_pipeline(cf, id)
+                }))
             || self.publication.publication_gate.is_active()
             || (!allow_during_shutdown && self.routing.pending_msg.is_some())
             || (!allow_during_shutdown
@@ -151,7 +154,10 @@ impl EventLoop {
             return;
         }
         let actor = &self.actors.flush_actor;
-        let Some(mut flush) = self.state.begin_next_immutable_flush_matching(|cf, id| actor.can_start_or_resume(cf, id)) else {
+        let Some(mut flush) = self
+            .state
+            .begin_next_immutable_flush_matching(|cf, id| actor.can_start_or_resume(cf, id))
+        else {
             return;
         };
         let Some((cf_id, _)) = self.state.immutable_flush_by_id(flush.flush_id) else {
@@ -299,6 +305,24 @@ impl EventLoop {
         &mut self,
         result: FlushWorkerResult,
     ) {
+        let identity = result.identity();
+        if !self.actors.flush_actor.take_completion(&result) {
+            // Inline unit fixtures also exercise settlement without submitting
+            // a physical task. An existing owner always requires its terminal
+            // proof, including under Inline mode; production has no bypass.
+            #[cfg(test)]
+            let fixture = self.pipeline.inline_flush_worker
+                && !self.actors.flush_actor.has_pipeline(identity.flush_id);
+            #[cfg(not(test))]
+            let fixture = false;
+            if !fixture {
+                tracing::debug!(
+                    flush_id = identity.flush_id,
+                    "ignored stale, duplicate or early flush worker completion"
+                );
+                return;
+            }
+        }
         let should_continue = match result {
             FlushWorkerResult::Build(completion) => self.handle_flush_build_completion(completion),
             FlushWorkerResult::Publish(completion) => {

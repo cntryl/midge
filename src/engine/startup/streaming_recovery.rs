@@ -360,8 +360,12 @@ fn checkpoint_family(
     ));
     let completion = super::timing::measure("recovery_checkpoint_construction", || {
         actor.submit_build(identity, table, staging_path, config.hybrid_storage.clone())?;
-        let FlushWorkerResult::Build(completion) =
-            receive_completion(rx, state.startup_scope.as_ref(), "recovery flush build")?
+        let FlushWorkerResult::Build(completion) = receive_completion(
+            actor,
+            rx,
+            state.startup_scope.as_ref(),
+            "recovery flush build",
+        )?
         else {
             return Err(MidgeError::Internal(
                 "unexpected recovery publication completion".into(),
@@ -426,8 +430,12 @@ fn publish_checkpoint_output(
         })?;
         #[cfg(test)]
         super::test_control::before_publish_receive();
-        let FlushWorkerResult::Publish(completion) =
-            receive_completion(rx, state.startup_scope.as_ref(), "recovery flush publish")?
+        let FlushWorkerResult::Publish(completion) = receive_completion(
+            actor,
+            rx,
+            state.startup_scope.as_ref(),
+            "recovery flush publish",
+        )?
         else {
             return Err(MidgeError::Internal(
                 "unexpected recovery build completion".into(),
@@ -479,6 +487,7 @@ fn commit_and_mirror_checkpoint(
         delta: delta.clone(),
         reservation,
         fs: Arc::clone(&state.fs),
+        metadata_cut: None,
         storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
             config.hybrid_storage.clone(),
             config.cloud_metadata_storage.clone(),
@@ -495,8 +504,12 @@ fn commit_and_mirror_checkpoint(
                 scope.clamp(config.runtime_response_timeout)
             }),
     })?;
-    let FlushWorkerResult::Mirror(mirror) =
-        receive_completion(rx, state.startup_scope.as_ref(), "recovery flush mirror")?
+    let FlushWorkerResult::Mirror(mirror) = receive_completion(
+        actor,
+        rx,
+        state.startup_scope.as_ref(),
+        "recovery flush mirror",
+    )?
     else {
         return Err(MidgeError::Internal(
             "unexpected recovery mirror completion".into(),
@@ -648,6 +661,7 @@ fn validate_monotonic_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResu
 }
 
 fn receive_completion(
+    actor: &mut FlushActor,
     rx: &crossbeam::channel::Receiver<FlushWorkerResult>,
     scope: Option<&crate::common::DeadlineScope>,
     context: &str,
@@ -673,5 +687,11 @@ fn receive_completion(
     if let Some(scope) = scope {
         scope.check(context)?;
     }
-    result
+    let completion = result?;
+    if !actor.take_completion(&completion) {
+        return Err(MidgeError::Fenced(format!(
+            "{context} did not match its physical task owner"
+        )));
+    }
+    Ok(completion)
 }
