@@ -7,6 +7,7 @@ use crate::types::EntryType;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 mod moves_tests;
+mod publication_queue_tests;
 
 struct ConcurrentFixture {
     event_loop: EventLoop,

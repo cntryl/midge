@@ -305,8 +305,7 @@ impl CompactionActor {
         self.slots.iter().any(|slot| slot.worker_handle.is_some())
     }
 
-    pub(crate) fn poll_compute_completions(&mut self) -> Vec<RuntimeMsg> {
-        let mut completed = Vec::new();
+    pub(crate) fn poll_compute_completion(&mut self) -> Option<RuntimeMsg> {
         for slot in self
             .slots
             .iter_mut()
@@ -322,7 +321,7 @@ impl CompactionActor {
                 continue;
             };
             slot.completion_emitted = true;
-            completed.push(RuntimeMsg::CompactionComplete {
+            return Some(RuntimeMsg::CompactionComplete {
                 request_id: id,
                 input_ssts: slot.active_input_ssts.clone(),
                 output_ssts: slot.completed_outputs.clone().unwrap_or_default(),
@@ -331,7 +330,7 @@ impl CompactionActor {
                 succeeded: slot.worker_succeeded.unwrap_or(false),
             });
         }
-        completed
+        None
     }
 
     pub(crate) fn protected_sst_names(&self) -> Vec<String> {

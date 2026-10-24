@@ -74,6 +74,7 @@ impl EventLoop {
             return true;
         }
         if !self.publication.publication_gate.is_active()
+            && !self.publication.compaction_publication.is_active()
             && self.actors.compaction_actor.has_ready_compute()
         {
             return true;

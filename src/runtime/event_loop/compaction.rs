@@ -601,6 +601,11 @@ impl CompactionCoordinator {
         event_loop: &mut EventLoop,
         request: CompactionCompleteRequest,
     ) -> HandleOutcome {
+        if event_loop.publication.compaction_publication.is_active() {
+            // Messages are notifications; the matching native result stays
+            // owned and is polled once the earlier publisher settles.
+            return HandleOutcome::Continue;
+        }
         let CompactionCompleteRequest {
             request_id,
             input_ssts,
