@@ -27,13 +27,7 @@ impl EventLoop {
         cf_id: crate::types::ColumnFamilyId,
         origin: Origin,
     ) -> crate::common::MidgeResult<u64> {
-        let durable_next = self
-            .state
-            .manifest
-            .next_sst_seqs
-            .get(&cf_id)
-            .copied()
-            .unwrap_or(1);
+        let sst_seq = self.next_sst_name(cf_id)?;
         if self.actors.cloud_coordinator.hybrid_storage.is_some() {
             // The publish worker uploads before it journals AddSst, so the
             // name must already be durable (as compaction does) or a crash in
@@ -41,24 +35,9 @@ impl EventLoop {
             // Names come from a cursor inside a durably reserved block, so
             // most flushes reserve nothing (#491). A restart resumes at the
             // durable reservation, past every name this session handed out.
-            let sst_seq = *self
-                .state
-                .sst_names
-                .cursor
-                .entry(cf_id)
-                .or_insert(durable_next);
-            let next_cursor = sst_seq.checked_add(1).ok_or_else(|| {
-                crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
-            })?;
             self.reserve_sst_name_durably_for(cf_id, sst_seq, origin)?;
-            self.state.sst_names.cursor.insert(cf_id, next_cursor);
-            return Ok(sst_seq);
         }
-        let sst_seq = durable_next;
-        let next_sst_seq = sst_seq.saturating_add(1);
-        self.state
-            .manifest
-            .advance_next_sst_seq(cf_id, next_sst_seq);
+        self.consume_sst_name(cf_id, sst_seq)?;
         Ok(sst_seq)
     }
 

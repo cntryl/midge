@@ -34,6 +34,10 @@ impl EventLoop {
                     .is_some_and(|rx| !rx.is_empty());
         }
 
+        if self.has_ready_reserved_compaction() {
+            return true;
+        }
+
         if self
             .actors
             .cloud_coordinator
@@ -250,6 +254,7 @@ impl EventLoop {
         self.drain_cloud_wal_upload_backlog();
         self.tick_hybrid_storage();
         self.drain_hybrid_storage_events();
+        self.resume_reserved_compaction_if_ready();
         self.drain_cloud_wal_upload_backlog();
         let hybrid_storage = self.actors.cloud_coordinator.hybrid_storage.clone();
         self.actors

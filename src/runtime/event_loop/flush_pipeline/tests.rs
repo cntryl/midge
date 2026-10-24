@@ -1517,6 +1517,19 @@ fn should_not_reuse_reserved_sst_names_when_replacement_restores_from_cloud_meta
     }
     let plan =
         first.assign_compaction_output_sequence(crate::compaction::CompactionPlan::new(0, 0, 1))?;
+    let orphan_key = crate::cloud_layout::object_key(&crate::cloud_layout::compaction_file_name(
+        0,
+        1,
+        plan.output_seq,
+        0,
+    ));
+    let orphan = b"abandoned immutable compaction output".to_vec();
+    let deadline = crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+    crate::storage::cloud::BlockingCloud::new(&cloud, &deadline).put_with_precondition(
+        &orphan_key,
+        orphan.clone(),
+        &crate::storage::StoragePrecondition::IfAbsent,
+    )?;
     drop(first);
     let replacement = tempfile::tempdir()?;
     let leader_store = lease.get_leader_store().expect("cloud leader store");
@@ -1531,7 +1544,9 @@ fn should_not_reuse_reserved_sst_names_when_replacement_restores_from_cloud_meta
     // Act
     let (mut second, _hybrid) = event_loop_with_hybrid_storage(&replacement)?;
     let first_name = second.reserve_flush_sst_seq(0)?;
-    let next_generation = second.state.next_compaction_output_generation()?;
+    let next_generation = second
+        .assign_compaction_output_sequence(crate::compaction::CompactionPlan::new(0, 0, 1))?
+        .output_seq;
 
     // Assert
     assert!(
@@ -1539,6 +1554,11 @@ fn should_not_reuse_reserved_sst_names_when_replacement_restores_from_cloud_meta
         "{used:?} then {first_name}"
     );
     assert!(next_generation > plan.output_seq);
+    let deadline = crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+    assert_eq!(
+        crate::storage::cloud::BlockingCloud::new(&cloud, &deadline).get_optional(&orphan_key)?,
+        Some(orphan)
+    );
     Ok(())
 }
 

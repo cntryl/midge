@@ -6,6 +6,128 @@ const SST_NAME_RESERVATION_BLOCK: u64 = 16;
 const SST_NAME_PREFETCH_REMAINING: u64 = SST_NAME_RESERVATION_BLOCK / 2;
 
 impl EventLoop {
+    pub(super) fn can_resume_reserved_compaction(
+        &self,
+        plan: &crate::compaction::CompactionPlan,
+    ) -> bool {
+        !self.publication.publication_gate.is_active()
+            && self
+                .actors
+                .cloud_coordinator
+                .cloud_wal_prune_worker
+                .is_none()
+            && self
+                .actors
+                .compaction_actor
+                .can_admit_plan(plan, &self.state.manifest.files)
+    }
+
+    fn reserved_compaction_position(&self) -> Option<usize> {
+        self.actors
+            .cloud_coordinator
+            .metadata_mirror
+            .pending_compactions
+            .iter()
+            .position(|(plan, _)| {
+                self.state
+                    .sst_names
+                    .reserved_through
+                    .get(&plan.cf_id)
+                    .is_some_and(|bound| plan.output_seq < *bound)
+                    && self.can_resume_reserved_compaction(plan)
+            })
+    }
+
+    pub(super) fn has_ready_reserved_compaction(&self) -> bool {
+        self.reserved_compaction_position().is_some()
+    }
+
+    pub(super) fn resume_reserved_compaction_if_ready(&mut self) {
+        if let Some(position) = self.reserved_compaction_position() {
+            let (plan, deadline) = self
+                .actors
+                .cloud_coordinator
+                .metadata_mirror
+                .pending_compactions
+                .remove(position)
+                .expect("selected pending compaction");
+            self.resume_compaction_after_metadata_mirror(plan, deadline, Ok(()));
+        }
+    }
+
+    /// Flush and compaction share one per-family creation order. Data/WAL
+    /// sequence numbers are independent from immutable filename generations.
+    pub(super) fn next_sst_name(&mut self, cf_id: u32) -> crate::common::MidgeResult<u64> {
+        if let Some(next) = self.state.sst_names.cursor.get(&cf_id) {
+            return Ok(*next);
+        }
+        let mut next = self
+            .state
+            .manifest
+            .next_sst_seqs
+            .get(&cf_id)
+            .copied()
+            .unwrap_or(1);
+        if self.actors.cloud_coordinator.hybrid_storage.is_none() {
+            // Local-only historical compactions did not reserve the shared
+            // counter. Seed once from existing and retired immutable names.
+            for file in self
+                .state
+                .manifest
+                .files
+                .iter()
+                .chain(self.state.manifest.retired_ssts.values())
+                .filter(|file| file.cf_id == cf_id)
+            {
+                let generation = crate::cloud_layout::parse_file_name(&file.name)
+                    .map(|(_, _, generation)| generation)
+                    .or_else(|| {
+                        crate::cloud_layout::parse_compaction_file_name(&file.name)
+                            .map(|(_, _, generation, _)| generation)
+                    })
+                    .unwrap_or(0)
+                    .max(file.sst_seq);
+                next = next.max(generation.checked_add(1).ok_or_else(|| {
+                    crate::common::MidgeError::ResourceLimit(
+                        "SST filename allocation exhausted".into(),
+                    )
+                })?);
+            }
+        }
+        self.state.sst_names.cursor.insert(cf_id, next);
+        Ok(next)
+    }
+
+    pub(super) fn consume_sst_name(
+        &mut self,
+        cf_id: u32,
+        name: u64,
+    ) -> crate::common::MidgeResult<()> {
+        if self.next_sst_name(cf_id)? != name {
+            return Err(crate::common::MidgeError::Fenced(
+                "SST name cursor changed before admission".into(),
+            ));
+        }
+        let next = name.checked_add(1).ok_or_else(|| {
+            crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
+        })?;
+        self.state.sst_names.cursor.insert(cf_id, next);
+        if self.actors.cloud_coordinator.hybrid_storage.is_none() {
+            self.state.manifest.advance_next_sst_seq(cf_id, next);
+        }
+        self.state.compaction_output_generation = self.state.compaction_output_generation.max(name);
+        Ok(())
+    }
+
+    pub(super) fn allocate_compaction_sst_name(
+        &mut self,
+        cf_id: u32,
+    ) -> crate::common::MidgeResult<u64> {
+        let name = self.next_sst_name(cf_id)?;
+        self.consume_sst_name(cf_id, name)?;
+        Ok(name)
+    }
+
     /// Reserve the next flush block while no publication owns the control
     /// turn. Completion, rather than this journal append, admits its names.
     pub(super) fn prefetch_flush_sst_names_if_due(&mut self) {

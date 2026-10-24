@@ -67,6 +67,13 @@ impl CompactionActor {
     pub(crate) fn has_capacity(&self) -> bool {
         self.active_count() < self.slots.len()
     }
+    pub(crate) fn can_admit_plan(
+        &self,
+        plan: &CompactionPlan,
+        files: &[crate::metadata::FileMeta],
+    ) -> bool {
+        self.has_capacity() && self.jobs.available(plan, files)
+    }
     pub(crate) fn concurrency_limit(&self) -> usize {
         self.slots.len()
     }

@@ -39,7 +39,7 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
         CompactionCoordinator::check_manual_deadline(manual_deadline)?;
         if plan.output_seq == 0 {
-            plan.output_seq = self.state.next_compaction_output_generation()?;
+            plan.output_seq = self.allocate_compaction_sst_name(plan.cf_id)?;
         }
         if self.actors.cloud_coordinator.hybrid_storage.is_some() {
             // Early remote output staging can leave harmless orphans after a
@@ -163,7 +163,7 @@ impl EventLoop {
         self.state.retry_metadata_reload()?;
         CompactionCoordinator::check_manual_deadline(manual_deadline)?;
         if plan.output_seq == 0 {
-            plan.output_seq = self.state.next_compaction_output_generation()?;
+            plan.output_seq = self.allocate_compaction_sst_name(plan.cf_id)?;
         }
         if self.actors.cloud_coordinator.hybrid_storage.is_some()
             && self.begin_sst_name_reservation(
@@ -212,6 +212,14 @@ impl EventLoop {
         deadline: Option<OperationDeadline>,
         result: MidgeResult<()>,
     ) {
+        if result.is_ok() && !self.can_resume_reserved_compaction(&plan) {
+            self.actors
+                .cloud_coordinator
+                .metadata_mirror
+                .pending_compactions
+                .push_back((plan, deadline));
+            return;
+        }
         let result = result.and_then(|()| {
             self.authority.compaction_fence.admit_compaction()?;
             self.launch_compaction_with_original_deadline(plan, deadline)

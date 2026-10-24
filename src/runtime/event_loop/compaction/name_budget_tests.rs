@@ -369,12 +369,19 @@ fn should_keep_name_reservation_uncovered_when_actual_metadata_read_outlives_ori
         let puts = fixture.backend.puts.lock().unwrap()[before_puts..].to_vec();
         let bound = fixture.el.state.sst_names.reserved_through.get(&0).copied();
         let local = crate::metadata::ManifestPersistence::load(&fixture.el.state.db_path);
-        let mut recovered = RuntimeState::try_new(
+        let recovered = RuntimeState::try_new(
             fixture.el.state.db_path.clone(),
             false,
             crate::config::RecoveryPolicy::Strict,
         )?;
-        let next_generation = recovered.next_compaction_output_generation();
+        let mut recovered_loop = EventLoop::new(
+            recovered,
+            false,
+            Arc::new(crate::runtime::ResponseRouter::new()),
+            crate::runtime::RuntimeConfig::default(),
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        let next_generation = recovered_loop.allocate_compaction_sst_name(0);
         let lease_is_live = fixture.el.check_lease_health();
         let accepted_epoch = fixture.lease.epoch();
         let store = fixture.lease.get_leader_store().unwrap();
@@ -401,7 +408,7 @@ fn should_keep_name_reservation_uncovered_when_actual_metadata_read_outlives_ori
             RESERVED_THROUGH
         );
         assert!(
-            next_generation.expect("recovered allocator retains reservation") > RESERVED_THROUGH
+            next_generation.expect("recovered allocator retains reservation") >= RESERVED_THROUGH
         );
         assert_eq!(
             after_head.expect("read unchanged authoritative pointer"),

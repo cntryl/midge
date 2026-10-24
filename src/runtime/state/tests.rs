@@ -3655,19 +3655,3 @@ fn should_return_error_without_wal_bytes_when_reservation_cannot_be_persisted() 
     assert_eq!(state.sequence, sequence_before);
     assert_eq!(device.files()[&segment], segment_before);
 }
-
-#[test]
-fn should_allocate_compaction_generation_within_reservation() {
-    // Arrange
-    let device = crate::simulation::crash_fs::CrashDevice::new();
-    let mut state = state_on_device(&device).expect("recover");
-
-    // Act
-    let generation = state
-        .next_compaction_output_generation()
-        .expect("allocate a generation");
-
-    // Assert
-    assert!(generation <= persisted_reservation(&device));
-    assert_eq!(state.sequence, generation);
-}

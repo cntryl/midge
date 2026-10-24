@@ -41,6 +41,133 @@ impl Drop for HeldMirror {
     }
 }
 
+fn seed_compaction_name_source(event_loop: &mut EventLoop) -> MidgeResult<String> {
+    use crate::sst::SstFactory as _;
+    let name = crate::cloud_layout::file_name(0, 0, 1);
+    let factory = crate::sst::FsSstFactoryIo::new(
+        crate::io::subdirectory(Arc::clone(&event_loop.state.fs), "sst"),
+        4096,
+    );
+    let mut writer = factory.create()?;
+    writer.add_sorted_with_meta(
+        b"key",
+        Some(b"value"),
+        1,
+        crate::types::EntryType::Put,
+        None,
+    )?;
+    let finalized = writer
+        .finish_to_path_with_summary(std::path::Path::new(&name))?
+        .unwrap();
+    let summary = finalized.summary.unwrap();
+    event_loop
+        .state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: name.clone(),
+            cf_id: 0,
+            level: 0,
+            sst_seq: 1,
+            size_bytes: finalized.size_bytes,
+            content_crc32c: Some(finalized.content_crc32c),
+            smallest_key: Some(summary.smallest_key),
+            largest_key: Some(summary.largest_key),
+            smallest_seq: Some(1),
+            largest_seq: Some(1),
+            key_bounds_complete: true,
+            ..Default::default()
+        });
+    crate::metadata::ManifestPersistence::save_with_fs(
+        &event_loop.state.fs,
+        &event_loop.state.manifest,
+    )
+    .map_err(MidgeError::Internal)?;
+    Ok(name)
+}
+
+#[test]
+fn should_retain_exact_compaction_name_and_deadline_when_reservation_completes_under_another_owner(
+) -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange: reserve a real source's output generation with a held mirror.
+    let mut event_loop =
+        crate::runtime::event_loop::tests::create_test_cloud_event_loop_with_reserved_names(
+            Default::default(),
+            Some(100),
+        )?;
+    let source = seed_compaction_name_source(&mut event_loop)?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let (completed, _results) = crossbeam::channel::unbounded();
+    event_loop.pipeline.worker_msg_tx = Some(completed);
+    let _waiter = event_loop
+        .routing
+        .router
+        .register(91101, "accepted compaction name");
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(20));
+    event_loop
+        .state
+        .pending_compaction_waits
+        .insert(91101, deadline);
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1);
+    plan.input_files.push(source.clone());
+    plan.source_files.push(source);
+    event_loop.launch_compaction(plan)?;
+    held.await_entry();
+    let owner = crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
+    assert!(event_loop
+        .publication
+        .publication_gate
+        .try_acquire(owner.clone()));
+    // Act: mirror success cannot fail or replace the accepted generation while
+    // an unrelated short local publication turn owns manifest mutation.
+    held.release.try_send(()).unwrap();
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+    let waiting = &event_loop
+        .actors
+        .cloud_coordinator
+        .metadata_mirror
+        .pending_compactions;
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].0.output_seq, 100);
+    assert_eq!(waiting[0].1, Some(deadline));
+    assert_eq!(event_loop.state.sst_names.cursor[&0], 101);
+    assert_eq!(event_loop.actors.compaction_actor.active_count(), 0);
+    assert!(!event_loop.has_ready_reserved_compaction());
+    event_loop.publication.publication_gate.release(&owner);
+    assert!(event_loop.has_ready_reserved_compaction());
+    event_loop.resume_reserved_compaction_if_ready();
+    // Assert: retry uses the owned original deadline/name, spends no new cursor,
+    // and starts the actual job exactly once after the short turn is released.
+    assert!(event_loop
+        .actors
+        .cloud_coordinator
+        .metadata_mirror
+        .pending_compactions
+        .is_empty());
+    assert_eq!(
+        event_loop
+            .actors
+            .compaction_actor
+            .accepted_output_generation(0, 1)?,
+        100
+    );
+    assert_eq!(
+        event_loop
+            .actors
+            .compaction_actor
+            .manual_deadline_for_generation(0, 1, 100)?,
+        Some(deadline)
+    );
+    assert_eq!(event_loop.state.sst_names.cursor[&0], 101);
+    fail::remove("midge::metadata_mirror::before_provider");
+    scenario.teardown();
+    Ok(())
+}
+
 #[test]
 fn should_complete_local_reads_and_best_effort_writes_while_metadata_provider_is_held(
 ) -> MidgeResult<()> {

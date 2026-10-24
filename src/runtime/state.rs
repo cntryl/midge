@@ -1389,13 +1389,6 @@ impl RuntimeState {
         Ok(sealed)
     }
 
-    pub(crate) fn next_compaction_output_generation(&mut self) -> MidgeResult<u64> {
-        self.raise_sequence_to(self.compaction_output_generation);
-        let generation = *self.allocate_sequences(1)?.end();
-        self.compaction_output_generation = generation;
-        Ok(generation)
-    }
-
     pub fn restore_sequence_floor_from_manifest(&mut self) {
         let sequence_floor = Self::manifest_visible_sequence_floor(&self.manifest);
         if self.sequence < sequence_floor {
