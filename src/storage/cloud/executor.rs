@@ -343,6 +343,19 @@ impl CloudExecutor {
     ) where
         F: FnOnce(String, MidgeResult<CloudResponse>) -> CloudEvent + Send + 'static,
     {
+        self.spawn_typed_request(request, context, callback, mapper);
+    }
+
+    pub(crate) fn spawn_typed_request<T, F>(
+        &self,
+        request: CloudRequest,
+        context: String,
+        callback: std::sync::mpsc::Sender<T>,
+        mapper: F,
+    ) where
+        T: Send + 'static,
+        F: FnOnce(String, MidgeResult<CloudResponse>) -> T + Send + 'static,
+    {
         let client = self.client.clone();
         let signer = self.signer.clone();
         let request = Self::apply_default_timeout(request, self.default_timeout());

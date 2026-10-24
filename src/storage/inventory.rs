@@ -7,6 +7,17 @@ use crate::common::{DeadlineScope, MidgeResult, OperationDeadline};
 
 /// Startup inventory of the object store that holds WAL segments and SSTs.
 pub(crate) trait ObjectInventory: Send + Sync {
+    /// One bounded inventory page. Unsupported stores return `None`, never a
+    /// full-prefix collection followed by truncation.
+    fn keys_page(
+        &self,
+        _prefix: &str,
+        _page: super::cloud::CloudListPageRequest,
+        _scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Option<super::cloud::CloudListPage>> {
+        Ok(None)
+    }
+
     /// Size of `key`. `None` only when the store reports the object
     /// definitively absent; an error means nothing is known about it.
     fn object_size(&self, key: &str, scope: Option<&DeadlineScope>) -> MidgeResult<Option<u64>>;
@@ -25,6 +36,23 @@ fn deadline(scope: Option<&DeadlineScope>) -> OperationDeadline {
 }
 
 impl ObjectInventory for CloudStorage {
+    fn keys_page(
+        &self,
+        prefix: &str,
+        page: super::cloud::CloudListPageRequest,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Option<super::cloud::CloudListPage>> {
+        let deadline = deadline(scope);
+        Ok(BlockingCloud::new(self, &deadline)
+            .list_page(prefix, page)?
+            .map(|mut page| {
+                for key in &mut page.keys {
+                    *key = self.strip_namespace(key).to_owned();
+                }
+                page
+            }))
+    }
+
     fn object_size(&self, key: &str, scope: Option<&DeadlineScope>) -> MidgeResult<Option<u64>> {
         let deadline = deadline(scope);
         Ok(BlockingCloud::new(self, &deadline)

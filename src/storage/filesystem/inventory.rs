@@ -34,6 +34,69 @@ pub(super) fn object_is_definitively_missing(path: &Path, error: &std::io::Error
 }
 
 impl crate::storage::inventory::ObjectInventory for FileSystem {
+    fn keys_page(
+        &self,
+        prefix: &str,
+        page: crate::storage::cloud::CloudListPageRequest,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> MidgeResult<Option<crate::storage::cloud::CloudListPage>> {
+        page.validate(prefix)
+            .map_err(|error| MidgeError::InvalidArgument(error.to_string()))?;
+        let directory = prefix.rfind('/').map_or("", |end| &prefix[..end]);
+        let directory = self
+            .full_path(directory)
+            .map_err(|error| Self::inventory_error("resolve page", Path::new(directory), error))?;
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if object_is_definitively_missing(&directory, &error) => {
+                return Ok(Some(crate::storage::cloud::CloudListPage {
+                    keys: Vec::new(),
+                    continuation: None,
+                }));
+            }
+            Err(error) => return Err(Self::inventory_error("list page", &directory, error)),
+        };
+        let mut selected = std::collections::BTreeSet::new();
+        for entry in entries {
+            if let Some(scope) = scope {
+                scope.check("filesystem inventory page")?;
+            }
+            let entry =
+                entry.map_err(|error| Self::inventory_error("list page", &directory, error))?;
+            let kind = entry.file_type()?;
+            // This capability deliberately supports a flat namespace only.
+            if kind.is_dir() {
+                return Ok(None);
+            }
+            if !kind.is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(&self.base_path)
+                .map_err(|error| Self::inventory_error("resolve page", &path, error))?;
+            let key = relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if key.starts_with(prefix)
+                && page.continuation.as_ref().is_none_or(|after| &key > after)
+            {
+                selected.insert(key);
+                if selected.len() > page.max_keys + 1 {
+                    selected.pop_last();
+                }
+            }
+        }
+        let more = selected.len() > page.max_keys;
+        let keys = selected.into_iter().take(page.max_keys).collect::<Vec<_>>();
+        let continuation = more.then(|| keys.last().cloned()).flatten();
+        page.accept(prefix, keys, continuation)
+            .map(Some)
+            .map_err(|error| MidgeError::Corruption(error.to_string()))
+    }
+
     fn object_size(
         &self,
         key: &str,

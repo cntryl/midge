@@ -388,6 +388,32 @@ impl crate::storage::cloud::CloudDeleteCapability for ObjectStoreBackend {
 }
 
 impl crate::storage::cloud::CloudListCapability for ObjectStoreBackend {
+    fn list_page(
+        &self,
+        prefix: &str,
+        page: super::CloudListPageRequest,
+        options: super::CloudRequestOptions,
+        callback: super::CloudListPageCallback,
+    ) {
+        let deadline = OperationDeadline::from_budget(
+            options.timeout().unwrap_or(self.timeout).min(self.timeout),
+        );
+        let scope = DeadlineScope::new(deadline);
+        let result = page
+            .validate(prefix)
+            .and_then(|()| {
+                self.store
+                    .keys_page(prefix, page.clone(), Some(&scope))
+                    .map_err(CloudError::from_protocol_or_timeout_error)
+            })
+            .and_then(|result| {
+                result
+                    .map(|result| page.accept(prefix, result.keys, result.continuation))
+                    .transpose()
+            });
+        let _ = callback.send(result);
+    }
+
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.submit_list_with_headers(prefix, Vec::new(), callback);
     }

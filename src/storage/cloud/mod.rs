@@ -25,6 +25,11 @@
 
 mod blocking;
 mod config;
+mod list_page;
+pub use list_page::{
+    CloudListPage, CloudListPageCallback, CloudListPageRequest, MAX_LIST_PAGE_BYTES,
+    MAX_LIST_PAGE_KEYS,
+};
 #[cfg(any(
     feature = "cloud-aws",
     feature = "cloud-azure",

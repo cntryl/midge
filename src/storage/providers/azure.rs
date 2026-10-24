@@ -844,6 +844,9 @@ struct AzureListContext {
 }
 
 impl ListPageParser for AzureListContext {
+    fn list_limit_parameter(&self) -> &'static str {
+        "maxresults"
+    }
     fn url(&self, prefix: &str, token: Option<&str>) -> String {
         let mut url = format!(
             "{}?restype=container&comp=list&prefix={}",
@@ -1341,6 +1344,26 @@ impl crate::storage::cloud::CloudDeleteCapability for AzureBackend {
 }
 
 impl crate::storage::cloud::CloudListCapability for AzureBackend {
+    fn list_page(
+        &self,
+        prefix: &str,
+        page: crate::storage::cloud::CloudListPageRequest,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: crate::storage::cloud::CloudListPageCallback,
+    ) {
+        super::rest::submit_list_page(
+            &self.executor,
+            AzureListContext {
+                base_url: self.base_url(),
+                sas_token: self.sas_token.clone(),
+            },
+            prefix,
+            page,
+            options,
+            callback,
+        );
+    }
+
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.submit_list_with_headers(prefix, Vec::new(), callback);
     }

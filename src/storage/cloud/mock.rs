@@ -327,6 +327,43 @@ impl crate::storage::cloud::CloudDeleteCapability for MockCloudBackend {
 }
 
 impl crate::storage::cloud::CloudListCapability for MockCloudBackend {
+    fn list_page(
+        &self,
+        prefix: &str,
+        page: CloudListPageRequest,
+        options: CloudRequestOptions,
+        callback: CloudListPageCallback,
+    ) {
+        let result = (|| {
+            page.validate(prefix)?;
+            if options.timeout().is_some_and(|timeout| timeout.is_zero()) {
+                return Err(CloudError::Timeout(
+                    "mock LIST page exhausted deadline".into(),
+                ));
+            }
+            let storage = self.storage.lock();
+            let mut selected = std::collections::BTreeSet::new();
+            for key in storage.keys().filter(|key| {
+                key.starts_with(prefix)
+                    && page.continuation.as_ref().is_none_or(|after| *key > after)
+            }) {
+                selected.insert(key);
+                if selected.len() > page.max_keys + 1 {
+                    selected.pop_last();
+                }
+            }
+            let more = selected.len() > page.max_keys;
+            let keys = selected
+                .into_iter()
+                .take(page.max_keys)
+                .cloned()
+                .collect::<Vec<_>>();
+            let next = more.then(|| keys.last().cloned()).flatten();
+            page.accept(prefix, keys, next).map(Some)
+        })();
+        let _ = callback.send(result);
+    }
+
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         let prefix = prefix.to_string();
         let results: Vec<_> = self

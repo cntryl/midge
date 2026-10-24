@@ -238,3 +238,51 @@ fn should_retain_replacement_when_delete_identity_changes_after_probe() {
         b"replacement"
     );
 }
+
+#[test]
+fn should_continue_bounded_pages_when_one_old_ordinal_has_many_orphan_attempts() {
+    // Arrange: successful epochs do not give all failed attempts distinct
+    // ordinals; one ordinal can contain many immutable operation UUIDs.
+    let fixture = Fixture::new();
+    let first = fixture.publish(1, true);
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    let bodies = read_committed_metadata_bodies_within(&fixture.cloud, &first, &deadline).unwrap();
+    for _ in 0..25 {
+        super::super::metadata_chain::publish(
+            &fixture.context(&deadline),
+            &bodies,
+            None,
+            None,
+            None,
+            first.id,
+        )
+        .unwrap();
+    }
+    let mut head = first;
+    for sequence in 2..=10 {
+        head = fixture.publish(sequence, true);
+    }
+    let mut state = MetadataRetentionState {
+        interval: Duration::from_millis(1),
+        ..Default::default()
+    };
+
+    // Act: real cooldown expiry allows each next page; no state reset is used.
+    for _ in 0..16 {
+        let lists = state.totals.lists;
+        let probes = state.totals.probes;
+        fixture.collect(&head, &mut state);
+        assert!(state.totals.lists - lists <= LIST_BUDGET as u64);
+        assert!(state.totals.probes - probes <= CANDIDATE_BUDGET as u64);
+    }
+
+    // Assert: operation-token paging makes eventual progress without ever
+    // collecting the complete ordinal prefix or abandoning its unprobed tail.
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    let remaining = BlockingCloud::new(&fixture.cloud, &deadline)
+        .list("manifest/")
+        .unwrap();
+    assert_eq!(remaining.len(), 4);
+    assert_eq!(state.totals.deleted, 31);
+    read_committed_metadata_bodies_within(&fixture.cloud, &head, &deadline).unwrap();
+}

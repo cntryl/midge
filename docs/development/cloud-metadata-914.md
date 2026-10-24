@@ -105,6 +105,11 @@ checks after takeover.
 
 Collection is attempted at most every 30 seconds following a successful mirror,
 with at most four ordinal-prefix LISTs and eight candidate probes per attempt.
+Each LIST is a single non-retrying bounded page. Native S3/OCI, Azure and GCS
+requests include the provider's page-size control; responses are capped at
+64 KiB and 32 returned keys, with bounded continuation tokens. The cursor stays
+on an ordinal until all its pages are consumed. Unsupported bounded-page stores
+retain data rather than falling back to complete-prefix enumeration.
 Each probe pins a bounded exact identity, decodes and checks its ordinal,
 operation and writer epoch, then freshly validates the lease and selected
 pointer before an identity-conditional DELETE. Unknown reads and conditional

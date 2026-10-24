@@ -56,6 +56,8 @@ pub mod gcs;
 #[cfg(feature = "cloud-gcp")]
 mod gcs_resolver;
 #[cfg(all(test, feature = "cloud-all"))]
+mod list_page_contract_tests;
+#[cfg(all(test, feature = "cloud-all"))]
 mod multipart_contract_tests;
 pub(crate) mod preflight;
 #[cfg(all(test, feature = "cloud-all", feature = "sqrzl-tests"))]

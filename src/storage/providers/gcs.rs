@@ -1085,6 +1085,15 @@ struct GcsListContext {
 }
 
 impl ListPageParser for GcsListContext {
+    fn list_limit_parameter(&self) -> &'static str {
+        match self.mode {
+            GcsBackendMode::Json => "maxResults",
+            GcsBackendMode::Xml => "max-keys",
+        }
+    }
+    fn page_request(&self, url: String) -> CloudRequest {
+        GcsBackend::bodyless_request(self.mode, Method::GET, url)
+    }
     fn url(&self, prefix: &str, token: Option<&str>) -> String {
         match self.mode {
             GcsBackendMode::Json => {
@@ -1763,6 +1772,27 @@ impl crate::storage::cloud::CloudDeleteCapability for GcsBackend {
 }
 
 impl crate::storage::cloud::CloudListCapability for GcsBackend {
+    fn list_page(
+        &self,
+        prefix: &str,
+        page: crate::storage::cloud::CloudListPageRequest,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: crate::storage::cloud::CloudListPageCallback,
+    ) {
+        super::rest::submit_list_page(
+            &self.executor,
+            GcsListContext {
+                endpoint: self.endpoint.clone(),
+                bucket: self.bucket.clone(),
+                mode: self.mode,
+            },
+            prefix,
+            page,
+            options,
+            callback,
+        );
+    }
+
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.submit_list_with_headers(prefix, Vec::new(), callback);
     }

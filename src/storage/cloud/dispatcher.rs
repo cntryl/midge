@@ -295,6 +295,32 @@ impl CloudStorage {
         );
     }
 
+    pub(crate) fn submit_list_page_within(
+        &self,
+        prefix: &str,
+        page: super::CloudListPageRequest,
+        deadline: crate::common::OperationDeadline,
+        callback: super::CloudListPageCallback,
+    ) {
+        let timeout = self.scoped_timeout(deadline.clamp(self.callback_timeout()));
+        let full_prefix = self.full_path(prefix);
+        if let Err(error) = page.validate(&full_prefix) {
+            let _ = callback.send(Err(error));
+        } else if timeout.is_zero() {
+            let _ = callback.send(Err(super::CloudError::Timeout(
+                "bounded LIST page has no budget".into(),
+            )));
+        } else {
+            self.lists.list_page(
+                &full_prefix,
+                page,
+                CloudRequestOptions::default()
+                    .with_deadline(crate::common::OperationDeadline::from_budget(timeout)),
+                callback,
+            );
+        }
+    }
+
     #[cfg(test)]
     pub fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.submit_head_within(key, self.callback_timeout(), callback);

@@ -806,3 +806,14 @@ cross-family BestEffort attempt and restart. The shared compile reaches only
 concurrent #909 test renames; behavioral, loom/differential/crash and A/B
 qualification remain pending. A related #941 regression preserves NotAttempted
 for an append whose physical rollback proves unchanged NoSpace.
+
+#943/#913 now have an optional bounded inventory-page capability. Native
+S3/OCI, Azure and GCS XML/JSON perform one non-retrying request per page, bounded
+to 32 keys, a 64 KiB response and a 4 KiB continuation. Unsupported inventory
+retains/defer work rather than collecting and truncating a whole prefix.
+Metadata retention preserves its ordinal/page cursor across four-LIST/eight-
+probe attempts, so many orphan UUIDs at one ordinal cannot starve later pages.
+Active HTTP regressions count requests across continuation/503 responses and
+reject repeated tokens; a 25-orphan ordinal regression preserves current
+recovery while draining bounded batches. Test targets compile (only #909 WIP
+warnings); behavioral/provider execution remains pending.

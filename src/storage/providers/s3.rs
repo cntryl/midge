@@ -1050,6 +1050,9 @@ struct S3ListContext {
 }
 
 impl ListPageParser for S3ListContext {
+    fn list_limit_parameter(&self) -> &'static str {
+        "max-keys"
+    }
     fn url(&self, prefix: &str, token: Option<&str>) -> String {
         let mut url = format!("{}?list-type=2&prefix={}", self.base_url, encode(prefix));
         if let Some(token) = token {
@@ -1575,6 +1578,25 @@ impl crate::storage::cloud::CloudDeleteCapability for S3Backend {
 }
 
 impl crate::storage::cloud::CloudListCapability for S3Backend {
+    fn list_page(
+        &self,
+        prefix: &str,
+        page: crate::storage::cloud::CloudListPageRequest,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: crate::storage::cloud::CloudListPageCallback,
+    ) {
+        super::rest::submit_list_page(
+            &self.executor,
+            S3ListContext {
+                base_url: self.base_url(),
+            },
+            prefix,
+            page,
+            options,
+            callback,
+        );
+    }
+
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.submit_list_with_headers(prefix, Vec::new(), callback);
     }

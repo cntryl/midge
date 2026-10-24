@@ -123,6 +123,39 @@ impl<'a> BlockingCloud<'a> {
         Ok(keys.unwrap_or_default())
     }
 
+    pub(crate) fn list_page(
+        &self,
+        prefix: &str,
+        page: super::CloudListPageRequest,
+    ) -> MidgeResult<Option<super::CloudListPage>> {
+        let deadline = self.begin("LIST page", prefix)?;
+        let timeout = self.remaining(&deadline, "LIST page", prefix)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cloud
+            .submit_list_page_within(prefix, page.clone(), deadline, tx);
+        let result = rx.recv_timeout(timeout).map_err(|error| {
+            MidgeError::Timeout(format!("bounded cloud LIST page callback: {error}"))
+        })?;
+        self.remaining(&deadline, "LIST page", prefix)?;
+        result
+            .map_err(|error| {
+                contextualize_operation_error(
+                    &error,
+                    format_args!("bounded cloud LIST page '{prefix}' failed"),
+                    self.deadline,
+                )
+            })?
+            .map(|result| {
+                page.accept(
+                    &self.cloud.full_path(prefix),
+                    result.keys,
+                    result.continuation,
+                )
+                .map_err(|error| MidgeError::Corruption(error.to_string()))
+            })
+            .transpose()
+    }
+
     #[cfg(test)]
     pub(crate) fn put_with_headers(
         &self,

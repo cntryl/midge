@@ -22,6 +22,7 @@ mod tests;
 pub(crate) struct MetadataRetentionState {
     last_run: Option<Instant>,
     cursor: u64,
+    continuation: Option<String>,
     pub(crate) totals: RetentionCounters,
     pub(crate) interval: Duration,
 }
@@ -31,6 +32,7 @@ impl Default for MetadataRetentionState {
         Self {
             last_run: None,
             cursor: 0,
+            continuation: None,
             totals: RetentionCounters::default(),
             interval: INTERVAL,
         }
@@ -60,6 +62,7 @@ impl MetadataRetentionState {
         }
         if self.cursor == 0 || self.cursor >= cutoff {
             self.cursor = 1;
+            self.continuation = None;
         }
         Some(cutoff)
     }
@@ -91,16 +94,17 @@ pub(super) fn collect_after_commit(
             break;
         }
         let ordinal = state.cursor;
-        state.cursor += 1;
         state.totals.lists += 1;
-        let Ok(keys) = io.list(&format!("manifest/{ordinal:020}/")) else {
+        let page = crate::storage::cloud::CloudListPageRequest {
+            continuation: state.continuation.clone(),
+            max_keys: (CANDIDATE_BUDGET - candidates)
+                .min(crate::storage::cloud::MAX_LIST_PAGE_KEYS),
+        };
+        let Ok(Some(page)) = io.list_page(&format!("manifest/{ordinal:020}/"), page) else {
             state.totals.retained += 1;
             break;
         };
-        for key in keys {
-            if candidates >= CANDIDATE_BUDGET {
-                break;
-            }
+        for key in page.keys {
             let key = context.cloud.strip_namespace(&key);
             if protected.contains(key)
                 || crate::metadata::cloud_manifest::validate_key(key, ordinal).is_err()
@@ -119,6 +123,10 @@ pub(super) fn collect_after_commit(
                 }
             }
         }
+        state.continuation = page.continuation;
+        if state.continuation.is_none() {
+            state.cursor += 1;
+        }
     }
     tracing::debug!(
         lists = state.totals.lists,
@@ -136,19 +144,23 @@ fn reclaim_candidate(
     ordinal: u64,
 ) -> MidgeResult<bool> {
     let io = BlockingCloud::new(context.cloud, context.deadline);
-    let Some(metadata) = io.head_optional(key)? else {
+    let Ok(Some(metadata)) = io.head_optional(key) else {
         return Ok(false);
     };
     if metadata.size == 0 || metadata.size > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
         return Ok(false);
     }
-    let bytes = read_identity(context, key, &metadata)?;
+    let Ok(bytes) = read_identity(context, key, &metadata) else {
+        return Ok(false);
+    };
     if !super::metadata_chain::reclaimable_version(
         &bytes,
         key,
         ordinal,
         context.authority.writer_epoch,
-    )? {
+    )
+    .unwrap_or(false)
+    {
         return Ok(false);
     }
     validate_current(context, generation)?;

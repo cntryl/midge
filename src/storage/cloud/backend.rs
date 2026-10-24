@@ -633,6 +633,19 @@ pub trait CloudDeleteCapability: Send + Sync {
 /// impl CloudListCapability for MissingList {}
 /// ```
 pub trait CloudListCapability: Send + Sync {
+    /// At most one physical LIST attempt; no implicit pagination or retries.
+    /// `None` means this backend cannot provide the bounded capability. It
+    /// must never emulate it by collecting a complete prefix first.
+    fn list_page(
+        &self,
+        _prefix: &str,
+        _page: super::CloudListPageRequest,
+        _options: CloudRequestOptions,
+        callback: super::CloudListPageCallback,
+    ) {
+        let _ = callback.send(Ok(None));
+    }
+
     /// Submit a LIST with typed deadline controls.
     fn list(&self, prefix: &str, options: CloudRequestOptions, callback: CloudCallback) {
         if options.timeout().is_some_and(|timeout| timeout.is_zero()) {
