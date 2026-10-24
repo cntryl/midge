@@ -35,6 +35,8 @@ mod ingest;
 mod lease_state;
 mod metrics;
 mod startup;
+#[cfg(feature = "failpoints")]
+pub use startup::{install_manual_caller_expiry, OwnerExit};
 mod verification;
 
 pub use crate::types::ColumnFamilyId;

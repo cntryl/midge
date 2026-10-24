@@ -174,6 +174,8 @@ pub mod __internal {
         pub use crate::runtime::read_snapshot::point_read::audit::set_point_read_level_order_audit;
     }
     pub mod startup {
+        #[cfg(feature = "failpoints")]
+        pub use crate::engine::{install_manual_caller_expiry, OwnerExit};
         pub use crate::runtime::{StartupEvent, StartupObserver};
     }
     pub mod maintenance {

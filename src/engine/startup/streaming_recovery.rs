@@ -178,7 +178,7 @@ impl CloudReplay {
             }
             Ok(stats)
         })();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "failpoints"))]
         super::test_control::actor_join_started();
         let shutdown = actor.shutdown_and_join();
         let stats = recovery?;
@@ -432,7 +432,7 @@ fn publish_checkpoint_output(
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),
         })?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "failpoints"))]
         super::test_control::before_publish_receive();
         let FlushWorkerResult::Publish(completion) = receive_completion(
             actor,

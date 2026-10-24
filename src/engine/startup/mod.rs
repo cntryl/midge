@@ -16,8 +16,10 @@ mod storage;
 mod storage_root;
 pub(super) use storage_root::existing_host_root;
 mod streaming_recovery;
-#[cfg(test)]
+#[cfg(any(test, feature = "failpoints"))]
 mod test_control;
+#[cfg(feature = "failpoints")]
+pub use test_control::{install_manual_caller_expiry, OwnerExit};
 mod timing;
 
 struct StartupStoragePath {

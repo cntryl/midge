@@ -1,10 +1,12 @@
 //! Native aggregate startup deadlines through an explicitly required Sqrzl endpoint.
 
 use super::*;
+#[cfg(feature = "failpoints")]
+use cntryl_midge::__internal::startup::{install_manual_caller_expiry, OwnerExit};
 use cntryl_midge::__internal::startup::{StartupEvent, StartupObserver};
 use cntryl_midge::MidgeError;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
@@ -27,6 +29,7 @@ struct StartupTrace {
     cleanup_changed: Condvar,
     prepared_hold: Mutex<bool>,
     prepared_changed: Condvar,
+    persistent_prepared_hold: AtomicBool,
 }
 
 impl StartupTrace {
@@ -40,6 +43,7 @@ impl StartupTrace {
             cleanup_changed: Condvar::new(),
             prepared_hold: Mutex::new(false),
             prepared_changed: Condvar::new(),
+            persistent_prepared_hold: AtomicBool::new(false),
         })
     }
 
@@ -66,19 +70,35 @@ impl StartupTrace {
     }
 
     fn observe_prepared(&self) {
+        let held = self.prepared_hold.lock().unwrap();
         self.prepared.fetch_add(1, Ordering::AcqRel);
         self.prepared_changed.notify_all();
-        // A finite test-only hold also makes an incorrect baseline return,
-        // while the RAII owner releases early on every completed caller path.
-        let (mut held, _) = self
+        if self.persistent_prepared_hold.load(Ordering::Acquire) {
+            // The controlled caller has a finite receive bound and releases
+            // this hold before joining even if a broken baseline never expires.
+            drop(
+                self.prepared_changed
+                    .wait_while(held, |held| *held)
+                    .unwrap(),
+            );
+        } else {
+            let (mut held, _) = self
+                .prepared_changed
+                .wait_timeout_while(held, Duration::from_secs(2), |held| *held)
+                .unwrap();
+            *held = false;
+        }
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn wait_for_prepared(&self) -> bool {
+        let (_held, _) = self
             .prepared_changed
-            .wait_timeout_while(
-                self.prepared_hold.lock().unwrap(),
-                Duration::from_secs(2),
-                |held| *held,
-            )
+            .wait_timeout_while(self.prepared_hold.lock().unwrap(), CLEANUP_WAIT, |_| {
+                self.prepared.load(Ordering::Acquire) == 0
+            })
             .unwrap();
-        *held = false;
+        self.prepared.load(Ordering::Acquire) == 1
     }
 }
 
@@ -88,6 +108,14 @@ impl PreparedHold {
     fn new(trace: Arc<StartupTrace>) -> Self {
         *trace.prepared_hold.lock().unwrap() = true;
         Self(trace)
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn until_release(trace: Arc<StartupTrace>) -> Self {
+        trace
+            .persistent_prepared_hold
+            .store(true, Ordering::Release);
+        Self::new(trace)
     }
 }
 
@@ -309,9 +337,12 @@ fn should_bound_native_epoch_discovery_when_catalog_heads_exceed_total_open_budg
     // Their cumulative700ms exceeds one600ms deadline captured before discovery.
     let fixture = Fixture::new(DelayMode::DiscoveryPair);
     let trace = fixture.trace();
+    let hold = PreparedHold::new(Arc::clone(&trace));
 
     // Act: always shut down an unexpected baseline Engine before asserting RED.
     let (result, elapsed) = observed_open(&fixture, Some(OPEN_BUDGET), Arc::clone(&trace));
+    let armed_at_return = *trace.prepared_hold.lock().unwrap();
+    drop(hold);
     let timeout = match result {
         Err(MidgeError::Timeout(_)) => true,
         Ok(mut engine) => {
@@ -355,6 +386,11 @@ fn should_bound_native_epoch_discovery_when_catalog_heads_exceed_total_open_budg
         0
     );
     trace.assert_no_runtime_admission();
+    assert!(
+        armed_at_return,
+        "an armed hold does not prove actual preparation"
+    );
+    assert_eq!(trace.aborted.load(Ordering::Acquire), 0);
     // Cooperative native fixture envelope, not a preemption promise for arbitrary local syscalls.
     assert!(
         elapsed <= OPEN_BUDGET + Duration::from_millis(400),
@@ -421,25 +457,82 @@ fn should_keep_startup_deadline_when_mandatory_native_catalog_read_follows_acqui
     assert_fast_same_path_reopens(&fixture);
 }
 
-#[test]
-fn should_abort_late_actual_runtime_preparation_when_native_open_caller_expires() {
-    // Arrange: bootstrap and durably acknowledge actual rows without an open
-    // deadline. The timed recovered reopen then targets a real dormant runtime,
-    // rather than spending its phase budget on fresh namespace initialization.
-    let fixture = Fixture::new(DelayMode::Fast);
+fn seed_preparation_fixture(fixture: &Fixture) {
     let mut seeded = Engine::open(fixture.options(None, fixture.trace()))
         .expect("defaultNone native bootstrap before preparation hold");
     record_rows_and_verify(&seeded);
     seeded.shutdown(Duration::from_secs(5)).unwrap();
-    let trace = fixture.trace();
-    let hold = PreparedHold::new(Arc::clone(&trace));
+}
 
-    // Act: the owned startup envelope must return while the worker is held.
-    let (result, elapsed) = observed_open(&fixture, Some(OPEN_BUDGET), Arc::clone(&trace));
-    let held_at_return = *trace.prepared_hold.lock().unwrap();
-    let admitted_at_return = trace.admitted.load(Ordering::Acquire);
-    drop(hold);
-    let timeout = match result {
+fn recover_preparation_seed(fixture: &Fixture) {
+    // Check the acknowledged seed before the healthy helper writes these keys.
+    let mut recovered = Engine::open(fixture.options(None, fixture.trace()))
+        .expect("defaultNone reopen after startup cleanup");
+    verify_rows(&recovered);
+    recovered.shutdown(Duration::from_secs(5)).unwrap();
+    assert_fast_same_path_reopens(fixture);
+}
+
+#[cfg(feature = "failpoints")]
+struct ControlledPreparation {
+    result: Result<Engine, MidgeError>,
+    prepared_before_expiry: bool,
+    held_at_return: bool,
+    admitted_at_return: usize,
+    owner_exit: OwnerExit,
+}
+
+#[cfg(feature = "failpoints")]
+fn controlled_prepared_open(fixture: &Fixture, trace: &Arc<StartupTrace>) -> ControlledPreparation {
+    let (expiry, expire) = crossbeam::channel::bounded(1);
+    let (owner_finished, finished) = crossbeam::channel::bounded(1);
+    let (returned, response) = crossbeam::channel::bounded(1);
+    let options = fixture.options(Some(OPEN_BUDGET), Arc::clone(trace));
+    std::thread::scope(|scope| {
+        let hold = PreparedHold::until_release(Arc::clone(trace));
+        let caller_trace = Arc::clone(trace);
+        let caller = scope.spawn(move || {
+            let _installation = install_manual_caller_expiry(expire, owner_finished);
+            let result = Engine::open(options);
+            let held = *caller_trace.prepared_hold.lock().unwrap();
+            let admitted = caller_trace.admitted.load(Ordering::Acquire);
+            let _ = returned.send((result, held, admitted));
+        });
+        let prepared_before_expiry = trace.wait_for_prepared();
+        // Even a missing phase is cancelled before cleanup, then fails its
+        // exact positive observation assertion; it cannot leak a caller.
+        let _ = expiry.send(());
+        let first = response.recv_timeout(CLEANUP_WAIT);
+        drop(hold);
+        let (result, held_at_return, admitted_at_return) = first
+            .or_else(|_| response.recv_timeout(CLEANUP_WAIT))
+            .expect("actual caller must return after phase hold releases");
+        caller.join().expect("controlled native open caller");
+        let owner_exit = finished
+            .recv_timeout(CLEANUP_WAIT)
+            .expect("actual startup owner must complete cleanup");
+        ControlledPreparation {
+            result,
+            prepared_before_expiry,
+            held_at_return,
+            admitted_at_return,
+            owner_exit,
+        }
+    })
+}
+
+#[test]
+#[cfg(feature = "failpoints")]
+fn should_abort_late_actual_runtime_preparation_when_native_open_caller_expires() {
+    // Arrange: preserve real acknowledged seed data and hold actual readiness.
+    let fixture = Fixture::new(DelayMode::Fast);
+    seed_preparation_fixture(&fixture);
+    let trace = fixture.trace();
+
+    // Act: manually expire the one shared scope only after positive preparation.
+    // The unchanged native600ms cases above prove real elapsed-time bounds.
+    let evidence = controlled_prepared_open(&fixture, &trace);
+    let timeout = match evidence.result {
         Err(MidgeError::Timeout(_)) => true,
         Ok(mut engine) => {
             engine.shutdown(Duration::from_secs(5)).unwrap();
@@ -449,33 +542,26 @@ fn should_abort_late_actual_runtime_preparation_when_native_open_caller_expires(
     };
     let clean = !timeout || trace.wait_for_successful_cleanup();
 
-    // Assert: release/join precedes assertions; late readiness never admits.
+    // Assert: release/join precedes assertions; the exact late phase never admits.
     assert!(
         timeout,
-        "prepared worker ignored aggregate budget: {elapsed:?}"
+        "prepared worker ignored manual shared-scope expiry"
     );
+    assert!(evidence.prepared_before_expiry);
     assert!(
-        held_at_return,
+        evidence.held_at_return,
         "caller returned only after held worker was released"
     );
-    assert!(
-        elapsed <= OPEN_BUDGET + Duration::from_millis(400),
-        "{elapsed:?}"
-    );
     assert_eq!(trace.prepared.load(Ordering::Acquire), 1);
-    assert_eq!(admitted_at_return, 0);
+    assert_eq!(evidence.admitted_at_return, 0);
     assert_eq!(trace.admitted.load(Ordering::Acquire), 0);
     assert_eq!(trace.aborted.load(Ordering::Acquire), 1);
+    assert_eq!(evidence.owner_exit, OwnerExit::Returned);
     assert!(
         clean,
         "actual aborted runtime and lease cleanup must finish"
     );
-    // Check the acknowledged seed before the healthy helper writes these keys.
-    let mut recovered = Engine::open(fixture.options(None, fixture.trace()))
-        .expect("defaultNone reopen after aborted runtime cleanup");
-    verify_rows(&recovered);
-    recovered.shutdown(Duration::from_secs(5)).unwrap();
-    assert_fast_same_path_reopens(&fixture);
+    recover_preparation_seed(&fixture);
 }
 
 #[test]
