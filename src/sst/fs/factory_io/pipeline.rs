@@ -239,7 +239,10 @@ impl BlockPipeline {
         FsSstWriter::update_key_bounds(&mut self.smallest_key, &mut self.largest_key, &entry.key);
 
         let target_block_size = FsSstWriter::clamp_block_size(block_size);
-        let restart = self.current_block_keys.len() % crate::sst::data_block::RESTART_INTERVAL == 0;
+        let restart = self
+            .current_block_keys
+            .len()
+            .is_multiple_of(crate::sst::data_block::RESTART_INTERVAL);
         let mut continued =
             restart && !self.current_block.is_empty() && self.previous_key == entry.key;
         if restart {
@@ -260,7 +263,11 @@ impl BlockPipeline {
             encoded = FsSstWriter::encode_pending_entry(&self.previous_key, &entry)?;
         }
 
-        if self.current_block_keys.len() % crate::sst::data_block::RESTART_INTERVAL == 0 {
+        if self
+            .current_block_keys
+            .len()
+            .is_multiple_of(crate::sst::data_block::RESTART_INTERVAL)
+        {
             let offset = u32::try_from(self.current_block.len()).map_err(|_| {
                 crate::common::MidgeError::ResourceLimit("SST restart offset exceeds u32".into())
             })?;

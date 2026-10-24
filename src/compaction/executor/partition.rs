@@ -1166,53 +1166,54 @@ fn range_starts(events: &[BudgetedEvent]) -> impl Iterator<Item = &RangeTombston
     })
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct PartitionOutputConfig<'a> {
+    pub cf_id: u32,
+    pub target_level: u32,
+    pub generation: u64,
+    pub target_sst_size: usize,
+    pub tombstone_gc: TombstoneGcPolicy,
+    pub output_size_limit: Option<usize>,
+    pub grandparent_overlap: &'a super::GrandparentOverlap,
+}
+
 pub(crate) fn write_partitioned_compaction_outputs(
     sst_factory: &dyn SstFactory,
     output_dir: &Path,
-    cf_id: u32,
-    target_level: u32,
-    generation: u64,
-    target_sst_size: usize,
     inputs: CompactionStreamInputs<'_>,
     budget: &crate::common::resource_budget::ResourceBudget,
-    tombstone_gc: TombstoneGcPolicy,
+    config: PartitionOutputConfig<'_>,
     abort_check: Option<&dyn Fn() -> bool>,
     output_sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
-    output_size_limit: Option<usize>,
-    grandparent_overlap: &super::GrandparentOverlap,
 ) -> MidgeResult<Vec<String>> {
     ensure_compaction_not_aborted(abort_check)?;
     let CompactionStreamInputs {
         mut cursors,
         _cursor_reservation,
     } = inputs;
-    if let Some(boundaries) = grandparent_overlap.boundary_cursor(budget)? {
+    if let Some(boundaries) = config.grandparent_overlap.boundary_cursor(budget)? {
         cursors.push(boundaries);
     }
-    let mut overlap = grandparent_overlap.tracker(budget);
+    let mut overlap = config.grandparent_overlap.tracker(budget);
     let mut roller = PartitionRoller::new(
         sst_factory,
         output_dir,
         PartitionIdentity {
-            cf_id,
-            target_level,
-            generation,
+            cf_id: config.cf_id,
+            target_level: config.target_level,
+            generation: config.generation,
             ordinal: 0,
         },
-        target_sst_size,
+        config.target_sst_size,
         budget,
-        output_size_limit,
+        config.output_size_limit,
     )?;
     let mut output_names = Vec::new();
     let mut cleanup = OutputSetCleanup::new(sst_factory.output_fs());
     let mut tombstones = RangeTombstoneTracker::new();
 
     let mut merged = EventMergeIterator::new(cursors, budget.clone(), abort_check)?;
-    if merged.peek_event().is_none() {
-        return Err(crate::common::MidgeError::Internal(
-            "compaction produced no output; inputs were not replaced".to_string(),
-        ));
-    }
+    require_compaction_input(&merged)?;
     let mut seen = 0usize;
     while let Some(first_event) = merged.next_event()? {
         if seen.is_multiple_of(1024) {
@@ -1239,13 +1240,17 @@ pub(crate) fn write_partitioned_compaction_outputs(
                 version,
                 tombstones.highest_obsolete_cover(),
                 starts.clone(),
-                tombstone_gc,
+                config.tombstone_gc,
             )
         });
 
         let has_output = roller.partition_point_count > 0 || tombstones.has_partition_tombstones();
-        if roller.should_roll(selected_version, starts.clone(), &tombstones, tombstone_gc)?
-            || (has_output && overlap.should_roll(&event_key))
+        if roller.should_roll(
+            selected_version,
+            starts.clone(),
+            &tombstones,
+            config.tombstone_gc,
+        )? || (has_output && overlap.should_roll(&event_key))
         {
             let (finished, boundary_reservation) =
                 roller.finish_for_roll(&event_key, &tombstones, abort_check)?;
@@ -1263,7 +1268,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
 
         tombstones.observe_starts(
             starts,
-            tombstone_gc,
+            config.tombstone_gc,
             budget,
             roller.pending_tombstone_bound(),
         )?;
@@ -1277,9 +1282,29 @@ pub(crate) fn write_partitioned_compaction_outputs(
         }
     }
 
+    finish_partitioned_outputs(
+        roller,
+        &tombstones,
+        cleanup,
+        output_names,
+        budget,
+        abort_check,
+        output_sink,
+    )
+}
+
+fn finish_partitioned_outputs(
+    roller: PartitionRoller<'_>,
+    tombstones: &RangeTombstoneTracker,
+    mut cleanup: OutputSetCleanup,
+    mut output_names: Vec<String>,
+    budget: &crate::common::resource_budget::ResourceBudget,
+    abort_check: Option<&dyn Fn() -> bool>,
+    output_sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
+) -> MidgeResult<Vec<String>> {
     ensure_compaction_not_aborted(abort_check)?;
     cleanup.record_finished_partition(
-        roller.finish(&tombstones, abort_check)?,
+        roller.finish(tombstones, abort_check)?,
         &mut output_names,
         budget,
         output_sink,
@@ -1287,6 +1312,15 @@ pub(crate) fn write_partitioned_compaction_outputs(
     ensure_compaction_not_aborted(abort_check)?;
     cleanup.disarm();
     Ok(output_names)
+}
+
+fn require_compaction_input(merged: &EventMergeIterator<'_>) -> MidgeResult<()> {
+    if merged.peek_event().is_none() {
+        return Err(crate::common::MidgeError::Internal(
+            "compaction produced no output; inputs were not replaced".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

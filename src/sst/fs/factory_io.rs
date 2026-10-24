@@ -522,7 +522,7 @@ impl FsSstWriter {
         &mut self,
         limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
     ) {
-        self.write_limiter = limiter.clone();
+        self.write_limiter.clone_from(&limiter);
         if let Some(streaming) = &mut self.streaming {
             streaming.sink.set_write_limiter(limiter);
         }
@@ -635,8 +635,10 @@ impl FsSstWriter {
 impl SstFactory for FsSstFactoryIo {
     fn fork_for_worker(&self) -> Option<Arc<dyn SstFactory>> {
         Some(Arc::new(Self {
-            fs: Arc::clone(&self.fs), block_size: self.block_size,
-            compression_policy: self.compression_policy.clone(), scratch_outstanding: Arc::default(),
+            fs: Arc::clone(&self.fs),
+            block_size: self.block_size,
+            compression_policy: self.compression_policy.clone(),
+            scratch_outstanding: Arc::default(),
             compaction_scratch_directory: self.compaction_scratch_directory.clone(),
             write_limiter: self.write_limiter.clone(),
         }))

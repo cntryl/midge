@@ -24,6 +24,7 @@ pub(crate) use merge::{
 };
 pub(crate) use partition::{
     write_fragmented_compaction_outputs, write_partitioned_compaction_outputs,
+    PartitionOutputConfig,
 };
 
 /// A single logical version of a key observed during compaction.

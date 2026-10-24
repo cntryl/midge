@@ -169,23 +169,28 @@ pub(crate) fn execute_compaction_at_target(
     let outputs = executor::write_partitioned_compaction_outputs(
         sst_factory,
         output_dir,
-        plan.cf_id,
-        plan.target_level,
-        plan.output_seq,
-        bounded_partition_target_size(target_sst_size, plan.compaction_memory_limit),
         inputs,
         &budget,
-        executor::TombstoneGcPolicy {
-            snapshot_horizon: plan.snapshot_horizon,
-            point_eligible: plan.point_tombstone_gc_eligible,
-            range_eligible: plan.range_tombstone_gc_eligible,
-            retained_snapshot_sources: plan.retained_snapshot_sources,
-            compaction_time_millis: plan.compaction_time_millis,
+        executor::PartitionOutputConfig {
+            cf_id: plan.cf_id,
+            target_level: plan.target_level,
+            generation: plan.output_seq,
+            target_sst_size: bounded_partition_target_size(
+                target_sst_size,
+                plan.compaction_memory_limit,
+            ),
+            tombstone_gc: executor::TombstoneGcPolicy {
+                snapshot_horizon: plan.snapshot_horizon,
+                point_eligible: plan.point_tombstone_gc_eligible,
+                range_eligible: plan.range_tombstone_gc_eligible,
+                retained_snapshot_sources: plan.retained_snapshot_sources,
+                compaction_time_millis: plan.compaction_time_millis,
+            },
+            output_size_limit,
+            grandparent_overlap: &plan.grandparent_overlap,
         },
         abort_check,
         output_sink,
-        output_size_limit,
-        &plan.grandparent_overlap,
     )?;
     if let Some(scratch) = &mut scratch {
         if let Err(error) = scratch.cleanup() {
@@ -2515,23 +2520,25 @@ mod tests {
         let outputs = executor::write_partitioned_compaction_outputs(
             &factory,
             temp_dir.path(),
-            0,
-            1,
-            54,
-            target_sst_size,
             inputs,
             &budget,
-            executor::TombstoneGcPolicy {
-                snapshot_horizon: None,
-                point_eligible: false,
-                range_eligible: false,
-                retained_snapshot_sources: false,
-                compaction_time_millis: None,
+            executor::PartitionOutputConfig {
+                cf_id: 0,
+                target_level: 1,
+                generation: 54,
+                target_sst_size,
+                tombstone_gc: executor::TombstoneGcPolicy {
+                    snapshot_horizon: None,
+                    point_eligible: false,
+                    range_eligible: false,
+                    retained_snapshot_sources: false,
+                    compaction_time_millis: None,
+                },
+                output_size_limit: None,
+                grandparent_overlap: &executor::GrandparentOverlap::default(),
             },
             None,
             None,
-            None,
-            &Default::default(),
         )?;
 
         // Assert

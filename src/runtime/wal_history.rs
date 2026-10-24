@@ -87,7 +87,7 @@ fn with_writer_fence<T>(
 /// Where a [`WalHistory`] persists its ledger edits.
 pub(crate) trait LedgerJournal: Send {
     fn sync_counts(&self) -> crate::wal::ledger_store::LedgerSyncSnapshot {
-        Default::default()
+        crate::wal::ledger_store::LedgerSyncSnapshot::default()
     }
     /// The ledger as persisted.
     fn ledger(&self) -> &WalLedger;

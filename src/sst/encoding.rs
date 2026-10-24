@@ -192,10 +192,10 @@ fn varint_len(mut value: u32) -> usize {
 
 fn put_varint(mut value: u32, out: &mut Vec<u8>) {
     while value >= 0x80 {
-        out.push((value as u8 & 0x7f) | 0x80);
+        out.push((value.to_le_bytes()[0] & 0x7f) | 0x80);
         value >>= 7;
     }
-    out.push(value as u8);
+    out.push(value.to_le_bytes()[0]);
 }
 
 fn take_varint(data: &[u8], cursor: &mut usize) -> MidgeResult<u32> {
