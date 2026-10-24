@@ -2609,6 +2609,9 @@ fn should_exit_after_writing_to_partly_applied_family_in_child() {
     let mut engine = crate::Engine::open(partial_spill_options(&path)).expect("open spill writer");
     let family = engine.get_column_family("default").expect("default family");
     let other = engine.create_column_family("other").expect("other family");
+    let retained = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadOnly)
+        .expect("retain complete visible cut");
     let mut tx = engine
         .begin_tx(family.id(), crate::TransactionMode::ReadWrite)
         .expect("spilled transaction");
@@ -2622,8 +2625,8 @@ fn should_exit_after_writing_to_partly_applied_family_in_child() {
     fail::remove("midge::wal::spilled_apply_op");
     assert!(may_be_applied_on_restart(&commit), "{commit:?}");
 
-    // Act: the other family's write goes first, because a write refused
-    // while the WAL is fenced may stop the whole runtime from writing.
+    // Act: try the other family first so a same-family rejection cannot
+    // mask a later cross-family jump across the incomplete global cut.
     let best_effort_other = put_one(
         &engine,
         &other,
@@ -2639,23 +2642,25 @@ fn should_exit_after_writing_to_partly_applied_family_in_child() {
     let sync_same = put_one(&engine, &family, b"sync", crate::WriteOptions::sync());
     let flushed = engine.flush_cf(&family);
 
-    // Assert: the marked family cannot freeze until restart, so it must not
-    // acknowledge a write it could never persist; the other family, which
-    // holds no partly applied unit, still takes the writes the fenced WAL
-    // allows.
-    assert!(best_effort_other.is_ok(), "{best_effort_other:?}");
+    // Assert: every later write must wait for restart. A cross-family write
+    // would otherwise expose the first partial key through the global cut.
     assert!(
-        matches!(best_effort_same, Err(MidgeError::RecoveryFailed(_))),
+        matches!(best_effort_other, Err(MidgeError::Fenced(_))),
+        "{best_effort_other:?}"
+    );
+    assert!(
+        matches!(best_effort_same, Err(MidgeError::Fenced(_))),
         "{best_effort_same:?}"
     );
     assert!(
-        matches!(
-            sync_same,
-            Err(MidgeError::RecoveryFailed(_) | MidgeError::Fenced(_))
-        ),
+        matches!(sync_same, Err(MidgeError::Fenced(_))),
         "{sync_same:?}"
     );
+    for key in [b"first".as_slice(), b"second"] {
+        assert_eq!(retained.get(key).expect("retained complete cut"), None);
+    }
     assert!(flushed.is_err(), "{flushed:?}");
+    drop(retained);
     let _ = engine.shutdown(std::time::Duration::from_secs(30));
     std::process::exit(76);
 }
@@ -2696,7 +2701,7 @@ const PARTIAL_SPILL_STALL_THRESHOLD: usize = 16 * 1024;
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_exit_after_writing_beside_large_partly_applied_family_in_child() {
+fn should_exit_after_rejecting_writes_beside_large_partly_applied_family_in_child() {
     // Arrange: runs only as the child of the stall test below, so the
     // process-global failpoint cannot reach another test.
     let Some(path) = std::env::var_os(PARTIAL_SPILL_STALL_CHILD) else {
@@ -2729,32 +2734,37 @@ fn should_exit_after_writing_beside_large_partly_applied_family_in_child() {
     fail::remove("midge::wal::spilled_apply_op");
     assert!(may_be_applied_on_restart(&commit), "{commit:?}");
 
-    // Act: a stall hint on the first reply makes the second check the stall.
+    // Act: repeated cross-family writes and the stall-control path must all
+    // preserve the incomplete prefix rather than publish a newer cut.
     let written = [b"best-effort-1".as_slice(), b"best-effort-2"]
         .map(|key| put_one(&engine, &other, key, crate::WriteOptions::best_effort()));
     let cleared = engine.wait_for_write_stall_clear(other.id(), std::time::Duration::from_secs(1));
 
-    // Assert: the marked family holds more than twice the flush threshold
-    // but takes no writes and cannot flush until restart; it must not stall
-    // a family that can.
-    assert!(written.iter().all(Result::is_ok), "{written:?}");
-    assert!(matches!(cleared, Ok(true)), "{cleared:?}");
+    // Assert: memory pressure cannot turn an incomplete global prefix into
+    // an independently writable family, even for WAL-free writes.
+    assert!(
+        written
+            .iter()
+            .all(|result| matches!(result, Err(MidgeError::Fenced(_)))),
+        "{written:?}"
+    );
+    assert!(matches!(cleared, Err(MidgeError::Fenced(_))), "{cleared:?}");
     let _ = engine.shutdown(std::time::Duration::from_secs(30));
     std::process::exit(76);
 }
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_accept_write_beside_family_holding_large_partly_applied_spilled_transaction() {
+fn should_reject_write_beside_family_holding_large_partly_applied_spilled_transaction() {
     // Arrange
     let directory = tempfile::tempdir().expect("database directory");
 
     // Act: a child process partly applies a spilled transaction larger than
-    // twice the flush threshold, then writes to another family.
+    // twice the flush threshold, then attempts writes to another family.
     let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
         .args([
             "--exact",
-            "runtime::actors::wal::tests::should_exit_after_writing_beside_large_partly_applied_family_in_child",
+            "runtime::actors::wal::tests::should_exit_after_rejecting_writes_beside_large_partly_applied_family_in_child",
             "--nocapture",
         ])
         .env(PARTIAL_SPILL_STALL_CHILD, directory.path())
