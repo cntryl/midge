@@ -23,8 +23,17 @@ struct SstDeleteWorker {
     names: Vec<String>,
 }
 
+struct SstDeleteWorkerState {
+    failed: Arc<parking_lot::Mutex<VecDeque<String>>>,
+    completed: Arc<parking_lot::Mutex<VecDeque<crate::metadata::FileMeta>>>,
+    inflight: Arc<parking_lot::Mutex<HashSet<String>>>,
+    notifier: Option<crossbeam::channel::Sender<RuntimeMsg>>,
+    publication_lock: crate::runtime::MetadataPublicationLock,
+}
+
 /// Actor handling garbage collection
 pub struct GcActor {
+    publication_lock: crate::runtime::MetadataPublicationLock,
     /// Last GC run timestamp
     last_gc_run: Option<std::time::Instant>,
     /// Obsolete files that were retained because a transaction still pins them.
@@ -64,6 +73,7 @@ impl GcActor {
 
     pub(crate) fn with_retry_policy(retry_policy: crate::runtime::RuntimeRetryPolicy) -> Self {
         Self {
+            publication_lock: crate::runtime::MetadataPublicationLock::default(),
             last_gc_run: None,
             pending_obsolete: VecDeque::new(),
             pending_retired_wal: VecDeque::new(),
@@ -98,6 +108,13 @@ impl GcActor {
     /// Configure the event-loop wakeup channel used by cloud delete workers.
     pub fn set_retry_notifier(&mut self, notifier: Option<crossbeam::channel::Sender<RuntimeMsg>>) {
         self.retry_notifier = notifier;
+    }
+
+    pub(crate) fn set_metadata_publication_lock(
+        &mut self,
+        lock: crate::runtime::MetadataPublicationLock,
+    ) {
+        self.publication_lock = lock;
     }
 
     /// Check for garbage collection opportunities
@@ -161,6 +178,30 @@ impl GcActor {
     /// 2. File is not being compacted
     /// 3. File is not pinned by active snapshot (BLOCKER #8)
     pub fn delete_ssts(
+        &mut self,
+        state: &mut RuntimeState,
+        sst_names: &[String],
+        hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
+    ) {
+        let publication_lock = self.publication_lock.clone();
+        let Some(_turn) = publication_lock.lock_for(Duration::ZERO) else {
+            self.defer_ssts_for_metadata(sst_names);
+            return;
+        };
+        if publication_lock.pending_captures() != 0 {
+            self.defer_ssts_for_metadata(sst_names);
+            return;
+        }
+        self.delete_ssts_under_local_turn(state, sst_names, hybrid_storage);
+    }
+
+    fn defer_ssts_for_metadata(&mut self, names: &[String]) {
+        for name in names {
+            self.retain_protected_sst_delete(name);
+        }
+    }
+
+    fn delete_ssts_under_local_turn(
         &mut self,
         state: &mut RuntimeState,
         sst_names: &[String],
@@ -295,10 +336,13 @@ impl GcActor {
             storage,
             fs,
             files,
-            Arc::clone(&self.failed_cloud_deletes),
-            Arc::clone(&self.completed_sst_deletes),
-            Arc::clone(&self.inflight_sst_deletes),
-            self.retry_notifier.clone(),
+            SstDeleteWorkerState {
+                failed: Arc::clone(&self.failed_cloud_deletes),
+                completed: Arc::clone(&self.completed_sst_deletes),
+                inflight: Arc::clone(&self.inflight_sst_deletes),
+                notifier: self.retry_notifier.clone(),
+                publication_lock: self.publication_lock.clone(),
+            },
         ) {
             Ok(worker) => {
                 self.cloud_delete_workers
@@ -449,6 +493,22 @@ impl GcActor {
     }
 
     pub(crate) fn retry_retired_wal(
+        &mut self,
+        state: &mut RuntimeState,
+        storage: Option<&crate::storage::HybridStorage>,
+    ) {
+        let publication_lock = self.publication_lock.clone();
+        let turn = publication_lock.lock_for(Duration::ZERO);
+        if turn.is_none() || publication_lock.pending_captures() != 0 {
+            if !self.pending_retired_wal.is_empty() {
+                self.retired_wal_retry.defer();
+            }
+            return;
+        }
+        self.retry_retired_wal_under_local_turn(state, storage);
+    }
+
+    fn retry_retired_wal_under_local_turn(
         &mut self,
         state: &mut RuntimeState,
         storage: Option<&crate::storage::HybridStorage>,
@@ -652,10 +712,7 @@ impl GcActor {
         storage: Arc<crate::storage::HybridStorage>,
         fs: Arc<dyn crate::io::Fs>,
         ssts: Vec<crate::metadata::FileMeta>,
-        failed_cloud_deletes: Arc<parking_lot::Mutex<VecDeque<String>>>,
-        completed_sst_deletes: Arc<parking_lot::Mutex<VecDeque<crate::metadata::FileMeta>>>,
-        inflight_sst_deletes: Arc<parking_lot::Mutex<HashSet<String>>>,
-        retry_notifier: Option<crossbeam::channel::Sender<RuntimeMsg>>,
+        completion: SstDeleteWorkerState,
     ) -> MidgeResult<JoinHandle<()>> {
         std::thread::Builder::new()
             .name("midge-sst-gc".to_string())
@@ -663,58 +720,61 @@ impl GcActor {
                 let storage = CloudPersistence::new(storage);
                 for file in ssts {
                     let sst_name = file.name.clone();
-                    let sst_path = crate::sst::fs::sst_key(&sst_name);
-                    let deadline = crate::common::OperationDeadline::from_budget(storage.storage_io_timeout());
-                    if let Err(error) = storage.delete_retired_sst_object_within(&file, &deadline) {
+                    if let Err(error) = Self::delete_cloud_and_local_sst(&storage, &fs, &file, &completion.publication_lock) {
                         tracing::warn!(
                             sst_name,
                             %error,
                             "Failed to delete obsolete SST from cloud storage; keeping local orphan for retry"
                         );
                         Self::queue_worker_failed_delete(
-                            &failed_cloud_deletes,
-                            retry_notifier.as_ref(),
+                            &completion.failed,
+                            completion.notifier.as_ref(),
                             sst_name.clone(),
                         );
-                        inflight_sst_deletes.lock().remove(&sst_name);
+                        completion.inflight.lock().remove(&sst_name);
                         continue;
                     }
 
-                    let resident_bytes = fs.metadata(&sst_path).ok().map(|metadata| metadata.len);
-                    match fs.remove_file(&sst_path) {
-                        Ok(()) => {
-                            storage.release_local_sst_bytes(resident_bytes.unwrap_or(0));
-                            tracing::info!(
-                                sst_name,
-                                path = sst_path.0,
-                                "Deleted obsolete SST after cloud provider cleanup"
-                            );
-                            completed_sst_deletes.lock().push_back(file.clone());
-                        }
-                        Err(crate::io::FsError::NotFound(_)) => {
-                            completed_sst_deletes.lock().push_back(file.clone());
-                        },
-                        Err(error) => {
-                            tracing::warn!(
-                                sst_name,
-                                path = sst_path.0,
-                                %error,
-                                "Failed to delete obsolete local SST after cloud provider cleanup"
-                            );
-                            Self::queue_worker_failed_delete(
-                                &failed_cloud_deletes,
-                                retry_notifier.as_ref(),
-                                sst_name.clone(),
-                            );
-                        }
-                    }
-                    inflight_sst_deletes.lock().remove(&sst_name);
-                    if let Some(notifier) = &retry_notifier {
+                    completion.completed.lock().push_back(file);
+                    completion.inflight.lock().remove(&sst_name);
+                    if let Some(notifier) = &completion.notifier {
                         let _ = notifier.try_send(RuntimeMsg::RetryGc);
                     }
                 }
             })
             .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))
+    }
+
+    fn delete_cloud_and_local_sst(
+        storage: &CloudPersistence,
+        fs: &Arc<dyn crate::io::Fs>,
+        file: &crate::metadata::FileMeta,
+        publication_lock: &crate::runtime::MetadataPublicationLock,
+    ) -> MidgeResult<()> {
+        let deadline = crate::common::OperationDeadline::from_budget(storage.storage_io_timeout());
+        let _turn = publication_lock
+            .lock_for(deadline.remaining())
+            .ok_or_else(|| {
+                crate::common::MidgeError::Timeout(
+                    "SST reclamation waits for metadata capture".into(),
+                )
+            })?;
+        if publication_lock.pending_captures() != 0 {
+            return Err(crate::common::MidgeError::Busy(
+                "SST reclamation retains admitted metadata cuts".into(),
+            ));
+        }
+        // Admission cannot begin between the final pending-cut check and
+        // either physical effect. An already admitted cut retains both copies.
+        storage.delete_retired_sst_object_within(file, &deadline)?;
+        let path = crate::sst::fs::sst_key(&file.name);
+        let resident = fs.metadata(&path).ok().map_or(0, |metadata| metadata.len);
+        match fs.remove_file(&path) {
+            Ok(()) => storage.release_local_sst_bytes(resident),
+            Err(crate::io::FsError::NotFound(_)) => {}
+            Err(error) => return Err(error.into_midge()),
+        }
+        Ok(())
     }
 
     fn queue_worker_failed_delete(

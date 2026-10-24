@@ -323,6 +323,7 @@ impl EventLoop {
         // that logical generation.
         let mut gc_actor = GcActor::with_retry_policy(config.retry_policy);
         gc_actor.set_retry_notifier(worker_msg_tx.clone());
+        gc_actor.set_metadata_publication_lock(config.metadata_publication_lock.clone());
         let durability =
             Self::create_durability_coordinator(&wal_actor, initial_segment_id, &config);
         let mut background_compaction_schedule = crate::runtime::retry_schedule::RetrySchedule::new(

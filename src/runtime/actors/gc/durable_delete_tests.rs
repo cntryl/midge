@@ -15,6 +15,7 @@ struct Fixture {
     storage: Arc<crate::storage::HybridStorage>,
     store: Arc<FsLeaderStore>,
     file: FileMeta,
+    publication_lock: crate::runtime::MetadataPublicationLock,
 }
 
 impl Fixture {
@@ -58,6 +59,7 @@ impl Fixture {
         ));
         store.acquire_leadership("writer").unwrap();
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+        let publication_lock = crate::runtime::MetadataPublicationLock::default();
         BlockingCloud::new(&cloud, &deadline)
             .put_with_headers(
                 &crate::cloud_layout::object_key(&file.name),
@@ -69,7 +71,7 @@ impl Fixture {
             CloudMetadataMirrorContext {
                 cloud: &cloud,
                 fs: state.fs.as_ref(),
-                publication_lock: &crate::runtime::MetadataPublicationLock::default(),
+                publication_lock: &publication_lock,
                 lock_wait_budget: Duration::from_secs(5),
                 deadline: &deadline,
                 authority: CloudMetadataMirrorAuthority {
@@ -88,6 +90,7 @@ impl Fixture {
             storage,
             store,
             file,
+            publication_lock,
         }
     }
 
@@ -99,6 +102,99 @@ impl Fixture {
         .get_optional(&crate::cloud_layout::object_key(&self.file.name))
         .unwrap()
     }
+}
+
+#[test]
+fn should_defer_known_retired_sst_until_admitted_metadata_cut_commits() {
+    // Arrange
+    let mut fixture = Fixture::new();
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    let cut = fixture
+        .publication_lock
+        .capture_control_cut(&fixture.state.fs, 1, &deadline)
+        .unwrap();
+    let mut actor = GcActor::new();
+    actor.set_metadata_publication_lock(fixture.publication_lock.clone());
+
+    // Act: a capture still owns its source authority even though the live
+    // local manifest already records the original immutable as retired.
+    actor.delete_ssts(
+        &mut fixture.state,
+        &[fixture.file.name.clone()],
+        Some(Arc::clone(&fixture.storage)),
+    );
+    actor.shutdown_workers();
+
+    // Assert: both copies and the durable original proof survive deferral.
+    assert_eq!(fixture.remote().unwrap(), b"original");
+    assert!(fixture
+        .state
+        .host_sst_dir()
+        .join(&fixture.file.name)
+        .exists());
+    assert_eq!(actor.pending_obsolete.len(), 1);
+    assert!(fixture
+        .state
+        .manifest
+        .retired_ssts
+        .contains_key(&fixture.file.name));
+
+    crate::runtime::hybrid_persistence::mirror_captured_control_metadata_within(
+        CloudMetadataMirrorContext {
+            cloud: &fixture.cloud,
+            fs: fixture.state.fs.as_ref(),
+            publication_lock: &fixture.publication_lock,
+            lock_wait_budget: Duration::from_secs(5),
+            deadline: &deadline,
+            authority: CloudMetadataMirrorAuthority {
+                store: fixture.store.as_ref(),
+                holder_id: "writer",
+                writer_epoch: 1,
+            },
+        },
+        &cut,
+        |_| Ok(()),
+    )
+    .unwrap();
+    actor.retry_pending(&mut fixture.state, Some(Arc::clone(&fixture.storage)));
+    actor.shutdown_workers();
+    actor.retry_pending(&mut fixture.state, Some(Arc::clone(&fixture.storage)));
+    assert!(fixture.remote().is_none());
+    assert!(fixture.state.manifest.retired_ssts.is_empty());
+}
+
+#[test]
+fn should_recheck_pending_cuts_inside_physical_retired_sst_worker() {
+    // Arrange: the worker may have been queued before this capture admitted.
+    let fixture = Fixture::new();
+    let cut = fixture
+        .publication_lock
+        .capture_control_cut(
+            &fixture.state.fs,
+            1,
+            &OperationDeadline::from_budget(Duration::from_secs(5)),
+        )
+        .unwrap();
+    let storage = CloudPersistence::new(Arc::clone(&fixture.storage));
+
+    // Act
+    let result = GcActor::delete_cloud_and_local_sst(
+        &storage,
+        &fixture.state.fs,
+        &fixture.file,
+        &fixture.publication_lock,
+    );
+
+    // Assert: the final worker-owned check prevents both physical effects.
+    assert!(matches!(result, Err(crate::common::MidgeError::Busy(_))));
+    assert_eq!(fixture.remote().unwrap(), b"original");
+    assert!(fixture
+        .state
+        .host_sst_dir()
+        .join(&fixture.file.name)
+        .exists());
+    assert_eq!(cut.writer_epoch(), 1);
+    assert_eq!(fixture.publication_lock.pending_captures(), 1);
 }
 
 #[test]
