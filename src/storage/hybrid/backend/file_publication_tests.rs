@@ -30,6 +30,55 @@ fn publish_source(
     )
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_retain_replacement_when_unpublished_output_cleanup_consumes_original_guard(
+) -> MidgeResult<()> {
+    // Arrange: publication returns the actual provider identity for this body.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let _scenario = fail::FailScenario::setup();
+    let directory = tempfile::tempdir()?;
+    let bytes = b"original unpublished output";
+    std::fs::write(directory.path().join("source"), bytes)?;
+    let backend = Arc::new(MockCloudBackend::new());
+    let cloud: Arc<dyn StorageBackend> =
+        Arc::new(CloudStorage::new(backend.clone(), String::new()));
+    let storage = HybridStorage::with_policy(
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    let budget = ResourceBudget::new(2 * 1024 * 1024);
+    let key = "sst/unpublished-output";
+    let proof = publish_source(&storage, key, directory.path(), bytes, &budget)?;
+    let replacement_backend = Arc::clone(&backend);
+    fail::cfg_callback("midge::cloud::before_compaction_orphan_delete", move || {
+        let (tx, rx) = mpsc::channel();
+        replacement_backend.submit_put(key, b"replacement".to_vec(), Vec::new(), tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CloudEvent::Put { result: Ok(()), .. }
+        ));
+    })
+    .unwrap();
+
+    // Act: replacement occurs after the failed task has retained its proof.
+    let result = storage.delete_unpublished_object_within(
+        &proof,
+        &OperationDeadline::from_budget(Duration::from_secs(5)),
+    );
+    let (tx, rx) = mpsc::channel();
+    backend.submit_get(key, tx);
+
+    // Assert: only the old identity was authorized, and the new bytes survive.
+    assert!(result.is_err());
+    assert!(matches!(
+        rx.recv().unwrap(),
+        CloudEvent::Get { result: Ok(body), .. } if body == b"replacement"
+    ));
+    assert_eq!(budget.used(), 0);
+    Ok(())
+}
+
 #[test]
 fn should_leave_three_quarters_of_maintenance_pool_for_live_compaction_inputs() {
     // Arrange: the mock bounds no copies of its own.

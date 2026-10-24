@@ -60,6 +60,20 @@ pub(crate) struct PreparedCompactionOutput {
 type PreparedCompactionOutputs =
     Arc<parking_lot::Mutex<std::collections::HashMap<String, PreparedCompactionOutput>>>;
 
+fn cleanup_failed_prepared_outputs(
+    prepared: &PreparedCompactionOutputs,
+    storage: Option<&Arc<dyn CompactionStorage>>,
+) {
+    let Some(storage) = storage else {
+        return;
+    };
+    // Never hold the registry mutex across provider work: the event loop can
+    // still inspect the active job while its owned compute task cleans up.
+    let mut outputs = std::mem::take(&mut *prepared.lock());
+    storage.cleanup_failed_outputs(&mut outputs);
+    prepared.lock().extend(outputs);
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct CompactionOutputAdmission<'a> {
     budget: &'a crate::common::resource_budget::ResourceBudget,
@@ -141,9 +155,47 @@ pub(crate) trait CompactionStorage: Send + Sync {
         path: &std::path::Path,
         admission: CompactionOutputAdmission<'_>,
     ) -> MidgeResult<PreparedCompactionOutput>;
+    /// Retain any uncertain residue; only the failed compute task's original
+    /// immutable identities can authorize cleanup of its unpublished outputs.
+    fn cleanup_failed_outputs(
+        &self,
+        outputs: &mut std::collections::HashMap<String, PreparedCompactionOutput>,
+    );
 }
 
 impl CompactionStorage for crate::storage::HybridStorage {
+    fn cleanup_failed_outputs(
+        &self,
+        outputs: &mut std::collections::HashMap<String, PreparedCompactionOutput>,
+    ) {
+        // Cleanup is a separate ownership obligation, not an extension of the
+        // expired caller/publication deadline. The compute task remains joined
+        // before lease release, and every DELETE checks current write authority.
+        let deadline = OperationDeadline::from_budget(self.storage_io_timeout());
+        outputs.retain(|name, output| {
+            let Some(proof) = &output.proof else {
+                return true;
+            };
+            let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.delete_unpublished_object_within(proof, &deadline)
+            }));
+            match attempt {
+                Ok(Ok(())) => false,
+                Ok(Err(error)) => {
+                    tracing::warn!(name, %error, "retaining uncertain failed compaction output");
+                    true
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        name,
+                        "retaining failed compaction output after cleanup panic"
+                    );
+                    true
+                }
+            }
+        });
+    }
+
     fn ephemeral_sst_cache_enabled(&self) -> bool {
         self.ephemeral_sst_cache_enabled()
     }
@@ -1235,7 +1287,8 @@ impl CompactionJobActor {
                 manual_deadline: self.active_manual_deadline,
                 budget: self.memory_budget.as_ref(),
             },
-        )?;
+        )
+        .inspect_err(|_| cleanup_failed_prepared_outputs(&self.prepared_outputs, sba))?;
 
         tracing::info!(
             input_count = plan.input_files.len(),
@@ -1407,6 +1460,9 @@ impl CompactionJobActor {
                 }
             };
             let succeeded = error.is_none();
+            if !succeeded {
+                cleanup_failed_prepared_outputs(&prepared_outputs, hybrid_storage.as_ref());
+            }
             store_compaction_worker_error(&worker_error, error.as_ref());
 
             Self::notify_worker_completion(&tx, &plan_clone, input_files, &output_ssts, succeeded, job_id);

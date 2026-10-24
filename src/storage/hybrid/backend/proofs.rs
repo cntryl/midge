@@ -168,6 +168,17 @@ impl HybridStorage {
         Ok(())
     }
 
+    /// The joined failed compute task proves that this reserved immutable
+    /// identity was never published. Preserve its original provider token;
+    /// a fresh observation must never authorize deleting a replacement.
+    pub(crate) fn delete_unpublished_object_within(
+        &self,
+        proof: &GuardedObjectProof,
+        deadline: &OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
+        self.delete_remote_object_by_identity_blocking_within(&proof.key, &proof.metadata, deadline)
+    }
+
     pub(super) fn head_range_object_from_backend(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
