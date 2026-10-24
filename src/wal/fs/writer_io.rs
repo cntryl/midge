@@ -1106,6 +1106,23 @@ mod tests {
     }
 
     #[test]
+    fn should_report_timeout_when_submitted_sync_cannot_complete_within_budget() {
+        // Arrange: no worker can acknowledge the admitted fsync request.
+        let writer = writer_without_background_worker();
+
+        // Act
+        let result = writer.sync_with_timeout(Duration::from_millis(5));
+
+        // Assert: expiry follows submission, and cannot claim durable success.
+        assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
+        assert_eq!(writer.sync_state.lock().pending_fsyncs, 1);
+        assert!(matches!(
+            writer.sync_with_timeout(Duration::from_secs(1)),
+            Err(crate::common::MidgeError::Timeout(_))
+        ));
+    }
+
+    #[test]
     fn should_sync_durably_when_legacy_skip_variable_is_set() -> MidgeResult<()> {
         // Arrange
         let _environment_guard = EnvVarGuard::set("MIDGE_SKIP_WAL_SYNC", "1");

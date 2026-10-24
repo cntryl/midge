@@ -282,6 +282,7 @@ impl EventLoop {
             initial,
             batch.coalescing_key,
             &mut batch.staged_touches,
+            &mut batch.staged_growth,
         ) {
             PrepareOutcome::Prepared {
                 request_id,
@@ -423,6 +424,7 @@ impl EventLoop {
                     request,
                     batch.coalescing_key,
                     &mut batch.staged_touches,
+                    &mut batch.staged_growth,
                 ) {
                     PrepareOutcome::Prepared {
                         request_id,
@@ -458,6 +460,7 @@ impl EventLoop {
         let CoalescedTransactionBatch {
             coalescing_key: _,
             staged_touches: _,
+            staged_growth: _,
             prepared,
             mut touched_cfs,
             request_ids,
@@ -551,6 +554,7 @@ impl EventLoop {
         request: ApplyTransactionRequest,
         coalescing_key: TransactionCoalescingKey,
         staged_touches: &mut StagedTransactionTouches,
+        staged_growth: &mut HashMap<u32, usize>,
     ) -> PrepareOutcome {
         if request.ops.is_empty()
             || self.transaction_coalescing_key(&request) != Some(coalescing_key)
@@ -564,6 +568,11 @@ impl EventLoop {
         let touched_cfs = Self::transaction_cf_ids(&request.ops);
         if let Err(error) = self.admit_drained_transaction(&touched_cfs) {
             return PrepareOutcome::Error { request_id, error };
+        }
+        match self.prepare_coalesced_cloud_memtables(&request.ops, staged_growth) {
+            Ok(true) => {}
+            Ok(false) => return PrepareOutcome::Fallback(request),
+            Err(error) => return PrepareOutcome::Error { request_id, error },
         }
         staged_touches.record_ops(&request.ops);
         let result = self.actors.wal_actor.prepare_transaction_append(
@@ -608,7 +617,10 @@ impl EventLoop {
             conflict_policy,
         } = request;
         let touched_cfs = Self::transaction_cf_ids(&ops);
-        if let Err(error) = self.admit_drained_transaction(&touched_cfs) {
+        if let Err(error) = self
+            .admit_drained_transaction(&touched_cfs)
+            .and_then(|()| self.prepare_cloud_transaction_memtables(&ops))
+        {
             self.finish_drained_write(request_id, Err(error));
             return;
         }
@@ -734,6 +746,7 @@ enum PrepareOutcome {
 struct CoalescedTransactionBatch {
     coalescing_key: TransactionCoalescingKey,
     staged_touches: StagedTransactionTouches,
+    staged_growth: HashMap<u32, usize>,
     prepared: Vec<crate::runtime::actors::wal::PreparedTransactionAppend>,
     touched_cfs: HashMap<u64, Vec<crate::types::ColumnFamilyId>>,
     request_ids: Vec<u64>,
@@ -747,6 +760,7 @@ impl CoalescedTransactionBatch {
         Self {
             coalescing_key,
             staged_touches: StagedTransactionTouches::default(),
+            staged_growth: HashMap::new(),
             prepared: Vec::new(),
             touched_cfs: HashMap::new(),
             request_ids: Vec::new(),

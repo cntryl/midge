@@ -133,5 +133,37 @@ batch contract case passed, along with 14 durability coordinator, 3 shutdown
 and 19 runtime recovery tests. Workspace build, all-target/all-feature pedantic
 Clippy, rustfmt, cntryl-tools test validation and documentation validation passed.
 
-Next: #976's admission parity and bound regressions. No issue is claimed merged
-or production-qualified by local commits.
+### #976: implemented locally
+
+The follower regression failed on the starting source: a Strict transaction
+whose standalone flush staging exceeded its window returned
+`TransactionApplied`. Coverage includes Strict/Batched, coalesced/fallback
+routes and standalone `NoSpace` / blocked-generation `WriteStall` admission.
+
+The request-queue and pending-transition cases already have active tests.
+Mutation checks confirmed that they reject a queue error changed from
+`WriteStall` to `Timeout`, and pending transition intents ignored at admission.
+New tests also reject a submitted fsync falsely acknowledged after timeout
+and a memory hint mistakenly enforced before the L0 slot ceiling. All four
+controls failed at their intended assertions and were removed.
+
+The combined-growth regression also failed after adding only individual
+follower checks: two individually admissible 20 KiB transactions produced an
+unflushable generation in a 128 KiB staging window. This confirmed extension
+of the same finding was added to #976. Coalescing now tracks prepared growth
+per family and ends a group before combined growth exceeds that window.
+Ordinary follower admission then freezes the earlier generation as needed.
+Smaller transactions retain one coalesced append; oversized individual
+transactions and blocked generations keep their normal rejection types.
+
+Validation: 9 cloud-memtable admission tests, 47 write-batch tests and 24 WAL
+writer tests passed, along with the queue and transition tests after removing
+their mutations. All-target/all-feature pedantic Clippy and cntryl-tools
+test/documentation validation passed. The final small-group control passed
+under both policies, retaining one append when combined growth fits; Clippy
+also passed on that final source. No timeout or assertion was relaxed.
+
+Next: #977's commit-outcome classification, followed by the evidence and
+pipeline prerequisites in the WAL design. The #904 sign-off gate remains.
+
+No issue is claimed merged or production-qualified by local commits.

@@ -2349,6 +2349,87 @@ fn should_stall_before_wal_when_transaction_would_exceed_hard_l0_ceiling() -> Mi
 }
 
 #[test]
+fn should_treat_memtable_limit_as_advisory_until_l0_slots_are_exhausted() -> MidgeResult<()> {
+    // Arrange: exceed the memory hint without consuming every L0 slot.
+    let mut fixture = EventLoopFixture::batched()?;
+    fixture.event_loop.state.limits.memtable_flush_threshold = 1;
+    fixture.event_loop.state.limits.l0_compaction_trigger = 1;
+    fixture.event_loop.state.limits.max_immutable_memtables = 1;
+    let (_messages, message_rx) = crossbeam::channel::unbounded();
+    let first = fixture.register(930);
+    fixture.event_loop.apply_transaction_with_coalescing(
+        &message_rx,
+        txn_request(
+            930,
+            vec![put_op(0, b"seed", b"over the memory hint")],
+            Some(DurabilityPolicy::Batched),
+        ),
+        1,
+    );
+    assert_eq!(expect_transaction_applied(&first, 930).1, 1);
+    assert!(fixture
+        .event_loop
+        .state
+        .is_total_memtable_hard_limit_exceeded());
+    assert!(fixture.event_loop.state.l0_slot_usage(0) < fixture.event_loop.state.l0_hard_ceiling());
+    let second = fixture.register(931);
+
+    // Act: another accepted write can use the existing active generation.
+    fixture.event_loop.apply_transaction_with_coalescing(
+        &message_rx,
+        txn_request(
+            931,
+            vec![put_op(0, b"accepted", b"value")],
+            Some(DurabilityPolicy::Batched),
+        ),
+        1,
+    );
+
+    // Assert: memory remains a hint; exhausting L0 slots is an enforced bound.
+    assert_eq!(expect_transaction_applied(&second, 931).1, 1);
+    fixture
+        .event_loop
+        .state
+        .manifest
+        .test_mut()
+        .files
+        .extend((0..2).map(|index| crate::metadata::FileMeta {
+            name: format!("advisory-l0-{index}.sst"),
+            level: 0,
+            cf_id: 0,
+            ..Default::default()
+        }));
+    let sequence = fixture.event_loop.state.sequence;
+    let appends = fixture.event_loop.actors.wal_actor.append_calls();
+    let third = fixture.register(932);
+    fixture.event_loop.apply_transaction_with_coalescing(
+        &message_rx,
+        txn_request(
+            932,
+            vec![put_op(0, b"rejected", b"value")],
+            Some(DurabilityPolicy::Batched),
+        ),
+        1,
+    );
+    expect_error(&third, 932, |error| {
+        matches!(error, MidgeError::WriteStall(_))
+    });
+    assert_eq!(fixture.event_loop.state.sequence, sequence);
+    assert_eq!(fixture.event_loop.actors.wal_actor.append_calls(), appends);
+    assert_eq!(
+        fixture
+            .event_loop
+            .state
+            .get_cf(0)
+            .unwrap()
+            .memtable
+            .get(b"rejected")?,
+        None
+    );
+    Ok(())
+}
+
+#[test]
 fn should_not_fence_runtime_when_no_space_comes_from_outside_the_wal_writer() -> MidgeResult<()> {
     // Arrange: storage admission pressure is backpressure, not lost
     // durability, even when its message mentions the wal writer.
