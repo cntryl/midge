@@ -73,9 +73,15 @@ readback must complete before pointer CAS.
 
 ## Remaining implementation and qualification
 
-Cached writer admission
-and validated receipts are prerequisites for the common edit-PUT/pointer-CAS
-two-request path; this slice does not claim that request target.
+Writer admission caches the claimed pointer identity only inside the acquired
+monotonic lease window. A validated pointer receipt updates that identity;
+unknown effects require exact readback, and a failed CAS clears the cache.
+A reduced authority view and fixed SHA-256 control-file fingerprints avoid
+rereading the predecessor bodies on the common path. The active transport
+regression counts one edit PUT and one pointer CAS, with no reads, when both
+receipts and the writer cache are available. It remains to be executed during
+the batch qualification pass. Cold starts, checkpoint publications, missing
+receipts and retention runs can require additional requests.
 
 Retention (#913) will operate on the new pointer-selected snapshot/edit
 closure. It must protect pending publication and predecessor history before

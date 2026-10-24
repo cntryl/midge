@@ -659,3 +659,13 @@ test targets compile after the related fixture/interface updates. Behavioral,
 crash, latency and provider qualification remain pending. Sealing itself keeps
 its required local append/fsync/rotation barrier; remote upload/publication is
 off loop. Publication independence between flush and compaction remains #910.
+
+The #914 cached common path now reuses receipt-validated pointer identity under
+monotonic writer validity and the takeover claim. Reduced manifest authority
+and fixed-size SHA fingerprints avoid retaining another SST inventory or full
+control-body cache. An active receipt-backend regression requires exactly an
+edit PUT plus pointer CAS with zero reads, then reconstructs the committed
+intents. Failpoint test targets compile; that regression has not executed.
+Unknown outcomes, replacement identities, cache invalidation and provider/crash
+qualification remain gates. The two-request count is a coded assertion for the
+supported receipt path, not a measured provider result.

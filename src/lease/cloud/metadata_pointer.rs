@@ -20,6 +20,12 @@ struct MetadataPointer {
     committed: Option<CloudMetadataGeneration>,
 }
 
+#[derive(Clone)]
+pub(super) struct CachedPointer {
+    pointer: MetadataPointer,
+    metadata: ObjectMetadata,
+}
+
 impl MetadataPointer {
     fn owns(&self, store: &ProviderLeaderStore, holder_id: &str, epoch: u64) -> bool {
         self.writer_epoch == epoch
@@ -54,6 +60,9 @@ impl ProviderLeaderStore {
                 .as_ref()
                 .is_some_and(|(pointer, _)| pointer.owns(self, &document.holder_id, epoch))
             {
+                if let Some((pointer, metadata)) = current {
+                    self.cache_pointer(pointer, metadata);
+                }
                 return Ok(());
             }
             if current
@@ -79,9 +88,66 @@ impl ProviderLeaderStore {
                 });
             match write_pointer(cloud, &replacement, condition, &deadline) {
                 Err(LeaseError::AcquisitionFailed(_)) => continue,
-                outcome => return outcome,
+                Ok(metadata) => {
+                    self.cache_pointer(replacement, metadata);
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
             }
         }
+    }
+
+    fn cache_pointer(&self, pointer: MetadataPointer, metadata: ObjectMetadata) {
+        *self
+            .metadata_pointer_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(CachedPointer { pointer, metadata });
+    }
+
+    pub(super) fn cached_metadata_head(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<CloudMetadataHead, LeaseError> {
+        let (pointer, _) = self.writer_pointer(holder_id, epoch, timeout)?;
+        Ok(pointer
+            .committed
+            .map_or(CloudMetadataHead::Uncommitted, CloudMetadataHead::Committed))
+    }
+
+    fn writer_pointer(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<(MetadataPointer, ObjectMetadata), LeaseError> {
+        if timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "metadata admission deadline exhausted".into(),
+            ));
+        }
+        self.validity.remaining(epoch)?;
+        let cached = self
+            .metadata_pointer_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let (pointer, metadata) = match cached {
+            Some(cached) => (cached.pointer, cached.metadata),
+            None => read_pointer(&self.cloud, timeout.min(self.cloud.callback_timeout()))?
+                .ok_or_else(|| {
+                    LeaseError::Indeterminate("initialized metadata pointer disappeared".into())
+                })?,
+        };
+        if !pointer.owns(self, holder_id, epoch) {
+            return Err(LeaseError::RenewalFailed(
+                "metadata pointer writer epoch or owner changed".into(),
+            ));
+        }
+        self.validity.remaining(epoch)?;
+        Ok((pointer, metadata))
     }
 
     pub(super) fn read_separate_metadata_head(
@@ -137,10 +203,8 @@ impl ProviderLeaderStore {
                 LeaseError::RenewalFailed("insufficient validity for metadata pointer CAS".into())
             })?;
         let deadline = deadline.earlier(crate::common::OperationDeadline::from_budget(budget));
-        let (current, metadata) = read_pointer(&self.cloud, remaining(&self.cloud, &deadline)?)?
-            .ok_or_else(|| {
-                LeaseError::Indeterminate("initialized metadata pointer disappeared".into())
-            })?;
+        let (current, metadata) =
+            self.writer_pointer(holder_id, epoch, remaining(&self.cloud, &deadline)?)?;
         if !current.owns(self, holder_id, epoch) {
             return Err(LeaseError::RenewalFailed(
                 "metadata pointer writer epoch or owner changed".into(),
@@ -160,13 +224,31 @@ impl ProviderLeaderStore {
             committed: Some(generation),
             ..current
         };
-        write_pointer(
+        let result = write_pointer(
             &self.cloud,
             &replacement,
             StoragePrecondition::IfMatch(metadata),
             &deadline,
-        )?;
-        self.validity.remaining(epoch).map(|_| ())
+        );
+        match result {
+            Ok(metadata) => {
+                self.validity.remaining(epoch)?;
+                self.cache_pointer(replacement, metadata);
+                Ok(())
+            }
+            Err(error) => {
+                *self
+                    .metadata_pointer_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                match error {
+                    LeaseError::AcquisitionFailed(message) => {
+                        Err(LeaseError::RenewalFailed(message))
+                    }
+                    error => Err(error),
+                }
+            }
+        }
     }
 }
 
@@ -239,7 +321,7 @@ fn write_pointer(
     pointer: &MetadataPointer,
     condition: StoragePrecondition,
     deadline: &crate::common::OperationDeadline,
-) -> Result<(), LeaseError> {
+) -> Result<ObjectMetadata, LeaseError> {
     let bytes = crate::metadata::codec::encode(POINTER_KIND, pointer)
         .map_err(|error| LeaseError::Internal(format!("encode metadata pointer: {error}")))?;
     let (tx, rx) = std::sync::mpsc::channel();
@@ -251,7 +333,7 @@ fn write_pointer(
     );
     let outcome = rx.recv_timeout(remaining(cloud, deadline)?);
     match outcome {
-        Ok(Ok(Some(receipt))) if receipt.matches(&bytes) => return Ok(()),
+        Ok(Ok(Some(receipt))) if receipt.matches(&bytes) => return Ok(receipt.metadata),
         Ok(Ok(Some(_))) => {
             return Err(LeaseError::Indeterminate(
                 "metadata pointer checksum receipt mismatch".into(),
@@ -267,7 +349,7 @@ fn write_pointer(
     // Missing receipt and unknown mutation outcomes require an exact pinned
     // readback. A successor's epoch claim cannot be mistaken for our success.
     match read_pointer(cloud, remaining(cloud, deadline)?)? {
-        Some((actual, _)) if actual == *pointer => Ok(()),
+        Some((actual, metadata)) if actual == *pointer => Ok(metadata),
         _ => Err(LeaseError::Indeterminate(
             "metadata pointer CAS was not proven by readback".into(),
         )),

@@ -51,6 +51,7 @@ struct ProviderLeaderStore {
     validity: Arc<LeaseValidity>,
     clock_skew_tolerance: Mutex<Duration>,
     clock: LeaseClock,
+    metadata_pointer_cache: Mutex<Option<metadata_pointer::CachedPointer>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +77,7 @@ impl ProviderLeaderStore {
             validity,
             clock_skew_tolerance: Mutex::new(clock_skew_tolerance),
             clock,
+            metadata_pointer_cache: Mutex::new(None),
         }
     }
 }
@@ -254,6 +256,25 @@ impl LeaderStore for ProviderLeaderStore {
 
     fn read_committed_metadata(&self, timeout: Duration) -> Result<CloudMetadataHead, LeaseError> {
         self.read_separate_metadata_head(timeout)
+    }
+
+    fn read_committed_metadata_for_writer(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<CloudMetadataHead, LeaseError> {
+        self.cached_metadata_head(holder_id, epoch, timeout)
+    }
+
+    fn validate_metadata_epoch_with_timeout(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.cached_metadata_head(holder_id, epoch, timeout)
+            .map(|_| ())
     }
 
     fn publish_committed_metadata(

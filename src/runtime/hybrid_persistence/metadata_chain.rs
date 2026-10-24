@@ -176,11 +176,49 @@ fn changes(
     changes
 }
 
+fn cached_changes(
+    local: &BTreeMap<String, Vec<u8>>,
+    fingerprints: &BTreeMap<String, super::metadata_snapshot::FileFingerprint>,
+) -> BTreeMap<String, FileEdit> {
+    let mut edits = BTreeMap::new();
+    for (name, bytes) in local {
+        match fingerprints
+            .get(name)
+            .and_then(|fingerprint| fingerprint.unchanged_prefix(bytes))
+        {
+            Some(keep) if keep == bytes.len() => {}
+            Some(keep) => {
+                edits.insert(
+                    name.clone(),
+                    FileEdit::Suffix {
+                        keep,
+                        bytes: Bytes::copy_from_slice(&bytes[keep..]),
+                    },
+                );
+            }
+            None => {
+                edits.insert(
+                    name.clone(),
+                    FileEdit::Replace(Bytes::copy_from_slice(bytes)),
+                );
+            }
+        }
+    }
+    for name in fingerprints
+        .keys()
+        .filter(|name| !local.contains_key(*name))
+    {
+        edits.insert(name.clone(), FileEdit::Remove);
+    }
+    edits
+}
+
 pub(super) fn publish(
     context: &CloudMetadataMirrorContext<'_>,
     local: &BTreeMap<String, Vec<u8>>,
     previous: Option<&CloudMetadataGeneration>,
     old_bodies: Option<&BTreeMap<String, Vec<u8>>>,
+    fingerprints: Option<&BTreeMap<String, super::metadata_snapshot::FileFingerprint>>,
     id: SharedGenerationId,
 ) -> MidgeResult<Vec<CloudMetadataObject>> {
     let mut history = previous
@@ -198,7 +236,13 @@ pub(super) fn publish(
         writer_epoch: context.authority.writer_epoch,
         operation_id: uuid::Uuid::new_v4().to_string(),
         parent: history.first().cloned(),
-        changes: changes(local, (!history.is_empty()).then_some(old_bodies).flatten()),
+        changes: if history.is_empty() {
+            changes(local, None)
+        } else if let Some(fingerprints) = fingerprints {
+            cached_changes(local, fingerprints)
+        } else {
+            changes(local, old_bodies)
+        },
     };
     let mut encoded = codec::encode(CHAIN_KIND, &version)?;
     if version.parent.is_some()

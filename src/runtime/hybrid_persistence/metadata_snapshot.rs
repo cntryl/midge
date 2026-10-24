@@ -9,6 +9,111 @@ use crate::storage::cloud::{BlockingCloud, CloudStorage};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+#[cfg(test)]
+mod cache_tests;
+
+pub(crate) struct FileFingerprint {
+    length: usize,
+    digest: Option<[u8; 32]>,
+}
+
+impl FileFingerprint {
+    pub(super) fn unchanged_prefix(&self, bytes: &[u8]) -> Option<usize> {
+        let prefix = bytes.get(..self.length)?;
+        let expected = self.digest?;
+        (metadata_digest(prefix) == Some(expected)).then_some(self.length)
+    }
+
+    fn unchanged(&self, bytes: &[u8]) -> bool {
+        bytes.len() == self.length && self.unchanged_prefix(bytes).is_some()
+    }
+}
+
+#[cfg(any(
+    test,
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
+fn metadata_digest(bytes: &[u8]) -> Option<[u8; 32]> {
+    use sha2::Digest;
+    if bytes.len() as u64 > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
+        return None;
+    }
+    Some(sha2::Sha256::digest(bytes).into())
+}
+
+#[cfg(not(any(
+    test,
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+)))]
+fn metadata_digest(_bytes: &[u8]) -> Option<[u8; 32]> {
+    None
+}
+
+/// Only authority fields and fixed-size fingerprints are retained, not SST
+/// inventories or copied control-file bodies.
+pub(crate) struct MetadataMirrorCache {
+    generation: CloudMetadataGeneration,
+    writer_epoch: u64,
+    manifest: Manifest,
+    fingerprints: BTreeMap<String, FileFingerprint>,
+}
+
+impl MetadataMirrorCache {
+    fn new(
+        generation: CloudMetadataGeneration,
+        writer_epoch: u64,
+        mut manifest: Manifest,
+        local: &BTreeMap<String, Vec<u8>>,
+    ) -> Self {
+        manifest.files.clear();
+        manifest.next_sst_seqs.clear();
+        for family in &mut manifest.column_families {
+            family.dropped_sst_names.clear();
+        }
+        Self {
+            generation,
+            writer_epoch,
+            manifest,
+            fingerprints: local
+                .iter()
+                .map(|(name, bytes)| {
+                    (
+                        name.clone(),
+                        FileFingerprint {
+                            length: bytes.len(),
+                            digest: metadata_digest(bytes),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn matches(&self, generation: &CloudMetadataGeneration, epoch: u64) -> bool {
+        self.writer_epoch == epoch
+            && &self.generation == generation
+            && self
+                .fingerprints
+                .values()
+                .all(|fingerprint| fingerprint.digest.is_some())
+    }
+
+    fn unchanged(&self, local: &BTreeMap<String, Vec<u8>>) -> bool {
+        self.fingerprints.len() == local.len()
+            && local.iter().all(|(name, bytes)| {
+                self.fingerprints
+                    .get(name)
+                    .is_some_and(|fingerprint| fingerprint.unchanged(bytes))
+            })
+    }
+}
+
 /// A committed shared manifest, decoded from the exact immutable pointer bodies.
 /// Only the shared loader can construct one; local progress never grants authority.
 pub(crate) struct SharedRetirementAuthority {
@@ -356,7 +461,11 @@ fn commit_metadata_generation(
     let readback = context
         .authority
         .store
-        .read_committed_metadata(context.deadline.remaining())
+        .read_committed_metadata_for_writer(
+            context.authority.holder_id,
+            context.authority.writer_epoch,
+            context.deadline.remaining(),
+        )
         .map_err(|error| error.into_validation_error("cloud metadata generation readback"))?;
     if readback != CloudMetadataHead::Committed(generation) {
         return Err(MidgeError::Fenced(
@@ -393,14 +502,22 @@ pub(crate) fn mirror_control_metadata_within(
                 )
             })?
     };
-    let _guard = context.publication_lock.lock_for(timeout).ok_or_else(|| {
+    let mut guard = context.publication_lock.lock_for(timeout).ok_or_else(|| {
         MidgeError::Timeout("metadata mirror timed out acquiring publication lock".into())
     })?;
+    mirror_under_lock(&context, &mut guard.cached, &mut validate_lease)
+}
+
+fn mirror_under_lock(
+    context: &CloudMetadataMirrorContext<'_>,
+    cache: &mut Option<MetadataMirrorCache>,
+    validate_lease: &mut impl FnMut(&OperationDeadline) -> MidgeResult<()>,
+) -> MidgeResult<()> {
     validate_lease(context.deadline)?;
     context
         .authority
         .store
-        .validate_epoch_with_timeout(
+        .validate_metadata_epoch_with_timeout(
             context.authority.holder_id,
             context.authority.writer_epoch,
             context.deadline.remaining(),
@@ -409,7 +526,11 @@ pub(crate) fn mirror_control_metadata_within(
     let previous = match context
         .authority
         .store
-        .read_committed_metadata(context.deadline.remaining())
+        .read_committed_metadata_for_writer(
+            context.authority.holder_id,
+            context.authority.writer_epoch,
+            context.deadline.remaining(),
+        )
         .map_err(|error| error.into_validation_error("cloud metadata pointer read"))?
     {
         CloudMetadataHead::Committed(generation) => Some(generation),
@@ -420,23 +541,37 @@ pub(crate) fn mirror_control_metadata_within(
             ))
         }
     };
-    let local = capture_local_metadata(&context)?;
+    let local = capture_local_metadata(context)?;
     let candidate = decode_manifest_bodies(&local, context.deadline)?;
+    let cached = cache.as_ref().filter(|cached| {
+        previous
+            .as_ref()
+            .is_some_and(|generation| cached.matches(generation, context.authority.writer_epoch))
+    });
     let old_bodies = previous
         .as_ref()
+        .filter(|_| cached.is_none())
         .map(|generation| {
             read_committed_metadata_bodies_within(context.cloud, generation, context.deadline)
         })
         .transpose()?;
     if let Some(previous) = previous.as_ref() {
-        let committed = decode_generation_manifest(
+        if validate_cached_successor(
+            context,
             previous,
-            old_bodies.as_ref().expect("previous bodies loaded"),
-            context.deadline,
-        )?;
-        validate_manifest_successor(&candidate, &committed)?;
-        if old_bodies.as_ref() == Some(&local) {
-            return verify_unchanged_publication(&context, previous);
+            &candidate,
+            &local,
+            cached,
+            old_bodies.as_ref(),
+        )? {
+            verify_unchanged_publication(context, previous)?;
+            *cache = Some(MetadataMirrorCache::new(
+                previous.clone(),
+                context.authority.writer_epoch,
+                candidate,
+                &local,
+            ));
+            return Ok(());
         }
     }
     let id = previous
@@ -448,10 +583,11 @@ pub(crate) fn mirror_control_metadata_within(
             MidgeError::ResourceLimit("shared metadata generation ordinal exhausted".into())
         })?;
     let objects = super::metadata_chain::publish(
-        &context,
+        context,
         &local,
         previous.as_ref(),
         old_bodies.as_ref(),
+        cached.map(|cached| &cached.fingerprints),
         id,
     )?;
     let generation = CloudMetadataGeneration {
@@ -460,7 +596,36 @@ pub(crate) fn mirror_control_metadata_within(
         objects,
     };
     validate_lease(context.deadline)?;
-    commit_metadata_generation(&context, previous.as_ref(), generation)
+    commit_metadata_generation(context, previous.as_ref(), generation.clone())?;
+    *cache = Some(MetadataMirrorCache::new(
+        generation,
+        context.authority.writer_epoch,
+        candidate,
+        &local,
+    ));
+    Ok(())
+}
+
+fn validate_cached_successor(
+    context: &CloudMetadataMirrorContext<'_>,
+    previous: &CloudMetadataGeneration,
+    candidate: &Manifest,
+    local: &BTreeMap<String, Vec<u8>>,
+    cached: Option<&MetadataMirrorCache>,
+    old_bodies: Option<&BTreeMap<String, Vec<u8>>>,
+) -> MidgeResult<bool> {
+    if let Some(cached) = cached {
+        validate_manifest_successor(candidate, &cached.manifest)?;
+        Ok(cached.unchanged(local))
+    } else {
+        let committed = decode_generation_manifest(
+            previous,
+            old_bodies.expect("uncached predecessor loaded"),
+            context.deadline,
+        )?;
+        validate_manifest_successor(candidate, &committed)?;
+        Ok(old_bodies == Some(local))
+    }
 }
 
 #[cfg(test)]
@@ -607,6 +772,7 @@ mod tests {
         super::super::metadata_chain::publish(
             &context,
             &local,
+            None,
             None,
             None,
             SharedGenerationId::new(99).unwrap(),

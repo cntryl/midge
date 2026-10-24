@@ -921,6 +921,28 @@ pub trait LeaderStore: Send + Sync {
         ))
     }
 
+    /// Writer-scoped metadata admission. Provider stores may use a pointer
+    /// identity cached under an acquired monotonic lease; the final pointer
+    /// CAS must still reject a successor epoch claim.
+    fn read_committed_metadata_for_writer(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<CloudMetadataHead, LeaseError> {
+        self.validate_metadata_epoch_with_timeout(holder_id, epoch, timeout)?;
+        self.read_committed_metadata(timeout)
+    }
+
+    fn validate_metadata_epoch_with_timeout(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.validate_epoch_with_timeout(holder_id, epoch, timeout)
+    }
+
     /// Commit a complete immutable generation through the metadata pointer CAS.
     ///
     /// The caller must upload and verify every referenced immutable body first.

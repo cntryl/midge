@@ -27,7 +27,8 @@ use catalog::{load_and_repair_catalog_within, mutate_wal_catalog_within, Missing
 pub(crate) use metadata_snapshot::{
     decode_generation_manifest, mirror_control_metadata_within,
     read_committed_metadata_bodies_within, CloudMetadataMirrorAuthority,
-    CloudMetadataMirrorContext, SharedMetadataSnapshot, SharedRetirementAuthority,
+    CloudMetadataMirrorContext, MetadataMirrorCache, SharedMetadataSnapshot,
+    SharedRetirementAuthority,
 };
 
 /// Why a WAL upload could not be verified or published (#841).
