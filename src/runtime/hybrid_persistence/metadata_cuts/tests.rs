@@ -234,7 +234,7 @@ impl Fixture {
 }
 
 #[test]
-fn should_charge_shared_capture_pool_before_copy_and_retain_it_until_source_owner_finishes() {
+fn should_account_owned_capture_bytes_until_the_source_owner_finishes() {
     // Arrange
     let fixture = Fixture::new(CloudStorage::with_mock());
     let memory = crate::common::resource_budget::ResourceBudget::new(128 * 1024);
@@ -243,13 +243,13 @@ fn should_charge_shared_capture_pool_before_copy_and_retain_it_until_source_owne
         .reserve(memory.limit() - 128, "other admitted maintenance")
         .unwrap();
 
-    // Act / Assert: rejected admission allocates no owned cut and leaves the
-    // existing maintenance owner charged. Releasing it permits real capture.
+    // Act: attempt capture while the existing maintenance owner is charged.
     let rejected = fixture.lock.capture_control_cut(
         &fixture.fs,
         1,
         &OperationDeadline::from_budget(Duration::from_secs(1)),
     );
+    // Assert: rejected admission preserves the existing maintenance charge.
     let Err(error) = rejected else {
         panic!("shared pool must reject capture while occupied");
     };
@@ -277,10 +277,11 @@ fn should_charge_shared_capture_pool_before_copy_and_retain_it_until_source_owne
 }
 
 #[test]
-fn should_retry_owned_cut_slot_contention_and_release_capacity_after_source_owners_finish() {
+fn should_restore_capture_slot_availability_after_owned_sources_finish() {
     // Arrange
     let fixture = Fixture::new(CloudStorage::with_mock());
     let mut owned = (0..64).map(|_| fixture.cut()).collect::<Vec<_>>();
+    // Act: request one capture beyond the capacity owned by live sources.
     let rejected = fixture.lock.capture_control_cut(
         &fixture.fs,
         1,
@@ -290,7 +291,7 @@ fn should_retry_owned_cut_slot_contention_and_release_capacity_after_source_owne
         panic!("owned capture capacity must be bounded");
     };
 
-    // Act / Assert: capacity exhaustion is the originating slot-pool
+    // Assert: capacity exhaustion is the originating slot-pool
     // contention, rather than intent-proof Busy or a permanent size failure.
     assert!(fixture.lock.capture_admission_retryable(&error));
     fixture.mirror(owned.last().unwrap()).unwrap();
@@ -453,15 +454,14 @@ fn should_retain_unsettled_intent_when_new_capture_attempts_to_drop_it() {
     let first = fixture.cut();
     IntentPersistence::save_with_fs(&fixture.fs, &[]).unwrap();
 
-    // Act / Assert: no witness may grant coverage of an omitted obligation.
-    assert!(matches!(
-        fixture.lock.capture_control_cut(
-            &fixture.fs,
-            1,
-            &OperationDeadline::from_budget(Duration::from_secs(1))
-        ),
-        Err(MidgeError::Busy(_))
-    ));
+    // Act: request a witness for the cut omitting the unsettled intent.
+    let omitted = fixture.lock.capture_control_cut(
+        &fixture.fs,
+        1,
+        &OperationDeadline::from_budget(Duration::from_secs(1)),
+    );
+    // Assert: no witness may grant coverage of an omitted obligation.
+    assert!(matches!(omitted, Err(MidgeError::Busy(_))));
     assert_eq!(fixture.lock.pending_captures(), 1);
     fixture.mirror(&first).unwrap();
     // Selecting OutputDurable is not a terminal operation receipt.
@@ -586,8 +586,11 @@ fn should_reject_owned_capture_when_successor_takes_writer_epoch() {
     fixture.store.release_leadership("writer", 1).unwrap();
     fixture.store.acquire_leadership("successor").unwrap();
 
-    // Act / Assert
-    assert!(matches!(fixture.mirror(&cut), Err(MidgeError::Fenced(_))));
+    // Act
+    let publication = fixture.mirror(&cut);
+
+    // Assert
+    assert!(matches!(publication, Err(MidgeError::Fenced(_))));
     assert_eq!(fixture.lock.pending_captures(), 1);
     assert_eq!(
         fixture

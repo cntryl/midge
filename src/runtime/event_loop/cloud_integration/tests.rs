@@ -9490,7 +9490,7 @@ impl Drop for ReleasePublicationWork {
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_keep_local_progress_and_fence_stale_completions_when_cloud_publication_is_held(
+fn should_reconcile_cloud_publication_only_under_current_authority(
 ) -> crate::common::MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();

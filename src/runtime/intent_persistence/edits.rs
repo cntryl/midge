@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn should_retain_prior_intent_and_repair_tail_when_final_append_is_torn() -> MidgeResult<()> {
+    fn should_recover_the_durable_intent_prefix_when_final_append_is_torn() -> MidgeResult<()> {
         // Arrange
         let directory = tempfile::tempdir()?;
         let fs: Arc<dyn Fs> =
@@ -203,17 +203,20 @@ mod tests {
         let full = std::fs::read(&path)?;
         let added = full.len() - prefix.len();
 
-        // Act / Assert
+        // Act: replay each interrupted append from the actual on-disk prefix.
         for extent in [1, 8, 16, added - 1] {
             std::fs::write(&path, &full[..prefix.len() + extent])?;
             let recovered = load(&fs)?;
+            // Assert: an incomplete append cannot replace its durable prefix.
             assert_eq!(recovered.len(), 1);
             assert!(matches!(
                 recovered[0],
                 IntentLogEntry::SeqnoAllocated { seqno: 1, cf_id: 0 }
             ));
+            // Act: persist a new edit after loading the torn final append.
             save(&fs, &[entry(1), entry(3)])?;
             let repaired = load(&fs)?;
+            // Assert: the repaired durable prefix accepts the next intent.
             assert_eq!(repaired.len(), 2);
             assert!(matches!(
                 repaired[1],

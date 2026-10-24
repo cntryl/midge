@@ -132,7 +132,7 @@ fn should_rediscover_retired_wal_when_anchor_committed_before_process_queue_was_
 }
 
 #[test]
-fn should_retain_future_epoch_and_inconsistent_headers_below_anchor() {
+fn should_retain_wal_candidates_without_valid_anchor_coverage() {
     // Arrange
     let fixture = Fixture::new();
     let deadline = OperationDeadline::from_budget(Duration::from_secs(5));

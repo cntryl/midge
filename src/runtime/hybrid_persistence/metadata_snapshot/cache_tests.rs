@@ -98,7 +98,7 @@ impl crate::storage::cloud::CloudHeadCapability for ReceiptBackend {
 impl CloudBackend for ReceiptBackend {}
 
 #[test]
-fn should_use_edit_put_and_pointer_cas_when_writer_and_integrity_receipts_are_cached() {
+fn should_bound_changed_metadata_publication_to_two_requests_when_receipts_are_cached() {
     // Arrange
     let directory = tempfile::tempdir().unwrap();
     let backend = Arc::new(ReceiptBackend {

@@ -83,7 +83,7 @@ fn should_exclude_same_epoch_prefetched_names_when_startup_floor_is_immutable() 
 }
 
 #[test]
-fn should_protect_pins_intents_and_pending_mirror_work_before_orphan_delete() -> MidgeResult<()> {
+fn should_retain_every_captured_source_before_orphan_deletion() -> MidgeResult<()> {
     // Arrange
     let mut event_loop = fixture()?;
     let pinned = crate::cloud_layout::file_name(0, 1, 10);
@@ -187,7 +187,7 @@ fn should_revisit_late_predecessor_put_without_deleting_successor_names() -> Mid
 }
 
 #[test]
-fn should_retain_unknown_names_and_retired_objects_without_original_checksums() -> MidgeResult<()> {
+fn should_retain_sst_candidates_without_valid_deletion_proof() -> MidgeResult<()> {
     // Arrange
     let mut event_loop = fixture()?;
     let retired = crate::cloud_layout::file_name(0, 1, 20);

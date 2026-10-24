@@ -88,7 +88,7 @@ fn seed_compaction_name_source(event_loop: &mut EventLoop) -> MidgeResult<String
 }
 
 #[test]
-fn should_retain_exact_compaction_name_and_deadline_when_reservation_completes_under_another_owner(
+fn should_preserve_accepted_compaction_reservation_when_its_mirror_finishes_under_another_owner(
 ) -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
@@ -169,8 +169,7 @@ fn should_retain_exact_compaction_name_and_deadline_when_reservation_completes_u
 }
 
 #[test]
-fn should_complete_local_reads_and_best_effort_writes_while_metadata_provider_is_held(
-) -> MidgeResult<()> {
+fn should_keep_foreground_progress_available_while_metadata_provider_is_held() -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
@@ -292,8 +291,7 @@ fn should_retain_uncovered_names_when_a_completed_metadata_mirror_loses_authorit
 }
 
 #[test]
-fn should_keep_flush_waiters_and_the_original_name_while_reservation_is_pending() -> MidgeResult<()>
-{
+fn should_preserve_the_accepted_flush_while_name_reservation_is_pending() -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange

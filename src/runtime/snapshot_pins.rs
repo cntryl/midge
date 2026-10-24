@@ -774,7 +774,7 @@ mod validation_pin_tests {
     use super::*;
 
     #[test]
-    fn should_keep_internal_and_transaction_sources_pinned_when_their_numeric_ids_match() {
+    fn should_preserve_independent_pin_ownership_when_numeric_ids_match() {
         // Arrange
         let registry = Arc::new(SnapshotPinRegistry::default());
         assert!(registry.register(0, 7, vec!["transaction.sst".into()]));
