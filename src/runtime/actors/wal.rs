@@ -759,7 +759,7 @@ impl WalActor {
         if matches!(failure.error, crate::common::MidgeError::NoSpace(_)) {
             Self::record_no_space_event(&self.counters);
         }
-        failure.error
+        crate::common::error::classify_commit_error(failure.error, failure.unchanged)
     }
 
     /// Attach a leader store for epoch validation at sync boundaries, along
@@ -894,7 +894,7 @@ impl WalActor {
         state.mark_persistence_anomaly();
         if outcome.logged {
             // Replay may apply a logged unit, so its outcome is unknown.
-            MidgeError::OutcomeUnknown(message)
+            Self::appended_unit_error(MidgeError::RecoveryFailed(message))
         } else if !outcome.partly_applied && matches!(error, MidgeError::Fenced(_)) {
             // Nothing logged and nothing applied: definitely not applied.
             error
@@ -920,13 +920,7 @@ impl WalActor {
     /// "retry", either of which could apply the unit twice, so it becomes
     /// `OutcomeUnknown`, including a failed fsync or an ambiguous append.
     fn appended_unit_error(error: MidgeError) -> MidgeError {
-        match error {
-            MidgeError::OutcomeUnknown(_) => error,
-            other => MidgeError::OutcomeUnknown(format!(
-                "the transaction is in the WAL but not applied; it may be applied on \
-                 restart: {other}"
-            )),
-        }
+        crate::common::error::classify_commit_error(error, false)
     }
 
     pub(crate) fn can_coalesce_transaction_append(

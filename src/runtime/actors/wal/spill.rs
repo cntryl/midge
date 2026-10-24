@@ -120,11 +120,10 @@ impl WalActor {
                         format!("spilled transaction WAL append failed: {error}"),
                     );
                 }
-                return Err(if wal_may_have_changed {
-                    Self::appended_unit_error(error)
-                } else {
-                    error
-                });
+                return Err(crate::common::error::classify_commit_error(
+                    error,
+                    !wal_may_have_changed,
+                ));
             }
         };
         state.wal.pending_writes = state.wal.pending_writes.saturating_add(wal_records);
@@ -167,13 +166,7 @@ impl WalActor {
         // so replay keeps or drops it whole whatever frontier a later flush
         // publishes; an appended unit's outcome is unknown.
         self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)
-            .map_err(|error| {
-                if logged {
-                    Self::appended_unit_error(error)
-                } else {
-                    error
-                }
-            })?;
+            .map_err(|error| crate::common::error::classify_commit_error(error, !logged))?;
         // The WAL now holds the unit and `state.sequence` is past its commit.
         // A lease that lapsed since is a failed apply.
         let mut applied_ops = 0_usize;

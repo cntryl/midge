@@ -1359,7 +1359,7 @@ fn should_bound_routed_transaction_response_when_runtime_accepts_without_respond
     // Assert
     assert!(matches!(
         result,
-        Err(MidgeError::Timeout(message))
+        Err(MidgeError::OutcomeUnknown(message))
             if message.contains("ApplyTransaction")
                 && message.contains(&format!("request_id={request_id}"))
                 && message.contains("20ms")

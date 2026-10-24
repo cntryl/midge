@@ -200,6 +200,12 @@ application-level idempotency check before writing it again. A plain
 `MidgeError::Timeout` from `commit()` comes only from commits that cannot have
 changed state.
 
+A writer timeout that carries proof of no physical effects, such as rejection
+before enqueue or a durably completed rollback, therefore remains a typed
+`Timeout` through the runtime response and transaction API. The caller-side
+wait alone has no such proof. WAL append failures retain their existing
+fencing behavior regardless of the error shown to the caller.
+
 When a commit with writes has crossed the WAL or visibility boundary but Midge
 cannot confirm its requested durability, `commit()` reports
 `MidgeError::OutcomeUnknown`. This includes a failed sync after the WAL append,

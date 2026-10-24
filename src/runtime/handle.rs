@@ -636,6 +636,7 @@ impl RuntimeHandle {
         submission: TransactionSubmission,
     ) -> MidgeResult<RuntimeResponse> {
         let submission_guard = self.lifecycle.begin_submission()?;
+        let has_writes = !submission.ops.is_empty();
         let response_rx = self.router.register(request_id, "ApplyTransaction");
         if let Err(error) = self.msg_tx.try_send(RuntimeMsg::ApplyTransaction {
             request_id,
@@ -656,6 +657,7 @@ impl RuntimeHandle {
             "ApplyTransaction",
             request_id,
             self.runtime_response_timeout,
+            has_writes,
         )
     }
 
@@ -665,6 +667,7 @@ impl RuntimeHandle {
         submission: SpilledTransactionSubmission,
     ) -> MidgeResult<RuntimeResponse> {
         let submission_guard = self.lifecycle.begin_submission()?;
+        let has_writes = !submission.source.is_empty();
         let response_rx = self.router.register(request_id, "ApplySpilledTransaction");
         if let Err(error) = self.msg_tx.try_send(RuntimeMsg::ApplySpilledTransaction {
             request_id,
@@ -685,6 +688,7 @@ impl RuntimeHandle {
             "ApplySpilledTransaction",
             request_id,
             self.runtime_response_timeout,
+            has_writes,
         )
     }
 
@@ -694,15 +698,15 @@ impl RuntimeHandle {
         request_kind: &'static str,
         request_id: u64,
         timeout: Duration,
+        has_writes: bool,
     ) -> MidgeResult<RuntimeResponse> {
         match response_rx.recv_timeout(timeout) {
             Ok(response) => Ok(response),
             Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
                 if self.router.abandon(request_id, timeout) {
-                    Err(Self::response_timeout_error(
-                        request_kind,
-                        request_id,
-                        timeout,
+                    Err(crate::common::error::classify_commit_error(
+                        Self::response_timeout_error(request_kind, request_id, timeout),
+                        !has_writes,
                     ))
                 } else {
                     response_rx.recv().map_err(|_| {

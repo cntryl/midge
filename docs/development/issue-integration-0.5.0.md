@@ -16,6 +16,11 @@ defect. Preserve it when interpreting broad validation.
 
 ## Working rules
 
+- On 2026-10-24 the user requested an implementation-first pass over every
+  0.5.0 issue, followed by review and tests. Subsequent candidate commits may
+  carry unexecuted behavioral regressions; preserve them, use compile checks
+  to keep interfaces coherent, and defer broad qualification and performance
+  measurements to the review pass. Do not equate implemented with qualified.
 - Work in dependency order, preserving a failing behavioral regression before
   each durability fix and recording the green commands with its commit.
 - Prefer a self-contained passing commit for each issue or bounded slice.
@@ -168,8 +173,23 @@ test/documentation validation passed. The final small-group control passed
 under both policies, retaining one append when combined growth fits; Clippy
 also passed on that final source. No timeout or assertion was relaxed.
 
-Next: #977's commit-outcome classification, followed by the evidence and
-pipeline prerequisites in the WAL design. The #904 sign-off gate remains.
+### #977: implemented candidate; tests deferred
+
+Append, group-sync and ledger failure paths use the common commit-error
+classifier. Byte admission still requires the physical unchanged proof, and
+existing actor fencing is preserved. Only an expired caller response wait
+for an admitted write becomes `OutcomeUnknown`; a proved unchanged `Timeout`
+inside a response now passes through the engine. Assertion-only requests
+retain typed response-wait timeouts. Post-apply cloud durability remains
+unknown on failure.
+
+Added a production writer pre-enqueue failpoint and public engine restart
+regressions for resident and spilled commits. The old helper-only engine
+remap tests were replaced by this path coverage; the existing routed-wait
+test now expects the truthful unknown outcome. `cargo check --locked --tests
+--features failpoints` passed. Execution of the regressions, broad tests,
+adversarial review and performance measurements is deferred per the user's
+implementation-first request.
 
 ### #981: implemented locally; Azure Sqrzl checks complete
 

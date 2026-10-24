@@ -342,14 +342,10 @@ impl WalActor {
         unapplied: &[&PreparedTransactionAppend],
         error: MidgeError,
     ) -> MidgeError {
-        if unapplied
+        let logged = unapplied
             .iter()
-            .any(|prepared| prepared.wal_batch.wal_record.is_some())
-        {
-            Self::appended_unit_error(error)
-        } else {
-            error
-        }
+            .any(|prepared| prepared.wal_batch.wal_record.is_some());
+        crate::common::error::classify_commit_error(error, !logged)
     }
 
     fn fail_unapplied_group(
@@ -680,16 +676,11 @@ impl WalActor {
                 None => writer.append_batch_accounted(&records),
             };
             if let Err(failure) = append_result {
-                let unchanged = failure.unchanged;
                 let error = self.settle_failed_wal_append(admitted, failure);
                 self.fence_transition(state, format!("WAL batch append failed: {error}"));
                 // One write carries every unit's frames. When it may have
                 // left some of them in the file, replay may apply them.
-                return Err(if unchanged {
-                    error
-                } else {
-                    Self::appended_unit_error(error)
-                });
+                return Err(error);
             }
             self.settle_wal_append(admitted, previous_position);
             self.finish_append_instrumentation(total_wal_bytes as u64, append_start.elapsed());

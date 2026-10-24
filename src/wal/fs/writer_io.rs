@@ -339,6 +339,11 @@ impl FsWalWriterIo {
         if let Some(error) = self.writer_failure() {
             return Err(WalAppendError::unchanged(error));
         }
+        crate::failpoints::fail_point!("midge::wal::timeout_before_enqueue", |_| Err(
+            WalAppendError::unchanged(MidgeError::Timeout(
+                "injected timeout before WAL enqueue".into()
+            ))
+        ));
         let admission_start = std::time::Instant::now();
         let authority = self.write_authority.read().clone();
         let (effect, root) = PendingWriterEffect::admit(authority, group, acknowledgement_timeout)
