@@ -4,7 +4,10 @@ use crate::storage::test_support::StorageBackendTestExt;
 use std::time::Duration;
 
 fn fixture() -> MidgeResult<EventLoop> {
-    create_test_cloud_event_loop_with_reserved_names(Default::default(), Some(100))
+    create_test_cloud_event_loop_with_reserved_names(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        Some(100),
+    )
 }
 
 fn put(event_loop: &EventLoop, name: &str) {

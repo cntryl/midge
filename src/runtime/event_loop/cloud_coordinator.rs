@@ -38,8 +38,9 @@ impl CloudCoordinator {
                 config.retry_policy,
             ),
             cloud_wal_prune_worker: None,
-            cloud_publication: Default::default(),
-            metadata_mirror: Default::default(),
+            cloud_publication:
+                super::cloud_integration::publication_worker::CloudPublicationPipeline::default(),
+            metadata_mirror: super::metadata_mirror::MetadataMirrorPipeline::default(),
             cloud_maintenance: CloudMaintenance::default(),
         }
     }

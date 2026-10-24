@@ -425,7 +425,9 @@ impl HybridStorage {
                     loop {
                         // Release the receive lock before any filesystem/provider
                         // work, allowing the other fixed workers to make progress.
-                        let Ok(upload) = receiver.lock().recv() else { break; };
+                        let Ok(upload) = receiver.lock().recv() else {
+                            break;
+                        };
                         let memory =
                             match reserve_upload_memory(&upload, cloud.as_ref(), &config.memory) {
                                 Ok(memory) => memory,

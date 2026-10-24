@@ -205,7 +205,7 @@ fn should_exclude_metadata_fetch_when_retention_owns_publication_capture() {
     let blocked = snapshot.committed_retirement_authority_within(&OperationDeadline::from_budget(
         Duration::from_millis(1),
     ));
-    assert!(fixture.backend.get_downloads().is_empty());
+    assert_eq!(fixture.backend.get_downloads(), Vec::<String>::new());
     drop(held);
     let resumed = snapshot.committed_retirement_authority_within(&OperationDeadline::from_budget(
         Duration::from_secs(5),

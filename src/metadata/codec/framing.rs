@@ -1,4 +1,4 @@
-//! Allocation-free extent validation before the borrowed MessagePack decoder.
+//! Allocation-free extent validation before the borrowed `MessagePack` decoder.
 
 use crate::common::{MidgeError, MidgeResult};
 

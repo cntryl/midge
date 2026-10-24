@@ -16,7 +16,8 @@ pub(in crate::storage::providers) fn submit_list_page<P: ListPageParser + Send +
         let _ = callback.send(Err(error));
         return;
     }
-    if options.timeout().is_some_and(|timeout| timeout.is_zero()) {
+    let timeout = options.timeout();
+    if timeout.is_some_and(|timeout| timeout.is_zero()) {
         let _ = callback.send(Err(CloudError::Timeout(
             "bounded LIST page deadline exhausted".into(),
         )));
@@ -35,8 +36,8 @@ pub(in crate::storage::providers) fn submit_list_page<P: ListPageParser + Send +
             max_retries: 0,
             ..Default::default()
         })
-        .with_reservation(options.reservation.clone());
-    if let Some(timeout) = options.timeout() {
+        .with_reservation(options.reservation);
+    if let Some(timeout) = timeout {
         request = request.with_timeout(timeout);
     }
     executor.spawn_typed_request(

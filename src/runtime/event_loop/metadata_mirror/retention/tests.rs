@@ -7,7 +7,9 @@ use crate::storage::cloud::BlockingCloud;
 #[test]
 fn should_reclaim_bounded_backlog_on_idle_turns_without_new_metadata_writes() -> MidgeResult<()> {
     // Arrange: twenty-five standalone snapshots exceed a single GC pass.
-    let mut event_loop = create_test_cloud_event_loop(Default::default())?;
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
     for sequence in 1..=25 {
         crate::runtime::IntentPersistence::save_with_fs(
             &event_loop.state.fs,

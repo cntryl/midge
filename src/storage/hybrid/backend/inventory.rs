@@ -49,7 +49,8 @@ impl HybridStorage {
         source
             .keys_page(prefix, page, Some(&scope))?
             .map(|result| {
-                expected.accept(prefix, result.keys, result.continuation)
+                expected
+                    .accept(prefix, result.keys, result.continuation)
                     .map_err(|error| MidgeError::Corruption(error.to_string()))
             })
             .transpose()

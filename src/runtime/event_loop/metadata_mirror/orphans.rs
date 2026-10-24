@@ -51,7 +51,7 @@ impl OrphanSweepTask {
             sweep_sst_orphans_within(context, &self.protection, self.cursor.clone(), |deadline| {
                 fence.validate_within(deadline)
             })?;
-        let remaining = 8usize.saturating_sub(result.probes as usize);
+        let remaining = 8usize.saturating_sub(usize::try_from(result.probes).unwrap_or(usize::MAX));
         if remaining != 0 {
             match crate::runtime::hybrid_persistence::sweep_retired_wal_within(
                 context,
@@ -69,7 +69,7 @@ impl OrphanSweepTask {
                 }
                 Err(error @ MidgeError::Fenced(_)) => return Err(error),
                 Err(error) => {
-                    tracing::debug!(%error, "retired WAL discovery retained its uncertain cursor")
+                    tracing::debug!(%error, "retired WAL discovery retained its uncertain cursor");
                 }
             }
         }
@@ -153,7 +153,7 @@ impl EventLoop {
             protection: Arc::new(protection),
             cursor: pipeline.orphan_cursor.clone(),
             wal_cursor: pipeline.wal_orphan_cursor.clone(),
-            progress: Default::default(),
+            progress: Arc::default(),
         }))
     }
 

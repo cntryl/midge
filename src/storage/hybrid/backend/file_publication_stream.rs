@@ -1,8 +1,8 @@
 //! Bounded publication of a finished immutable file through provider sessions.
 
 use super::{
-    mpsc, Arc, FsError, HybridStorage, ImmutableFileSource, MidgeError, MidgeResult,
-    OpenOptions, OperationDeadline, PublicationAdmission, ResourceBudget, StorageObjectMetadata,
+    mpsc, Arc, FsError, HybridStorage, ImmutableFileSource, MidgeError, MidgeResult, OpenOptions,
+    OperationDeadline, PublicationAdmission, ResourceBudget, StorageObjectMetadata,
     FIXED_WORKSPACE, READBACK_BYTES,
 };
 use crate::storage::{StorageFileUpload, StoragePrecondition, StorageRequest, StorageWriteReceipt};

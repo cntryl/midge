@@ -1,6 +1,6 @@
 //! Shared bounded binary metadata frames for local and cloud authority.
 //!
-//! MessagePack maps preserve explicit field names and optional fields while
+//! `MessagePack` maps preserve explicit field names and optional fields while
 //! encoding integers and key bytes compactly. CRC32C covers the header, kind,
 //! length and exact payload, so a frame cannot be reinterpreted as another kind.
 

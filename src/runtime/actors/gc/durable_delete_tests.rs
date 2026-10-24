@@ -51,7 +51,7 @@ impl Fixture {
         let cloud = Arc::new(CloudStorage::with_mock());
         let storage = Arc::new(crate::storage::HybridStorage::with_policy(
             cloud.clone(),
-            Default::default(),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         let store = Arc::new(FsLeaderStore::new(
             Arc::clone(&state.fs),

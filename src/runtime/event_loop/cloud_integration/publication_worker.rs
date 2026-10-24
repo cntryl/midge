@@ -280,18 +280,18 @@ impl EventLoop {
             )))
         });
         let _ = job.worker.join();
-        let result = if epoch != self.state.writer_epoch {
-            Err(PublicationError::Fenced(MidgeError::Fenced(
-                "stale cloud WAL publication epoch".into(),
-            )))
-        } else {
+        let result = if epoch == self.state.writer_epoch {
             self.check_lease_health()
                 .map_err(PublicationError::Fenced)
                 .and(result)
+        } else {
+            Err(PublicationError::Fenced(MidgeError::Fenced(
+                "stale cloud WAL publication epoch".into(),
+            )))
         };
         match result {
             Ok(Completion::Verified(upload)) => {
-                self.accept_verified_cloud_wal_upload(job.acknowledged, upload, job.deadline)
+                self.accept_verified_cloud_wal_upload(job.acknowledged, upload, job.deadline);
             }
             Ok(Completion::Published) => {
                 self.actors

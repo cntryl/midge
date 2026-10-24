@@ -120,8 +120,13 @@ impl EventLoop {
         let due_sync = self.actors.wal_actor.should_sync_batch()
             && (self.actors.wal_actor.has_pending_data()
                 || self.pipeline.durability.has_pending_waiters());
-        due_sync || self.actors.cloud_coordinator.hybrid_storage_events
-            .as_ref().is_some_and(|rx| !rx.is_empty())
+        due_sync
+            || self
+                .actors
+                .cloud_coordinator
+                .hybrid_storage_events
+                .as_ref()
+                .is_some_and(|rx| !rx.is_empty())
     }
 
     pub(super) fn idle_progress_timeout(&self) -> Option<Duration> {

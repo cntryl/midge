@@ -18,7 +18,7 @@ impl Fixture {
         let cloud = Arc::new(CloudStorage::new(backend.clone(), "retired".into()));
         let storage = Arc::new(HybridStorage::with_policy(
             cloud.clone(),
-            Default::default(),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         let original = FileMeta {
             name: crate::cloud_layout::file_name(0, 1, 7),
@@ -54,7 +54,7 @@ impl Fixture {
 #[test]
 fn should_delete_original_bytes_when_every_bounded_read_matches_retired_identity() {
     // Arrange
-    let fixture = Fixture::new(&vec![0x41; READ_CHUNK as usize * 2 + 7]);
+    let fixture = Fixture::new(&vec![0x41; usize::try_from(READ_CHUNK).unwrap() * 2 + 7]);
     fixture.backend.clear_history();
 
     // Act

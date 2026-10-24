@@ -42,12 +42,12 @@ impl Default for MetadataMirrorPipeline {
         Self {
             next_operation: 0,
             running: None,
-            pending_compactions: Default::default(),
+            pending_compactions: std::collections::VecDeque::default(),
             pending_flush: None,
             retention_due: std::time::Instant::now() + retention_interval,
             retention_interval,
-            orphan_cursor: Default::default(),
-            wal_orphan_cursor: Default::default(),
+            orphan_cursor: crate::runtime::hybrid_persistence::InventoryCursor::default(),
+            wal_orphan_cursor: crate::runtime::hybrid_persistence::InventoryCursor::default(),
         }
     }
 }
@@ -173,10 +173,10 @@ impl EventLoop {
         self.state
             .diagnostics
             .record(|m| m.record_cloud_metadata_mirror_latency(job.started.elapsed()));
-        let result = if epoch != self.state.writer_epoch {
-            Err(MidgeError::Fenced("stale metadata mirror epoch".into()))
-        } else {
+        let result = if epoch == self.state.writer_epoch {
             self.check_lease_health().and(result)
+        } else {
+            Err(MidgeError::Fenced("stale metadata mirror epoch".into()))
         };
         self.publication.publication_gate.release(
             &super::coordination::ManifestPublicationOwner::MetadataMirror { operation_id: id },
@@ -246,7 +246,7 @@ impl EventLoop {
                 );
                 for (plan, deadline) in pending {
                     if plan.cf_id == cf_id && plan.output_seq < next_seq {
-                        let outcome = result.as_ref().map(|_| ()).map_err(MidgeError::replay);
+                        let outcome = result.as_ref().copied().map_err(MidgeError::replay);
                         self.resume_compaction_after_metadata_mirror(plan, deadline, outcome);
                     } else {
                         self.actors
@@ -258,7 +258,7 @@ impl EventLoop {
                 }
             }
             MirrorContinuation::Reclamation => {
-                super::gc::GcCoordinator::finish_manifest_reclamation(self, result)
+                super::gc::GcCoordinator::finish_manifest_reclamation(self, result);
             }
             MirrorContinuation::OrphanSweep(task) => {
                 if let Err(error) = result {
