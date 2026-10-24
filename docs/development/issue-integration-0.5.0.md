@@ -338,3 +338,18 @@ snapshot rename before journal truncation. Test targets compile in the shared
 working tree; behavioral execution remains pending. Ahead-of-use name
 reservation and the remaining publication cadence paths still need review and
 implementation before the issue can be considered complete.
+
+### #946/#905: same-group overlay implemented; asynchronous handoff pending
+
+A sequenced staged-write overlay now supplies same-group point/range write
+conflicts, assertions and insert-only existence/TTL decisions. It retains Bytes
+handles and borrowed preflight/deduplication keys. Blind overlapping writes can
+share one append/sync; mixed operation-ordering barriers are preserved.
+Active tests cover overlapping strict units across restart, write conflicts,
+staged range deletion and insert-only, and require coalescing while retaining
+failure outcomes. Failpoint test targets compile; no tests or A/B runs have
+executed for this candidate.
+
+Off-loop snapshot validation with intervening-write revalidation, earlier
+in-flight groups, pipeline receipts, parked roots and concurrent apply remain
+pending. This slice does not enable an asynchronous pipeline.

@@ -88,6 +88,19 @@ impl WalActor {
         state: &mut RuntimeState,
         params: TransactionAppendParams,
     ) -> MidgeResult<PreparedTransactionAppend> {
+        self.prepare_transaction_append_with_overlay(
+            state,
+            params,
+            &super::StagedWriteOverlay::default(),
+        )
+    }
+
+    pub(crate) fn prepare_transaction_append_with_overlay(
+        &mut self,
+        state: &mut RuntimeState,
+        params: TransactionAppendParams,
+        overlay: &super::StagedWriteOverlay,
+    ) -> MidgeResult<PreparedTransactionAppend> {
         self.ensure_lease_validity()?;
         let TransactionAppendParams {
             request_id,
@@ -130,6 +143,7 @@ impl WalActor {
             &assertions,
             start_sequence,
             conflict_policy,
+            overlay,
         )?;
         let sequence_plan = Self::allocate_transaction_sequences(state, ops.len(), cf_id)?;
         let (apply_ops, wal_batch) = match self.build_transaction_wal_batch(
@@ -380,9 +394,11 @@ impl WalActor {
         assertions: &[crate::runtime::KeyAssertion],
         start_sequence: Option<u64>,
         conflict_policy: crate::runtime::ConflictPolicy,
+        overlay: &super::StagedWriteOverlay,
     ) -> MidgeResult<()> {
         // One snapshot per family serves conflict checks and assertions.
-        let mut snapshots = super::transaction_state::ValidationSnapshots::new(state, resources);
+        let mut snapshots =
+            super::transaction_state::ValidationSnapshots::with_overlay(state, resources, overlay);
         if matches!(
             conflict_policy,
             crate::runtime::ConflictPolicy::AbortOnWriteConflict

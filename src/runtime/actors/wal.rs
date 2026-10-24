@@ -291,10 +291,12 @@ mod authority;
 mod durability;
 mod rotation;
 mod spill;
+mod staged_writes;
 #[cfg(test)]
 mod test_append;
 mod transaction;
 mod transaction_state;
+pub(crate) use staged_writes::StagedWriteOverlay;
 
 impl WalActor {
     #[cfg(test)]

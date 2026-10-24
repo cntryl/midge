@@ -548,10 +548,10 @@ fn should_coalesce_mixed_transaction_contents_across_column_families() -> MidgeR
 }
 
 #[test]
-fn should_fall_back_from_coalescing_when_point_range_overlap() -> MidgeResult<()> {
+fn should_coalesce_blind_transactions_when_point_range_overlap() -> MidgeResult<()> {
     for (policy, expected_syncs) in [
         (DurabilityPolicy::Batched, 0),
-        (DurabilityPolicy::Strict, 2),
+        (DurabilityPolicy::Strict, 1),
     ] {
         // Arrange
         let mut fixture = EventLoopFixture::with_policy(policy)?;
@@ -575,7 +575,7 @@ fn should_fall_back_from_coalescing_when_point_range_overlap() -> MidgeResult<()
 
         // Assert
         assert_eq!(handled, 2);
-        assert_eq!(fixture.event_loop.actors.wal_actor.append_calls(), 2);
+        assert_eq!(fixture.event_loop.actors.wal_actor.append_calls(), 1);
         assert_eq!(
             fixture.event_loop.actors.wal_actor.sync_calls(),
             expected_syncs
@@ -589,8 +589,8 @@ fn should_fall_back_from_coalescing_when_point_range_overlap() -> MidgeResult<()
 }
 
 #[test]
-fn should_return_inline_responses_when_same_key_lww_transaction_falls_back_from_coalescing(
-) -> MidgeResult<()> {
+fn should_return_inline_responses_when_same_key_lww_transactions_share_a_group() -> MidgeResult<()>
+{
     // Arrange
     let mut fixture = EventLoopFixture::batched()?;
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -615,7 +615,7 @@ fn should_return_inline_responses_when_same_key_lww_transaction_falls_back_from_
 
     // Assert
     assert_eq!(handled, 2);
-    assert_eq!(fixture.event_loop.actors.wal_actor.append_calls(), 2);
+    assert_eq!(fixture.event_loop.actors.wal_actor.append_calls(), 1);
     assert_eq!(expect_transaction_applied(&first_rx, 34).1, 1);
     assert_eq!(expect_transaction_applied(&fallback_rx, 35).1, 1);
     assert_no_additional_response(&first_rx);
@@ -626,7 +626,7 @@ fn should_return_inline_responses_when_same_key_lww_transaction_falls_back_from_
 }
 
 #[test]
-fn should_return_inline_error_when_same_key_insert_only_fallback_rejects_from_coalescing(
+fn should_return_inline_error_when_same_key_insert_only_is_rejected_by_staged_writes(
 ) -> MidgeResult<()> {
     // Arrange
     let mut fixture = EventLoopFixture::batched()?;
@@ -953,8 +953,8 @@ fn should_reject_assertion_when_earlier_batch_member_writes_the_asserted_key() -
     // it doesn't already fall back via the empty-ops guard alone.
     //
     // Preparation allocates a sequence immediately, but memtable apply for
-    // the whole batch is deferred until it flushes — so without
-    // StagedTransactionTouches::touches_assertions, B's assertion would be
+    // the whole batch is deferred until it flushes — so without the shared
+    // sequenced-write overlay, B's assertion would be
     // checked against a memtable that does not yet reflect A's write (whose
     // sequence is nonetheless already allocated) and would wrongly pass.
     let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
@@ -1523,7 +1523,6 @@ fn reopen_and_find(fixture: EventLoopFixture, keys: [&[u8]; 2]) -> MidgeResult<[
 }
 
 /// Like `reopen_and_find`, returning the recovered values.
-#[cfg(feature = "failpoints")]
 fn reopen_and_read(
     fixture: EventLoopFixture,
     keys: [&[u8]; 2],
@@ -1842,7 +1841,7 @@ fn should_freeze_without_failed_unit_when_strict_sync_fails_after_wal_append() -
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_fail_same_key_fallback_when_coalesced_prefix_append_fails() -> MidgeResult<()> {
+fn should_fail_overlapping_group_when_coalesced_append_fails() -> MidgeResult<()> {
     // Arrange
     let _guard = failpoint_test_lock()
         .lock()
@@ -1889,57 +1888,6 @@ fn should_fail_same_key_fallback_when_coalesced_prefix_append_fails() -> MidgeRe
     }
 
     Ok(())
-}
-
-#[test]
-fn should_detect_overlapping_point_range_touches_when_staging_transactions() {
-    // Arrange
-    let mut touches = StagedTransactionTouches::default();
-    touches.record_ops(&[
-        TransactionOp::Put {
-            cf_id: 0,
-            key: Bytes::from_static(b"point"),
-            value: Bytes::from_static(b"value"),
-            ttl_seconds: None,
-            insert_only: false,
-        },
-        TransactionOp::DeleteRange {
-            cf_id: 0,
-            start_key: Bytes::from_static(b"range-a"),
-            end_key: Bytes::from_static(b"range-z"),
-        },
-    ]);
-
-    // Act
-    // Assert
-    assert!(touches.touches_ops(&[TransactionOp::Delete {
-        cf_id: 0,
-        key: Bytes::from_static(b"point"),
-    }]));
-    assert!(touches.touches_ops(&[TransactionOp::Put {
-        cf_id: 0,
-        key: Bytes::from_static(b"range-m"),
-        value: Bytes::from_static(b"value"),
-        ttl_seconds: None,
-        insert_only: true,
-    }]));
-    assert!(touches.touches_ops(&[TransactionOp::DeleteRange {
-        cf_id: 0,
-        start_key: Bytes::from_static(b"range-y"),
-        end_key: Bytes::from_static(b"zz"),
-    }]));
-    assert!(!touches.touches_ops(&[TransactionOp::Put {
-        cf_id: 1,
-        key: Bytes::from_static(b"point"),
-        value: Bytes::from_static(b"value"),
-        ttl_seconds: None,
-        insert_only: false,
-    }]));
-    assert!(!touches.touches_ops(&[TransactionOp::DeleteRange {
-        cf_id: 0,
-        start_key: Bytes::from_static(b"range-z"),
-        end_key: Bytes::from_static(b"zz"),
-    }]));
 }
 
 #[test]
@@ -2764,7 +2712,7 @@ fn should_answer_outcome_unknown_when_lease_lapses_before_spilled_sync() -> Midg
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_answer_not_applied_to_fallback_request_when_its_group_fails() -> MidgeResult<()> {
-    // Arrange: request 75 writes the key request 74 already staged, so it
+    // Arrange: request 75 requires a different ordering contract, so it
     // cannot join the group and waits as the fallback, never prepared.
     let _guard = failpoint_test_lock()
         .lock()
@@ -2777,11 +2725,15 @@ fn should_answer_not_applied_to_fallback_request_when_its_group_fails() -> Midge
         let grouped_rx = fixture.register(74);
         let fallback_rx = fixture.register(75);
         msg_tx
-            .send(txn_msg(
-                75,
-                vec![put_op(0, b"shared", b"fallback-value")],
-                Some(DurabilityPolicy::Strict),
-            ))
+            .send(RuntimeMsg::ApplyTransaction {
+                request_id: 75,
+                ops: vec![put_op(0, b"shared", b"fallback-value")],
+                assertions: Vec::new(),
+                durability_policy: Some(DurabilityPolicy::Strict),
+                start_sequence: Some(0),
+                conflict_policy: ConflictPolicy::AbortOnWriteConflict,
+                response_tx: None,
+            })
             .expect("queue fallback transaction");
         lapse_lease_at(
             &mut fixture,
@@ -2821,5 +2773,158 @@ fn should_answer_not_applied_to_fallback_request_when_its_group_fails() -> Midge
         "{fallback:?}"
     );
     assert_eq!(recovered.as_deref(), Some(b"grouped-value".as_slice()));
+    Ok(())
+}
+
+#[test]
+fn should_recover_later_overlapping_strict_unit_when_both_share_one_append() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    let (sender, receiver) = crossbeam::channel::unbounded();
+    let first = fixture.register(9_905);
+    let second = fixture.register(9_906);
+    sender
+        .send(txn_msg(
+            9_906,
+            vec![
+                put_op(0, b"hot-key", b"second"),
+                put_op(0, b"second-unit", b"whole"),
+            ],
+            Some(DurabilityPolicy::Strict),
+        ))
+        .expect("queue later unit");
+
+    // Act
+    let handled = fixture.event_loop.apply_transaction_with_coalescing(
+        &receiver,
+        txn_request(
+            9_905,
+            vec![put_op(0, b"hot-key", b"first")],
+            Some(DurabilityPolicy::Strict),
+        ),
+        1024,
+    );
+
+    // Assert
+    assert_eq!(handled, 2);
+    assert_eq!(fixture.event_loop.actors.wal_actor.append_calls(), 1);
+    assert_eq!(fixture.event_loop.actors.wal_actor.sync_calls(), 1);
+    assert_eq!(expect_transaction_applied(&first, 9_905).1, 1);
+    assert_eq!(expect_transaction_applied(&second, 9_906).1, 2);
+    let [key, second_unit] = reopen_and_read(fixture, [b"hot-key", b"second-unit"])?;
+    assert_eq!(key.as_deref(), Some(b"second".as_slice()));
+    assert_eq!(second_unit.as_deref(), Some(b"whole".as_slice()));
+    Ok(())
+}
+
+#[test]
+fn should_reject_conflicting_follower_when_staged_point_or_range_intersects_its_writes(
+) -> MidgeResult<()> {
+    for (first_ops, second_ops) in [
+        (
+            vec![put_op(0, b"middle", b"first")],
+            vec![put_op(0, b"middle", b"second")],
+        ),
+        (
+            vec![put_op(0, b"middle", b"first")],
+            vec![delete_range_op(0, b"a", b"z")],
+        ),
+        (
+            vec![delete_range_op(0, b"a", b"z")],
+            vec![put_op(0, b"middle", b"second")],
+        ),
+        (
+            vec![delete_range_op(0, b"a", b"z")],
+            vec![delete_range_op(0, b"b", b"y")],
+        ),
+    ] {
+        // Arrange
+        let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+        let (sender, receiver) = crossbeam::channel::unbounded();
+        let first = fixture.register(9_946);
+        let second = fixture.register(9_947);
+        sender
+            .send(RuntimeMsg::ApplyTransaction {
+                request_id: 9_947,
+                ops: second_ops,
+                assertions: Vec::new(),
+                durability_policy: Some(DurabilityPolicy::Strict),
+                start_sequence: Some(0),
+                conflict_policy: ConflictPolicy::AbortOnWriteConflict,
+                response_tx: None,
+            })
+            .expect("queue conflicting unit");
+
+        // Act
+        fixture.event_loop.apply_transaction_with_coalescing(
+            &receiver,
+            ordered_txn_request(
+                9_946,
+                first_ops,
+                DurabilityPolicy::Strict,
+                0,
+                ConflictPolicy::AbortOnWriteConflict,
+            ),
+            1024,
+        );
+
+        // Assert
+        assert_eq!(expect_transaction_applied(&first, 9_946).1, 1);
+        expect_error(&second, 9_947, |error| {
+            matches!(error, MidgeError::WriteConflict(_))
+        });
+        assert_eq!(fixture.event_loop.actors.wal_actor.append_calls(), 1);
+        assert_eq!(fixture.event_loop.state.applied_sequence, 3);
+    }
+    Ok(())
+}
+
+#[test]
+fn should_allow_insert_only_after_staged_range_delete_when_existing_value_is_masked(
+) -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = EventLoopFixture::with_policy(DurabilityPolicy::Strict)?;
+    fixture.event_loop.actors.wal_actor.append_transaction(
+        &mut fixture.event_loop.state,
+        crate::runtime::actors::wal::TransactionAppendParams {
+            request_id: 9_950,
+            ops: vec![put_op(0, b"middle", b"old")],
+            assertions: Vec::new(),
+            durability_policy: Some(DurabilityPolicy::Strict),
+            start_sequence: None,
+            conflict_policy: ConflictPolicy::LastWriteWins,
+        },
+    )?;
+    let appends_before = fixture.event_loop.actors.wal_actor.append_calls();
+    let (sender, receiver) = crossbeam::channel::unbounded();
+    let first = fixture.register(9_951);
+    let second = fixture.register(9_952);
+    sender
+        .send(txn_msg(
+            9_952,
+            vec![insert_only_put_op(0, b"middle", b"new")],
+            Some(DurabilityPolicy::Strict),
+        ))
+        .expect("queue insert");
+
+    // Act
+    fixture.event_loop.apply_transaction_with_coalescing(
+        &receiver,
+        txn_request(
+            9_951,
+            vec![delete_range_op(0, b"a", b"z")],
+            Some(DurabilityPolicy::Strict),
+        ),
+        1024,
+    );
+
+    // Assert
+    assert_eq!(expect_transaction_applied(&first, 9_951).1, 1);
+    assert_eq!(expect_transaction_applied(&second, 9_952).1, 1);
+    assert_eq!(
+        fixture.event_loop.actors.wal_actor.append_calls() - appends_before,
+        1
+    );
+    assert_memtable_value(&fixture.event_loop, 0, b"middle", Some(b"new"));
     Ok(())
 }

@@ -8,6 +8,7 @@ use super::durability_sync::AppliedTransaction;
 use super::wal::ApplyTransactionRequest;
 use super::EventLoop;
 use crate::common::MidgeError;
+use crate::runtime::actors::wal::StagedWriteOverlay;
 use crossbeam::channel::{Receiver, TryRecvError};
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -281,7 +282,7 @@ impl EventLoop {
         match self.prepare_transaction_for_coalescing(
             initial,
             batch.coalescing_key,
-            &mut batch.staged_touches,
+            &mut batch.staged_writes,
             &mut batch.staged_growth,
         ) {
             PrepareOutcome::Prepared {
@@ -423,7 +424,7 @@ impl EventLoop {
                 match self.prepare_transaction_for_coalescing(
                     request,
                     batch.coalescing_key,
-                    &mut batch.staged_touches,
+                    &mut batch.staged_writes,
                     &mut batch.staged_growth,
                 ) {
                     PrepareOutcome::Prepared {
@@ -459,7 +460,7 @@ impl EventLoop {
     fn finish_coalesced_transaction_batch(&mut self, batch: CoalescedTransactionBatch) -> usize {
         let CoalescedTransactionBatch {
             coalescing_key: _,
-            staged_touches: _,
+            staged_writes: _,
             staged_growth: _,
             prepared,
             mut touched_cfs,
@@ -561,13 +562,11 @@ impl EventLoop {
         &mut self,
         request: ApplyTransactionRequest,
         coalescing_key: TransactionCoalescingKey,
-        staged_touches: &mut StagedTransactionTouches,
+        staged_writes: &mut StagedWriteOverlay,
         staged_growth: &mut HashMap<u32, usize>,
     ) -> PrepareOutcome {
         if request.ops.is_empty()
             || self.transaction_coalescing_key(&request) != Some(coalescing_key)
-            || staged_touches.touches_ops(&request.ops)
-            || staged_touches.touches_assertions(&request.assertions)
         {
             return PrepareOutcome::Fallback(request);
         }
@@ -582,25 +581,31 @@ impl EventLoop {
             Ok(false) => return PrepareOutcome::Fallback(request),
             Err(error) => return PrepareOutcome::Error { request_id, error },
         }
-        staged_touches.record_ops(&request.ops);
-        let result = self.actors.wal_actor.prepare_transaction_append(
-            &mut self.state,
-            crate::runtime::actors::wal::TransactionAppendParams {
-                request_id,
-                ops: request.ops,
-                assertions: request.assertions,
-                durability_policy: request.durability_policy,
-                start_sequence: request.start_sequence,
-                conflict_policy: request.conflict_policy,
-            },
-        );
+        let result = self
+            .actors
+            .wal_actor
+            .prepare_transaction_append_with_overlay(
+                &mut self.state,
+                crate::runtime::actors::wal::TransactionAppendParams {
+                    request_id,
+                    ops: request.ops,
+                    assertions: request.assertions,
+                    durability_policy: request.durability_policy,
+                    start_sequence: request.start_sequence,
+                    conflict_policy: request.conflict_policy,
+                },
+                staged_writes,
+            );
 
         match result {
-            Ok(prepared_transaction) => PrepareOutcome::Prepared {
-                request_id,
-                prepared_transaction: Box::new(prepared_transaction),
-                touched_cfs,
-            },
+            Ok(prepared_transaction) => {
+                staged_writes.record(&prepared_transaction);
+                PrepareOutcome::Prepared {
+                    request_id,
+                    prepared_transaction: Box::new(prepared_transaction),
+                    touched_cfs,
+                }
+            }
             Err(error) => PrepareOutcome::Error { request_id, error },
         }
     }
@@ -753,7 +758,7 @@ enum PrepareOutcome {
 
 struct CoalescedTransactionBatch {
     coalescing_key: TransactionCoalescingKey,
-    staged_touches: StagedTransactionTouches,
+    staged_writes: StagedWriteOverlay,
     staged_growth: HashMap<u32, usize>,
     prepared: Vec<crate::runtime::actors::wal::PreparedTransactionAppend>,
     touched_cfs: HashMap<u64, Vec<crate::types::ColumnFamilyId>>,
@@ -767,7 +772,7 @@ impl CoalescedTransactionBatch {
     fn new(coalescing_key: TransactionCoalescingKey) -> Self {
         Self {
             coalescing_key,
-            staged_touches: StagedTransactionTouches::default(),
+            staged_writes: StagedWriteOverlay::default(),
             staged_growth: HashMap::new(),
             prepared: Vec::new(),
             touched_cfs: HashMap::new(),
@@ -796,106 +801,6 @@ struct TransactionCoalescingKey {
     durability_policy: crate::wal::DurabilityPolicy,
     has_start_sequence: bool,
     conflict_policy: ConflictPolicy,
-}
-
-#[derive(Default)]
-struct StagedTransactionTouches {
-    point_keys: HashMap<crate::types::ColumnFamilyId, HashSet<Vec<u8>>>,
-    ranges: Vec<StagedRange>,
-}
-
-struct StagedRange {
-    cf_id: crate::types::ColumnFamilyId,
-    start_key: Vec<u8>,
-    end_key: Vec<u8>,
-}
-
-impl StagedTransactionTouches {
-    fn touches_ops(&self, ops: &[TransactionOp]) -> bool {
-        ops.iter().any(|op| match op {
-            TransactionOp::Put { cf_id, key, .. } | TransactionOp::Delete { cf_id, key } => {
-                self.touches_point(*cf_id, key)
-            }
-            TransactionOp::DeleteRange {
-                cf_id,
-                start_key,
-                end_key,
-            } => self.touches_range(*cf_id, start_key, end_key),
-        })
-    }
-
-    /// True when an earlier-staged (but not yet applied) batch member's
-    /// write already touches one of `assertions`' keys.
-    ///
-    /// This is the read-side half of the coalescing hazard: preparation
-    /// (including this assertion check) allocates a transaction's sequence
-    /// immediately, but memtable apply for the whole batch is deferred until
-    /// the batch flushes. Without this check, an assertion prepared after an
-    /// earlier-staged write to the same key would query `latest_key_sequence`
-    /// and see the pre-write state — the write's sequence is already
-    /// allocated, but its mutation is not yet visible — and would wrongly
-    /// pass. Falling back routes the asserting transaction through the
-    /// single-transaction path, which only runs once the batch's own writes
-    /// are irrelevant to it (it is no longer part of that batch).
-    ///
-    /// The reverse order needs no symmetric guard: a write staged *after* an
-    /// already-prepared assertion gets a strictly later sequence, which does
-    /// not retroactively invalidate the assertion's already-serialized
-    /// check.
-    fn touches_assertions(&self, assertions: &[crate::runtime::KeyAssertion]) -> bool {
-        assertions
-            .iter()
-            .any(|assertion| self.touches_point(assertion.cf_id, &assertion.key))
-    }
-
-    fn record_ops(&mut self, ops: &[TransactionOp]) {
-        for op in ops {
-            match op {
-                TransactionOp::Put { cf_id, key, .. } | TransactionOp::Delete { cf_id, key } => {
-                    self.point_keys
-                        .entry(*cf_id)
-                        .or_default()
-                        .insert(key.to_vec());
-                }
-                TransactionOp::DeleteRange {
-                    cf_id,
-                    start_key,
-                    end_key,
-                } => self.ranges.push(StagedRange {
-                    cf_id: *cf_id,
-                    start_key: start_key.to_vec(),
-                    end_key: end_key.to_vec(),
-                }),
-            }
-        }
-    }
-
-    fn touches_point(&self, cf_id: crate::types::ColumnFamilyId, key: &[u8]) -> bool {
-        self.point_keys
-            .get(&cf_id)
-            .is_some_and(|keys| keys.contains(key))
-            || self.ranges.iter().any(|range| {
-                range.cf_id == cf_id
-                    && key >= range.start_key.as_slice()
-                    && key < range.end_key.as_slice()
-            })
-    }
-
-    fn touches_range(
-        &self,
-        cf_id: crate::types::ColumnFamilyId,
-        start_key: &[u8],
-        end_key: &[u8],
-    ) -> bool {
-        self.point_keys.get(&cf_id).is_some_and(|keys| {
-            keys.iter()
-                .any(|key| key.as_slice() >= start_key && key.as_slice() < end_key)
-        }) || self.ranges.iter().any(|range| {
-            range.cf_id == cf_id
-                && range.start_key.as_slice() < end_key
-                && range.end_key.as_slice() > start_key
-        })
-    }
 }
 
 #[cfg(test)]
