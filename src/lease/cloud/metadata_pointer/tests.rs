@@ -88,6 +88,7 @@ fn should_preserve_predecessor_history_when_successor_claims_metadata_pointer() 
     let current = read_pointer(&cloud, Duration::from_secs(5))
         .unwrap()
         .unwrap();
+    first.cache_pointer(current.0.clone(), current.1.clone());
     let stale = first.publish_separate_metadata(
         "holder-7",
         7,
