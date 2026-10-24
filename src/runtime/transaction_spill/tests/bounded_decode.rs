@@ -23,7 +23,8 @@ fn should_retain_decoded_spill_memory_until_last_value_clone_is_released() -> Mi
 
     // Assert: closing the reader and returning from iteration cannot release
     // bytes still owned by a caller, and the final clone settles the charge.
-    assert_eq!(retained.as_ref().unwrap().as_ref(), &[7; 64 * 1024]);
+    assert_eq!(retained.as_ref().map(Bytes::len), Some(64 * 1024));
+    assert!(retained.as_ref().unwrap().iter().all(|byte| *byte == 7));
     assert!(memory.used() >= 64 * 1024);
     assert!(memory.peak() <= memory.limit());
     drop(retained);

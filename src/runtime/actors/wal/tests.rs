@@ -1859,7 +1859,7 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
                 .append_spilled_transaction(
                     &mut state,
                     &writes.take_source(),
-                    SpilledTransactionAppendParams {
+                    &SpilledTransactionAppendParams {
                         request_id: 2,
                         assertions: Vec::new(),
                         durability_policy: Some(DurabilityPolicy::CloudAsync),
@@ -2397,7 +2397,7 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
     let result = actor.append_spilled_transaction(
         &mut state,
         &source,
-        SpilledTransactionAppendParams {
+        &SpilledTransactionAppendParams {
             request_id: 339,
             assertions: Vec::new(),
             durability_policy: Some(DurabilityPolicy::Strict),
@@ -2457,7 +2457,7 @@ fn should_report_discard_on_restart_when_best_effort_spill_partly_applies() -> M
     let result = actor.append_spilled_transaction(
         &mut state,
         &source,
-        SpilledTransactionAppendParams {
+        &SpilledTransactionAppendParams {
             request_id: 340,
             assertions: Vec::new(),
             durability_policy: Some(DurabilityPolicy::BestEffort),
@@ -3336,7 +3336,7 @@ fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult
                 actor.append_spilled_transaction(
                     &mut state,
                     &writes.take_source(),
-                    SpilledTransactionAppendParams {
+                    &SpilledTransactionAppendParams {
                         request_id: 1,
                         assertions: Vec::new(),
                         durability_policy: Some(policy),

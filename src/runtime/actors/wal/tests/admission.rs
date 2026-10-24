@@ -46,7 +46,7 @@ fn should_reject_spilled_transaction_before_wal_write_when_preflight_finds_dupli
     let result = actor.append_spilled_transaction(
         &mut state,
         &source,
-        SpilledTransactionAppendParams {
+        &SpilledTransactionAppendParams {
             request_id: 1,
             assertions: Vec::new(),
             durability_policy: Some(DurabilityPolicy::Strict),
@@ -203,7 +203,7 @@ fn append_admission_test_transaction(
             .append_spilled_transaction(
                 state,
                 &write_set.take_source(),
-                SpilledTransactionAppendParams {
+                &SpilledTransactionAppendParams {
                     request_id: 2,
                     assertions: Vec::new(),
                     durability_policy: Some(DurabilityPolicy::CloudAsync),
@@ -269,7 +269,7 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
     let first_result = actor.append_spilled_transaction(
         &mut state,
         &source,
-        SpilledTransactionAppendParams {
+        &SpilledTransactionAppendParams {
             request_id: 1,
             assertions: Vec::new(),
             durability_policy: Some(DurabilityPolicy::CloudAsync),
@@ -298,7 +298,7 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
     actor.append_spilled_transaction(
         &mut state,
         &source,
-        SpilledTransactionAppendParams {
+        &SpilledTransactionAppendParams {
             request_id: 2,
             assertions: Vec::new(),
             durability_policy: Some(DurabilityPolicy::CloudAsync),
@@ -665,7 +665,7 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
     let budget_before = setup.hybrid_storage.budget_snapshot().total_committed_bytes;
 
     // Act: the whole unit is rejected before its begin frame can be written.
-    let first_result = actor.append_spilled_transaction(&mut state, &source, params(1));
+    let first_result = actor.append_spilled_transaction(&mut state, &source, &params(1));
     let wal_len_after_first = fs
         .metadata(&FsPath::new(crate::wal::segment_file_name(1)))
         .map_or(0, |m| m.len);
@@ -673,7 +673,7 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
     let budget_after_rejection = setup.hybrid_storage.budget_snapshot().total_committed_bytes;
     // The budget frees up (e.g. uploads retire WAL); the caller retries.
     setup.hybrid_storage.release_local_wal_bytes(pre_admitted);
-    let retry = actor.append_spilled_transaction(&mut state, &source, params(2));
+    let retry = actor.append_spilled_transaction(&mut state, &source, &params(2));
 
     // Assert
     assert!(

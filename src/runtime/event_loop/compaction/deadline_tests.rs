@@ -118,7 +118,7 @@ fn should_wake_idle_runtime_when_blocked_manual_waiter_budget_expires() -> Midge
 
         // Act: use the actual idle select loop, preserving the other publication owner.
         let runtime = std::thread::spawn(move || {
-            run_blocked_manual_waiter(request_rx, worker_rx, initialized)
+            run_blocked_manual_waiter(&request_rx, &worker_rx, &initialized)
         });
         let setup = initialization
             .recv_timeout(Duration::from_secs(10))
@@ -158,9 +158,9 @@ struct IdleWaiterSetup {
 }
 
 fn run_blocked_manual_waiter(
-    request_rx: crossbeam::channel::Receiver<RuntimeMsg>,
-    worker_rx: crossbeam::channel::Receiver<RuntimeMsg>,
-    initialized: crossbeam::channel::Sender<IdleWaiterSetup>,
+    request_rx: &crossbeam::channel::Receiver<RuntimeMsg>,
+    worker_rx: &crossbeam::channel::Receiver<RuntimeMsg>,
+    initialized: &crossbeam::channel::Sender<IdleWaiterSetup>,
 ) -> MidgeResult<(bool, bool)> {
     let mut event_loop = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -197,7 +197,7 @@ fn run_blocked_manual_waiter(
             initial_wake: event_loop.idle_progress_timeout(),
         })
         .expect("report initialized idle runtime");
-    event_loop.run(&request_rx, &worker_rx);
+    event_loop.run(request_rx, worker_rx);
     let gate_retained = event_loop.publication.publication_gate.is_active();
     event_loop.publication.publication_gate.release(&owner);
     event_loop.join_cloud_wal_prune_worker();

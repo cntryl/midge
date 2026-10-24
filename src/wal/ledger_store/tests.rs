@@ -34,7 +34,7 @@ fn should_count_ledger_file_and_directory_syncs_at_their_production_boundaries()
         appended.directory_completed + 1
     );
     for_each_power_loss(&device, |fs| {
-        assert_eq!(loaded(fs).0, applied(&genesis_ledger(), &[rotate(1)]))
+        assert_eq!(loaded(fs).0, applied(&genesis_ledger(), &[rotate(1)]));
     });
 }
 

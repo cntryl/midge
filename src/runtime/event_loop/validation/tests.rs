@@ -5,6 +5,8 @@ use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+mod spilled_tests;
+
 struct HeldCallback {
     release: Sender<()>,
     reached: Receiver<()>,

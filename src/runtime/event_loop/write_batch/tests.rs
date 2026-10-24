@@ -1374,7 +1374,7 @@ fn commit_strict_spill(
         .append_spilled_transaction(
             &mut fixture.event_loop.state,
             &source,
-            crate::runtime::actors::wal::SpilledTransactionAppendParams {
+            &crate::runtime::actors::wal::SpilledTransactionAppendParams {
                 request_id: 71,
                 assertions: Vec::new(),
                 durability_policy: Some(DurabilityPolicy::Strict),
