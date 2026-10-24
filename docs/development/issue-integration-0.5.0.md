@@ -694,3 +694,9 @@ Failpoint test targets compile cleanly; no behavioral test execution is claimed.
 Async next-group append, writer encoding/copy work, concurrent apply, spilled
 proof/sync handoff and oversized Strict compatibility remain unfinished. #904's
 explicit recovery-window decision is still pending.
+
+The writer publishes its completed-write prefix before append acknowledgement,
+then releases its queue/sync locks before notifying the caller. This closes the
+window where immediate typed sync admission could reject an append the caller
+had already been told completed. The held-fsync stage regression exercises that
+handoff; its execution remains pending with the rest of the implementation pass.

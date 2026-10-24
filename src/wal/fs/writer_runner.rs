@@ -476,7 +476,6 @@ impl WriterRunner {
     }
 
     fn complete_flushes_after_write(&self, start_pos: u64, batch_len: u64, batch: &[QueuedWrite]) {
-        Self::ack_batch_success(batch, start_pos);
         self.config.current_pos.store(
             start_pos.saturating_add(batch_len),
             std::sync::atomic::Ordering::SeqCst,
@@ -489,6 +488,12 @@ impl WriterRunner {
             s.completed_flushes = s.pending_flushes;
         }
         self.config.sync_cond.notify_all();
+        drop(s);
+        drop(queue);
+        // The next loop turn may submit an exact-prefix sync as soon as it
+        // observes this acknowledgement. Publish its completed-write proof
+        // first, without requiring the caller to win a second worker race.
+        Self::ack_batch_success(batch, start_pos);
     }
 
     fn complete_pending_flushes(&self) {
