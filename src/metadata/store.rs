@@ -285,7 +285,15 @@ impl ManifestStore {
                 &FsPath::new("manifest.snapshot.json.tmp"),
                 &FsPath::new(crate::metadata::files::MANIFEST_SNAPSHOT),
                 bytes,
-                || Ok(()),
+                || {
+                    crate::failpoints::fail_point!(
+                        "midge::manifest::inject_no_space_on_checkpoint_save",
+                        |_| Err(crate::common::MidgeError::NoSpace(
+                            "failpoint: no space while saving manifest checkpoint".into()
+                        ))
+                    );
+                    Ok(())
+                },
             )?;
             operation.snapshot_durable(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
             crate::failpoints::fail_point!(
