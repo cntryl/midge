@@ -26,6 +26,40 @@ Validate naming and AAA structure:
 cntryl-tools validate-tests
 ```
 
+Model-check and interpret the lock-free skiplist (#931). All three runs are
+part of the local gate for any change under `src/memtable/`:
+
+```bash
+# Every interleaving of the loom models, with the skiplist's atomics swapped
+# for loom's. Only the models run: ordinary tests build lists outside a model.
+# The separate target directory keeps the cfg from rebuilding the normal one.
+RUSTFLAGS="--cfg midge_loom" cargo test --lib --release --target-dir target/loom \
+  memtable::skiplist::loom_tests
+
+# The models are compiled only under the cfg, so lint them the same way.
+RUSTFLAGS="--cfg midge_loom" cargo clippy --lib --tests --release --target-dir target/loom \
+  -- -D warnings -D clippy::pedantic
+
+# The skiplist unit tests under miri (nightly toolchain with the miri component).
+# Default features pull in provider clients whose native dependencies miri
+# cannot build; isolation is off because proptest looks up the working
+# directory; the case count keeps the interpreted run under a minute.
+MIRIFLAGS="-Zmiri-disable-isolation" PROPTEST_CASES=16 \
+  cargo +nightly miri test --lib --no-default-features memtable::skiplist
+
+# Deeper, about three minutes: the same tests under four scheduler seeds, so
+# the threaded tests take different interleavings.
+MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-many-seeds=0..4" PROPTEST_CASES=16 \
+  cargo +nightly miri test --lib --no-default-features memtable::skiplist::tests
+```
+
+The cfg is crate-specific because dependencies such as tokio react to a global
+`cfg(loom)` by removing APIs other dependencies need. Loom tracks causality
+only through its own atomics, so the models prove the protocol (no lost
+update, every link present and ordered, every lost race reclaimed) and not the
+memory ordering of the plain payload fields each publication hands over; miri's
+data-race detector covers that for the schedules it runs.
+
 Run the repository and packaging qualification gates:
 
 ```bash

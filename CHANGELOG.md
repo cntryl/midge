@@ -9,6 +9,12 @@ Midge is currently in the 0.4 release line. Compatibility expectations for pre-1
 
 ## [Unreleased]
 
+### Added
+
+- Loom models of the lock-free skiplist's insert, append and read races under
+  `cfg(midge_loom)`, and a documented miri run of its unit tests, both part of
+  the local gate for memtable changes (#931).
+
 ### Changed
 
 - Cloud mode caches fetched remote SST ranges on local disk, keyed by the

@@ -11,11 +11,23 @@
 use bytes::Bytes;
 use std::cmp::Ordering;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering as AO};
 use std::sync::Arc;
+use sync::{AtomicPtr, AtomicUsize, Ordering as AO};
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 pub(crate) mod cursor;
+#[cfg(all(test, midge_loom))]
+mod loom_tests;
+
+/// The atomics behind every link and counter. Under `cfg(midge_loom)` they come
+/// from the model checker, which explores every interleaving of the lock-free
+/// protocol (#931); production builds use the standard library's.
+mod sync {
+    #[cfg(midge_loom)]
+    pub(super) use loom::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+    #[cfg(not(midge_loom))]
+    pub(super) use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+}
 
 /// Maximum height of the skiplist towers.
 ///
@@ -29,14 +41,18 @@ const MAX_LEVEL: usize = 20;
 #[cfg(test)]
 pub(crate) const PROBE_SEQ_BASE: u64 = 0xF000_0000_0000_0000;
 
-/// Live `VersionNode` count for versions in the probe sequence range.
+/// Live `VersionNode` count for versions in the probe sequence range. Plain
+/// standard-library atomics: they are instrumentation, not part of the
+/// protocol a loom model explores.
 #[cfg(test)]
-pub(crate) static PROBE_LIVE_VERSIONS: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PROBE_LIVE_VERSIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Number of times a probe-range node lost the level-0 splice race and had to
 /// reclaim its freshly built node.
 #[cfg(test)]
-pub(crate) static PROBE_SPLICE_RETRIES: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PROBE_SPLICE_RETRIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Test-only rendezvous immediately before probe nodes attempt level-0
 /// publication.
@@ -192,11 +208,17 @@ impl SkipList {
     /// Create a new lock-free skiplist.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_seed(rand::random())
+    }
+
+    /// A list whose tower heights derive from `seed`, so a model can pick
+    /// keys of known height.
+    fn with_seed(seed: u64) -> Self {
         let head = Arc::new(Node::sentinel());
         SkipList {
             head,
             top_level: AtomicUsize::new(1),
-            seed: rand::random(),
+            seed,
             retained_bytes: AtomicUsize::new(0),
             #[cfg(test)]
             nodes_visited: AtomicUsize::new(0),
@@ -329,6 +351,7 @@ impl SkipList {
     /// otherwise `None`.
     #[inline]
     #[cfg(test)]
+    #[must_use]
     pub fn get(&self, key: &[u8], snapshot_seq: u64) -> Option<Bytes> {
         let node_ptr = self.find_node(key);
 
@@ -351,6 +374,7 @@ impl SkipList {
     ///   - Some(None)     → key visible as a tombstone
     ///   - Some(Some(..)) → key visible with (value, exp)
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn get_visible_with_exp(
         &self,
         key: &[u8],
@@ -375,6 +399,7 @@ impl SkipList {
     /// Returns `(value, seq, is_tombstone, expiration, op_type)` for the
     /// newest visible version of `key`.
     #[inline]
+    #[must_use]
     pub fn get_visible_entry_with_exp(
         &self,
         key: &[u8],
@@ -401,6 +426,7 @@ impl SkipList {
     }
 
     /// Return whether `key` already has a version with exactly `sequence`.
+    #[must_use]
     pub fn contains_sequence(&self, key: &[u8], sequence: u64) -> bool {
         let node_ptr = self.find_node(key);
         let Some(node) = (unsafe { node_ptr.as_ref() }) else {
@@ -679,6 +705,7 @@ impl SkipList {
     ///
     /// Returns newest visible non-tombstone value for each key in [start, end).
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn range_visible(
         &self,
         start: Option<&[u8]>,
@@ -721,6 +748,7 @@ impl SkipList {
 
     /// Get all tombstoned keys in range visible at `snapshot_seq`.
     #[cfg(test)]
+    #[must_use]
     pub fn tombstones_range_visible(
         &self,
         start: Option<&[u8]>,
@@ -825,6 +853,7 @@ impl SkipList {
     /// This does *not* physically clear the skiplist; instead it walks all
     /// nodes and returns all versions newest-first for each key.
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn drain_with_meta_with_exp(&self) -> Vec<SkipListEntryWithExp> {
         let mut out = Vec::with_capacity(256);
 
@@ -856,6 +885,7 @@ impl SkipList {
 
     /// Get all keys currently in the skiplist (no snapshot filtering).
     #[cfg(test)]
+    #[must_use]
     pub fn get_all_keys(&self) -> Vec<Bytes> {
         let mut keys = Vec::with_capacity(128);
 
@@ -873,12 +903,14 @@ impl SkipList {
     ///
     /// This is used by the memtable for "current state" queries.
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<(Bytes, Bytes)> {
         self.range_visible(start, end, u64::MAX)
     }
 
     /// Get all tombstoned keys in range (no snapshot filtering).
     #[cfg(test)]
+    #[must_use]
     pub fn tombstones_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<Bytes> {
         self.tombstones_range_visible(start, end, u64::MAX)
     }
