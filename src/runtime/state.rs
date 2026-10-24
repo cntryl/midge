@@ -148,6 +148,7 @@ impl ColumnFamilyState {
 pub(crate) struct SstNameAllocation {
     pub(crate) cursor: HashMap<crate::types::ColumnFamilyId, u64>,
     pub(crate) reserved_through: HashMap<crate::types::ColumnFamilyId, u64>,
+    pub(crate) prefetch_retry_at: Option<std::time::Instant>,
 }
 
 /// WAL state

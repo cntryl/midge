@@ -190,6 +190,7 @@ impl EventLoop {
             }
             MirrorContinuation::SstReservation { cf_id, next_seq } => {
                 if result.is_ok() {
+                    self.state.sst_names.prefetch_retry_at = None;
                     self.state
                         .sst_names
                         .reserved_through
@@ -197,6 +198,8 @@ impl EventLoop {
                         .and_modify(|old| *old = (*old).max(next_seq))
                         .or_insert(next_seq);
                 } else {
+                    self.state.sst_names.prefetch_retry_at =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
                     self.state.mark_persistence_anomaly();
                 }
                 if let Some(flush_id) = self

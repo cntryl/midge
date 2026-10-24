@@ -3,8 +3,79 @@ use crate::metadata::accounting::Origin;
 
 /// SST names one journal append and mirror reserve at a time.
 const SST_NAME_RESERVATION_BLOCK: u64 = 16;
+const SST_NAME_PREFETCH_REMAINING: u64 = SST_NAME_RESERVATION_BLOCK / 2;
 
 impl EventLoop {
+    /// Reserve the next flush block while no publication owns the control
+    /// turn. Completion, rather than this journal append, admits its names.
+    pub(super) fn prefetch_flush_sst_names_if_due(&mut self) {
+        if self.actors.cloud_coordinator.hybrid_storage.is_none()
+            || self.cloud_maintenance_control_blocked()
+            || self.compaction_compute_owned()
+            || self
+                .state
+                .sst_names
+                .prefetch_retry_at
+                .is_some_and(|at| std::time::Instant::now() < at)
+        {
+            return;
+        }
+        let mut families = std::iter::once(0).chain(
+            self.state
+                .manifest
+                .column_families
+                .iter()
+                .filter(|family| family.deleted_at.is_none())
+                .map(|family| family.id),
+        );
+        let candidate = families.find_map(|cf_id| self.flush_name_prefetch_candidate(cf_id));
+        let Some((cf_id, cursor, bound)) = candidate else {
+            return;
+        };
+        // A prewarm must retain the current first usable name before its
+        // journal raises next_sst_seqs. Otherwise the later flush would start
+        // at that new durable bound and skip the entire prefetched block.
+        self.state.sst_names.cursor.entry(cf_id).or_insert(cursor);
+        let result =
+            self.begin_sst_name_reservation(cf_id, bound.max(cursor), None, Origin::Administration);
+        if let Err(error) = result {
+            self.state.sst_names.prefetch_retry_at =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+            tracing::debug!(%error, cf_id, "SST name prefetch retained for retry");
+        } else {
+            self.state.sst_names.prefetch_retry_at = None;
+        }
+    }
+
+    fn flush_name_prefetch_candidate(
+        &self,
+        cf_id: crate::types::ColumnFamilyId,
+    ) -> Option<(crate::types::ColumnFamilyId, u64, u64)> {
+        let cursor = self
+            .state
+            .sst_names
+            .cursor
+            .get(&cf_id)
+            .copied()
+            .unwrap_or_else(|| {
+                self.state
+                    .manifest
+                    .next_sst_seqs
+                    .get(&cf_id)
+                    .copied()
+                    .unwrap_or(1)
+            });
+        let bound = self
+            .state
+            .sst_names
+            .reserved_through
+            .get(&cf_id)
+            .copied()
+            .unwrap_or(0);
+        (bound.saturating_sub(cursor) <= SST_NAME_PREFETCH_REMAINING)
+            .then_some((cf_id, cursor, bound))
+    }
+
     /// Persist an SST filename allocation before the object can exist
     /// remotely. After a crash between upload and publication, a replacement
     /// must never reuse the orphan's name: immutable publication rejects an
@@ -125,6 +196,9 @@ impl EventLoop {
         Ok(false)
     }
 }
+
+#[cfg(test)]
+mod tests;
 
 fn check_reservation_deadline(
     deadline: Option<&crate::common::OperationDeadline>,

@@ -233,6 +233,7 @@ impl EventLoop {
         self.retry_manifest_reclamation_if_due();
         self.drain_auto_flush_memtables();
         self.run_background_compaction_maintenance_if_due();
+        self.prefetch_flush_sst_names_if_due();
     }
 
     pub(super) fn retry_manifest_reclamation_if_due(&mut self) {

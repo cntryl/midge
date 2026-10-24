@@ -15,7 +15,7 @@ impl EventLoop {
     /// Picks the SST sequence for a flush output and, when the output can
     /// reach remote storage before it is published, makes the name durable.
     #[cfg(test)]
-    pub(super) fn reserve_flush_sst_seq(
+    pub(in crate::runtime::event_loop) fn reserve_flush_sst_seq(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
     ) -> crate::common::MidgeResult<u64> {

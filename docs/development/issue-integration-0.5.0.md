@@ -710,3 +710,12 @@ snapshot retention/restart, required delta history, pointer replacement and
 capture exclusion. Shared test targets compile; these tests have not executed.
 An idle continuation is still required so the bounded cursor progresses after
 the final write or a cooldown, and is being implemented separately.
+
+#911 now prewarms ordinary flush-name blocks of sixteen and replenishes when
+eight remain. Only matching successful mirror completion admits the bound;
+output launch consumes admitted names without a new journal append or mirror.
+The cursor is captured before raising the durable counter, preserving every
+unconsumed name. Active tests check first-block consumption and replenishment
+against the durable selected manifest. They compile but have not executed.
+Compaction's WAL-sequence jumps still use the owned asynchronous fallback;
+this slice does not claim every job start finds an ahead-reserved block.
