@@ -93,7 +93,7 @@ base64 = { version = "0.23", optional = true }
 hmac = { version = "0.13", optional = true }
 percent-encoding = { version = "2.3", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"], optional = true }
-sha2 = { version = "0.11", optional = true }
+sha2 = "0.11"
 md5 = { package = "md-5", version = "0.11", optional = true }
 sha1 = { version = "0.11", optional = true }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros"], optional = true }
@@ -155,7 +155,6 @@ cloud-aws = [
     "cloud-common",
     "dep:base64",
     "dep:hmac",
-    "dep:sha2",
     "dep:percent-encoding",
     "dep:urlencoding",
 ]
@@ -171,7 +170,6 @@ cloud-azure = [
     "dep:base64",
     "dep:hmac",
     "dep:md5",
-    "dep:sha2",
     "dep:percent-encoding",
     "dep:urlencoding",
 ]
@@ -181,7 +179,6 @@ cloud-gcp = [
     "dep:hmac",
     "dep:ring",
     "dep:sha1",
-    "dep:sha2",
     "dep:percent-encoding",
     "dep:urlencoding",
 ]
@@ -189,7 +186,6 @@ cloud-oci = [
     "cloud-common",
     "dep:base64",
     "dep:hmac",
-    "dep:sha2",
     "dep:percent-encoding",
     "dep:urlencoding",
 ]

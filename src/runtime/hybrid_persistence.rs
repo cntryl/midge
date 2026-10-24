@@ -19,8 +19,10 @@ use std::sync::Arc;
 
 mod catalog;
 pub(crate) mod metadata_chain;
+mod metadata_cuts;
 mod metadata_retention;
-mod metadata_snapshot;
+pub(crate) use metadata_cuts::mirror_captured_control_metadata_within;
+pub(crate) mod metadata_snapshot;
 mod orphan_sweep;
 mod wal_orphan_sweep;
 pub(crate) use wal_orphan_sweep::sweep_retired_wal_within;

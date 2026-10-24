@@ -13,6 +13,10 @@ use std::collections::BTreeMap;
 
 const CHAIN_KIND: u8 = 5;
 const CHECKPOINT_EDIT_BYTES: u64 = 16 * 1024;
+type DecodedChain = (
+    BTreeMap<String, Vec<u8>>,
+    Option<crate::runtime::metadata_publication::MetadataCutProof>,
+);
 
 #[derive(Serialize, Deserialize)]
 enum FileEdit {
@@ -28,6 +32,8 @@ struct ManifestVersion {
     operation_id: String,
     parent: Option<CloudMetadataObject>,
     changes: BTreeMap<String, FileEdit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cut: Option<crate::runtime::metadata_publication::MetadataCutProof>,
 }
 
 pub(super) fn reclaimable_version(
@@ -66,6 +72,14 @@ pub(crate) fn read(
     generation: &CloudMetadataGeneration,
     deadline: &OperationDeadline,
 ) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
+    read_with_cut(cloud, generation, deadline).map(|(bodies, _)| bodies)
+}
+
+pub(super) fn read_with_cut(
+    cloud: &CloudStorage,
+    generation: &CloudMetadataGeneration,
+    deadline: &OperationDeadline,
+) -> MidgeResult<DecodedChain> {
     if generation.objects.is_empty() || generation.objects.len() > MAX_CHAIN_OBJECTS {
         return Err(MidgeError::Corruption(
             "cloud manifest chain length is invalid".into(),
@@ -112,11 +126,21 @@ pub(crate) fn read(
         successor_epoch = version.writer_epoch;
         versions.push(version);
     }
+    let cut = versions.first().and_then(|version| version.cut.clone());
+    let head_epoch = versions.first().map(|version| version.writer_epoch);
     let mut bodies = BTreeMap::new();
     for version in versions.into_iter().rev() {
         apply(version, &mut bodies)?;
     }
-    Ok(bodies)
+    if let Some(cut) = &cut {
+        cut.validate(&bodies)?;
+        if Some(cut.writer_epoch) != head_epoch {
+            return Err(MidgeError::Corruption(
+                "cloud metadata cut epoch differs from its manifest version".into(),
+            ));
+        }
+    }
+    Ok((bodies, cut))
 }
 
 fn apply(version: ManifestVersion, bodies: &mut BTreeMap<String, Vec<u8>>) -> MidgeResult<()> {
@@ -235,6 +259,18 @@ pub(super) fn publish(
     fingerprints: Option<&BTreeMap<String, super::metadata_snapshot::FileFingerprint>>,
     id: SharedGenerationId,
 ) -> MidgeResult<Vec<CloudMetadataObject>> {
+    publish_with_cut(context, local, previous, old_bodies, fingerprints, id, None)
+}
+
+pub(super) fn publish_with_cut(
+    context: &CloudMetadataMirrorContext<'_>,
+    local: &BTreeMap<String, Vec<u8>>,
+    previous: Option<&CloudMetadataGeneration>,
+    old_bodies: Option<&BTreeMap<String, Vec<u8>>>,
+    fingerprints: Option<&BTreeMap<String, super::metadata_snapshot::FileFingerprint>>,
+    id: SharedGenerationId,
+    cut: Option<&crate::runtime::metadata_publication::MetadataCutProof>,
+) -> MidgeResult<Vec<CloudMetadataObject>> {
     let mut history = previous
         .filter(|generation| is_chain(generation))
         .map_or_else(Vec::new, |generation| generation.objects.clone());
@@ -249,6 +285,7 @@ pub(super) fn publish(
         id,
         writer_epoch: context.authority.writer_epoch,
         operation_id: uuid::Uuid::new_v4().to_string(),
+        cut: cut.cloned(),
         parent: history.first().cloned(),
         changes: if history.is_empty() {
             changes(local, None)

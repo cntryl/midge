@@ -563,7 +563,7 @@ impl LeaderStore for FsLeaderStore {
                 if previous.as_ref() == Some(&generation) {
                     return Ok(());
                 }
-                return Err(LeaseError::RenewalFailed(
+                return Err(LeaseError::AcquisitionFailed(
                     "shared metadata predecessor changed".into(),
                 ));
             }

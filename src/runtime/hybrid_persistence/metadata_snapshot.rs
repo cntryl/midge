@@ -12,6 +12,7 @@ use std::sync::Arc;
 #[cfg(test)]
 mod cache_tests;
 
+#[derive(Clone)]
 pub(crate) struct FileFingerprint {
     length: usize,
     digest: Option<[u8; 32]>,
@@ -29,13 +30,6 @@ impl FileFingerprint {
     }
 }
 
-#[cfg(any(
-    test,
-    feature = "cloud-aws",
-    feature = "cloud-azure",
-    feature = "cloud-gcp",
-    feature = "cloud-oci"
-))]
 fn metadata_digest(bytes: &[u8]) -> Option<[u8; 32]> {
     use sha2::Digest;
     if bytes.len() as u64 > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
@@ -44,43 +38,30 @@ fn metadata_digest(bytes: &[u8]) -> Option<[u8; 32]> {
     Some(sha2::Sha256::digest(bytes).into())
 }
 
-#[cfg(not(any(
-    test,
-    feature = "cloud-aws",
-    feature = "cloud-azure",
-    feature = "cloud-gcp",
-    feature = "cloud-oci"
-)))]
-fn metadata_digest(_bytes: &[u8]) -> Option<[u8; 32]> {
-    None
-}
-
 /// Only authority fields and fixed-size fingerprints are retained, not SST
 /// inventories or copied control-file bodies.
+#[derive(Clone)]
 pub(crate) struct MetadataMirrorCache {
-    generation: CloudMetadataGeneration,
-    writer_epoch: u64,
-    manifest: Manifest,
-    fingerprints: BTreeMap<String, FileFingerprint>,
+    pub(super) generation: CloudMetadataGeneration,
+    pub(super) writer_epoch: u64,
+    pub(super) manifest: Manifest,
+    pub(super) fingerprints: BTreeMap<String, FileFingerprint>,
+    pub(super) cut: Option<crate::runtime::metadata_publication::MetadataCutProof>,
 }
 
 impl MetadataMirrorCache {
-    fn new(
+    pub(super) fn new(
         generation: CloudMetadataGeneration,
         writer_epoch: u64,
         mut manifest: Manifest,
         local: &BTreeMap<String, Vec<u8>>,
     ) -> Self {
-        manifest.files.clear();
-        manifest.retired_ssts.clear();
-        manifest.next_sst_seqs.clear();
-        for family in &mut manifest.column_families {
-            family.dropped_sst_names.clear();
-        }
+        reduce_to_authority(&mut manifest);
         Self {
             generation,
             writer_epoch,
             manifest,
+            cut: None,
             fingerprints: local
                 .iter()
                 .map(|(name, bytes)| {
@@ -96,7 +77,7 @@ impl MetadataMirrorCache {
         }
     }
 
-    fn matches(&self, generation: &CloudMetadataGeneration, epoch: u64) -> bool {
+    pub(super) fn matches(&self, generation: &CloudMetadataGeneration, epoch: u64) -> bool {
         self.writer_epoch == epoch
             && &self.generation == generation
             && self
@@ -112,6 +93,15 @@ impl MetadataMirrorCache {
                     .get(name)
                     .is_some_and(|fingerprint| fingerprint.unchanged(bytes))
             })
+    }
+}
+
+pub(crate) fn reduce_to_authority(manifest: &mut Manifest) {
+    manifest.files.clear();
+    manifest.retired_ssts.clear();
+    manifest.next_sst_seqs.clear();
+    for family in &mut manifest.column_families {
+        family.dropped_sst_names.clear();
     }
 }
 
@@ -339,7 +329,7 @@ pub(crate) fn decode_generation_manifest(
     Ok(manifest)
 }
 
-fn decode_manifest_bodies(
+pub(super) fn decode_manifest_bodies(
     bodies: &BTreeMap<String, Vec<u8>>,
     deadline: &OperationDeadline,
 ) -> MidgeResult<Manifest> {
@@ -370,7 +360,7 @@ pub(crate) struct CloudMetadataMirrorContext<'a> {
     pub(crate) authority: CloudMetadataMirrorAuthority<'a>,
 }
 
-fn capture_local_metadata(
+pub(super) fn capture_local_metadata(
     context: &CloudMetadataMirrorContext<'_>,
 ) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
     let mut local = BTreeMap::new();
@@ -396,7 +386,10 @@ fn capture_local_metadata(
     Ok(local)
 }
 
-fn validate_manifest_successor(candidate: &Manifest, committed: &Manifest) -> MidgeResult<()> {
+pub(crate) fn validate_manifest_successor(
+    candidate: &Manifest,
+    committed: &Manifest,
+) -> MidgeResult<()> {
     if candidate.edit_checkpoint_id < committed.edit_checkpoint_id {
         return Err(MidgeError::Fenced(
             "candidate shared manifest regresses the committed journal horizon".into(),

@@ -76,7 +76,9 @@ pub(super) fn collect_after_commit(
     generation: &CloudMetadataGeneration,
     state: &mut MetadataRetentionState,
 ) {
-    if !super::metadata_chain::is_chain(generation) {
+    if context.publication_lock.pending_captures() != 0
+        || !super::metadata_chain::is_chain(generation)
+    {
         return;
     }
     let Some(cutoff) = state.begin(generation.id.get()) else {

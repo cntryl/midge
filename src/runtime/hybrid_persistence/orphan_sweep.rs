@@ -103,6 +103,11 @@ pub(crate) fn sweep_sst_orphans_within(
                 .min(context.metadata.callback_timeout()),
         )
         .ok_or_else(|| MidgeError::Timeout("orphan sweep waits for metadata capture".into()))?;
+    if context.publication_lock.pending_captures() != 0 {
+        return Err(MidgeError::Busy(
+            "orphan sweep retains admitted metadata cuts".into(),
+        ));
+    }
     validate_lease(context.deadline)?;
     let (generation, selected, _memory) = selected_names(&context)?;
     let mut progress = OrphanSweepProgress::default();
@@ -309,7 +314,7 @@ pub(crate) fn visit_intent_sources(
             }
         }
         IntentLogEntry::FlushPublish { file_meta, .. } | IntentLogEntry::SstAdded { file_meta } => {
-            visit(&file_meta.name)
+            visit(&file_meta.name);
         }
         IntentLogEntry::CompactionPublish { removed, added, .. }
         | IntentLogEntry::CompactionApplied { removed, added } => {
@@ -321,7 +326,7 @@ pub(crate) fn visit_intent_sources(
             }
         }
         IntentLogEntry::CloudUploadComplete { resource, .. } => {
-            visit(resource.strip_prefix("sst/").unwrap_or(resource))
+            visit(resource.strip_prefix("sst/").unwrap_or(resource));
         }
         _ => {}
     }

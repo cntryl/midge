@@ -8,8 +8,14 @@
 use parking_lot::{Mutex, MutexGuard};
 use std::sync::Arc;
 
+mod cut;
+pub(crate) use cut::{CapturedMetadataCut, MetadataCutProof};
+
 #[derive(Clone, Default)]
-pub(crate) struct MetadataPublicationLock(Arc<Mutex<MetadataPublicationState>>);
+pub(crate) struct MetadataPublicationLock {
+    state: Arc<Mutex<MetadataPublicationState>>,
+    cuts: Arc<Mutex<cut::CutRegistry>>,
+}
 
 #[derive(Default)]
 pub(crate) struct MetadataPublicationState {
@@ -22,16 +28,16 @@ impl MetadataPublicationLock {
         &self,
         timeout: std::time::Duration,
     ) -> Option<MutexGuard<'_, MetadataPublicationState>> {
-        self.0.try_lock_for(timeout)
+        self.state.try_lock_for(timeout)
     }
 
     #[cfg(test)]
     pub(crate) fn try_lock(&self) -> Option<MutexGuard<'_, MetadataPublicationState>> {
-        self.0.try_lock()
+        self.state.try_lock()
     }
 
     #[cfg(test)]
     pub(crate) fn lock(&self) -> MutexGuard<'_, MetadataPublicationState> {
-        self.0.lock()
+        self.state.lock()
     }
 }

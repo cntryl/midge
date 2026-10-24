@@ -22,6 +22,15 @@ pub(crate) fn sweep_retired_wal_within(
         progress.cursor = cursor;
         return Ok(progress);
     }
+    let _capture = context
+        .publication_lock
+        .lock_for(context.deadline.remaining())
+        .ok_or_else(|| MidgeError::Timeout("WAL orphan sweep waits for metadata capture".into()))?;
+    if context.publication_lock.pending_captures() != 0 {
+        return Err(MidgeError::Busy(
+            "WAL orphan sweep retains admitted metadata cuts".into(),
+        ));
+    }
     let _mutation = context
         .storage
         .lock_wal_catalog_mutation_within(context.deadline, "retired WAL inventory")?;

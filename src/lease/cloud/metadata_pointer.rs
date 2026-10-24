@@ -5,7 +5,14 @@
 //! old identity after the claim. Learning a successor identity cannot authorize
 //! a stale writer: every publication also matches the pointer's epoch and owner.
 
-use super::*;
+use super::{
+    classify_lease_read_error, legacy_metadata_migration_error, mutation_precondition_headers,
+    provider_read_authority_sentinel, provider_read_doc_with_timeout,
+    provider_read_event_with_timeout, validate_metadata_generation, AuthoritySentinelState,
+    CloudEvent, CloudMetadataGeneration, CloudMetadataHead, CloudOutcome, CloudStorage, Duration,
+    LeaseDocument, LeaseDocumentVersion, LeaseError, ObjectMetadata, ProviderLeaderStore,
+    RENEWAL_WRITE_DEADLINE_MARGIN,
+};
 use crate::storage::{StorageBackend, StoragePrecondition, StorageRequest};
 use serde::{Deserialize, Serialize};
 
@@ -87,7 +94,7 @@ impl ProviderLeaderStore {
                     StoragePrecondition::IfMatch(metadata.clone())
                 });
             match write_pointer(cloud, &replacement, condition, &deadline) {
-                Err(LeaseError::AcquisitionFailed(_)) => continue,
+                Err(LeaseError::AcquisitionFailed(_)) => {}
                 Ok(metadata) => {
                     self.cache_pointer(replacement, metadata);
                     return Ok(());
@@ -98,11 +105,23 @@ impl ProviderLeaderStore {
     }
 
     fn cache_pointer(&self, pointer: MetadataPointer, metadata: ObjectMetadata) {
-        *self
+        let mut cache = self
             .metadata_pointer_cache
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(CachedPointer { pointer, metadata });
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if cache.as_ref().is_some_and(|current| {
+            current.pointer.writer_epoch > pointer.writer_epoch
+                || (current.pointer.writer_epoch == pointer.writer_epoch
+                    && current
+                        .pointer
+                        .committed
+                        .as_ref()
+                        .map(|generation| generation.id)
+                        > pointer.committed.as_ref().map(|generation| generation.id))
+        }) {
+            return;
+        }
+        *cache = Some(CachedPointer { pointer, metadata });
     }
 
     pub(super) fn cached_metadata_head(
@@ -167,9 +186,12 @@ impl ProviderLeaderStore {
         let sentinel =
             provider_read_authority_sentinel(&self.cloud, remaining(&self.cloud, &deadline)?)?;
         match (pointer, lease, sentinel) {
-            (Some((pointer, _)), Some(_), AuthoritySentinelState::Active) => Ok(pointer
-                .committed
-                .map_or(CloudMetadataHead::Uncommitted, CloudMetadataHead::Committed)),
+            (Some((pointer, metadata)), Some(_), AuthoritySentinelState::Active) => {
+                self.cache_pointer(pointer.clone(), metadata);
+                Ok(pointer
+                    .committed
+                    .map_or(CloudMetadataHead::Uncommitted, CloudMetadataHead::Committed))
+            }
             (Some((pointer, _)), Some(_), AuthoritySentinelState::Pending)
                 if pointer.committed.is_none() =>
             {
@@ -215,7 +237,7 @@ impl ProviderLeaderStore {
             return Ok(());
         }
         if current.committed.as_ref() != previous {
-            return Err(LeaseError::RenewalFailed(
+            return Err(LeaseError::AcquisitionFailed(
                 "metadata pointer predecessor changed".into(),
             ));
         }
@@ -236,18 +258,7 @@ impl ProviderLeaderStore {
                 self.cache_pointer(replacement, metadata);
                 Ok(())
             }
-            Err(error) => {
-                *self
-                    .metadata_pointer_cache
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-                match error {
-                    LeaseError::AcquisitionFailed(message) => {
-                        Err(LeaseError::RenewalFailed(message))
-                    }
-                    error => Err(error),
-                }
-            }
+            Err(error) => Err(error),
         }
     }
 }
