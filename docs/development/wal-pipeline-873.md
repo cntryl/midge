@@ -1,9 +1,23 @@
 # WAL pipeline: current state, target design, and slice plan (#873)
 
-Status: design, no production code changes. Source: `develop` at `12962819` (2026-10-24).
+Historical design baseline: `develop` at `12962819` (2026-10-24). Local candidate
+implementation and outstanding qualification are tracked in
+[the integration log](issue-integration-0.5.0.md); the appendices retain their
+original source observations.
 Method: four read-only research passes over the WAL write-to-recovery lifecycle, each citing lines it read in the
 source. The passes are included verbatim as appendices A to D, with their own path abbreviations. This document
 holds the decisions. The tables in section 2 are the summary, the appendices are the evidence.
+
+On 2026-10-24 the user selected ordered whole-transaction publication for #940.
+The loop may prepare and queue later groups while fsync is held, and must serve
+reads/control/validation against the earlier applied cut. A later BestEffort
+write waits for the preceding whole applied prefix before success or visibility.
+Its sequence cannot bypass an unapplied Strict unit. Issue #940 AC1 now uses a
+deterministic held-fsync gate for this contract; a five-millisecond later-write
+completion is not required. A separate commit-visibility map or reordered
+linearization would require another design. This keeps the applied cut monotonic,
+immutable snapshots and read-your-writes together, consistent with the
+[RocksDB ordering tradeoff](https://github.com/facebook/rocksdb/wiki/unordered_write).
 
 ## 1. Conclusions
 
@@ -18,7 +32,8 @@ holds the decisions. The tables in section 2 are the summary, the appendices are
    segment becomes exact only below an amortized floor, with an exact edit at rotation and clean shutdown
    (section 5). Durability itself does not change. This is the one decision in this document that changes what a
    recovery can detect, so it needs explicit sign-off at the first slice PR.
-4. **Persisted formats:** no byte layout changes and no version bump. The #904 change alters when an existing
+4. **WAL persisted formats:** these WAL slices require no byte layout changes or version bump. The separate
+   metadata FORMAT 9 work is tracked by #953. The #904 change alters when an existing
    ledger edit is written, not what a reader may assume of it (section 6.3).
 5. **Eleven numbered slices, ordered** (section 6.4); slice 8 splits into four and slice 11 into three. Slices 1, 2,
    5, 6 and 10 are correctness, contract or test-debt fixes found by this review that no existing issue covers.
@@ -324,7 +339,7 @@ principle; labels follow `AGENTS.md`.
 | 6 | **One commit-outcome function** (#977) | `solid`, p2, `area:wal` | `WalAppendError`, group durability and ledger failures map through one function per section 4.3; the Timeout remap moves to the caller-side wait; engine remap tested through `RuntimeHandle` | `should_keep_timeout_given_provably_unchanged_failure_when_commit_is_submitted` | failpoint `midge::wal::txn_after_commit_append_before_sync`; local and cloud strict map the same | none |
 | 7 | **Apply bookkeeping per group** (#924, part of #906) | p2, `area:wal` | `recompute_total_memtable_bytes` once per group; snapshot publication per touched family | `should_build_one_read_snapshot_given_many_families_when_commit_touches_one` | none; local and cloud share the path | `tier1_hotpath_api`, `tier4_system_local_throughput_regression` |
 | 8a | **Pipeline prerequisites** (#978) | p1, `area:wal` | Unify strict and ticketed sync protocols; park the `WriterEffectGroup` root in loop-owned state; drain before rotate, seal, lease transition and shutdown; snapshots publish the applied sequence; spill path is a barrier (C2 to C4) | `should_publish_applied_sequence_given_failed_group_when_snapshot_published`; `should_drain_in_flight_group_before_rotate_given_pending_group` | the local and cloud rotation matrices run again with a group parked; parity: cloud seal drains too | `tier4_system_strict_group_commit` (no regression) |
-| 8b | **Pipelined commit** (#940) | p1, `area:wal` | Append and fsync completion become loop events; in-flight limit and group byte cap; floor is the fsynced group's end (C1, C5) | `should_serve_best_effort_commit_given_strict_fsync_in_flight_when_submitted`; `should_open_strictly_given_group_written_after_synced_group_when_power_is_lost`; a failed fsync still yields `Fenced` and `OutcomeUnknown` | failpoints at append, sync, ledger floor, apply; local and cloud strict pass one suite | `tier4_system_strict_group_commit` (scales to the fsync ceiling), `tier2_subsystem_durability_commit_latency` (read p99 decoupled) |
+| 8b | **Pipelined commit** (#940) | p1, `area:wal` | Append and fsync completion become loop events; in-flight limit and group byte cap; floor is the fsynced group's end (C1, C5) | held-fsync read/control progress and ordered later-write completion (#940 AC1); `should_open_strictly_given_group_written_after_synced_group_when_power_is_lost`; a failed fsync still yields `Fenced` and `OutcomeUnknown` | failpoints at append, sync, ledger floor, apply; local and cloud strict pass one suite | `tier4_system_strict_group_commit` (scales to the fsync ceiling), `tier2_subsystem_durability_commit_latency` (read p99 decoupled) |
 | 8c | **Writer-thread encoding** (#941 corrected, #947 reduced) | p2, `area:wal` | Frame encode, compress and CRC move to the writer thread; "frame once" | byte-for-byte golden against the legacy encoder; old decoder reads new-path bytes | the append failpoints; local and cloud share the encoder | `tier2_subsystem_durability_commit_latency` |
 | 8d | **Overlapping writes join groups** (#905 widened) | p2, `area:wal` | Overlapping keys join a group when no assertions, `start_sequence` or `insert_only`; assertions and write-write conflicts are checked against the overlay inside the group | `should_coalesce_overlapping_strict_writes_given_no_assertions_when_same_window`; the existing `insert_only` rejection still rejects inside a group | failpoint `midge::wal::before_prepared_transaction_apply`; local and cloud strict | `tier4_system_strict_group_commit` |
 | 9 | **Concurrent apply with watermark** (#906) | p1, `area:wal` | Memtable apply on workers, a visibility watermark, the loop allocates and acknowledges | `should_not_expose_sequence_after_watermark_given_earlier_apply_stalled_when_read` | failpoint `midge::wal::before_prepared_transaction_apply`; loom (#931) and the differential fuzzer (#951), both merged, run before merge | `tier4_system_strict_group_commit` |

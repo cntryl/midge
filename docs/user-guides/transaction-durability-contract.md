@@ -31,6 +31,11 @@ Within a committed transaction:
 - write operations occupy one contiguous transaction sequence range
 - readers either observe the full committed batch or none of it
 
+Successful writes publish in their admitted sequence order. Preparing or
+queuing a later write does not make it visible ahead of an earlier unapplied
+transaction. A later `best_effort()` commit can wait behind a Strict group;
+that wait does not give the BestEffort write a WAL durability guarantee.
+
 ## Read Semantics
 
 ### Read-only transactions

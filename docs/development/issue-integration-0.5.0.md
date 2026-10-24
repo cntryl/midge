@@ -524,3 +524,14 @@ deadline before fencing, so a timely concurrent renewal is preserved. The
 held-renewal regression now exercises both the tuple snapshot and remaining
 validity. The current combined check is blocked by concurrent multipart
 provider interface edits; this follow-up has not executed its tests.
+
+### #940: ordered visibility decision reconciled
+
+The user selected Midge's existing ordered whole-transaction publication on
+2026-10-24. The loop can prepare/queue later work during fsync and serve reads,
+control and validation against the earlier applied cut. Later BestEffort writes
+wait for that prefix before success/visibility. A different commit-visibility
+map or reordered linearization is outside this batch. GitHub #940 R3/R4/AC1
+were updated and read back: deterministic held-fsync progress replaces the
+contradictory five-millisecond later-write completion requirement. The WAL
+design and public contract agree; issue implementation is still in progress.
