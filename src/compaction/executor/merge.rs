@@ -25,6 +25,8 @@ pub(crate) struct TombstoneGcPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CompactionEvent {
+    /// A legal partition boundary with no logical mutation.
+    Boundary(Vec<u8>),
     RangeEnd(RangeTombstone),
     RangeStart(RangeTombstone),
     Version(CompactionVersion),
@@ -33,6 +35,7 @@ pub(super) enum CompactionEvent {
 impl CompactionEvent {
     pub(super) fn key(&self) -> &[u8] {
         match self {
+            Self::Boundary(key) => key,
             Self::RangeEnd(tombstone) => &tombstone.end,
             Self::RangeStart(tombstone) => &tombstone.start,
             Self::Version(version) => &version.key,
@@ -41,6 +44,7 @@ impl CompactionEvent {
 
     fn sequence(&self) -> u64 {
         match self {
+            Self::Boundary(_) => 0,
             Self::RangeEnd(tombstone) | Self::RangeStart(tombstone) => tombstone.seq,
             Self::Version(version) => version.seq,
         }
@@ -48,6 +52,7 @@ impl CompactionEvent {
 
     fn kind_rank(&self) -> u8 {
         match self {
+            Self::Boundary(_) => 3,
             Self::RangeEnd(_) => 0,
             Self::RangeStart(_) => 1,
             Self::Version(_) => 2,
@@ -56,6 +61,7 @@ impl CompactionEvent {
 
     pub(super) fn retained_bytes(&self) -> usize {
         match self {
+            Self::Boundary(key) => std::mem::size_of::<Self>().saturating_add(key.capacity()),
             Self::RangeEnd(tombstone) | Self::RangeStart(tombstone) => std::mem::size_of::<Self>()
                 .saturating_add(tombstone.start.capacity())
                 .saturating_add(tombstone.end.capacity()),
@@ -495,7 +501,7 @@ pub(crate) fn merge_repair_inputs_to_run(
             CompactionEvent::RangeStart(tombstone) => {
                 writer.add_range_tombstone(&tombstone.start, &tombstone.end, tombstone.seq)?;
             }
-            CompactionEvent::RangeEnd(_) => {}
+            CompactionEvent::RangeEnd(_) | CompactionEvent::Boundary(_) => {}
         }
         if writer
             .encoded_size_upper_bound()

@@ -353,3 +353,22 @@ executed for this candidate.
 Off-loop snapshot validation with intervening-write revalidation, earlier
 in-flight groups, pipeline receipts, parked roots and concurrent apply remain
 pending. This slice does not enable an asynchronous pipeline.
+
+### #948: overlap partition slice implemented; Fragment narrowing pending
+
+Plans capture level+2 bounds and a configurable soft overlap-byte target
+(default 320 MiB in LeveledCompactionConfig; zero disables). Output merging
+introduces non-mutating boundary events at grandparent starts, so range-only
+coverage can also be fragmented legally. Indexed weighted endpoints measure
+overlap in logarithmic time per key group. Whole user-key groups remain
+indivisible. One oversized grandparent, an inseparable overlapping set, or
+unknown legacy bounds can exceed the soft target; the roller avoids splitting
+every key inside that same oversized span. Exclusive range ends may coincide
+with the following grandparent's first key without covering that key.
+
+Active tests cover feasible point layouts, repeated-key reduction, contiguous
+range coverage, and one oversized grandparent. Compilation reaches this code;
+the latest shared check stops in concurrent cloud-publication interface edits.
+Execution, A/B write amplification and narrowing the existing Fragment fallback
+remain pending. The fallback is retained conservatively for legacy or oversized
+source/target layouts while the new partition policy is qualified.

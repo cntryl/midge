@@ -358,6 +358,9 @@ pub struct CompactionActor {
 }
 
 impl CompactionActor {
+    pub(crate) fn max_grandparent_overlap_bytes(&self) -> u64 {
+        self.compactor.config.max_grandparent_overlap_bytes
+    }
     #[cfg(test)]
     pub fn new(sst_factory: Arc<dyn SstFactory>) -> Self {
         Self::new_with_config(sst_factory, LeveledCompactionConfig::default())

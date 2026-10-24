@@ -124,6 +124,9 @@ pub struct CompactionPlan {
     /// Production snapshots retain their original immutable sources until
     /// unpin, so rewritten outputs need not retain ranges for those readers.
     pub retained_snapshot_sources: bool,
+    /// Soft next-level overlap target. Oversized individual grandparents or
+    /// indivisible key coverage may exceed it; source key groups stay whole.
+    pub grandparent_overlap: super::executor::GrandparentOverlap,
 }
 
 impl CompactionPlan {
@@ -149,6 +152,7 @@ impl CompactionPlan {
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
             retained_snapshot_sources: false,
+            grandparent_overlap: Default::default(),
         }
     }
 
@@ -190,6 +194,8 @@ impl CompactionPlan {
 ///   Ln (n >= 2): `L1_target` * `level_multiplier^(n` - 1)
 #[derive(Debug, Clone)]
 pub struct LeveledCompactionConfig {
+    /// Soft maximum bytes of level+2 intersected by one output. Zero disables.
+    pub max_grandparent_overlap_bytes: u64,
     pub l0_compaction_threshold: u64,
     pub l0_file_count_threshold: usize,
     /// Hard safety bound for simultaneously active source merge streams.
@@ -204,6 +210,7 @@ pub struct LeveledCompactionConfig {
 impl Default for LeveledCompactionConfig {
     fn default() -> Self {
         Self {
+            max_grandparent_overlap_bytes: 320 * 1024 * 1024,
             l0_compaction_threshold: 4 * 1024 * 1024, // 4MB
             l0_file_count_threshold: 4,
             max_compaction_input_files: 64,
@@ -337,6 +344,7 @@ impl Compactor {
                 point_tombstone_gc_eligible: false,
                 range_tombstone_gc_eligible: false,
                 retained_snapshot_sources: false,
+                grandparent_overlap: Default::default(),
             }));
         }
         Ok(None)
@@ -484,6 +492,7 @@ impl Compactor {
             point_tombstone_gc_eligible,
             range_tombstone_gc_eligible,
             retained_snapshot_sources: false,
+            grandparent_overlap: Default::default(),
         }))
     }
 
@@ -559,6 +568,7 @@ impl Compactor {
             point_tombstone_gc_eligible,
             range_tombstone_gc_eligible,
             retained_snapshot_sources: false,
+            grandparent_overlap: Default::default(),
         }))
     }
 
@@ -632,6 +642,7 @@ impl Compactor {
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
             retained_snapshot_sources: false,
+            grandparent_overlap: Default::default(),
         }
     }
 

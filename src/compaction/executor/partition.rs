@@ -556,7 +556,9 @@ fn select_newest_version<'a>(
     let mut versions: Vec<&CompactionVersion> = events
         .filter_map(|event| match event {
             CompactionEvent::Version(version) => Some(version),
-            CompactionEvent::RangeStart(_) | CompactionEvent::RangeEnd(_) => None,
+            CompactionEvent::RangeStart(_)
+            | CompactionEvent::RangeEnd(_)
+            | CompactionEvent::Boundary(_) => None,
         })
         .collect();
     versions.sort_by_key(|version| std::cmp::Reverse(version.seq));
@@ -960,7 +962,9 @@ fn write_fragment_key_events(
     let newest = select_newest_version(events.iter().map(|event| &event.event))?;
     let starts = events.iter().filter_map(|event| match &event.event {
         CompactionEvent::RangeStart(tombstone) => Some(tombstone),
-        CompactionEvent::RangeEnd(_) | CompactionEvent::Version(_) => None,
+        CompactionEvent::RangeEnd(_)
+        | CompactionEvent::Version(_)
+        | CompactionEvent::Boundary(_) => None,
     });
     let retain_all = TombstoneGcPolicy {
         snapshot_horizon: None,
@@ -1127,12 +1131,17 @@ pub(crate) fn write_partitioned_compaction_outputs(
     abort_check: Option<&dyn Fn() -> bool>,
     output_sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
     output_size_limit: Option<usize>,
+    grandparent_overlap: &super::GrandparentOverlap,
 ) -> MidgeResult<Vec<String>> {
     ensure_compaction_not_aborted(abort_check)?;
     let CompactionStreamInputs {
-        cursors,
+        mut cursors,
         _cursor_reservation,
     } = inputs;
+    if let Some(boundaries) = grandparent_overlap.boundary_cursor(budget)? {
+        cursors.push(boundaries);
+    }
+    let mut overlap = grandparent_overlap.tracker(budget);
     let mut roller = PartitionRoller::new(
         sst_factory,
         output_dir,
@@ -1184,7 +1193,9 @@ pub(crate) fn write_partitioned_compaction_outputs(
 
         let starts = key_events.iter().filter_map(|event| match &event.event {
             CompactionEvent::RangeStart(tombstone) => Some(tombstone),
-            CompactionEvent::RangeEnd(_) | CompactionEvent::Version(_) => None,
+            CompactionEvent::RangeEnd(_)
+            | CompactionEvent::Version(_)
+            | CompactionEvent::Boundary(_) => None,
         });
         let selected_version = selected_version.filter(|version| {
             survives_tombstone_gc(
@@ -1195,7 +1206,10 @@ pub(crate) fn write_partitioned_compaction_outputs(
             )
         });
 
-        if roller.should_roll(selected_version, starts.clone(), &tombstones, tombstone_gc)? {
+        let has_output = roller.partition_point_count > 0 || tombstones.has_partition_tombstones();
+        if roller.should_roll(selected_version, starts.clone(), &tombstones, tombstone_gc)?
+            || (has_output && overlap.should_roll(&event_key))
+        {
             let (finished, boundary_reservation) =
                 roller.finish_for_roll(&event_key, &tombstones, abort_check)?;
             let partition_emitted = finished.is_some();
@@ -1207,6 +1221,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
                 &mut tombstones,
                 partition_emitted,
             )?;
+            overlap.reset();
         }
 
         tombstones.observe_starts(
@@ -1220,6 +1235,9 @@ pub(crate) fn write_partitioned_compaction_outputs(
             roller.write_selected(version)?;
         }
         roller.ensure_current_fits(&tombstones)?;
+        if roller.partition_point_count > 0 || tombstones.has_partition_tombstones() {
+            overlap.observe(&event_key)?;
+        }
     }
 
     ensure_compaction_not_aborted(abort_check)?;
@@ -1256,11 +1274,13 @@ impl VersionMergeIterator<'_> {
     fn next_version(&mut self) -> MidgeResult<Option<CompactionVersion>> {
         match self.0.next_event()? {
             Some(CompactionEvent::Version(version)) => Ok(Some(version)),
-            Some(CompactionEvent::RangeEnd(_) | CompactionEvent::RangeStart(_)) => {
-                Err(crate::common::MidgeError::Internal(
-                    "version-only test merge observed a range event".to_string(),
-                ))
-            }
+            Some(
+                CompactionEvent::RangeEnd(_)
+                | CompactionEvent::RangeStart(_)
+                | CompactionEvent::Boundary(_),
+            ) => Err(crate::common::MidgeError::Internal(
+                "version-only test merge observed a range event".to_string(),
+            )),
             None => Ok(None),
         }
     }

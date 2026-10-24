@@ -6,10 +6,13 @@ pub mod strategy;
 
 #[cfg(test)]
 mod fragment_tests;
+#[cfg(test)]
+mod grandparent_tests;
 
 pub(crate) use config::{
     OpenCompactionConfig, DEFAULT_COMPACTION_MEMORY_LIMIT, DEFAULT_TARGET_SST_SIZE,
 };
+pub use executor::GrandparentOverlap;
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
 use crate::common::{MidgeError, MidgeResult};
@@ -179,6 +182,7 @@ pub(crate) fn execute_compaction_at_target(
         abort_check,
         output_sink,
         output_size_limit,
+        &plan.grandparent_overlap,
     )?;
     if let Some(scratch) = &mut scratch {
         if let Err(error) = scratch.cleanup() {
@@ -2523,6 +2527,7 @@ mod tests {
             None,
             None,
             None,
+            &Default::default(),
         )?;
 
         // Assert

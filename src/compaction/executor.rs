@@ -14,7 +14,10 @@ use crate::common::MidgeResult;
 use crate::sst::traits::RawSstVersion;
 
 mod merge;
+mod overlap;
 mod partition;
+
+pub use overlap::GrandparentOverlap;
 
 pub(crate) use merge::{
     collect_compaction_stream_inputs, merge_repair_inputs_to_run, TombstoneGcPolicy,

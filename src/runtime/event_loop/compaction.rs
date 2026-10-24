@@ -65,6 +65,15 @@ impl EventLoop {
         // capture/registration sampling boundary. Rewriting cannot remove the
         // source of a pre-delete read until its final snapshot unpins.
         plan.retained_snapshot_sources = true;
+        let grandparent_level = plan.target_level.saturating_add(1);
+        plan.grandparent_overlap = crate::compaction::GrandparentOverlap::from_files(
+            self.state
+                .manifest
+                .files
+                .iter()
+                .filter(|file| file.cf_id == plan.cf_id && file.level == grandparent_level),
+            self.actors.compaction_actor.max_grandparent_overlap_bytes(),
+        );
         plan.target_sst_size = self.actors.compaction_actor.target_sst_size();
         plan.compaction_memory_limit = memory_limit;
 
@@ -377,6 +386,7 @@ impl CompactionCoordinator {
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
             retained_snapshot_sources: false,
+            grandparent_overlap: Default::default(),
         };
 
         let schedule_res = event_loop.launch_compaction(cplan);
