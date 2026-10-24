@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 fn publish_raw_snapshot(fixture: &Fixture, bytes: &[u8]) -> CloudMetadataGeneration {
     std::fs::write(
-        fixture._directory.path().join(files::MANIFEST_SNAPSHOT),
+        fixture.directory.path().join(files::MANIFEST_SNAPSHOT),
         bytes,
     )
     .unwrap();
@@ -114,9 +114,8 @@ fn should_refuse_dense_selected_slots_before_decoding_retirement_authority() {
 
         // Assert: no authority or typed allocation is admitted, and the exact
         // selected immutable body remains available for diagnosis/recovery.
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("dense selected decode must not grant retirement authority"),
+        let Err(error) = result else {
+            panic!("dense selected decode must not grant retirement authority");
         };
         assert!(
             matches!(&error, MidgeError::ResourceLimit(message)

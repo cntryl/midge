@@ -772,7 +772,7 @@ mod tests {
     }
 
     struct Fixture {
-        _directory: tempfile::TempDir,
+        directory: tempfile::TempDir,
         fs: Arc<dyn Fs>,
         cloud: Arc<CloudStorage>,
         store: Arc<FsLeaderStore>,
@@ -795,7 +795,7 @@ mod tests {
             ));
             store.acquire_leadership("writer").unwrap();
             Self {
-                _directory: directory,
+                directory,
                 fs,
                 cloud,
                 store,
