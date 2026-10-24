@@ -373,6 +373,8 @@ mod sst_regressions {
         assert!(rewritten_bytes > 0);
     }
 
+    const L0_PRESSURE_ANCHOR: &[u8] = b"l0-pressure/anchor";
+
     fn exercise_l0_pressure_recovery(recover_before_commit: bool) -> (u64, u64, u64) {
         use cntryl_midge::{Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions};
         use std::time::Duration;
@@ -387,8 +389,8 @@ mod sst_regressions {
         .unwrap();
         let cf = engine.create_column_family("l0-pressure").unwrap();
         let mut rejected = 0_u64;
-        // Act: 32 separate flushes exceed the default hard L0 ceiling. Only the
-        // production pressure-recovery path can restore admission in this process.
+        // Act: the common anchor makes every flushed SST overlap. Pressure
+        // recovery must physically merge this history instead of moving files.
         for index in 0_u32..32 {
             if recover_before_commit {
                 assert!(engine
@@ -399,6 +401,11 @@ mod sst_regressions {
             let commit = || {
                 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
                 tx.put(index.to_be_bytes().to_vec(), b"value".to_vec(), None)?;
+                tx.put(
+                    L0_PRESSURE_ANCHOR.to_vec(),
+                    index.to_be_bytes().to_vec(),
+                    None,
+                )?;
                 tx.commit(WriteOptions::sync())
             };
             match commit() {
@@ -410,6 +417,11 @@ mod sst_regressions {
                     assert_eq!(after.wal_append_count, before.wal_append_count);
                     let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
                     assert_eq!(read.get(&index.to_be_bytes()).unwrap(), None);
+                    let previous_anchor = index.checked_sub(1).map(|index| index.to_be_bytes());
+                    assert_eq!(
+                        read.get(L0_PRESSURE_ANCHOR).unwrap().as_deref(),
+                        previous_anchor.as_ref().map(<[u8; 4]>::as_slice)
+                    );
                     drop(read);
                     assert!(engine
                         .wait_for_write_stall_clear(cf.id(), Duration::from_secs(10))
@@ -438,17 +450,7 @@ mod sst_regressions {
                 .unwrap(),
         )
         .unwrap();
-        let cf = reopened.get_column_family("l0-pressure").unwrap();
-        let tx = reopened
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .unwrap();
-        // Assert
-        for index in 0_u32..32 {
-            assert_eq!(
-                tx.get(&index.to_be_bytes()).unwrap().as_deref(),
-                Some(b"value".as_slice())
-            );
-        }
+        assert_l0_history_after_reopen(&reopened);
         eprintln!(
             "L0 recovery: wait_before_commit={recover_before_commit} rejected={rejected} published_compactions={} rewritten_bytes={}",
             recovered.compactions_run, recovered.compaction_bytes_rewritten,
@@ -458,6 +460,30 @@ mod sst_regressions {
             recovered.compactions_run,
             recovered.compaction_bytes_rewritten,
         )
+    }
+
+    fn assert_l0_history_after_reopen(reopened: &cntryl_midge::Engine) {
+        let cf = reopened.get_column_family("l0-pressure").unwrap();
+        let tx = reopened
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        // Assert: every original row and the last atomic anchor survive restart.
+        for index in 0_u32..32 {
+            assert_eq!(
+                tx.get(&index.to_be_bytes()).unwrap().as_deref(),
+                Some(b"value".as_slice())
+            );
+        }
+        assert_eq!(
+            tx.get(L0_PRESSURE_ANCHOR).unwrap().as_deref(),
+            Some(31_u32.to_be_bytes().as_slice())
+        );
+        let index_rows = tx
+            .scan(&cntryl_midge::Query::new().prefix(vec![0_u8].into()))
+            .unwrap()
+            .try_collect()
+            .unwrap();
+        assert_eq!(index_rows.len(), 32);
     }
 }
 
