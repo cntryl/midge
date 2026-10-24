@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-const FLUSH_WORKER_CHANNEL_CAPACITY: usize = 1;
 #[cfg(test)]
 const DEFAULT_FLUSH_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 
@@ -199,12 +198,14 @@ enum FlushWorkerTask {
     Shutdown,
 }
 
-/// One persistent worker with one executing task and one bounded channel slot.
+/// Bounded reusable workers, with one owned pipeline per column family.
 pub struct FlushActor {
-    in_progress: usize,
+    owners: std::collections::HashMap<u64, u32>,
+    worker_limit: usize,
+    submitted: u64,
     memory_mode: bool,
     task_tx: Option<crossbeam::channel::Sender<FlushWorkerTask>>,
-    worker_handle: Option<JoinHandle<()>>,
+    worker_handles: Vec<JoinHandle<()>>,
 }
 
 impl FlushActor {
@@ -251,41 +252,62 @@ impl FlushActor {
         memory_bytes: usize,
         limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
     ) -> MidgeResult<Self> {
+        Self::new_with_worker_count(fs, memory_mode, compression_policy, completion_tx, memory_bytes, limiter, 1)
+    }
+
+    pub(crate) fn new_with_worker_count(
+        fs: Arc<dyn crate::io::Fs>, memory_mode: bool,
+        compression_policy: crate::codec::CompressionPolicy,
+        completion_tx: crossbeam::channel::Sender<FlushWorkerResult>, memory_bytes: usize,
+        limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>, workers: usize,
+    ) -> MidgeResult<Self> {
+        if !(1..=64).contains(&workers) { return Err(MidgeError::InvalidArgument("flush concurrency must be in 1..=64".into())); }
+        let mut actor = Self { owners: Default::default(), worker_limit: workers, submitted: 0,
+            memory_mode, task_tx: None, worker_handles: Vec::new() };
         if memory_mode {
-            return Ok(Self {
-                in_progress: 0,
-                memory_mode: true,
-                task_tx: None,
-                worker_handle: None,
-            });
+            return Ok(actor);
         }
-
-        let sst_factory = Arc::new(
-            crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
-                .with_write_limiter(limiter)
-                .with_compression_policy(compression_policy)
-                .with_compaction_scratch_directory(PathBuf::from(
-                    crate::sst::fs::FLUSH_STAGING_DIR,
-                )),
-        );
         let (task_tx, task_rx) =
-            crossbeam::channel::bounded::<FlushWorkerTask>(FLUSH_WORKER_CHANNEL_CAPACITY);
+            crossbeam::channel::bounded::<FlushWorkerTask>(workers);
+        actor.task_tx = Some(task_tx);
         let budget = crate::common::resource_budget::ResourceBudget::new(memory_bytes);
-        let worker_handle = std::thread::Builder::new()
-            .name("midge-flush".to_string())
-            .spawn(move || Self::worker_loop(&task_rx, &completion_tx, &sst_factory, &budget))
-            .map_err(|error| MidgeError::Internal(format!("spawn flush worker: {error}")))?;
-
-        Ok(Self {
-            in_progress: 0,
-            memory_mode: false,
-            task_tx: Some(task_tx),
-            worker_handle: Some(worker_handle),
-        })
+        for index in 0..workers {
+            // Scratch cleanup belongs to this worker, while memory and write
+            // throttling share their original engine-wide admission ledgers.
+            let factory = Arc::new(crate::sst::FsSstFactoryIo::new(Arc::clone(&fs), 64 * 1024)
+                .with_write_limiter(limiter.clone()).with_compression_policy(compression_policy.clone())
+                .with_compaction_scratch_directory(PathBuf::from(crate::sst::fs::FLUSH_STAGING_DIR)));
+            let task_rx = task_rx.clone();
+            let completion_tx = completion_tx.clone();
+            let budget = budget.clone();
+            let worker = std::thread::Builder::new().name(format!("midge-flush-{index}"))
+                .spawn(move || Self::worker_loop(&task_rx, &completion_tx, &factory, &budget))
+                .map_err(|error| MidgeError::Internal(format!("spawn flush worker: {error}")))?;
+            actor.worker_handles.push(worker);
+        }
+        Ok(actor)
     }
 
     pub(crate) fn is_inflight(&self) -> bool {
-        self.in_progress != 0
+        !self.owners.is_empty()
+    }
+
+    pub(crate) fn has_capacity(&self) -> bool { self.owners.len() < self.worker_limit }
+    pub(crate) fn submitted_work(&self) -> u64 { self.submitted }
+    pub(crate) fn owns_pipeline(&self, cf_id: u32, flush_id: u64) -> bool { self.owners.get(&flush_id) == Some(&cf_id) }
+    pub(crate) fn can_start_or_resume(&self, cf_id: u32, flush_id: u64) -> bool {
+        self.owns_pipeline(cf_id, flush_id) || (self.has_capacity() && !self.owners.values().any(|cf| *cf == cf_id))
+    }
+
+    fn submit_task(&mut self, identity: FlushIdentity, task: FlushWorkerTask, resume: bool) -> MidgeResult<()> {
+        if !self.can_start_or_resume(identity.cf_id, identity.flush_id) || (!resume && self.owners.contains_key(&identity.flush_id)) {
+            return Err(MidgeError::Busy("flush pipeline capacity or column family is owned".into()));
+        }
+        self.task_tx.as_ref().ok_or_else(|| MidgeError::Internal("flush workers are unavailable".into()))?
+            .try_send(task).map_err(|error| MidgeError::Busy(format!("flush worker queue is full: {error}")))?;
+        self.owners.insert(identity.flush_id, identity.cf_id);
+        self.submitted = self.submitted.saturating_add(1);
+        Ok(())
     }
 
     pub(crate) fn submit_build(
@@ -298,11 +320,6 @@ impl FlushActor {
         if self.memory_mode {
             return Ok(());
         }
-        if self.is_inflight() {
-            return Err(MidgeError::Busy(
-                "flush worker already has an in-flight task".to_string(),
-            ));
-        }
         let task = FlushWorkerTask::Build(FlushBuildTask {
             identity,
             memtable,
@@ -310,40 +327,22 @@ impl FlushActor {
             reservation: None,
             hybrid_storage,
         });
-        self.task_tx
-            .as_ref()
-            .ok_or_else(|| MidgeError::Internal("flush worker is unavailable".to_string()))?
-            .try_send(task)
-            .map_err(|error| MidgeError::Busy(format!("flush worker queue is full: {error}")))?;
-        self.in_progress = 1;
-        Ok(())
+        self.submit_task(identity, task, false)
     }
 
     pub(crate) fn submit_publish(&mut self, task: FlushPublishTask) -> MidgeResult<()> {
         if self.memory_mode {
             return Ok(());
         }
-        self.task_tx
-            .as_ref()
-            .ok_or_else(|| MidgeError::Internal("flush worker is unavailable".to_string()))?
-            .send(FlushWorkerTask::Publish(Box::new(task)))
-            .map_err(|error| MidgeError::Internal(format!("submit flush publication: {error}")))?;
-        self.in_progress = 1;
-        Ok(())
+        self.submit_task(task.build.identity, FlushWorkerTask::Publish(Box::new(task)), true)
     }
 
     pub(crate) fn submit_mirror(&mut self, task: FlushMirrorTask) -> MidgeResult<()> {
-        self.task_tx
-            .as_ref()
-            .ok_or_else(|| MidgeError::Internal("flush worker is unavailable".to_string()))?
-            .send(FlushWorkerTask::Mirror(Box::new(task)))
-            .map_err(|error| MidgeError::Internal(format!("submit flush mirror: {error}")))?;
-        self.in_progress = 1;
-        Ok(())
+        self.submit_task(task.delta.identity, FlushWorkerTask::Mirror(Box::new(task)), true)
     }
 
-    pub(crate) fn finish_pipeline(&mut self) {
-        self.in_progress = 0;
+    pub(crate) fn finish_pipeline(&mut self, flush_id: u64) {
+        self.owners.remove(&flush_id);
     }
 
     pub(crate) fn reserve_flush(
@@ -397,19 +396,19 @@ impl FlushActor {
     }
 
     pub(crate) fn shutdown_and_join(&mut self) -> MidgeResult<()> {
-        if self.worker_handle.is_none() {
+        if self.worker_handles.is_empty() {
             return Ok(());
         }
         if let Some(task_tx) = &self.task_tx {
-            let _ = task_tx.send(FlushWorkerTask::Shutdown);
+            for _ in &self.worker_handles { let _ = task_tx.send(FlushWorkerTask::Shutdown); }
         }
-        if let Some(worker) = self.worker_handle.take() {
-            worker.join().map_err(|_| {
-                MidgeError::Internal("flush worker panicked during shutdown".into())
-            })?;
+        let mut error = None;
+        for worker in self.worker_handles.drain(..) {
+            if worker.join().is_err() { error = Some(MidgeError::Internal("flush worker panicked during shutdown".into())); }
         }
         self.task_tx = None;
-        Ok(())
+        self.owners.clear();
+        error.map_or(Ok(()), Err)
     }
 
     fn worker_loop(
@@ -1372,7 +1371,7 @@ mod tests {
         )?;
 
         // Assert
-        assert!(actor.worker_handle.is_some());
+        assert_eq!(actor.worker_handles.len(), 1);
         assert!(!actor.is_inflight());
         actor.shutdown_and_join()?;
         Ok(())
@@ -1392,7 +1391,7 @@ mod tests {
         )?;
 
         // Assert
-        assert!(actor.worker_handle.is_none());
+        assert!(actor.worker_handles.is_empty());
         Ok(())
     }
 

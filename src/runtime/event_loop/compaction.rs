@@ -13,6 +13,7 @@ use crate::runtime::CompactionPlan;
 use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
+mod compute;
 
 pub(super) enum CompactionLaunch {
     Started,
@@ -63,7 +64,8 @@ impl EventLoop {
         plan: crate::compaction::CompactionPlan,
         manual_deadline: Option<OperationDeadline>,
     ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
-        let memory_limit = self.available_compaction_memory()?;
+        self.available_compaction_memory()?;
+        let memory_limit = self.actors.compaction_actor.memory_limit_for_plan(&plan);
         let mut plan = self.assign_compaction_output_sequence_within(plan, manual_deadline)?;
         plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
         // Read snapshots pin their original SST names through GC's exclusive
@@ -120,6 +122,9 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<CompactionLaunch> {
         let had_manual_waiters = !self.state.pending_compaction_waits.is_empty();
         CompactionCoordinator::expire_manual_compaction_waiters(self);
+        if self.actors.compaction_actor.active_count().saturating_add(self.actors.cloud_coordinator.metadata_mirror.pending_compactions.len()) >= self.actors.compaction_actor.concurrency_limit() {
+            return Err(MidgeError::Busy("compaction owner capacity is reserved".into()));
+        }
         if self.publication.publication_gate.is_active() {
             return Err(crate::common::MidgeError::Busy(
                 "manifest publication is already in progress".to_string(),
@@ -161,7 +166,7 @@ impl EventLoop {
             self.actors
                 .cloud_coordinator
                 .metadata_mirror
-                .pending_compaction = Some((plan, manual_deadline));
+                .pending_compactions.push_back((plan, manual_deadline));
             return Ok(CompactionLaunch::WaitingForMetadata);
         }
         let plan = self.prepare_compaction_plan_for_launch_within(plan, manual_deadline)?;
@@ -509,12 +514,7 @@ impl CompactionCoordinator {
             return HandleOutcome::Continue;
         }
 
-        if event_loop
-            .state
-            .active_compactions
-            .load(std::sync::atomic::Ordering::SeqCst)
-            > 0
-        {
+        if !event_loop.actors.compaction_actor.has_capacity() {
             return HandleOutcome::Continue;
         }
 
@@ -590,6 +590,10 @@ impl CompactionCoordinator {
             target_level,
             succeeded,
         } = request;
+        if !event_loop.actors.compaction_actor.select_completion(request_id, &input_ssts, &output_ssts, cf_id, target_level, succeeded) {
+            tracing::debug!(request_id, "ignored stale, early or mismatched compaction completion");
+            return HandleOutcome::Continue;
+        }
         let worker_error = event_loop.actors.compaction_actor.take_worker_error();
 
         if succeeded {
@@ -1242,20 +1246,26 @@ impl CompactionCoordinator {
         event_loop: &mut EventLoop,
         completion: CompactionPublishCompletion,
     ) {
-        event_loop.actors.compaction_publish_actor.finish_task();
         let Some(pending) = event_loop.publication.compaction_publication.get().cloned() else {
             tracing::warn!(?completion.phase, "ignored stale compaction publication completion");
             return;
         };
         if pending.token != completion.token || pending.expected_phase != completion.phase {
-            Self::finish_failed_publication(
-                event_loop,
-                &crate::common::MidgeError::Fenced(
-                    "compaction publication completion did not match the active token".to_string(),
-                ),
-            );
+            // A late/duplicate result has no authority over the current job,
+            // worker ticket, reservation, publication owner or durable intent.
+            tracing::warn!(?completion.phase, "ignored mismatched compaction publication completion");
             return;
         }
+        if pending.expected_phase != CompactionPublishPhase::IntentCleared
+            && event_loop.actors.compaction_actor.active_count() > 0
+            && !event_loop.actors.compaction_actor.select_job(pending.token.request_id)
+        {
+            event_loop.authority.compaction_fence.degrade();
+            event_loop.state.mark_persistence_anomaly();
+            tracing::error!(job_id = pending.token.request_id, "retaining publication whose compute owner cannot be selected");
+            return;
+        }
+        event_loop.actors.compaction_publish_actor.finish_task();
         if let Err(error) = completion.result {
             Self::finish_failed_publication(event_loop, &error);
             return;
@@ -1800,12 +1810,12 @@ impl CompactionCoordinator {
         if active != 0 {
             return;
         }
-        if event_loop
+        if !event_loop
             .actors
             .cloud_coordinator
             .metadata_mirror
-            .pending_compaction
-            .is_some()
+            .pending_compactions
+            .is_empty()
         {
             return;
         }
@@ -1942,12 +1952,12 @@ impl CompactionCoordinator {
     pub(super) fn complete_idle_compaction_waits(event_loop: &mut EventLoop, include_manual: bool) {
         Self::expire_manual_compaction_waiters(event_loop);
         if !include_manual
-            || event_loop
+            || !event_loop
                 .actors
                 .cloud_coordinator
                 .metadata_mirror
-                .pending_compaction
-                .is_some()
+                .pending_compactions
+                .is_empty()
         {
             return;
         }

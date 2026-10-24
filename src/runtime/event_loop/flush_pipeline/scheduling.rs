@@ -131,7 +131,7 @@ impl EventLoop {
     ) -> bool {
         (self.shutdown.shutting_down && !allow_during_shutdown)
             || self.state.is_memory_mode()
-            || self.actors.flush_actor.is_inflight()
+            || (!self.actors.flush_actor.has_capacity() && !self.state.has_due_immutable_flush_matching(|cf, id| self.actors.flush_actor.owns_pipeline(cf, id)))
             || self.publication.publication_gate.is_active()
             || (!allow_during_shutdown && self.routing.pending_msg.is_some())
             || (!allow_during_shutdown
@@ -150,7 +150,8 @@ impl EventLoop {
         if self.flush_start_blocked(allow_during_shutdown) {
             return;
         }
-        let Some(mut flush) = self.state.begin_next_immutable_flush() else {
+        let actor = &self.actors.flush_actor;
+        let Some(mut flush) = self.state.begin_next_immutable_flush_matching(|cf, id| actor.can_start_or_resume(cf, id)) else {
             return;
         };
         let Some((cf_id, _)) = self.state.immutable_flush_by_id(flush.flush_id) else {

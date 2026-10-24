@@ -83,7 +83,7 @@ impl EventLoop {
                 reservation,
             );
         }
-        self.actors.flush_actor.finish_pipeline();
+        self.actors.flush_actor.finish_pipeline(flush_id);
         self.publication.publication_gate.release(
             &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush { flush_id },
         );

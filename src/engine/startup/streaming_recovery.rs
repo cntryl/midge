@@ -436,7 +436,7 @@ fn publish_checkpoint_output(
         Ok(completion)
     })?;
     let delta = completion.result?;
-    actor.finish_pipeline();
+    actor.finish_pipeline(completion.identity.flush_id);
     let cloud_metadata_published =
         commit_and_mirror_checkpoint(state, config, actor, rx, &delta, completion.reservation)?;
     super::timing::measure("recovery_checkpoint_installation", || {
@@ -503,7 +503,7 @@ fn commit_and_mirror_checkpoint(
         ));
     };
     let cloud_metadata_published = mirror.result?;
-    actor.finish_pipeline();
+    actor.finish_pipeline(mirror.delta.identity.flush_id);
     Ok(cloud_metadata_published)
 }
 

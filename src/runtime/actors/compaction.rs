@@ -41,6 +41,8 @@ pub(crate) mod publication;
 mod jobs;
 #[path = "compaction/pool.rs"]
 mod pool;
+mod concurrent;
+pub use concurrent::CompactionActor;
 
 /// A finished compaction partition, summarized where it was written.
 ///
@@ -68,6 +70,7 @@ pub(crate) struct CompactionOutputAdmission<'a> {
 struct CompactionOutputWork<'a> {
     prepared: &'a PreparedCompactionOutputs,
     manual_deadline: Option<OperationDeadline>,
+    budget: Option<&'a crate::common::resource_budget::ResourceBudget>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -319,7 +322,11 @@ fn record_staged_output_partition(
 }
 
 /// Actor handling SST compaction
-pub struct CompactionActor {
+pub struct CompactionJobActor {
+    active_job_id: Option<u64>,
+    completed_outputs: Option<Vec<String>>,
+    completion_emitted: bool,
+    worker_succeeded: Option<bool>,
     jobs: Arc<jobs::CompactionJobs>,
     active_job_reservation: Option<jobs::CompactionJobGuard>,
     /// Whether a compaction is currently running
@@ -330,6 +337,7 @@ pub struct CompactionActor {
     compactor: Compactor,
     target_sst_size: usize,
     compaction_memory_limit: usize,
+    memory_budget: Option<crate::common::resource_budget::ResourceBudget>,
     /// Last column family selected for the global compaction slot. Planning
     /// resumes after this ID so a perpetually eligible low ID cannot starve
     /// unrelated families.
@@ -364,7 +372,7 @@ pub struct CompactionActor {
     prepared_outputs: PreparedCompactionOutputs,
 }
 
-impl CompactionActor {
+impl CompactionJobActor {
     /// Conservative excess bytes in levels which can move to a deeper level.
     /// This is an admission estimate, not a prediction of physical rewrite I/O.
     pub(crate) fn estimated_pending_bytes(&self, files: &[crate::metadata::FileMeta]) -> u64 {
@@ -405,16 +413,15 @@ impl CompactionActor {
     pub(crate) fn max_grandparent_overlap_bytes(&self) -> u64 {
         self.compactor.config.max_grandparent_overlap_bytes
     }
-    #[cfg(test)]
-    pub fn new(sst_factory: Arc<dyn SstFactory>) -> Self {
-        Self::new_with_config(sst_factory, LeveledCompactionConfig::default())
-    }
-
     pub fn new_with_config(
         sst_factory: Arc<dyn SstFactory>,
         config: LeveledCompactionConfig,
     ) -> Self {
         Self {
+            active_job_id: None,
+            completed_outputs: None,
+            completion_emitted: false,
+            worker_succeeded: None,
             jobs: jobs::CompactionJobs::new(1),
             active_job_reservation: None,
             compaction_running: false,
@@ -422,6 +429,7 @@ impl CompactionActor {
             compactor: Compactor::with_config(config),
             target_sst_size: crate::compaction::DEFAULT_TARGET_SST_SIZE,
             compaction_memory_limit: crate::compaction::DEFAULT_COMPACTION_MEMORY_LIMIT,
+            memory_budget: None,
             last_scheduled_cf: None,
             storage_reservation: None,
             active_input_ssts: Vec::new(),
@@ -451,14 +459,6 @@ impl CompactionActor {
     ) {
         self.target_sst_size = target_sst_size.max(1);
         self.compaction_memory_limit = compaction_memory_limit;
-    }
-
-    pub(crate) fn target_sst_size(&self) -> usize {
-        self.target_sst_size
-    }
-
-    pub(crate) fn compaction_memory_limit(&self) -> usize {
-        self.compaction_memory_limit
     }
 
     /// Prefer input bytes within four admitted output targets, returning to
@@ -555,7 +555,7 @@ impl CompactionActor {
                 .compactor
                 .pick_repair_compaction(&state.manifest.files, *cf_id)?
             {
-                return Ok(Some(self.record_scheduled_plan(plan)));
+                if self.jobs.available(&plan, &state.manifest.files) { return Ok(Some(self.record_scheduled_plan(plan))); }
             }
         }
 
@@ -567,7 +567,7 @@ impl CompactionActor {
                     self.compactor
                         .pick_l0_compaction(&state.manifest.files, *cf_id, true)?
                 {
-                    return Ok(Some(self.record_scheduled_plan(plan)));
+                    if self.jobs.available(&plan, &state.manifest.files) { return Ok(Some(self.record_scheduled_plan(plan))); }
                 }
             }
         }
@@ -576,9 +576,11 @@ impl CompactionActor {
         // before creating more downstream debt from ordinary L0 work.
         let mut deepest_plan: Option<crate::compaction::CompactionPlan> = None;
         for cf_id in &cf_ids {
-            let candidate = self
-                .compactor
-                .pick_deepest_inner_compaction(&state.manifest.files, *cf_id)?;
+            let candidate = self.compactor.pick_available_inner_compaction(
+                &state.manifest.files, *cf_id,
+                |file, target| self.jobs.source_available(file, target),
+                |plan| self.jobs.available(plan, &state.manifest.files),
+            )?;
             if candidate.as_ref().is_some_and(|plan| {
                 deepest_plan
                     .as_ref()
@@ -600,11 +602,12 @@ impl CompactionActor {
                 self.compactor
                     .pick_l0_compaction(&state.manifest.files, *cf_id, force_l0)?
             {
-                return Ok(Some(self.record_scheduled_plan(plan)));
+                if self.jobs.available(&plan, &state.manifest.files) { return Ok(Some(self.record_scheduled_plan(plan))); }
             }
         }
 
         if !respect_background_enabled {
+            if self.jobs.active_count() > 0 { return Ok(None); }
             for cf_id in cf_ids {
                 if self
                     .compactor
@@ -624,7 +627,7 @@ impl CompactionActor {
                 cf_id,
                 state.observed_time_millis(),
             )? {
-                return Ok(Some(self.record_scheduled_plan(plan)));
+                if self.jobs.available(&plan, &state.manifest.files) { return Ok(Some(self.record_scheduled_plan(plan))); }
             }
         }
 
@@ -1002,6 +1005,7 @@ impl CompactionActor {
     }
 
     fn join_worker(&mut self) -> Vec<String> {
+        if let Some(outputs) = self.completed_outputs.take() { return outputs; }
         let Some(handle) = self.worker_handle.take() else {
             return Vec::new();
         };
@@ -1042,6 +1046,7 @@ impl CompactionActor {
         self.active_input_ssts.clear();
         self.active_input_metadata.clear();
         self.active_job_reservation = None;
+        self.active_job_id = None;
         self.active_same_level_repair = false;
         self.active_source_fragmentation = None;
         self.active_manual_deadline = None;
@@ -1062,6 +1067,9 @@ impl CompactionActor {
         }
 
         self.prepared_outputs.lock().clear();
+        self.completed_outputs = None;
+        self.completion_emitted = false;
+        self.worker_succeeded = None;
         let job_reservation = self.jobs.reserve(plan, &state.manifest.files)?;
         self.storage_reservation =
             if let Some(hybrid) = sba.filter(|hybrid| hybrid.ephemeral_sst_cache_enabled()) {
@@ -1183,6 +1191,7 @@ impl CompactionActor {
             CompactionOutputWork {
                 prepared: &self.prepared_outputs,
                 manual_deadline: self.active_manual_deadline,
+                budget: self.memory_budget.as_ref(),
             },
         )?;
 
@@ -1242,9 +1251,9 @@ impl CompactionActor {
             crate::compaction::CompactionResources {
                 target_sst_size: target,
                 source_fan_in,
-                budget: storage
+                budget: work.budget.cloned().or_else(|| storage
                     .and_then(|storage| storage.maintenance_memory())
-                    .unwrap_or_else(|| {
+                    ).unwrap_or_else(|| {
                         crate::common::resource_budget::ResourceBudget::new(
                             plan.compaction_memory_limit,
                         )
@@ -1284,10 +1293,12 @@ impl CompactionActor {
         let worker_cancel = Arc::clone(&self.worker_cancel);
         let worker_error = Arc::clone(&self.worker_error);
         let prepared_outputs = Arc::clone(&self.prepared_outputs);
+        let memory_budget = self.memory_budget.clone();
         let manual_deadline = self.active_manual_deadline;
         let source_fan_in = self.compactor.config.max_compaction_input_files;
         store_compaction_worker_error(&worker_error, None);
         let job_id = next_request_id()?;
+        self.active_job_id = Some(job_id);
 
         let pool = if let Some(pool) = &self.worker_pool {
             Arc::clone(pool)
@@ -1314,7 +1325,7 @@ impl CompactionActor {
                     output_dir,
                     Some(&abort_check),
                     hybrid_storage.as_ref(),
-                    CompactionOutputWork { prepared: &prepared_outputs, manual_deadline },
+                    CompactionOutputWork { prepared: &prepared_outputs, manual_deadline, budget: memory_budget.as_ref() },
                 );
 
                 let (output_ssts, error) = match result {
@@ -1366,14 +1377,7 @@ impl CompactionActor {
         succeeded: bool,
         job_id: u64,
     ) {
-        let Ok(request_id) = next_request_id() else {
-            tracing::error!(
-                component = "compaction",
-                job_id,
-                "compaction worker could not allocate completion request ID"
-            );
-            return;
-        };
+        let request_id = job_id;
         if tx
             .try_send(RuntimeMsg::CompactionComplete {
                 request_id,
@@ -1520,7 +1524,7 @@ fn store_compaction_worker_error(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = error.map(MidgeError::replay);
 }
 
-impl Drop for CompactionActor {
+impl Drop for CompactionJobActor {
     fn drop(&mut self) {
         self.worker_cancel.store(true, Ordering::Release);
         let _ = self.join_worker();
@@ -1542,7 +1546,7 @@ mod tests {
         // Act
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| {
-                CompactionActor::notify_worker_completion(&tx, &plan, Vec::new(), &[], false, 7);
+                CompactionJobActor::notify_worker_completion(&tx, &plan, Vec::new(), &[], false, 7);
                 completed_tx.send(()).expect("report worker completion");
             });
 

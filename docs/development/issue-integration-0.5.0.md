@@ -852,3 +852,15 @@ pointer CAS and monotonic covered-cut acknowledgement. The provider-duration
 gate stays until that protocol and GC capture protection are wired. Releasing
 it around the current live-Fs/full-image publishers would be unsafe. This is
 the remaining publication implementation, not a delivered independence claim.
+
+#909's prerequisite now has explicit per-job cores behind a bounded coordinator,
+configurable compaction/flush counts (1..=64, default 1), shared memory admission,
+reserved-range-aware picking and per-worker scratch proof scopes. Exact owned
+compute results and bounded polling tolerate early/lost notifications; completed
+jobs retain their inputs and reservations through publication. Per-family flush
+slots bind completion/retry/release to exact IDs, and queued name reservations
+retain every job's generation/deadline. Publication callbacks reselect their job
+and ignore unrelated stale errors without settling active ownership or files.
+Test targets compile cleanly. Held-two-worker/fairness/budget production-loop
+regressions are the next slice; execution, crash and A/B qualification remain
+pending. The global publication gate remains for #910's protocol change.

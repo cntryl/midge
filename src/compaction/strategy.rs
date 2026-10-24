@@ -295,6 +295,7 @@ impl Compactor {
         self.plan_zero_level(&levels, cf_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn pick_deepest_inner_compaction(
         &self,
         files: &[FileMeta],
@@ -309,6 +310,24 @@ impl Compactor {
                 self.level_target_size(u32::try_from(level).expect("level index fits in u32"));
             if level_size > target_size {
                 return self.plan_inner_level(&levels, cf_id, level);
+            }
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn pick_available_inner_compaction(
+        &self, files: &[FileMeta], cf_id: u32,
+        eligible: impl Fn(&FileMeta, u32) -> bool,
+        admitted: impl Fn(&CompactionPlan) -> bool,
+    ) -> MidgeResult<Option<CompactionPlan>> {
+        let Some(levels) = self.validated_levels(files, cf_id)? else { return Ok(None); };
+        for level in (1..self.config.max_levels.saturating_sub(1)).rev() {
+            let level_size: u64 = levels[level].iter().map(|file| file.size_bytes).sum();
+            let source_level = u32::try_from(level).expect("level index fits u32");
+            if level_size <= self.level_target_size(source_level) { continue; }
+            let available = |file: &FileMeta| eligible(file, source_level + 1);
+            if let Some(plan) = self.plan_inner_level_filtered(&levels, cf_id, level, &available)? {
+                if admitted(&plan) { return Ok(Some(plan)); }
             }
         }
         Ok(None)
@@ -586,6 +605,13 @@ impl Compactor {
         cf_id: u32,
         level: usize,
     ) -> MidgeResult<Option<CompactionPlan>> {
+        self.plan_inner_level_filtered(levels, cf_id, level, &|_| true)
+    }
+
+    fn plan_inner_level_filtered(
+        &self, levels: &[Vec<&FileMeta>], cf_id: u32, level: usize,
+        eligible: &dyn Fn(&FileMeta) -> bool,
+    ) -> MidgeResult<Option<CompactionPlan>> {
         if levels[level].is_empty() {
             return Ok(None);
         }
@@ -599,7 +625,12 @@ impl Compactor {
                 .cmp(&right.smallest_key)
                 .then_with(|| left.name.cmp(&right.name))
         });
+        // Keep a contiguous available component. Combining both sides of an
+        // active publication range would reserve a conflicting output span.
+        source_files = source_files.into_iter().skip_while(|file| !eligible(file))
+            .take_while(|file| eligible(file)).collect();
         source_files.truncate(self.config.l0_file_count_threshold.max(1));
+        if source_files.is_empty() { return Ok(None); }
         let source_level = u32::try_from(level).expect("level index fits in u32");
         let target_level = u32::try_from(level + 1).expect("level index fits in u32");
         let (mut source_names, mut target_files) = self.complete_overlap_span(

@@ -200,6 +200,26 @@ total-input resource limit, and disabled compaction formerly allowed continuing
 L0 growth. The corresponding regressions now enforce indexed selection,
 streamed target spans, and pre-WAL admission.
 
+## Concurrent maintenance candidate
+
+`compaction_concurrency` and `flush_concurrency` are independently configurable
+from 1 through 64 and default to 1 pending qualification. Compaction slots keep
+exact worker identities and range/input reservations through publication. The
+picker skips reserved conflicts, admits at most one L0 job per family, keeps
+repair exclusive and charges child budgets against one shared pool. Reusable
+compute workers and bounded completion polling retain terminal ownership even
+when a notification arrives early or is lost. Per-worker scratch scopes keep
+cleanup proof independent of another job's scratch lifetime.
+
+Flush slots admit at most one generation per family and use the same bounded
+global flush budget. Their exact flush IDs bind completion, retries and release.
+Successful compaction publication requests another picker turn immediately;
+deep debt does not need a new flush or the thirty-second timer. Progress still
+depends on a non-conflicting plan fitting the configured budgets and terminal
+storage service. Concurrent held-worker, fairness, budget and restart proofs
+remain active qualification work; publication still serializes through the
+existing intent/manifest gate until #910's ordered-cut protocol is wired.
+
 ## Commands
 
 ### Optional admission slowdown

@@ -60,7 +60,6 @@ impl EventLoop {
                 .deferred_messages_is_empty()
             || self.publication.publication_gate.is_active()
             || self.publication.verification_barrier.is_active()
-            || self.actors.flush_actor.is_inflight()
             || self
                 .actors
                 .cloud_coordinator
@@ -81,23 +80,21 @@ impl EventLoop {
     pub(super) fn schedule_cloud_maintenance(&mut self) -> Option<MaintenanceTask> {
         super::compaction::CompactionCoordinator::expire_manual_compaction_waiters(self);
         let compute_owned = self.compaction_compute_owned();
+        let compute_full = compute_owned && !self.actors.compaction_actor.has_capacity();
         let blocked = self.cloud_maintenance_control_blocked()
-            || (compute_owned && !self.state.has_due_immutable_flush());
+            || (compute_full && !self.state.has_due_immutable_flush());
         let mut task = self
             .actors
             .cloud_coordinator
             .begin_maintenance_turn(blocked)?;
-        if compute_owned {
+        if compute_full {
             // Accepted immutable data must be able to release memory while
             // remote compute retains its inputs and separate reservation.
             // Flush admission and manifest publication keep their normal gates;
             // another compaction and retirement still wait for the compute owner.
+            let before = self.actors.flush_actor.submitted_work();
             self.schedule_next_flush_worker();
-            let started = self
-                .actors
-                .flush_actor
-                .is_inflight()
-                .then_some(MaintenanceTask::Flush);
+            let started = (self.actors.flush_actor.submitted_work() != before).then_some(MaintenanceTask::Flush);
             self.actors
                 .cloud_coordinator
                 .complete_maintenance_turn(started);
@@ -107,8 +104,9 @@ impl EventLoop {
         for _ in 0..3 {
             let launched = match task {
                 MaintenanceTask::Flush => {
+                    let before = self.actors.flush_actor.submitted_work();
                     self.schedule_next_flush_worker();
-                    self.actors.flush_actor.is_inflight()
+                    self.actors.flush_actor.submitted_work() != before
                 }
                 MaintenanceTask::Compaction => {
                     if self.shutdown.shutting_down {

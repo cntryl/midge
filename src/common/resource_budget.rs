@@ -76,7 +76,6 @@ impl ResourceBudget {
     /// the shared `Arc` because it is a per-holder error contract, and
     /// propagating it would change the errors unrelated callers observe.
     #[must_use]
-    #[cfg(test)]
     pub(crate) fn child(&self, limit: usize) -> Self {
         Self {
             inner: Arc::new(ResourceBudgetInner {

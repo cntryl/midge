@@ -52,16 +52,22 @@ impl RuntimeState {
         Some(flush)
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_next_immutable_flush(&mut self) -> Option<ImmutableFlush> {
+        self.begin_next_immutable_flush_matching(|_, _| true)
+    }
+
+    pub(crate) fn begin_next_immutable_flush_matching(&mut self, eligible: impl Fn(u32, u64) -> bool) -> Option<ImmutableFlush> {
+        let eligible = &eligible;
         let (cf_id, flush_id) = self
             .column_families
             .iter()
             .flat_map(|(cf_id, cf)| {
                 cf.immutable_flushes.iter().filter_map(move |flush| {
-                    matches!(
+                    (matches!(
                         flush.phase,
                         ImmutableFlushPhase::Queued | ImmutableFlushPhase::RetryPending
-                    )
+                    ) && (flush.phase != ImmutableFlushPhase::RetryPending || flush.retry.is_ready()) && eligible(*cf_id, flush.flush_id))
                     .then_some((*cf_id, flush.flush_id, flush.sequence))
                 })
             })
@@ -150,19 +156,14 @@ impl RuntimeState {
     }
 
     pub(crate) fn has_due_immutable_flush(&self) -> bool {
-        self.column_families
-            .values()
-            .flat_map(|cf_state| cf_state.immutable_flushes.iter())
-            .filter(|flush| {
-                matches!(
-                    flush.phase,
-                    ImmutableFlushPhase::Queued | ImmutableFlushPhase::RetryPending
-                )
-            })
-            .min_by_key(|flush| (flush.sequence, flush.flush_id))
-            .is_some_and(|flush| {
-                flush.phase == ImmutableFlushPhase::Queued || flush.retry.is_ready()
-            })
+        self.has_due_immutable_flush_matching(|_, _| true)
+    }
+
+    pub(crate) fn has_due_immutable_flush_matching(&self, eligible: impl Fn(u32, u64) -> bool) -> bool {
+        self.column_families.iter().any(|(cf_id, cf)| cf.immutable_flushes.iter().any(|flush| {
+            eligible(*cf_id, flush.flush_id) && (flush.phase == ImmutableFlushPhase::Queued
+                || (flush.phase == ImmutableFlushPhase::RetryPending && flush.retry.is_ready()))
+        }))
     }
 
     pub(crate) fn flush_retry_deadline_timeout(&self) -> Option<Duration> {

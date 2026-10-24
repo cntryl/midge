@@ -633,6 +633,14 @@ impl FsSstWriter {
 }
 
 impl SstFactory for FsSstFactoryIo {
+    fn fork_for_worker(&self) -> Option<Arc<dyn SstFactory>> {
+        Some(Arc::new(Self {
+            fs: Arc::clone(&self.fs), block_size: self.block_size,
+            compression_policy: self.compression_policy.clone(), scratch_outstanding: Arc::default(),
+            compaction_scratch_directory: self.compaction_scratch_directory.clone(),
+            write_limiter: self.write_limiter.clone(),
+        }))
+    }
     fn output_fs(&self) -> Arc<dyn Fs> {
         self.fs
             .local_output_view()

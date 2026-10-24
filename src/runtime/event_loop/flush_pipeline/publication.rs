@@ -154,12 +154,12 @@ impl EventLoop {
         // as Queued with its build retained so it cannot start a second
         // metadata writer mid-turn; the scheduler resumes queued flushes when
         // the gate is released and publishes a retained build directly. The
-        // build is done, so release the worker; publication re-arms it.
+        // compute worker is free, but this exact CF pipeline retains its slot
+        // until publication settles; another CF can use another bounded slot.
         if self.publication.publication_gate.is_active() {
             if let Some((_, current)) = self.state.immutable_flush_by_id_mut(identity.flush_id) {
                 current.phase = ImmutableFlushPhase::Queued;
             }
-            self.actors.flush_actor.finish_pipeline();
             return;
         }
         if let Some((_, current)) = self.state.immutable_flush_by_id_mut(identity.flush_id) {
@@ -208,7 +208,7 @@ impl EventLoop {
             self.state
                 .finish_flush_publication_attempt(completion.identity.flush_id, true);
             self.settle_stale_publish_reservation(&completion);
-            self.actors.flush_actor.finish_pipeline();
+            self.actors.flush_actor.finish_pipeline(completion.identity.flush_id);
             self.publication.publication_gate.release(
                 &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
                     flush_id: completion.identity.flush_id,
@@ -407,7 +407,7 @@ impl EventLoop {
             {
                 hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
             }
-            self.actors.flush_actor.finish_pipeline();
+            self.actors.flush_actor.finish_pipeline(delta.identity.flush_id);
             return;
         };
         let accounting = flush.accounting;
@@ -451,7 +451,7 @@ impl EventLoop {
         if cloud_metadata_published {
             self.evict_published_sst_cache(std::slice::from_ref(&delta.file_meta.name));
         }
-        self.actors.flush_actor.finish_pipeline();
+        self.actors.flush_actor.finish_pipeline(delta.identity.flush_id);
         self.publish_snapshot();
         self.refresh_write_stall_timing();
         self.wake_write_stall_waiters();

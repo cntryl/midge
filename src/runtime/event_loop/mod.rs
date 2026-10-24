@@ -295,13 +295,14 @@ impl EventLoop {
             Self::create_compaction_publish_actor(inline_flush_worker)?;
 
         // Create actors - they handle memory_mode internally
-        let flush_actor = FlushActor::new_with_write_limiter(
+        let flush_actor = FlushActor::new_with_worker_count(
             Arc::clone(&state.fs),
             memory_mode,
             config.compression_policy.clone(),
             flush_completion_tx,
             config.flush_memory_limit,
             state.write_pressure.admission.limiter(),
+            config.flush_concurrency,
         )?;
         let mut wal_actor = WalActor::open(
             &state,
@@ -329,7 +330,7 @@ impl EventLoop {
             state,
             actors: EventLoopActors {
                 flush_actor,
-                compaction_actor: Self::create_compaction_actor(sst_factory, &config),
+                compaction_actor: Self::create_compaction_actor(sst_factory, &config)?,
                 compaction_publish_actor,
                 wal_actor,
                 gc_actor,
@@ -433,17 +434,18 @@ impl EventLoop {
     fn create_compaction_actor(
         sst_factory: Arc<dyn crate::sst::SstFactory>,
         config: &super::RuntimeConfig,
-    ) -> CompactionActor {
+    ) -> crate::common::MidgeResult<CompactionActor> {
         let compaction_config = crate::compaction::LeveledCompactionConfig {
             l0_file_count_threshold: config.l0_compaction_trigger.max(1),
             ..Default::default()
         };
         let mut actor = CompactionActor::new_with_config(sst_factory, compaction_config);
         actor.set_execution_limits(config.target_sst_size, config.compaction_memory_limit);
+        actor.configure_concurrency(config.compaction_concurrency)?;
         actor.configure_work_target(config.hybrid_storage.as_ref().map(|storage| {
             storage.as_ref() as &dyn crate::runtime::actors::compaction::CompactionStorage
         }));
-        actor
+        Ok(actor)
     }
 
     /// Wires the WAL actor to the engine: its counters, the read caches its
@@ -580,7 +582,7 @@ impl EventLoop {
             .compaction_actor
             .configure_work_target(Some(storage.as_ref()));
         storage
-            .configure_maintenance_memory(self.actors.compaction_actor.compaction_memory_limit());
+            .configure_maintenance_memory(self.actors.compaction_actor.total_memory_limit());
         self.actors
             .wal_actor
             .set_storage_budget(Arc::clone(&storage));
@@ -648,7 +650,10 @@ impl EventLoop {
         if self.state.write_pressure.admission.enabled()
             || self.state.write_pressure.admission.tracks_background_io()
         {
-            self.state.write_pressure.admission.retain_families(|cf| self.state.column_families.contains_key(&cf));
+            self.state
+                .write_pressure
+                .admission
+                .retain_families(|cf| self.state.column_families.contains_key(&cf));
             for &cf_id in self.state.column_families.keys() {
                 self.publish_write_pressure(cf_id);
             }

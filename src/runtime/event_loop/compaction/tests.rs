@@ -7,6 +7,91 @@ const LOCAL_BUDGET: u64 = 1_000;
 const STAGING_BYTES: u64 = 500;
 
 #[test]
+fn should_retain_current_intent_and_files_when_another_job_reports_publication_failure(
+) -> MidgeResult<()> {
+    // Arrange: the durable intent belongs to one exact operation. An unrelated
+    // result must not settle it or authorize cleanup of its retained files.
+    let directory = tempfile::tempdir()?;
+    let mut event_loop = EventLoop::new(
+        crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false),
+        false,
+        Arc::new(crate::runtime::ResponseRouter::new()),
+        crate::runtime::RuntimeConfig::default(),
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
+    let input = "retained-input.sst".to_string();
+    let output = "retained-output.sst".to_string();
+    std::fs::write(event_loop.state.host_sst_dir().join(&input), b"input")?;
+    std::fs::write(event_loop.state.host_sst_dir().join(&output), b"output")?;
+    event_loop
+        .state
+        .record_compaction_publication_intent(0, vec![input.clone()], Vec::new())?;
+    let intent_path = directory.path().join(crate::metadata::files::INTENT_LOG);
+    let before = std::fs::read(&intent_path)?;
+    let token = CompactionPublicationToken {
+        request_id: 41,
+        writer_epoch: event_loop.state.writer_epoch,
+        cf_id: 0,
+        target_level: 1,
+        output_generation: 10,
+        input_ssts: vec![input.clone()],
+        output_ssts: vec![output.clone()],
+        started_at: None,
+    };
+    let owner = CompactionCoordinator::publication_owner(&token);
+    assert!(event_loop
+        .publication
+        .publication_gate
+        .try_acquire(owner.clone()));
+    event_loop.publication.compaction_publication.install(
+        &event_loop.publication.publication_gate,
+        owner.clone(),
+        PendingCompactionPublication {
+            manual_deadline: None,
+            token: token.clone(),
+            outputs: Vec::new(),
+            added: Vec::new(),
+            superseded_outputs: Vec::new(),
+            expected_phase: CompactionPublishPhase::OutputDurable,
+        },
+    )?;
+    let mut stale = token.clone();
+    stale.request_id = 40;
+
+    // Act
+    CompactionCoordinator::handle_publication_completion(
+        &mut event_loop,
+        CompactionPublishCompletion {
+            token: stale,
+            phase: CompactionPublishPhase::OutputDurable,
+            result: Err(MidgeError::Internal("earlier job failed".into())),
+        },
+    );
+
+    // Assert
+    assert_eq!(
+        event_loop
+            .publication
+            .compaction_publication
+            .get()
+            .unwrap()
+            .token,
+        token
+    );
+    assert!(event_loop.publication.publication_gate.is_owned_by(&owner));
+    assert_eq!(std::fs::read(&intent_path)?, before);
+    assert_eq!(
+        std::fs::read(event_loop.state.host_sst_dir().join(input))?,
+        b"input"
+    );
+    assert_eq!(
+        std::fs::read(event_loop.state.host_sst_dir().join(output))?,
+        b"output"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_reject_stale_repair_publication_state() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;

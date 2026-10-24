@@ -169,6 +169,8 @@ impl std::fmt::Debug for InjectedObjectStore {
 /// ```
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
+    compaction_concurrency: usize,
+    flush_concurrency: usize,
     write_backpressure: crate::config::WriteBackpressureConfig,
     drop_transaction_wait_timeout: Duration,
     storage: Storage,
@@ -200,6 +202,8 @@ pub struct OpenOptions {
 /// once, in [`Self::build`], so setter order cannot stale a derived value.
 #[derive(Debug, Clone)]
 pub struct OpenOptionsBuilder {
+    compaction_concurrency: usize,
+    flush_concurrency: usize,
     write_backpressure: crate::config::WriteBackpressureConfig,
     drop_transaction_wait_timeout: Duration,
     storage: Storage,
@@ -233,6 +237,14 @@ struct DerivedMemoryPools {
 }
 
 impl OpenOptions {
+    /// Maximum independent compaction owners; memory and range admission may
+    /// reduce the number which can run together. Defaults to one.
+    #[must_use]
+    pub fn compaction_concurrency(&self) -> usize { self.compaction_concurrency }
+
+    /// Maximum flush pipelines, with at most one active pipeline per family.
+    #[must_use]
+    pub fn flush_concurrency(&self) -> usize { self.flush_concurrency }
     /// Optional caller admission and background output limits.
     #[must_use]
     pub fn write_backpressure(&self) -> &crate::config::WriteBackpressureConfig {
@@ -553,6 +565,19 @@ impl OpenOptions {
 }
 
 impl OpenOptionsBuilder {
+    /// Bound concurrent compaction owners and reusable compute workers.
+    #[must_use]
+    pub fn compaction_concurrency(mut self, workers: usize) -> Self {
+        self.compaction_concurrency = workers;
+        self
+    }
+
+    /// Bound concurrent flush pipelines across distinct column families.
+    #[must_use]
+    pub fn flush_concurrency(mut self, workers: usize) -> Self {
+        self.flush_concurrency = workers;
+        self
+    }
     /// Configure caller-side slowdown and shared background output throttling.
     #[must_use]
     pub fn write_backpressure(mut self, config: crate::config::WriteBackpressureConfig) -> Self {
@@ -570,6 +595,8 @@ impl OpenOptionsBuilder {
 
     fn new(storage: Storage) -> Self {
         Self {
+            compaction_concurrency: 1,
+            flush_concurrency: 1,
             write_backpressure: crate::config::WriteBackpressureConfig::default(),
             drop_transaction_wait_timeout: Duration::from_secs(30),
             storage,
@@ -933,6 +960,9 @@ impl OpenOptionsBuilder {
     /// providers' millisecond-granularity deadlines, and the enclosing runtime
     /// response timeout must be greater than the storage I/O timeout.
     pub fn build(self) -> MidgeResult<OpenOptions> {
+        if !(1..=64).contains(&self.compaction_concurrency) || !(1..=64).contains(&self.flush_concurrency) {
+            return Err(MidgeError::InvalidArgument("compaction and flush concurrency must be in 1..=64".into()));
+        }
         self.validate_storage()?;
         if self.io_timeouts.storage < Duration::from_millis(1) {
             return Err(MidgeError::InvalidArgument(
@@ -987,6 +1017,8 @@ impl OpenOptionsBuilder {
         )?;
 
         Ok(OpenOptions {
+            compaction_concurrency: self.compaction_concurrency,
+            flush_concurrency: self.flush_concurrency,
             write_backpressure: self.write_backpressure,
             storage: self.storage,
             goal: self.goal,

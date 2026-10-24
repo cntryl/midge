@@ -67,6 +67,11 @@ impl EventLoop {
         if !self.publication.compaction_publish_result_rx.is_empty() {
             return true;
         }
+        if !self.publication.publication_gate.is_active()
+            && self.actors.compaction_actor.has_ready_compute()
+        {
+            return true;
+        }
 
         if self.actors.wal_actor.should_sync_batch() {
             return true;
@@ -87,7 +92,10 @@ impl EventLoop {
             return true;
         }
 
-        if self.state.has_due_immutable_flush() && !self.flush_start_blocked(false) {
+        if self.state.has_due_immutable_flush_matching(|cf, id| {
+            self.actors.flush_actor.can_start_or_resume(cf, id)
+        }) && !self.flush_start_blocked(false)
+        {
             return true;
         }
 
@@ -158,6 +166,10 @@ impl EventLoop {
                 .compaction_publish_actor
                 .is_inflight()
                 .then_some(Duration::from_millis(1)),
+            self.actors
+                .compaction_actor
+                .has_pending_compute()
+                .then_some(Duration::from_millis(1)),
             authority_poll,
             self.metadata_retention_timeout(),
             CompactionCoordinator::manual_compaction_wait_timeout(self),
@@ -214,6 +226,7 @@ impl EventLoop {
         }
         CompactionCoordinator::expire_manual_compaction_waiters(self);
         self.wake_write_stall_waiters();
+        self.reap_compaction_compute_results();
         self.wake_flush_waiters_for_terminal_fencing();
         CompactionCoordinator::drain_publish_results(self);
         self.drain_flush_worker_results();
@@ -421,8 +434,7 @@ impl EventLoop {
             }
             self.restore_verification_deferred_message();
             self.restore_publication_deferred_message();
-            if let Some(pending) = self.routing.pending_msg.take() {
-                let outcome = self.process_restored_one(pending, msg_rx);
+            if let Some(outcome) = self.process_pending_message(msg_rx) {
                 if outcome == HandleOutcome::Break {
                     break;
                 }

@@ -25,8 +25,8 @@ pub(super) struct MetadataMirrorJob {
 pub(super) struct MetadataMirrorPipeline {
     next_operation: u64,
     running: Option<MetadataMirrorJob>,
-    pub(super) pending_compaction:
-        Option<(crate::compaction::CompactionPlan, Option<OperationDeadline>)>,
+    pub(super) pending_compactions:
+        std::collections::VecDeque<(crate::compaction::CompactionPlan, Option<OperationDeadline>)>,
     pub(super) pending_flush: Option<u64>,
     retention_due: std::time::Instant,
     retention_interval: std::time::Duration,
@@ -38,7 +38,7 @@ impl Default for MetadataMirrorPipeline {
         Self {
             next_operation: 0,
             running: None,
-            pending_compaction: None,
+            pending_compactions: Default::default(),
             pending_flush: None,
             retention_due: std::time::Instant::now() + retention_interval,
             retention_interval,
@@ -231,14 +231,14 @@ impl EventLoop {
                         self.fail_flush_pipeline(flush_id, None, error);
                     }
                 }
-                if let Some((plan, deadline)) = self
-                    .actors
-                    .cloud_coordinator
-                    .metadata_mirror
-                    .pending_compaction
-                    .take()
-                {
-                    self.resume_compaction_after_metadata_mirror(plan, deadline, result);
+                let pending = std::mem::take(&mut self.actors.cloud_coordinator.metadata_mirror.pending_compactions);
+                for (plan, deadline) in pending {
+                    if plan.cf_id == cf_id && plan.output_seq < next_seq {
+                        let outcome = result.as_ref().map(|_| ()).map_err(MidgeError::replay);
+                        self.resume_compaction_after_metadata_mirror(plan, deadline, outcome);
+                    } else {
+                        self.actors.cloud_coordinator.metadata_mirror.pending_compactions.push_back((plan, deadline));
+                    }
                 }
             }
             MirrorContinuation::Reclamation => {
