@@ -168,12 +168,13 @@ impl EventLoop {
             plan.output_seq = self.allocate_compaction_sst_name(plan.cf_id)?;
         }
         if self.actors.cloud_coordinator.hybrid_storage.is_some()
-            && self.begin_sst_name_reservation(
-                plan.cf_id,
-                plan.output_seq,
-                manual_deadline.as_ref(),
-                crate::metadata::accounting::Origin::CompactionBeforeGc,
-            )?
+            && (self.sst_name_waits_for_metadata_mirror(plan.cf_id, plan.output_seq)
+                || self.begin_sst_name_reservation(
+                    plan.cf_id,
+                    plan.output_seq,
+                    manual_deadline.as_ref(),
+                    crate::metadata::accounting::Origin::CompactionBeforeGc,
+                )?)
         {
             // This accepted plan and its initial caller allowance survive the
             // provider round trip. It has no worker/output ownership yet.
@@ -265,7 +266,13 @@ impl EventLoop {
         manual: bool,
     ) -> crate::common::MidgeResult<bool> {
         if self.publication.publication_gate.is_active()
-            || !self.actors.compaction_actor.has_capacity()
+            || self.actors.compaction_actor.active_count().saturating_add(
+                self.actors
+                    .cloud_coordinator
+                    .metadata_mirror
+                    .pending_compactions
+                    .len(),
+            ) >= self.actors.compaction_actor.concurrency_limit()
         {
             return Ok(false);
         }

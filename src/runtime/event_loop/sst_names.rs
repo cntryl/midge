@@ -6,6 +6,16 @@ const SST_NAME_RESERVATION_BLOCK: u64 = 16;
 const SST_NAME_PREFETCH_REMAINING: u64 = SST_NAME_RESERVATION_BLOCK / 2;
 
 impl EventLoop {
+    pub(super) fn sst_name_waits_for_metadata_mirror(&self, cf_id: u32, name: u64) -> bool {
+        self.actors.cloud_coordinator.metadata_mirror.is_running()
+            && self
+                .state
+                .sst_names
+                .reserved_through
+                .get(&cf_id)
+                .is_none_or(|bound| name >= *bound)
+    }
+
     pub(super) fn can_resume_reserved_compaction(
         &self,
         plan: &crate::compaction::CompactionPlan,
@@ -29,11 +39,7 @@ impl EventLoop {
             .pending_compactions
             .iter()
             .position(|(plan, _)| {
-                self.state
-                    .sst_names
-                    .reserved_through
-                    .get(&plan.cf_id)
-                    .is_some_and(|bound| plan.output_seq < *bound)
+                !self.sst_name_waits_for_metadata_mirror(plan.cf_id, plan.output_seq)
                     && self.can_resume_reserved_compaction(plan)
             })
     }
