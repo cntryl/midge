@@ -192,6 +192,11 @@ pub(crate) struct ResourceContention {
 }
 
 impl ResourceContention {
+    /// Match this failed attempt's originating pool even if the owner that
+    /// caused contention has already released its charge.
+    pub(crate) fn is_for_pool(&self, budget: &ResourceBudget) -> bool {
+        budget.is_within_pool(self.pool_id)
+    }
     /// Recover the contention that produced `error`, if it was produced by a
     /// contention-reporting budget. Pure: nothing is consumed, so the same
     /// error can be inspected any number of times and no other attempt can

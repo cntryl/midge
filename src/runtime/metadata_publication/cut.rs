@@ -1,6 +1,7 @@
 //! Immutable local control cuts and bounded, exact coalescence witnesses.
 
 use super::MetadataPublicationLock;
+use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::io::{Fs, FsError, FsPath, MockFs, OpenOptions};
 use crate::metadata::{files, Manifest, ManifestPersistence};
@@ -8,7 +9,6 @@ use crate::runtime::{IntentLogEntry, IntentPersistence, PublicationPhase};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 const MAX_CAPTURED_CUTS: usize = 64;
@@ -77,9 +77,10 @@ pub(crate) struct CapturedMetadataCut {
     fs: Arc<dyn Fs>,
     pub(crate) proof: MetadataCutProof,
     manifest: Manifest,
-    publication_intents: BTreeSet<[u8; 32]>,
-    terminal: AtomicBool,
+    publication_intents: PublicationIntentBoundary,
     registry: Weak<parking_lot::Mutex<CutRegistry>>,
+    memory: Arc<ResourceReservation>,
+    _slot: ResourceReservation,
 }
 
 impl CapturedMetadataCut {
@@ -92,19 +93,48 @@ impl CapturedMetadataCut {
     pub(crate) fn cut_ordinal(&self) -> u64 {
         self.proof.ordinal
     }
+    pub(crate) fn memory_reservation(&self) -> Arc<ResourceReservation> {
+        Arc::clone(&self.memory)
+    }
     pub(crate) fn mark_committed(&self) {
-        self.terminal.store(true, Ordering::Release);
         if let Some(registry) = self.registry.upgrade() {
-            registry.lock().pending.retain(|_, cut| {
-                if self.proof.covers(&cut.proof) {
-                    cut.terminal.store(true, Ordering::Release);
-                    false
-                } else {
-                    true
-                }
-            });
+            let mut registry = registry.lock();
+            for digest in &self.publication_intents.manifest_published {
+                registry
+                    .published_intents
+                    .entry(*digest)
+                    .and_modify(|receipt| {
+                        receipt.horizon = receipt.horizon.max(self.manifest.edit_checkpoint_id);
+                    })
+                    .or_insert_with(|| PublishedIntentReceipt {
+                        horizon: self.manifest.edit_checkpoint_id,
+                        _memory: Arc::clone(&self.memory),
+                    });
+            }
+            registry.pending.retain(|_, cut| !self.proof.covers(&cut.proof));
+            prune_intent_receipts(&mut registry, &self.publication_intents);
         }
     }
+}
+
+impl Drop for CapturedMetadataCut {
+    fn drop(&mut self) {
+        let Some(registry) = self.registry.upgrade() else {
+            return;
+        };
+        // Covered pending ownership may be dropped while the registry is
+        // locked. That caller prunes after its batch; ordinary task drop can
+        // prune here and release receipt/source accounting immediately.
+        if let Some(mut registry) = registry.try_lock() {
+            registry.owned.retain(|cut| cut.strong_count() > 0);
+            prune_intent_receipts(&mut registry, &PublicationIntentBoundary::default());
+        };
+    }
+}
+
+struct PublishedIntentReceipt {
+    horizon: u64,
+    _memory: Arc<ResourceReservation>,
 }
 
 pub(super) struct CutRegistry {
@@ -113,6 +143,9 @@ pub(super) struct CutRegistry {
     next: u64,
     owned: Vec<Weak<CapturedMetadataCut>>,
     pending: BTreeMap<u64, Arc<CapturedMetadataCut>>,
+    /// Only selected `ManifestPublished` phases discharge an owned operation's
+    /// intent. An `OutputDurable` cut receipt proves a weaker event.
+    published_intents: BTreeMap<[u8; 32], PublishedIntentReceipt>,
 }
 
 impl Default for CutRegistry {
@@ -123,6 +156,7 @@ impl Default for CutRegistry {
             next: 1,
             owned: Vec::new(),
             pending: BTreeMap::new(),
+            published_intents: BTreeMap::new(),
         }
     }
 }
@@ -158,6 +192,11 @@ impl MetadataPublicationLock {
                 "metadata cut requires an active epoch".into(),
             ));
         }
+        let slot = self
+            .capture_slots
+            .get_or_init(|| ResourceBudget::new(MAX_CAPTURED_CUTS).with_contention_errors())
+            .reserve(1, "owned metadata cut slot")?;
+        let memory = self.reserve_capture_memory(source, deadline)?;
         let (fs, bodies) = copy_control_files(source, deadline)?;
         let snapshot = bodies
             .get(files::MANIFEST_SNAPSHOT)
@@ -171,9 +210,7 @@ impl MetadataPublicationLock {
         let publication_intents = publication_intents(&fs)?;
         let mut registry = self.cuts.lock();
         registry.owned.retain(|cut| cut.strong_count() > 0);
-        if registry.owned.len() >= MAX_CAPTURED_CUTS {
-            return Err(MidgeError::Busy("too many owned metadata cuts".into()));
-        }
+        prune_intent_receipts(&mut registry, &publication_intents);
         if registry.epoch != epoch {
             if !registry.owned.is_empty() {
                 return Err(MidgeError::Fenced(
@@ -201,8 +238,9 @@ impl MetadataPublicationLock {
             proof,
             manifest,
             publication_intents,
-            terminal: AtomicBool::new(false),
             registry: Arc::downgrade(&self.cuts),
+            memory,
+            _slot: slot,
         });
         registry.owned.push(Arc::downgrade(&cut));
         registry.pending.insert(cut.cut_ordinal(), Arc::clone(&cut));
@@ -214,12 +252,55 @@ impl MetadataPublicationLock {
     pub(crate) fn pending_captures(&self) -> usize {
         self.cuts.lock().pending.len()
     }
+
+    fn reserve_capture_memory(
+        &self,
+        fs: &Arc<dyn Fs>,
+        deadline: &OperationDeadline,
+    ) -> MidgeResult<Arc<ResourceReservation>> {
+        let mut encoded = 0_usize;
+        for name in files::CLOUD_MIRRORED {
+            DeadlineScope::new(*deadline).check("metadata capture admission")?;
+            let length = match fs.metadata(&FsPath::new(*name)) {
+                Ok(metadata) => metadata.len,
+                Err(FsError::NotFound(_)) => continue,
+                Err(error) => return Err(error.into_midge()),
+            };
+            encoded = usize::try_from(length)
+                .ok()
+                .and_then(|length| encoded.checked_add(length))
+                .ok_or_else(|| {
+                    MidgeError::ResourceLimit(
+                        "metadata capture length overflows address space".into(),
+                    )
+                })?;
+        }
+        if encoded as u64 > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
+            return Err(MidgeError::ResourceLimit(
+                "metadata capture exceeds cloud body bound".into(),
+            ));
+        }
+        let admitted = encoded
+            .checked_mul(16)
+            .and_then(|bytes| bytes.checked_add(4096))
+            .ok_or_else(|| {
+                MidgeError::ResourceLimit(
+                    "metadata capture workspace overflows address space".into(),
+                )
+            })?;
+        let pool = self.capture_memory.get_or_init(|| {
+            ResourceBudget::new(crate::compaction::DEFAULT_COMPACTION_MEMORY_LIMIT)
+                .with_contention_errors()
+        });
+        pool.reserve(admitted, "owned metadata capture and decoder workspace")
+            .map(Arc::new)
+    }
 }
 
 fn coverage_witnesses(
     registry: &CutRegistry,
     manifest: &Manifest,
-    intents: &BTreeSet<[u8; 32]>,
+    intents: &PublicationIntentBoundary,
 ) -> MidgeResult<Vec<CutWitness>> {
     let mut witnesses = Vec::new();
     for prior in registry.owned.iter().filter_map(Weak::upgrade) {
@@ -227,33 +308,81 @@ fn coverage_witnesses(
             manifest,
             &prior.manifest,
         )?;
-        if !prior.terminal.load(Ordering::Acquire) && !prior.publication_intents.is_subset(intents)
-        {
-            return Err(MidgeError::Busy(
-                "new metadata cut removes an unsettled publication intent".into(),
-            ));
+        for digest in &prior.publication_intents.all {
+            if !intents.all.contains(digest)
+                && registry
+                    .published_intents
+                    .get(digest)
+                    .is_none_or(|receipt| receipt.horizon > manifest.edit_checkpoint_id)
+            {
+                return Err(MidgeError::Busy(
+                    "new metadata cut removes an intent without selected ManifestPublished proof"
+                        .into(),
+                ));
+            }
+            if prior
+                .publication_intents
+                .manifest_published
+                .contains(digest)
+                && intents.all.contains(digest)
+                && !intents.manifest_published.contains(digest)
+            {
+                return Err(MidgeError::Busy(
+                    "new metadata cut regresses a publication intent phase".into(),
+                ));
+            }
         }
         witnesses.push(prior.proof.witness());
     }
     Ok(witnesses)
 }
 
-fn publication_intents(fs: &Arc<dyn Fs>) -> MidgeResult<BTreeSet<[u8; 32]>> {
-    IntentPersistence::load_with_fs_and_policy_typed(fs, crate::config::RecoveryPolicy::Strict)?
-        .into_iter()
-        .filter_map(|mut intent| match &mut intent {
+#[derive(Default)]
+struct PublicationIntentBoundary {
+    all: BTreeSet<[u8; 32]>,
+    manifest_published: BTreeSet<[u8; 32]>,
+}
+
+fn prune_intent_receipts(registry: &mut CutRegistry, current: &PublicationIntentBoundary) {
+    let mut needed = current.all.clone();
+    for cut in registry.owned.iter().filter_map(Weak::upgrade) {
+        needed.extend(&cut.publication_intents.all);
+    }
+    registry
+        .published_intents
+        .retain(|digest, _| needed.contains(digest));
+}
+
+fn publication_intents(fs: &Arc<dyn Fs>) -> MidgeResult<PublicationIntentBoundary> {
+    let mut boundary = PublicationIntentBoundary::default();
+    for mut intent in
+        IntentPersistence::load_with_fs_and_policy_typed(fs, crate::config::RecoveryPolicy::Strict)?
+    {
+        let published = match &mut intent {
             IntentLogEntry::FlushPublish { phase, .. }
             | IntentLogEntry::CompactionPublish { phase, .. }
             | IntentLogEntry::MoveSstsPublish { phase, .. } => {
+                let published = *phase == PublicationPhase::ManifestPublished;
                 *phase = PublicationPhase::OutputDurable;
-                Some(
-                    crate::metadata::codec::encode(crate::metadata::codec::INTENT, &intent)
-                        .map(|bytes| Sha256::digest(&bytes).into()),
-                )
+                published
             }
-            _ => None,
-        })
-        .collect()
+            _ => continue,
+        };
+        let digest = Sha256::digest(crate::metadata::codec::encode(
+            crate::metadata::codec::INTENT,
+            &intent,
+        )?)
+        .into();
+        if !boundary.all.insert(digest) {
+            return Err(MidgeError::Corruption(
+                "metadata cut repeats a publication intent identity".into(),
+            ));
+        }
+        if published {
+            boundary.manifest_published.insert(digest);
+        }
+    }
+    Ok(boundary)
 }
 
 fn copy_control_files(

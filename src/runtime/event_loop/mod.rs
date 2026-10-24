@@ -590,7 +590,11 @@ impl EventLoop {
         self.actors
             .compaction_actor
             .configure_work_target(Some(storage.as_ref()));
-        storage.configure_maintenance_memory(self.actors.compaction_actor.total_memory_limit());
+        let memory =
+            storage.configure_maintenance_memory(self.actors.compaction_actor.total_memory_limit());
+        self.publication
+            .metadata_publication_lock
+            .configure_capture_memory(memory);
         self.actors
             .wal_actor
             .set_storage_budget(Arc::clone(&storage));

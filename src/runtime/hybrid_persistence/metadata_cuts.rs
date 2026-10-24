@@ -237,7 +237,7 @@ fn stage_cut(
         selected.bodies.as_ref(),
         selected.cache.as_ref().map(|cache| &cache.fingerprints),
         id,
-        Some(&cut.proof),
+        Some(cut),
     )?;
     Ok(CloudMetadataGeneration {
         id,

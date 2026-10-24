@@ -97,7 +97,10 @@ impl Fixture {
             .unwrap()
     }
     fn mirror(&self, cut: &CapturedMetadataCut) -> MidgeResult<()> {
-        let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+        self.mirror_for(cut, Duration::from_secs(5))
+    }
+    fn mirror_for(&self, cut: &CapturedMetadataCut, timeout: Duration) -> MidgeResult<()> {
+        let deadline = OperationDeadline::from_budget(timeout);
         mirror_captured_control_metadata_within(
             CloudMetadataMirrorContext {
                 cloud: &self.cloud,
@@ -131,6 +134,119 @@ impl Fixture {
         .unwrap();
         (generation, bodies)
     }
+}
+
+#[test]
+fn should_charge_shared_capture_pool_before_copy_and_retain_it_until_source_owner_finishes() {
+    // Arrange
+    let fixture = Fixture::new(CloudStorage::with_mock());
+    let memory = crate::common::resource_budget::ResourceBudget::new(128 * 1024);
+    fixture.lock.configure_capture_memory(memory.clone());
+    let busy = memory
+        .reserve(memory.limit() - 128, "other admitted maintenance")
+        .unwrap();
+
+    // Act / Assert: rejected admission allocates no owned cut and leaves the
+    // existing maintenance owner charged. Releasing it permits real capture.
+    let rejected = fixture.lock.capture_control_cut(
+        &fixture.fs,
+        1,
+        &OperationDeadline::from_budget(Duration::from_secs(1)),
+    );
+    let Err(error) = rejected else {
+        panic!("shared pool must reject capture while occupied");
+    };
+    assert!(fixture.lock.capture_contention(&error));
+    assert_eq!(fixture.lock.pending_captures(), 0);
+    assert_eq!(memory.used(), memory.limit() - 128);
+    drop(busy);
+    assert!(!fixture.lock.capture_contention(&error));
+    assert!(
+        fixture.lock.capture_admission_retryable(&error),
+        "release between rejection and classification still requires retry"
+    );
+    let cut = fixture.cut();
+    let source_charge = memory.used();
+    assert!(source_charge > 4096);
+    fixture.mirror(&cut).unwrap();
+    assert_eq!(fixture.lock.pending_captures(), 0);
+    assert_eq!(
+        memory.used(),
+        source_charge,
+        "a selected cut may still have a live source task"
+    );
+    drop(cut);
+    assert_eq!(memory.used(), 0);
+}
+
+#[test]
+fn should_retry_owned_cut_slot_contention_and_release_capacity_after_source_owners_finish() {
+    // Arrange
+    let fixture = Fixture::new(CloudStorage::with_mock());
+    let mut owned = (0..64).map(|_| fixture.cut()).collect::<Vec<_>>();
+    let rejected = fixture.lock.capture_control_cut(
+        &fixture.fs,
+        1,
+        &OperationDeadline::from_budget(Duration::from_secs(1)),
+    );
+    let Err(error) = rejected else {
+        panic!("owned capture capacity must be bounded");
+    };
+
+    // Act / Assert: capacity exhaustion is the originating slot-pool
+    // contention, rather than intent-proof Busy or a permanent size failure.
+    assert!(fixture.lock.capture_admission_retryable(&error));
+    fixture.mirror(owned.last().unwrap()).unwrap();
+    assert_eq!(fixture.lock.pending_captures(), 0);
+    assert!(fixture.lock.capture_admission_retryable(&error));
+    owned.clear();
+    let successor = fixture.cut();
+    fixture.mirror(&successor).unwrap();
+    assert_eq!(fixture.lock.pending_captures(), 0);
+}
+
+#[test]
+fn should_keep_unknown_physical_put_charged_after_later_cut_covers_its_capture() {
+    // Arrange
+    let (entered, arrived) = mpsc::channel();
+    let released = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+    let backend = Arc::new(HeldManifestBackend {
+        inner: Arc::new(MockCloudBackend::new()),
+        hold: AtomicBool::new(true),
+        entered,
+        released: Arc::clone(&released),
+    });
+    let fixture = Fixture::new(CloudStorage::new(backend, "physical-capture-budget".into()));
+    let memory = crate::common::resource_budget::ResourceBudget::new(256 * 1024);
+    fixture.lock.configure_capture_memory(memory.clone());
+    let first = fixture.cut();
+    assert!(matches!(
+        fixture.mirror_for(&first, Duration::from_millis(20)),
+        Err(MidgeError::Timeout(_))
+    ));
+    arrived.recv_timeout(Duration::from_secs(1)).unwrap();
+    drop(first);
+
+    // Act: the later selected proof settles the logical capture while the
+    // earlier actual transport still retains its payload/reservation callback.
+    let second = fixture.cut();
+    fixture.mirror(&second).unwrap();
+    drop(second);
+    assert_eq!(fixture.lock.pending_captures(), 0);
+    assert!(
+        memory.used() > 0,
+        "physical request must retain its source accounting after coalescence"
+    );
+    let (lock, changed) = &*released;
+    *lock.lock().unwrap() = true;
+    changed.notify_all();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while memory.used() != 0 && std::time::Instant::now() < until {
+        std::thread::yield_now();
+    }
+
+    // Assert
+    assert_eq!(memory.used(), 0);
 }
 
 #[test]
@@ -251,6 +367,37 @@ fn should_retain_unsettled_intent_when_new_capture_attempts_to_drop_it() {
     ));
     assert_eq!(fixture.lock.pending_captures(), 1);
     fixture.mirror(&first).unwrap();
+    // Selecting OutputDurable is not a terminal operation receipt.
+    assert!(matches!(
+        fixture.lock.capture_control_cut(
+            &fixture.fs,
+            1,
+            &OperationDeadline::from_budget(Duration::from_secs(1))
+        ),
+        Err(MidgeError::Busy(_))
+    ));
+    let mut published = flush_intent();
+    let IntentLogEntry::FlushPublish {
+        phase, file_meta, ..
+    } = &mut published
+    else {
+        unreachable!()
+    };
+    *phase = PublicationPhase::ManifestPublished;
+    let store = crate::metadata::store::ManifestStore::new(Arc::clone(&fixture.fs));
+    store
+        .append(&crate::metadata::ManifestEdit::Batch(vec![
+            crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta::from(&*file_meta)),
+            crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                cf_id: 0,
+                freeze_sequence: 10,
+            },
+        ]))
+        .unwrap();
+    IntentPersistence::save_with_fs(&fixture.fs, &[published]).unwrap();
+    let manifest_cut = fixture.cut();
+    fixture.mirror(&manifest_cut).unwrap();
+    IntentPersistence::save_with_fs(&fixture.fs, &[]).unwrap();
     let second = fixture.cut();
     fixture.mirror(&second).unwrap();
     assert_eq!(fixture.lock.pending_captures(), 0);
@@ -362,7 +509,9 @@ fn should_capture_exact_checkpoint_cut_when_snapshot_installation_is_between_ren
     // Arrange: the production checkpoint owns the writer lock after its new
     // snapshot is durable but before its covered journal prefix is removed.
     let fixture = Arc::new(Fixture::new(CloudStorage::with_mock()));
-    let store = Arc::new(crate::metadata::store::ManifestStore::new(Arc::clone(&fixture.fs)));
+    let store = Arc::new(crate::metadata::store::ManifestStore::new(Arc::clone(
+        &fixture.fs,
+    )));
     let edit = crate::metadata::ManifestEdit::BumpNextSstSeq {
         cf_id: 0,
         next_seq: 10,

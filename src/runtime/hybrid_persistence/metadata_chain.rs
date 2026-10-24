@@ -269,7 +269,7 @@ pub(super) fn publish_with_cut(
     old_bodies: Option<&BTreeMap<String, Vec<u8>>>,
     fingerprints: Option<&BTreeMap<String, super::metadata_snapshot::FileFingerprint>>,
     id: SharedGenerationId,
-    cut: Option<&crate::runtime::metadata_publication::MetadataCutProof>,
+    cut: Option<&crate::runtime::CapturedMetadataCut>,
 ) -> MidgeResult<Vec<CloudMetadataObject>> {
     let mut history = previous
         .filter(|generation| is_chain(generation))
@@ -285,7 +285,7 @@ pub(super) fn publish_with_cut(
         id,
         writer_epoch: context.authority.writer_epoch,
         operation_id: uuid::Uuid::new_v4().to_string(),
-        cut: cut.cloned(),
+        cut: cut.map(|cut| cut.proof.clone()),
         parent: history.first().cloned(),
         changes: if history.is_empty() {
             changes(local, None)
@@ -313,7 +313,13 @@ pub(super) fn publish_with_cut(
         ));
     }
     let key = format!("manifest/{:020}/{}", id.get(), version.operation_id);
-    publish_bytes(context.cloud, &key, &encoded, context.deadline)?;
+    publish_bytes(
+        context.cloud,
+        &key,
+        &encoded,
+        context.deadline,
+        cut.map(crate::runtime::CapturedMetadataCut::memory_reservation),
+    )?;
     let object = CloudMetadataObject {
         file_name: CHAIN_FILE_NAME.into(),
         object_key: key,
@@ -329,14 +335,15 @@ fn publish_bytes(
     key: &str,
     bytes: &[u8],
     deadline: &OperationDeadline,
+    reservation: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
 ) -> MidgeResult<()> {
     let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_write_receipt_request(
-        StorageRequest::new(key, *deadline, cloud.callback_timeout())
-            .with_precondition(StoragePrecondition::IfAbsent),
-        bytes.to_vec(),
-        tx,
-    );
+    let mut request = StorageRequest::new(key, *deadline, cloud.callback_timeout())
+        .with_precondition(StoragePrecondition::IfAbsent);
+    if let Some(reservation) = reservation {
+        request = request.with_reservation(reservation);
+    }
+    cloud.submit_write_receipt_request(request, bytes.to_vec(), tx);
     let timeout = deadline
         .clamp_nonzero(cloud.callback_timeout())
         .ok_or_else(|| MidgeError::Timeout("cloud manifest PUT deadline exhausted".into()))?;
