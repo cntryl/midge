@@ -669,3 +669,12 @@ intents. Failpoint test targets compile; that regression has not executed.
 Unknown outcomes, replacement identities, cache invalidation and provider/crash
 qualification remain gates. The two-request count is a coded assertion for the
 supported receipt path, not a measured provider result.
+
+#909 compute now runs on a bounded reusable worker pool instead of creating an
+OS thread per job. Owned task tickets join terminal work, pool teardown closes
+admission and joins all workers, and worker panics remain terminal results
+without killing the reusable worker. Active regressions cover physical thread
+reuse, a held worker with a full queue, and post-panic progress. The existing
+single production slot is preserved until the multi-job coordinator/shared
+budget handoff is ready. The latest shared compile is in concurrent name-
+prefetch/interface edits; these tests have not executed.

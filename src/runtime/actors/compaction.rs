@@ -16,7 +16,6 @@ use crate::types::EntryType;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::JoinHandle;
 
 /// The compaction factory is rooted at the SST directory, so compaction names
 /// its inputs, outputs and repair scratch relative to it; outputs land at its
@@ -40,6 +39,8 @@ pub(crate) mod publication;
 
 #[path = "compaction/jobs.rs"]
 mod jobs;
+#[path = "compaction/pool.rs"]
+mod pool;
 
 /// A finished compaction partition, summarized where it was written.
 ///
@@ -353,7 +354,8 @@ pub struct CompactionActor {
     /// Cooperative cancellation flag for the active background worker.
     worker_cancel: Arc<AtomicBool>,
     /// Active background worker, joined before runtime shutdown completes.
-    worker_handle: Option<JoinHandle<Vec<String>>>,
+    worker_handle: Option<pool::CompactionTask>,
+    worker_pool: Option<Arc<pool::CompactionPool>>,
     /// Exact terminal worker error transferred out-of-band so the public
     /// runtime message shape remains unchanged.
     worker_error: Arc<std::sync::Mutex<Option<MidgeError>>>,
@@ -394,6 +396,7 @@ impl CompactionActor {
             active_manual_deadline: None,
             worker_cancel: Arc::new(AtomicBool::new(false)),
             worker_handle: None,
+            worker_pool: None,
             worker_error: Arc::new(std::sync::Mutex::new(None)),
             prepared_outputs: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         }
@@ -1249,9 +1252,14 @@ impl CompactionActor {
         store_compaction_worker_error(&worker_error, None);
         let job_id = next_request_id()?;
 
-        let worker = std::thread::Builder::new()
-            .name(format!("midge-compaction-{job_id}"))
-            .spawn(move || {
+        let pool = if let Some(pool) = &self.worker_pool {
+            Arc::clone(pool)
+        } else {
+            let pool = pool::CompactionPool::new(1)?;
+            self.worker_pool = Some(Arc::clone(&pool));
+            pool
+        };
+        let worker = pool.submit(move || {
             let _span = tracing::debug_span!(
                 "compaction_job",
                 job_id,
@@ -1307,8 +1315,7 @@ impl CompactionActor {
 
             Self::notify_worker_completion(&tx, &plan_clone, input_files, &output_ssts, succeeded, job_id);
             output_ssts
-        })
-            .map_err(|error| MidgeError::Internal(format!("spawn compaction worker: {error}")))?;
+        })?;
         self.worker_handle = Some(worker);
 
         Ok(Vec::new())
