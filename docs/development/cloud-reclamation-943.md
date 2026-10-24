@@ -62,9 +62,11 @@ Current-epoch unpublished uploads stay protected until a later takeover
 establishes a floor. A delayed predecessor PUT can recreate only an unreachable
 leak; repeated bounded inventory cycles revisit it.
 
-Each interval retains at most one 32-key inventory page and performs at most
-eight candidate probes/deletes. Unprobed keys remain with the cursor until the
-next interval. Unsupported bounded-page inventories retain/defer; full-prefix
+Each interval retains at most one 32-key page per data class and shares an
+eight-candidate probe/delete allowance across SST and retired-WAL discovery.
+SST discovery consumes the allowance first; the finite predecessor backlog
+then leaves room for WAL cleanup. Unprobed keys remain with their class cursor
+until the next interval. Unsupported bounded-page inventories retain/defer; full-prefix
 LIST is never a fallback. Native LIST pages make one physical request with
 retries disabled and a 64 KiB response limit. Engine runtime metrics report
 `cloud_orphan_list_attempts`, `cloud_orphan_probes`,
@@ -74,7 +76,29 @@ the durable discovery source; their existing provider retry/deadline policy
 remains applicable. Known-retired work admits at most two workers and eight
 identities per worker, retaining the rest for scheduled retry.
 
-The durable catalog anchor can separately rediscover retired WAL objects; that
-discovery scan is still outstanding. Public hybrid snapshot-across-compaction,
+The WAL scan loads the admitted primary/mirror catalog under its mutation
+owner and requires the current writer epoch. Its anchor permanently closes
+every segment id at or below the anchor id. Recovery selects only catalog
+membership; future publication must advance past this closed range. The scan
+accepts only canonical epoch/id keys, rejects future epochs, and reads the
+128-byte CRC/version-checked header under the probed identity. Header epoch/id,
+ordered predecessor and first-sequence bounds must agree with the closed range.
+It freshly validates the same catalog bytes/anchor, the selected shared
+generation's dominance over `retired_by`, and writer authority before IfMatch
+deletion. Missing, malformed and above-anchor objects remain.
+
+This proves permanent key unselectability rather than reconstructing a
+retired segment's exact historical digest ancestry: intermediate retired
+objects can already be absent. The ordinary declared-retirement path keeps its
+original full segment proof and remains distinct. The scan never replaces that
+required membership proof with a newly learned HEAD. It does not fetch or
+decode unbounded WAL payloads. A late retired PUT recreates an unreachable key
+which a following inventory cycle removes. Filesystem inventory streams directory
+entries with at most eight open directory levels and 33 retained key candidates;
+unknown deeper layouts defer without collecting a complete prefix.
+
+Active WAL regressions cover loss of the process queue after anchor commit,
+live/future/inconsistent-header retention, late predecessor PUT and a new
+catalog epoch between probe and final validation. Public hybrid snapshot-across-compaction,
 delayed predecessor effects, failure campaigns and request-budget qualification
 remain #943 acceptance gates.

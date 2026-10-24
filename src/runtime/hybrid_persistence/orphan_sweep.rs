@@ -14,8 +14,8 @@ const MAX_PROBES: usize = 8;
 
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub(crate) struct InventoryCursor {
-    continuation: Option<String>,
-    pending: VecDeque<String>,
+    pub(super) continuation: Option<String>,
+    pub(super) pending: VecDeque<String>,
 }
 
 #[derive(Default)]
@@ -26,6 +26,7 @@ pub(crate) struct OrphanSweepProgress {
     pub(crate) deleted: u64,
     pub(crate) retained: u64,
     pub(crate) unavailable: u64,
+    pub(crate) wal_cursor: Option<InventoryCursor>,
 }
 
 /// Constructed by the loop from its immutable startup floor and a pin-safe
@@ -73,6 +74,7 @@ impl SstOrphanProtection {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct OrphanSweepContext<'a> {
     pub(crate) storage: &'a HybridStorage,
     pub(crate) metadata: &'a CloudStorage,

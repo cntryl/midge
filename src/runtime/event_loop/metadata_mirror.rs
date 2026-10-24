@@ -33,6 +33,7 @@ pub(super) struct MetadataMirrorPipeline {
     retention_due: std::time::Instant,
     retention_interval: std::time::Duration,
     orphan_cursor: crate::runtime::hybrid_persistence::InventoryCursor,
+    wal_orphan_cursor: crate::runtime::hybrid_persistence::InventoryCursor,
 }
 
 impl Default for MetadataMirrorPipeline {
@@ -46,6 +47,7 @@ impl Default for MetadataMirrorPipeline {
             retention_due: std::time::Instant::now() + retention_interval,
             retention_interval,
             orphan_cursor: Default::default(),
+            wal_orphan_cursor: Default::default(),
         }
     }
 }
@@ -235,13 +237,23 @@ impl EventLoop {
                         self.fail_flush_pipeline(flush_id, None, error);
                     }
                 }
-                let pending = std::mem::take(&mut self.actors.cloud_coordinator.metadata_mirror.pending_compactions);
+                let pending = std::mem::take(
+                    &mut self
+                        .actors
+                        .cloud_coordinator
+                        .metadata_mirror
+                        .pending_compactions,
+                );
                 for (plan, deadline) in pending {
                     if plan.cf_id == cf_id && plan.output_seq < next_seq {
                         let outcome = result.as_ref().map(|_| ()).map_err(MidgeError::replay);
                         self.resume_compaction_after_metadata_mirror(plan, deadline, outcome);
                     } else {
-                        self.actors.cloud_coordinator.metadata_mirror.pending_compactions.push_back((plan, deadline));
+                        self.actors
+                            .cloud_coordinator
+                            .metadata_mirror
+                            .pending_compactions
+                            .push_back((plan, deadline));
                     }
                 }
             }
@@ -260,7 +272,11 @@ impl EventLoop {
                         unavailable = progress.unavailable,
                         "bounded remote orphan sweep complete"
                     );
-                    self.actors.cloud_coordinator.metadata_mirror.orphan_cursor = progress.cursor;
+                    let pipeline = &mut self.actors.cloud_coordinator.metadata_mirror;
+                    pipeline.orphan_cursor = progress.cursor;
+                    if let Some(cursor) = progress.wal_cursor {
+                        pipeline.wal_orphan_cursor = cursor;
+                    }
                 }
             }
         }

@@ -155,6 +155,15 @@ pub(crate) struct SstNameAllocation {
     pub(crate) startup_floor_epoch: Option<u64>,
 }
 
+impl SstNameAllocation {
+    fn recovered(manifest: &Manifest) -> Self {
+        Self {
+            startup_floor: manifest.next_sst_seqs.clone(),
+            ..Default::default()
+        }
+    }
+}
+
 /// WAL state
 pub struct WalState {
     /// Pending writes waiting for sync

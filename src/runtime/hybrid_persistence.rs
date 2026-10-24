@@ -22,6 +22,8 @@ pub(crate) mod metadata_chain;
 mod metadata_retention;
 mod metadata_snapshot;
 mod orphan_sweep;
+mod wal_orphan_sweep;
+pub(crate) use wal_orphan_sweep::sweep_retired_wal_within;
 mod retired_sst;
 use crate::storage::hybrid::backend::ControlObject;
 pub(crate) use catalog::refusal_error;

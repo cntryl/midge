@@ -893,3 +893,14 @@ Active regressions count the real writer's fsyncs and require a rotation to
 precede the newer write. The same all-target failpoint/stress-soak compile
 passes cleanly; execution is pending. This improves ordered queued coalescing
 without claiming simultaneous physical append during the held fsync.
+
+#943 now rediscovers WAL objects in the admitted catalog's permanently closed
+ID range through bounded pages and pinned header reads. Canonical identity,
+valid header lineage, fresh same-epoch anchor, shared `retired_by` authority and
+lease validation precede conditional deletion. This is unreachable-key proof,
+kept distinct from full original membership/digest proof for known retirement.
+Above-anchor/future/malformed candidates remain retained. Active regressions
+cover lost queues, late retired PUTs, replacement/epoch races and bad headers.
+Test targets compile cleanly; execution and provider/crash gates remain pending.
+Two growing metadata functions were split into focused helpers for the hard
+line-count policy; no lint suppression was added.

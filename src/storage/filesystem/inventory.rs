@@ -57,16 +57,26 @@ impl crate::storage::inventory::ObjectInventory for FileSystem {
             Err(error) => return Err(Self::inventory_error("list page", &directory, error)),
         };
         let mut selected = std::collections::BTreeSet::new();
-        for entry in entries {
+        let mut stack = vec![entries];
+        while let Some(entries) = stack.last_mut() {
             if let Some(scope) = scope {
                 scope.check("filesystem inventory page")?;
             }
+            let Some(entry) = entries.next() else {
+                stack.pop();
+                continue;
+            };
             let entry =
                 entry.map_err(|error| Self::inventory_error("list page", &directory, error))?;
             let kind = entry.file_type()?;
-            // This capability deliberately supports a flat namespace only.
             if kind.is_dir() {
-                return Ok(None);
+                // A directory iterator per level avoids retaining all child
+                // paths. Unknown deep layouts are conservatively unsupported.
+                if stack.len() >= 8 {
+                    return Ok(None);
+                }
+                stack.push(fs::read_dir(entry.path())?);
+                continue;
             }
             if !kind.is_file() {
                 continue;

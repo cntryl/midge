@@ -771,6 +771,23 @@ impl Metrics {
         Some(u64_to_f64(total) / u64_to_f64(count))
     }
 
+    fn latency_summaries(&self) -> crate::types::RuntimeLatencySummaries {
+        crate::types::RuntimeLatencySummaries {
+            commit_sync: self.commit_latency_sync.summary(),
+            commit_buffered: self.commit_latency_buffered.summary(),
+            commit_best_effort: self.commit_latency_best_effort.summary(),
+            commit_cloud_async: self.commit_latency_cloud_async.summary(),
+            commit_cloud_strict: self.commit_latency_cloud_strict.summary(),
+            point_read: self.point_read_latency.summary(),
+            scan: self.scan_latency.summary(),
+            flush: self.flush_latency.summary(),
+            compaction: self.compaction_latency.summary(),
+            wal_fsync: self.wal_fsync_latency.summary(),
+            cloud_wal_upload: self.cloud_wal_upload_latency.summary(),
+            cloud_metadata_mirror: self.cloud_metadata_mirror_latency.summary(),
+        }
+    }
+
     /// Get all metrics as a snapshot
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -784,20 +801,7 @@ impl Metrics {
             gets: self.gets.load(Ordering::Relaxed),
             #[cfg(test)]
             range_scans: self.range_scans.load(Ordering::Relaxed),
-            latency: crate::types::RuntimeLatencySummaries {
-                commit_sync: self.commit_latency_sync.summary(),
-                commit_buffered: self.commit_latency_buffered.summary(),
-                commit_best_effort: self.commit_latency_best_effort.summary(),
-                commit_cloud_async: self.commit_latency_cloud_async.summary(),
-                commit_cloud_strict: self.commit_latency_cloud_strict.summary(),
-                point_read: self.point_read_latency.summary(),
-                scan: self.scan_latency.summary(),
-                flush: self.flush_latency.summary(),
-                compaction: self.compaction_latency.summary(),
-                wal_fsync: self.wal_fsync_latency.summary(),
-                cloud_wal_upload: self.cloud_wal_upload_latency.summary(),
-                cloud_metadata_mirror: self.cloud_metadata_mirror_latency.summary(),
-            },
+            latency: self.latency_summaries(),
             #[cfg(test)]
             wal_appends: self.wal_appends.load(Ordering::Relaxed),
             #[cfg(test)]

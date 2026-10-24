@@ -2614,6 +2614,24 @@ pub(crate) struct SharedRetirementFixture {
 }
 
 impl SharedRetirementFixture {
+    pub(crate) fn orphan_context<'a>(
+        &'a self,
+        storage: &'a HybridStorage,
+        deadline: &'a crate::common::OperationDeadline,
+    ) -> OrphanSweepContext<'a> {
+        OrphanSweepContext {
+            storage,
+            metadata: &self.cloud,
+            authority: CloudMetadataMirrorAuthority {
+                store: self.store.as_ref(),
+                holder_id: "writer",
+                writer_epoch: 2,
+            },
+            publication_lock: &self.lock,
+            deadline,
+        }
+    }
+
     pub(crate) fn new(manifest: &Manifest) -> Self {
         use crate::lease::LeaderStore;
         let directory = tempfile::tempdir().unwrap();

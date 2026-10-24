@@ -16,6 +16,7 @@ mod tests;
 pub(in crate::runtime::event_loop) struct OrphanSweepTask {
     protection: Arc<SstOrphanProtection>,
     cursor: InventoryCursor,
+    wal_cursor: InventoryCursor,
     progress: Arc<parking_lot::Mutex<Option<OrphanSweepProgress>>>,
 }
 
@@ -32,24 +33,46 @@ impl OrphanSweepTask {
         fence: &super::super::fencing::RuntimeFence,
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
-        let result = sweep_sst_orphans_within(
-            OrphanSweepContext {
-                storage,
-                metadata: cloud,
-                authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
-                    store: fence.leader_store.as_deref().ok_or_else(|| {
-                        MidgeError::Fenced("orphan sweep has no writer store".into())
-                    })?,
-                    holder_id: fence.leader_holder_id.as_deref().unwrap_or_default(),
-                    writer_epoch: fence.writer_epoch,
-                },
-                publication_lock: lock,
-                deadline,
+        let context = OrphanSweepContext {
+            storage,
+            metadata: cloud,
+            authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                store: fence
+                    .leader_store
+                    .as_deref()
+                    .ok_or_else(|| MidgeError::Fenced("orphan sweep has no writer store".into()))?,
+                holder_id: fence.leader_holder_id.as_deref().unwrap_or_default(),
+                writer_epoch: fence.writer_epoch,
             },
-            &self.protection,
-            self.cursor.clone(),
-            |deadline| fence.validate_within(deadline),
-        )?;
+            publication_lock: lock,
+            deadline,
+        };
+        let mut result =
+            sweep_sst_orphans_within(context, &self.protection, self.cursor.clone(), |deadline| {
+                fence.validate_within(deadline)
+            })?;
+        let remaining = 8usize.saturating_sub(result.probes as usize);
+        if remaining != 0 {
+            match crate::runtime::hybrid_persistence::sweep_retired_wal_within(
+                context,
+                self.wal_cursor.clone(),
+                remaining,
+                |deadline| fence.validate_within(deadline),
+            ) {
+                Ok(wal) => {
+                    result.pages += wal.pages;
+                    result.probes += wal.probes;
+                    result.deleted += wal.deleted;
+                    result.retained += wal.retained;
+                    result.unavailable += wal.unavailable;
+                    result.wal_cursor = Some(wal.cursor);
+                }
+                Err(error @ MidgeError::Fenced(_)) => return Err(error),
+                Err(error) => {
+                    tracing::debug!(%error, "retired WAL discovery retained its uncertain cursor")
+                }
+            }
+        }
         *self.progress.lock() = Some(result);
         Ok(())
     }
@@ -129,6 +152,7 @@ impl EventLoop {
         Ok(Some(OrphanSweepTask {
             protection: Arc::new(protection),
             cursor: pipeline.orphan_cursor.clone(),
+            wal_cursor: pipeline.wal_orphan_cursor.clone(),
             progress: Default::default(),
         }))
     }
