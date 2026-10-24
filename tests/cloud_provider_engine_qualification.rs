@@ -276,7 +276,7 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
                 cache_path.clone(),
                 CloudStorageLocation::new(provider.clone(), database_prefix.clone()),
             )
-            .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
+            .memory_budget(MemoryBudget::Bytes(16 * 1024 * 1024))
             .background_compaction(false)
             .target_sst_size_for_testing(4 * 1024)
             .build()
@@ -286,20 +286,10 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
     };
     let mut engine = open_engine();
     let cf = default_cf(&engine);
-    for batch in 0..4u8 {
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin compaction seed");
-        tx.put(
-            format!("sqrzl-partial-mirror-{batch}").into_bytes(),
-            vec![batch; 512],
-            None,
-        )
-        .expect("put compaction seed");
-        tx.commit(WriteOptions::cloud_strict())
-            .expect("commit compaction seed");
-        engine.flush_cf(&cf).expect("force SST upload");
-    }
+    // Use the real partition fixture: tiny disjoint SSTs can be promoted
+    // without uploads, which would never reach the injected second part.
+    seed_sqrzl_partitioned_compaction_data(label, &mut engine, &cf)
+        .expect("seed multiple physical output partitions");
     let pre_failure_layout = engine
         .metrics()
         .get_storage_layout()
@@ -350,16 +340,8 @@ fn verify_recovered_partition_set(
     expected_compacted_files: usize,
 ) {
     let reopened_cf = default_cf(&reopened);
-    for batch in 0..4u8 {
-        let key = format!("sqrzl-partial-mirror-{batch}");
-        let read_tx = reopened
-            .begin_tx(reopened_cf.id(), TransactionMode::ReadOnly)
-            .expect("begin read tx");
-        assert_eq!(
-            read_tx.get(key.as_bytes()).expect("read value"),
-            Some(Bytes::from(vec![batch; 512]))
-        );
-    }
+    assert_sqrzl_partitioned_reads("partial-upload recovery", &reopened, &reopened_cf)
+        .expect("every acknowledged partition fixture value survives");
     let reopened_layout = reopened
         .metrics()
         .get_storage_layout()
@@ -483,6 +465,14 @@ fn seed_sqrzl_partitioned_compaction_data(
             )
             .map_err(|error| format!("{label}: put: {error}"))?;
         }
+        // The shared upper key makes every source range overlap, requiring a
+        // physical merge instead of promoting existing disjoint SST names.
+        tx.put(
+            b"sqrzl-partitioned/overlap".to_vec(),
+            b"shared".to_vec(),
+            None,
+        )
+        .map_err(|error| format!("{label}: put overlapping source key: {error}"))?;
         tx.commit(WriteOptions::cloud_strict())
             .map_err(|error| format!("{label}: cloud-strict commit: {error}"))?;
         engine
@@ -511,6 +501,16 @@ fn assert_sqrzl_partitioned_reads(
                 "{label}: unexpected value for {key} after recovery"
             ));
         }
+    }
+    if read
+        .get(b"sqrzl-partitioned/overlap")
+        .map_err(|error| format!("{label}: read overlapping source key: {error}"))?
+        .as_deref()
+        != Some(b"shared".as_slice())
+    {
+        return Err(format!(
+            "{label}: lost overlapping source key after recovery"
+        ));
     }
     Ok(())
 }
