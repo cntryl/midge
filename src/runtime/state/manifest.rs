@@ -267,7 +267,6 @@ impl RuntimeState {
         Ok(superseded_outputs)
     }
 
-    #[cfg(test)]
     pub fn transition_flush_publication_intent(
         &mut self,
         sst_name: &str,
@@ -399,6 +398,24 @@ impl RuntimeState {
         &mut self,
         publication: FlushManifestPublication<'_>,
     ) -> MidgeResult<()> {
+        self.commit_flush_publication_in_phase(publication, None)
+    }
+
+    pub(crate) fn commit_flush_manifest_retaining_intent(
+        &mut self,
+        publication: FlushManifestPublication<'_>,
+    ) -> MidgeResult<()> {
+        self.commit_flush_publication_in_phase(
+            publication,
+            Some(PublicationPhase::ManifestPublished),
+        )
+    }
+
+    fn commit_flush_publication_in_phase(
+        &mut self,
+        publication: FlushManifestPublication<'_>,
+        retained_phase: Option<PublicationPhase>,
+    ) -> MidgeResult<()> {
         let FlushManifestPublication {
             origin,
             cf_id,
@@ -477,7 +494,7 @@ impl RuntimeState {
                 crate::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
             }
         }
-        self.clear_flush_publication_intent(&file_meta.name)?;
+        self.finish_local_flush_intent(&file_meta.name, retained_phase)?;
         if ordinary_local
             && !forced_path
             && bounded_record
@@ -492,6 +509,17 @@ impl RuntimeState {
             return Ok(());
         }
         self.checkpoint_flush_publication(publication)
+    }
+
+    fn finish_local_flush_intent(
+        &mut self,
+        sst_name: &str,
+        retained_phase: Option<PublicationPhase>,
+    ) -> MidgeResult<()> {
+        match retained_phase {
+            Some(phase) => self.transition_flush_publication_intent(sst_name, phase),
+            None => self.clear_flush_publication_intent(sst_name),
+        }
     }
 
     pub fn transition_compaction_publication_intent(

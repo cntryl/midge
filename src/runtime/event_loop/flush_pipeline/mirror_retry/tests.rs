@@ -1,6 +1,7 @@
 use super::*;
 use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::runtime::RuntimeResponse;
+use std::sync::Arc;
 
 struct ContendedFlush {
     el: EventLoop,
@@ -15,6 +16,24 @@ impl ContendedFlush {
         let mut el = crate::runtime::event_loop::tests::create_test_cloud_event_loop(
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
+        let remote_reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+            Arc::clone(&el.state.fs),
+            el.actors
+                .cloud_coordinator
+                .hybrid_storage
+                .as_ref()
+                .unwrap()
+                .remote_sst_backend(),
+            Duration::from_secs(5),
+        ));
+        el.authority.read_resources = Some(Arc::new(
+            crate::runtime::read_resources::ReadResources::new(
+                remote_reads,
+                std::path::PathBuf::from(crate::sst::fs::SST_DIR),
+                1024 * 1024,
+                crate::sst::cache::CachePolicyType::Lru,
+            ),
+        ));
         el.prefetch_flush_sst_names_if_due();
         el.pipeline.inline_flush_worker = false;
         el.routing.runtime_response_timeout = timeout;
@@ -216,6 +235,8 @@ fn should_count_verified_flush_gate_parking_once_without_counting_capture_memory
         panic!("physical mirror result");
     };
     let duplicate = FlushWorkerResult::Mirror(FlushMirrorCompletion {
+        phase: mirror.phase,
+        deadline: mirror.deadline,
         delta: mirror.delta.clone(),
         reservation: mirror.reservation,
         result: Ok(*mirror
@@ -240,7 +261,15 @@ fn should_count_verified_flush_gate_parking_once_without_counting_capture_memory
     );
     assert!(fixture.response.try_recv().is_err());
     fixture.el.publication.publication_gate.release(&owner);
-    fixture.el.drain_flush_worker_results();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture.el.state.immutable_flush_by_id(fixture.id).is_some() {
+        fixture.el.drain_flush_worker_results();
+        assert!(
+            Instant::now() < deadline,
+            "terminal intent-clear mirror settles"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
     assert_eq!(
         fixture
             .el

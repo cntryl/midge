@@ -488,6 +488,7 @@ fn commit_and_mirror_checkpoint(
         require_snapshot: config.hybrid_storage.is_some(),
     })?;
     actor.submit_mirror(FlushMirrorTask {
+        phase: crate::runtime::actors::flush::FlushMirrorPhase::IntentCleared,
         delta: delta.clone(),
         reservation,
         fs: Arc::clone(&state.fs),

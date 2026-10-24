@@ -89,6 +89,67 @@ fn publication_task(fs: Arc<dyn crate::io::Fs>, build: &FlushBuildCompletion) ->
     }
 }
 
+fn mirror_task(
+    fs: Arc<dyn crate::io::Fs>,
+    delta: &FlushPublicationDelta,
+    phase: FlushMirrorPhase,
+    deadline: crate::common::OperationDeadline,
+) -> FlushMirrorTask {
+    FlushMirrorTask {
+        phase,
+        delta: delta.clone(),
+        reservation: None,
+        fs,
+        metadata_cut: None,
+        storage: Arc::new(HybridFlushStorage::default()),
+        metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
+        lease_healthy: None,
+        lease_validity: None,
+        leader_store: None,
+        leader_holder_id: None,
+        deadline,
+    }
+}
+
+fn complete_mirror_phases(
+    actor: &mut FlushActor,
+    results: &crossbeam::channel::Receiver<FlushWorkerResult>,
+    fs: Arc<dyn crate::io::Fs>,
+    delta: &FlushPublicationDelta,
+) -> MidgeResult<()> {
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+    actor.submit_mirror(mirror_task(
+        Arc::clone(&fs),
+        delta,
+        FlushMirrorPhase::ManifestPublished,
+        deadline,
+    ))?;
+    let published = results.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(actor.take_completion(&published));
+    let held = HeldStage::new("midge::flush_worker::after_control_metadata_publication");
+    actor.submit_mirror(mirror_task(
+        fs,
+        delta,
+        FlushMirrorPhase::IntentCleared,
+        deadline,
+    ))?;
+    held.entered();
+    assert!(!actor.take_completion(&published));
+    held.release.send(()).unwrap();
+    let cleared = results.recv_timeout(Duration::from_secs(5)).unwrap();
+    // Even after the clear's physical ticket is ready, an earlier phase has
+    // no authority to consume it or release this pipeline's logical owner.
+    assert!(!actor.take_completion(&published));
+    assert!(actor.take_completion(&cleared));
+    let FlushWorkerResult::Mirror(cleared) = cleared else {
+        panic!("clear result")
+    };
+    assert_eq!(cleared.phase, FlushMirrorPhase::IntentCleared);
+    assert_eq!(cleared.deadline, deadline);
+    fail::remove("midge::flush_worker::after_control_metadata_publication");
+    Ok(())
+}
+
 #[test]
 fn should_retain_cf_owner_until_its_exact_physical_completion() -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
@@ -120,7 +181,7 @@ fn should_retain_cf_owner_until_its_exact_physical_completion() -> MidgeResult<(
         panic!("build result");
     };
     let publish_hold = HeldStage::new("midge::flush_worker::before_publication");
-    actor.submit_publish(publication_task(fs, output))?;
+    actor.submit_publish(publication_task(Arc::clone(&fs), output))?;
     publish_hold.entered();
     // Assert: completed build proof cannot settle the executing publish phase.
     assert!(
@@ -144,6 +205,10 @@ fn should_retain_cf_owner_until_its_exact_physical_completion() -> MidgeResult<(
     );
     assert!(!actor.is_inflight());
     assert!(!actor.has_capacity());
+    let FlushWorkerResult::Publish(published) = &published else {
+        panic!("publish result")
+    };
+    complete_mirror_phases(&mut actor, &results, fs, published.result.as_ref().unwrap())?;
     actor.finish_pipeline(identity.flush_id);
     assert!(actor.has_capacity());
     assert!(directory

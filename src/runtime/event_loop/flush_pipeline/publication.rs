@@ -3,6 +3,7 @@ use super::{
     FlushMirrorCompletion, FlushMirrorTask, FlushPublicationDelta, FlushPublishCompletion,
     ImmutableFlushPhase, Origin,
 };
+use crate::runtime::actors::flush::FlushMirrorPhase;
 
 impl EventLoop {
     pub(super) fn runtime_fs_path(
@@ -255,15 +256,20 @@ impl EventLoop {
         )?;
         crate::failpoints::fail_point!("midge::flush::after_publication_intent_before_manifest");
         self.check_lease_health()?;
-        self.state
-            .commit_flush_publication_for(FlushManifestPublication {
-                origin,
-                cf_id: delta.identity.cf_id,
-                sequence: delta.identity.sequence,
-                file_meta: &delta.file_meta,
-                next_sst_seq: delta.next_sst_seq,
-                require_snapshot: self.actors.cloud_coordinator.hybrid_storage.is_some(),
-            })?;
+        let publication = FlushManifestPublication {
+            origin,
+            cf_id: delta.identity.cf_id,
+            sequence: delta.identity.sequence,
+            file_meta: &delta.file_meta,
+            next_sst_seq: delta.next_sst_seq,
+            require_snapshot: self.actors.cloud_coordinator.hybrid_storage.is_some(),
+        };
+        if self.actors.cloud_coordinator.hybrid_storage.is_some() {
+            self.state
+                .commit_flush_manifest_retaining_intent(publication)?;
+        } else {
+            self.state.commit_flush_publication_for(publication)?;
+        }
         Ok(())
     }
 
@@ -273,7 +279,23 @@ impl EventLoop {
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) -> crate::common::MidgeResult<()> {
         let deadline = self.flush_mirror_deadline(delta.identity);
+        self.submit_flush_mirror_phase(
+            delta,
+            reservation,
+            FlushMirrorPhase::ManifestPublished,
+            deadline,
+        )
+    }
+
+    fn submit_flush_mirror_phase(
+        &mut self,
+        delta: FlushPublicationDelta,
+        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+        phase: FlushMirrorPhase,
+        deadline: crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         let task = FlushMirrorTask {
+            phase,
             delta,
             reservation,
             fs: Arc::clone(&self.state.fs),
@@ -306,6 +328,32 @@ impl EventLoop {
         }
         match completion.result {
             Ok(cloud_metadata_published) => {
+                if cloud_metadata_published
+                    && completion.phase == FlushMirrorPhase::ManifestPublished
+                {
+                    let result = self
+                        .state
+                        .clear_flush_publication_intent(&completion.delta.file_meta.name)
+                        .and_then(|()| {
+                            self.submit_flush_mirror_phase(
+                                completion.delta.clone(),
+                                completion.reservation,
+                                FlushMirrorPhase::IntentCleared,
+                                completion.deadline,
+                            )
+                        });
+                    self.publication.publication_gate.release(
+                        &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush { flush_id: completion.delta.identity.flush_id });
+                    if let Err(error) = result {
+                        self.fail_flush_pipeline(
+                            completion.delta.identity.flush_id,
+                            completion.reservation,
+                            &error,
+                        );
+                        return true;
+                    }
+                    return false;
+                }
                 self.publication.publication_gate.release(
                     &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
                         flush_id: completion.delta.identity.flush_id,

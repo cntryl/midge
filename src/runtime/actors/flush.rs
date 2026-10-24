@@ -201,7 +201,14 @@ pub(crate) struct FlushPublishCompletion {
     pub result: MidgeResult<FlushPublicationDelta>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlushMirrorPhase {
+    ManifestPublished,
+    IntentCleared,
+}
+
 pub(crate) struct FlushMirrorTask {
+    pub phase: FlushMirrorPhase,
     pub delta: FlushPublicationDelta,
     pub reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     pub fs: Arc<dyn crate::io::Fs>,
@@ -216,6 +223,8 @@ pub(crate) struct FlushMirrorTask {
 }
 
 pub(crate) struct FlushMirrorCompletion {
+    pub phase: FlushMirrorPhase,
+    pub deadline: crate::common::OperationDeadline,
     pub delta: FlushPublicationDelta,
     pub reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     pub result: MidgeResult<bool>,
@@ -257,7 +266,7 @@ enum FlushWorkerTask {
 enum FlushPhase {
     Build,
     Publish,
-    Mirror,
+    Mirror(FlushMirrorPhase),
 }
 
 struct SubmittedFlushTask {
@@ -443,7 +452,7 @@ impl FlushActor {
         let phase = match &task {
             FlushWorkerTask::Build(_) => FlushPhase::Build,
             FlushWorkerTask::Publish(_) => FlushPhase::Publish,
-            FlushWorkerTask::Mirror(_) => FlushPhase::Mirror,
+            FlushWorkerTask::Mirror(task) => FlushPhase::Mirror(task.phase),
             FlushWorkerTask::Shutdown => {
                 return Err(MidgeError::Internal(
                     "shutdown is not a flush pipeline task".into(),
@@ -478,7 +487,9 @@ impl FlushActor {
         let (identity, phase) = match completion {
             FlushWorkerResult::Build(result) => (result.identity, FlushPhase::Build),
             FlushWorkerResult::Publish(result) => (result.identity, FlushPhase::Publish),
-            FlushWorkerResult::Mirror(result) => (result.delta.identity, FlushPhase::Mirror),
+            FlushWorkerResult::Mirror(result) => {
+                (result.delta.identity, FlushPhase::Mirror(result.phase))
+            }
         };
         let Some(owner) = self.owners.get(&identity.flush_id) else {
             return false;
@@ -731,6 +742,8 @@ impl FlushActor {
                 };
                 finished.store(true, Ordering::Release);
                 let _ = completion_tx.send(FlushWorkerResult::Mirror(FlushMirrorCompletion {
+                    phase: task.phase,
+                    deadline: task.deadline,
                     delta: task.delta,
                     reservation: task.reservation,
                     result,
@@ -1278,6 +1291,7 @@ mod tests {
 
     fn mirror_task(fixture: &PublicationFixture, delta: FlushPublicationDelta) -> FlushMirrorTask {
         FlushMirrorTask {
+            phase: FlushMirrorPhase::IntentCleared,
             delta,
             reservation: None,
             fs: Arc::clone(&fixture.task.fs),
