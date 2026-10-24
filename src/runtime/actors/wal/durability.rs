@@ -85,9 +85,12 @@ impl WalActor {
     pub(crate) fn begin_sync_transition(
         &mut self,
         state: &mut RuntimeState,
-        _ticket: &WalSyncTicket,
+        ticket: &WalSyncTicket,
     ) -> MidgeResult<WalSyncReceipt> {
-        let result = self.begin_sync_io(state, None);
+        let result = self.begin_sync_io(state, None).map(|mut receipt| {
+            receipt.generation = Some(ticket.generation());
+            receipt
+        });
         debug_assert!(
             result.is_ok() || self.is_open() || self.is_fenced(),
             "a failed WAL sync must settle in Open or Fenced"
@@ -100,8 +103,15 @@ impl WalActor {
         &mut self,
         state: &mut RuntimeState,
         receipt: WalSyncReceipt,
-        _ticket: &WalSyncTicket,
+        ticket: &WalSyncTicket,
     ) -> MidgeResult<()> {
+        if receipt.generation != Some(ticket.generation()) {
+            let error = MidgeError::Internal(
+                "WAL sync receipt belongs to a different barrier generation".into(),
+            );
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        }
         self.commit_sync_io(state, receipt)
     }
 
@@ -167,6 +177,23 @@ impl WalActor {
             }
             return Err(error);
         }
+
+        // Capture the exact admitted prefix before I/O. Future queued work
+        // must never be included by reading mutable writer/state fields after
+        // the physical barrier returns.
+        let receipt = WalSyncReceipt {
+            durable_sequence: self
+                .writer()
+                .and_then(|writer| writer.tail().last_seq)
+                .unwrap_or(state.sequence),
+            pending_writes: state.wal.pending_writes,
+            pending_sync_count: self.pending_sync_count,
+            bytes_since_sync: self.bytes_since_sync,
+            end_offset: self.writer().map(crate::wal::WalWriter::current_pos),
+            writer_epoch: self.current_epoch,
+            segment_id: state.wal.open_segment(),
+            generation: None,
+        };
 
         if self.writer().is_some() {
             // Bound the acknowledgement wait so a degraded storage device cannot
@@ -254,20 +281,17 @@ impl WalActor {
             }
         }
 
-        self.persist_sync_boundary(state, group)?;
-        Ok(WalSyncReceipt {
-            durable_sequence: state.sequence,
-            pending_writes: state.wal.pending_writes,
-        })
+        self.persist_sync_boundary(state, group, receipt.end_offset)?;
+        Ok(receipt)
     }
 
     fn persist_sync_boundary(
         &mut self,
         state: &mut RuntimeState,
         group: Option<&crate::lease::WriterEffectGroup>,
+        end_offset: Option<u64>,
     ) -> MidgeResult<()> {
-        if let Some(writer) = self.writer() {
-            let bytes = writer.current_pos();
+        if let Some(bytes) = end_offset {
             let recorded = match group {
                 Some(group) => state.wal.history.record_sync_in_group(bytes, group),
                 None => state.wal.history.record_sync(bytes),
@@ -288,8 +312,12 @@ impl WalActor {
         state: &mut RuntimeState,
         receipt: WalSyncReceipt,
     ) -> MidgeResult<()> {
-        if state.sequence != receipt.durable_sequence
-            || state.wal.pending_writes != receipt.pending_writes
+        if state.sequence < receipt.durable_sequence
+            || state.wal.pending_writes < receipt.pending_writes
+            || self.pending_sync_count < receipt.pending_sync_count
+            || self.bytes_since_sync < receipt.bytes_since_sync
+            || self.current_epoch != receipt.writer_epoch
+            || state.wal.open_segment() != receipt.segment_id
         {
             let error = MidgeError::Internal(
                 "WAL state changed while a sync receipt awaited commit".to_string(),
@@ -305,9 +333,9 @@ impl WalActor {
             .wal
             .frontiers
             .advance_synced_to(receipt.durable_sequence);
-        state.wal.pending_writes = 0;
-        self.pending_sync_count = 0;
-        self.bytes_since_sync = 0;
+        state.wal.pending_writes -= receipt.pending_writes;
+        self.pending_sync_count -= receipt.pending_sync_count;
+        self.bytes_since_sync -= receipt.bytes_since_sync;
 
         Ok(())
     }

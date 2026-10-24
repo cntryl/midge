@@ -2134,6 +2134,7 @@ mod admission;
 mod writer_groups;
 
 mod floor;
+mod sync_receipts;
 
 struct DurableSyncCountingFile<'a> {
     inner: Box<dyn File + 'a>,

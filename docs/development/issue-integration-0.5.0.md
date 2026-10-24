@@ -506,3 +506,13 @@ release racing wait setup, coherent authority reads with renewal locked, and
 10,000 snapshots across generations sharing a filename. Failpoint test targets
 compile. Existing read-fencing and #341/#342 tests are retained unchanged;
 execution and the named 32-client A/B target/evidence remain pending acceptance.
+
+The #940/#978 receipt prerequisite now records the pre-I/O end offset, actual
+appended sequence, pending counts, epoch and segment. Ticketed completion binds
+the barrier generation and consumes only that captured prefix. It no longer
+uses a writer's later mutable position as evidence for an earlier fsync.
+Active real-writer recovery coverage appends a later unsynced frame between
+fsync and acknowledgement, truncates it, and requires strict recovery of the
+earlier prefix. A rejection matrix covers wrong generation/epoch/segment.
+Failpoint test targets compile without warnings; behavioral execution remains
+pending. This remains synchronous groundwork for the ordered pipeline.

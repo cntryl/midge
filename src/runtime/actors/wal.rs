@@ -202,6 +202,12 @@ enum WalTransitionOperation {
 pub(crate) struct WalSyncReceipt {
     durable_sequence: u64,
     pending_writes: usize,
+    pending_sync_count: usize,
+    bytes_since_sync: usize,
+    end_offset: Option<u64>,
+    writer_epoch: u64,
+    segment_id: u64,
+    generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

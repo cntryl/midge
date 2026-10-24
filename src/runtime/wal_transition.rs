@@ -58,6 +58,10 @@ pub(crate) struct WalSyncTicket {
 }
 
 impl WalSyncTicket {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(generation: u64) -> Self {
         Self { generation }
