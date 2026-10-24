@@ -1,5 +1,8 @@
 //! Completed startup work, independent of benchmark or runtime policy.
 
+#[cfg(test)]
+mod tests;
+
 use std::time::{Duration, Instant};
 
 const BYTE_QUANTUM: u64 = 64 * 1024;

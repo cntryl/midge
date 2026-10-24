@@ -2896,21 +2896,6 @@ pub(super) fn run_journal_recovery_watchdog_fixture(ctx: &mut StressContext) {
     dead_code,
     reason = "Only the watchdog integration target calls this fixture"
 )]
-pub(super) fn run_recovery_listener_fixture(ctx: &mut StressContext) {
-    let progress = ctx.progress_handle();
-    let listener_units = ctx.measure("recovery listener isolation", || {
-        let before = progress.completed_units();
-        recovery_progress::assert_listener_isolation(&progress);
-        progress.completed_units() - before
-    });
-    ctx.metadata("fixture_listener_progress_units", listener_units);
-}
-
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "Only the watchdog integration target calls this fixture"
-)]
 fn watchdog_fixture_operation(
     growth: &mut std::fs::File,
     attempt: u64,

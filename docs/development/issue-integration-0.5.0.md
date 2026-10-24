@@ -876,3 +876,12 @@ Active tests cover floor/prewarm separation, pin/intent/pending-job protection,
 malformed references, bounded page tails, replacement identity and rediscovery.
 Combined test targets compile; execution/crash/provider gates remain pending.
 Catalog-anchor WAL rediscovery is the next isolated slice.
+
+#979 adds five active default-Cargo progress regressions through existing real
+remote-WAL, manifest-authoritative HEAD and journal recovery fixtures. Held or
+failed transport cannot earn completed-work credit. The existing listener's
+caller/thread/generation scopes now run against real replay, including nested
+non-recovery scope restoration; uninvoked synthetic event helpers are removed.
+`cargo check --locked --all-targets --features failpoints,stress-soak` passes
+cleanly (latest 3.13s). Behavioral execution and mutation red evidence remain
+pending; the PROG rows will be refreshed at this test checkpoint.

@@ -214,9 +214,11 @@ mod tests {
         // SST bytes. Re-encoding it must preserve its exact logical contents.
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/compatibility/v9_populated_v5_sst_db");
-        let manifest: crate::metadata::Manifest =
-            decode(MANIFEST, &std::fs::read(fixture.join("manifest.snapshot.json")).unwrap())
-                .unwrap();
+        let manifest: crate::metadata::Manifest = decode(
+            MANIFEST,
+            &std::fs::read(fixture.join("manifest.snapshot.json")).unwrap(),
+        )
+        .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let fs = crate::io::real::test_root(directory.path());
         crate::metadata::format::ensure_or_create_format_marker(&fs, directory.path()).unwrap();

@@ -15,7 +15,7 @@ pub mod journal;
 mod key_bounds;
 pub mod manifest;
 pub mod persistence;
-#[cfg(feature = "internal-testing")]
+#[cfg(any(test, feature = "internal-testing"))]
 #[doc(hidden)]
 pub(crate) mod recovery_progress_fixture;
 pub(crate) mod store;
