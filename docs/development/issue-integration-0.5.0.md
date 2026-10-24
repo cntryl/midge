@@ -14,6 +14,50 @@ test returned `precondition failed: remote SST version changed` in
 This is a baseline observation, not a reproduced or diagnosed integration
 defect. Preserve it when interpreting broad validation.
 
+## Current review boundary
+
+The implementation-first batch now contains the approved runtime candidates
+for the 0.5.0 issues. The chronological notes below retain earlier partial
+checkpoints; their older "pending implementation" descriptions are superseded
+by the later slices and the final invariant-evidence map. No issue is closed
+by a local commit, and the batch has not been pushed or opened as a PR.
+
+The final runtime/test source checkpoint is
+`0bb7f09df6eaadd92ebba6870434acc30ba3a69d`. Following evidence-map and tracking
+commits are documentation only. Validation at that source checkpoint:
+
+- `cargo fmt --check`: passed.
+- `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic`:
+  passed with zero warnings.
+- `cntryl-tools validate-tests`: 4,495 declarations compliant, zero structure
+  violations. This is source validation, not 4,495 executed tests.
+- `cargo check --locked --manifest-path fuzz/Cargo.toml --bins`: passed;
+  the two metadata replay targets report an unused shared fixture helper.
+- Active behavioral regressions and measurements added during the
+  implementation-first pass remain unexecuted.
+
+The implementation retains Midge's ordered whole-unit applied prefix, exact
+WAL durable floors, storage-enforced epoch fencing and conservative physical
+reclamation. Provider-duration metadata serialization is replaced by exact
+owned captures and conditional pointer publication. Both resident and spilled
+validation use the existing detached read stage; spill append/apply remains a
+drained compatibility barrier. Flush and compaction names share an independently
+prefetched durable cursor, and disjoint moves preserve immutable SST identity.
+
+The remaining milestone obligations are review and evidence, plus explicitly
+gated decisions. #904 has accounting preparation while its weaker floor cadence
+remains unapproved and unimplemented. #939 consumes the commit-path measurements
+before its design decision; it has no speculative production sharding change.
+The absolute #929 matrix, #937 provider runs, relative A/B targets, runtime/crash
+regressions, assurance compute budgets and Sqrzl requalification remain due.
+Conditional #916 interval and #918 hash-index choices require measurements.
+Deferred #922/#925/#928/#958 retain their existing gates.
+
+Formatting, type/lint checks, source-map consistency and test-structure checks
+are implementation checks. They do not establish a runtime pass, latency bound,
+crash outcome or release qualification. Earlier executed results in this log
+apply to their recorded slice/source, not the completed aggregate branch.
+
 ## Working rules
 
 - On 2026-10-24 the user requested an implementation-first pass over every
@@ -1007,3 +1051,41 @@ ownership. No fixed large budget increase or per-key proof cache is accepted.
 The compaction cursor must consume a name once, retain it across provider wait,
 and restart beyond the durable exclusive bound without changing WAL epoch
 semantics. Neither gap is represented as completed or qualified here.
+
+Those two remaining runtime gaps are now coded. #911 shares a per-family
+prefetched durable name cursor across flush and compaction, preserving the
+accepted generation/deadline through reservation and short-turn contention.
+#946 streams resident/spilled SST validation through the existing worker;
+decoded fields retain real reservations, range traversal is bounded, and
+constant-size TTL/error summaries are revalidated against the exact live cut
+and source generations. The moved source keeps its original transaction pool
+and disk ownership rather than being charged again against the 8MiB capture
+queue. One consumed-completion workspace prevents aggregate decoder buildup.
+Five decoder and thirteen dependent active regressions cover budget/corruption,
+conflict/insert/assert/range, TTL/error order, deadlines, epoch loss, flush,
+restart and legal large sources. Execution remains deferred.
+
+Final #910 integration charges captures and cold selected-metadata reads to the
+existing shared maintenance pool, retains physical PUT/GET charges after caller
+timeout, and reuses exact staged object identity for small-pool lost-CAS
+readback. Selected `ManifestPublished` receipts authorize an intent clear;
+`OutputDurable` alone does not. Temporary memory/count admission retains exact
+flush/compaction ownership and the original absolute deadline. The requested
+gate-deferral counter and a labeled CloudSimulated compaction-backpressure row
+are implemented. Independent-flush fixtures now cover held PUT, duplicate/lost
+successful CAS callbacks and cold recovery before release, excluding exact
+unselected output names from recovered authority. A process-kill campaign and
+actual latency/provider results remain separate outstanding evidence.
+
+The final full issue audit found no further clearly missing approved runtime
+behavior. Explicit recovery-contract and measurement gates remain as stated
+above. Live #911/#946 now describe their candidates and keep their issues OPEN.
+
+Final static validation made single-invariant test names and setup/action/assert
+boundaries explicit without removing atomic proof assertions. The last #910
+correction prunes obsolete receipt accounting before any new byte admission:
+a last source dropped under a read-only registry guard cannot leave the next
+capture blocked by already-finished ownership. Two active tests cover capture
+and selected-body admission in exactly one-cut-sized pools. The invariant map
+refresh uses the final source checkpoint, including those tests and renamed
+proofs; its links and hashes establish source traceability, not execution.
