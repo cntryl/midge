@@ -38,6 +38,21 @@ proptest! {
     }
 }
 
+#[test]
+fn should_preserve_compaction_contract_when_replaying_expiration_regression_seed() {
+    // Arrange: preserved proptest seed ed843532a3dc372428651b6e436d64226.
+    let data = [
+        117, 0, 0, 0, 208, 0, 0, 7, 0, 0, 53, 0, 0, 0, 0, 0, 0, 0, 0, 0, 76, 0, 0, 0, 0, 0, 217,
+        33, 0, 154, 0, 55, 7, 0, 7, 0, 15, 0, 180, 0, 0, 98, 0, 45, 7, 1, 7, 1, 76, 0, 0, 0, 0, 0,
+        70, 0, 28, 87, 1, 123, 34, 0, 0, 0, 0, 0, 94, 1, 160, 0, 0, 0, 0, 0, 25, 68,
+    ];
+
+    // Act: replay every real commit, compaction and recovery.
+    // Assert: the driver checks the BTreeMap history at each step; the
+    // production plan validator remains enabled.
+    run_history(&data);
+}
+
 /// The fuzz corpus seeds decode into histories that between them reach every
 /// kind of step, and each runs clean.
 #[test]

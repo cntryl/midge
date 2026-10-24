@@ -339,3 +339,150 @@ fn should_preserve_timeout_when_admitted_pinned_range_readback_exhausts_deadline
     );
     Ok(())
 }
+
+#[derive(Clone, Copy)]
+enum ReceiptFault {
+    None,
+    WrongChecksum,
+    Missing,
+    TransientBeforeWrite,
+    LostResponseAfterWrite,
+}
+
+struct ReceiptPublication {
+    inner: MockCloudBackend,
+    fault: ReceiptFault,
+    attempts: std::sync::atomic::AtomicUsize,
+}
+
+impl CloudReadCapability for ReceiptPublication {
+    crate::storage::cloud::forward_cloud_backend!(inner;
+        submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
+
+impl CloudWriteCapability for ReceiptPublication {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+
+    fn write_with_receipt(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        use crate::storage::cloud::CloudError;
+        let first = self.attempts.fetch_add(1, Ordering::AcqRel) == 0;
+        if first && matches!(self.fault, ReceiptFault::TransientBeforeWrite) {
+            callback
+                .send(CloudEvent::PutReceipt {
+                    key: key.into(),
+                    result: Err(CloudError::ServerError("injected 503".into())),
+                })
+                .unwrap();
+            return;
+        }
+        let checksum = crc32c::crc32c(&bytes);
+        let (tx, rx) = mpsc::channel();
+        self.inner.submit_put(key, bytes, options.headers, tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CloudEvent::Put { result: Ok(()), .. }
+        ));
+        if first && matches!(self.fault, ReceiptFault::LostResponseAfterWrite) {
+            callback
+                .send(CloudEvent::PutReceipt {
+                    key: key.into(),
+                    result: Err(CloudError::Transport("injected lost response".into())),
+                })
+                .unwrap();
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.inner.submit_head(key, tx);
+        let CloudEvent::Head {
+            result: Ok(metadata),
+            ..
+        } = rx.recv().unwrap()
+        else {
+            panic!("written object must have an identity");
+        };
+        let receipt = (!matches!(self.fault, ReceiptFault::Missing)).then_some(
+            crate::storage::StorageWriteReceipt {
+                metadata,
+                content_crc32c: checksum
+                    ^ u32::from(matches!(self.fault, ReceiptFault::WrongChecksum)),
+            },
+        );
+        callback
+            .send(CloudEvent::PutReceipt {
+                key: key.into(),
+                result: Ok(receipt),
+            })
+            .unwrap();
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for ReceiptPublication {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for ReceiptPublication {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl CloudHeadCapability for ReceiptPublication {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl CloudBackend for ReceiptPublication {}
+
+#[test]
+fn should_reconcile_immutable_publication_when_receipts_cover_the_exact_source_identity(
+) -> MidgeResult<()> {
+    for fault in [
+        ReceiptFault::None,
+        ReceiptFault::WrongChecksum,
+        ReceiptFault::Missing,
+        ReceiptFault::TransientBeforeWrite,
+        ReceiptFault::LostResponseAfterWrite,
+    ] {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let bytes = vec![7; 256 * 1024];
+        std::fs::write(directory.path().join("source"), &bytes)?;
+        let backend = Arc::new(ReceiptPublication {
+            inner: MockCloudBackend::new(),
+            fault,
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut storage = HybridStorage::with_policy(
+            Arc::new(CloudStorage::new(backend.clone(), String::new())),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        );
+        storage.set_immutable_retry_policy(crate::storage::cloud::CloudRetryPolicy {
+            max_retries: 2,
+            base_delay: Duration::ZERO,
+        });
+        let budget = ResourceBudget::new(4 * 1024 * 1024);
+
+        // Act
+        let result = publish_source(&storage, "sst/receipt", directory.path(), &bytes, &budget);
+
+        // Assert
+        if matches!(fault, ReceiptFault::WrongChecksum) {
+            assert!(matches!(result, Err(MidgeError::Corruption(_))));
+        } else {
+            assert!(result.is_ok(), "{:?}", result.err());
+        }
+        assert_eq!(backend.inner.get_uploads().len(), 1);
+        let readback = matches!(
+            fault,
+            ReceiptFault::Missing | ReceiptFault::LostResponseAfterWrite
+        );
+        assert_eq!(!backend.inner.get_range_downloads().is_empty(), readback);
+        let attempts = 1 + usize::from(matches!(fault, ReceiptFault::TransientBeforeWrite));
+        assert_eq!(backend.attempts.load(Ordering::Acquire), attempts);
+        assert_eq!(budget.used(), 0);
+    }
+    Ok(())
+}

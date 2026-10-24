@@ -24,6 +24,8 @@ pub(super) struct ValidationSnapshots<'a> {
     state: &'a RuntimeState,
     /// The event loop's reader and block caches, when running under it.
     resources: Option<Arc<crate::runtime::read_resources::ReadResources>>,
+    overlay: Option<&'a super::StagedWriteOverlay>,
+    proof: Option<&'a super::CommitValidationProof>,
     by_cf: std::collections::HashMap<
         crate::types::ColumnFamilyId,
         Option<crate::runtime::ReadSnapshot>,
@@ -38,7 +40,32 @@ impl<'a> ValidationSnapshots<'a> {
         Self {
             state,
             resources,
+            overlay: None,
+            proof: None,
             by_cf: std::collections::HashMap::new(),
+        }
+    }
+
+    pub(super) fn with_overlay(
+        state: &'a RuntimeState,
+        resources: Option<Arc<crate::runtime::read_resources::ReadResources>>,
+        overlay: &'a super::StagedWriteOverlay,
+    ) -> Self {
+        Self {
+            overlay: Some(overlay),
+            ..Self::new(state, resources)
+        }
+    }
+
+    pub(super) fn with_proof(
+        state: &'a RuntimeState,
+        resources: Option<Arc<crate::runtime::read_resources::ReadResources>>,
+        overlay: &'a super::StagedWriteOverlay,
+        proof: Option<&'a super::CommitValidationProof>,
+    ) -> Self {
+        Self {
+            proof,
+            ..Self::with_overlay(state, resources, overlay)
         }
     }
 
@@ -66,7 +93,7 @@ impl WalActor {
             let Some((key, sequence)) = point else {
                 continue;
             };
-            if !batch_pairs.insert((cf_id, key.to_vec(), sequence)) {
+            if !batch_pairs.insert((cf_id, key, sequence)) {
                 return Err(MidgeError::Corruption(format!(
                     "duplicate memtable key/sequence pair for column family {cf_id} at sequence {sequence}"
                 )));
@@ -187,13 +214,13 @@ impl WalActor {
         ops: &[crate::runtime::TransactionOp],
         start_sequence: u64,
     ) -> MidgeResult<()> {
-        let mut checked_keys: HashSet<(crate::types::ColumnFamilyId, Vec<u8>)> = HashSet::new();
+        let mut checked_keys: HashSet<(crate::types::ColumnFamilyId, &[u8])> = HashSet::new();
 
         for op in ops {
             match op {
                 crate::runtime::TransactionOp::Put { cf_id, key, .. }
                 | crate::runtime::TransactionOp::Delete { cf_id, key } => {
-                    let dedupe_key = (*cf_id, key.to_vec());
+                    let dedupe_key = (*cf_id, key.as_ref());
                     if !checked_keys.insert(dedupe_key) {
                         continue;
                     }
@@ -279,10 +306,10 @@ impl WalActor {
         assertions: &[crate::runtime::KeyAssertion],
         start_sequence: u64,
     ) -> MidgeResult<()> {
-        let mut checked_keys: HashSet<(crate::types::ColumnFamilyId, Vec<u8>)> = HashSet::new();
+        let mut checked_keys: HashSet<(crate::types::ColumnFamilyId, &[u8])> = HashSet::new();
 
         for assertion in assertions {
-            let dedupe_key = (assertion.cf_id, assertion.key.to_vec());
+            let dedupe_key = (assertion.cf_id, assertion.key.as_ref());
             if !checked_keys.insert(dedupe_key) {
                 continue;
             }
@@ -294,17 +321,17 @@ impl WalActor {
                 )));
             }
 
-            if let Some(snapshot) = snapshots.get(assertion.cf_id) {
-                if let Some(latest_seq) = snapshot.latest_state_sequence(&assertion.key)? {
-                    if latest_seq > start_sequence {
-                        state
-                            .diagnostics
-                            .record(crate::telemetry::Metrics::record_write_conflict_point);
-                        return Err(MidgeError::WriteConflict(format!(
+            if let Some(latest_seq) =
+                Self::latest_key_sequence(snapshots, assertion.cf_id, &assertion.key)?
+            {
+                if latest_seq > start_sequence {
+                    state
+                        .diagnostics
+                        .record(crate::telemetry::Metrics::record_write_conflict_point);
+                    return Err(MidgeError::WriteConflict(format!(
                             "assertion conflict on cf {} for key {:?}: latest seq {latest_seq} > tx start {start_sequence}",
                             assertion.cf_id, assertion.key
                         )));
-                    }
                 }
             }
 
@@ -331,6 +358,15 @@ impl WalActor {
         cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
     ) -> MidgeResult<Option<u64>> {
+        if let Some(sequence) = snapshots
+            .overlay
+            .and_then(|overlay| overlay.latest_key_sequence(cf_id, key))
+        {
+            return Ok(Some(sequence));
+        }
+        if let Some(proof) = snapshots.proof {
+            return proof.point(cf_id, key).map(|point| point.sequence);
+        }
         let Some(snapshot) = snapshots.get(cf_id) else {
             return Ok(None);
         };
@@ -343,30 +379,24 @@ impl WalActor {
         resources: Option<&Arc<crate::runtime::read_resources::ReadResources>>,
     ) -> Option<crate::runtime::ReadSnapshot> {
         let cf_state = state.column_families.get(&cf_id)?;
-        let sst_files: Vec<_> = state
-            .manifest
-            .files
-            .iter()
-            .filter(|f| f.cf_id == cf_id)
-            .cloned()
-            .collect();
+        let sst_view = state.manifest.read_view_for(cf_id);
 
         let sst_path_prefix = std::path::PathBuf::from(crate::sst::fs::SST_DIR);
 
         // Read through the event loop's reader and block caches when given,
         // so validating many ops opens each SST once (#492). Without them
         // (tests only) the snapshot opens readers directly.
-        let mut snapshot = crate::runtime::ReadSnapshot::new_with_resources(
+        let snapshot = crate::runtime::ReadSnapshot::new_with_view_resources(
+            cf_id,
             cf_state.memtable.clone(),
             cf_state.immutable_memtables.clone(),
-            sst_files,
+            sst_view,
             Arc::clone(state.recovery_sst_fs.as_ref().unwrap_or(&state.fs)),
             sst_path_prefix,
             state.is_memory_mode(),
             state.observed_time_millis(),
             resources.cloned(),
         );
-        snapshot.cf_id = cf_id;
         #[cfg(test)]
         ASSERTION_SNAPSHOT_BUILD_COUNT.with(|count| count.set(count.get().saturating_add(1)));
         Some(snapshot)
@@ -389,6 +419,16 @@ impl WalActor {
         end_key: &[u8],
         threshold: u64,
     ) -> MidgeResult<Option<u64>> {
+        if let Some(sequence) = snapshots
+            .overlay
+            .and_then(|overlay| overlay.latest_range_sequence(cf_id, start_key, end_key))
+            .filter(|sequence| *sequence > threshold)
+        {
+            return Ok(Some(sequence));
+        }
+        if let Some(proof) = snapshots.proof {
+            return proof.range(cf_id, start_key, end_key);
+        }
         let Some(snapshot) = snapshots.get(cf_id) else {
             return Ok(None);
         };
@@ -460,6 +500,16 @@ impl WalActor {
         cf_id: crate::types::ColumnFamilyId,
         key: &[u8],
     ) -> MidgeResult<bool> {
+        if let Some(exists) = snapshots.overlay.and_then(|overlay| {
+            overlay.key_exists(cf_id, key, snapshots.state.observed_time_millis())
+        }) {
+            return Ok(exists);
+        }
+        if let Some(proof) = snapshots.proof {
+            return proof
+                .point(cf_id, key)
+                .map(|point| point.exists_at(snapshots.state.observed_time_millis()));
+        }
         let Some(snapshot) = snapshots.get(cf_id) else {
             return Ok(false);
         };
@@ -499,7 +549,10 @@ impl WalActor {
             cf_state.active_memtable_started_in_segment = open_segment;
             cf_state.active_memtable_started_at_wal_bytes = appended_bytes;
         }
-        state.recompute_total_memtable_bytes();
+        state.total_memtable_bytes = state
+            .total_memtable_bytes
+            .saturating_sub(prev)
+            .saturating_add(new);
         Ok(())
     }
 
@@ -528,7 +581,10 @@ impl WalActor {
             cf_state.active_memtable_started_in_segment = open_segment;
             cf_state.active_memtable_started_at_wal_bytes = appended_bytes;
         }
-        state.recompute_total_memtable_bytes();
+        state.total_memtable_bytes = state
+            .total_memtable_bytes
+            .saturating_sub(prev)
+            .saturating_add(new);
         state.record_delete_range(cf_id, start_key, end_key, sequence);
         Ok(())
     }

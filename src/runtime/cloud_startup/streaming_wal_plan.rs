@@ -22,7 +22,7 @@ use crate::wal::planner::{
 use crate::wal::recovery::streaming::{
     inspect_sealed_wal_file, inspect_wal_file, max_verified_suffix_sequence, StreamingReplayLimits,
 };
-use crate::wal::recovery::ReplaySegments;
+use crate::wal::recovery::{open_tail_action, ReplayErrorAction, ReplayPolicy, ReplaySegments};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -395,7 +395,9 @@ fn probe_open_member(
         Err(error) => return classify(error),
     };
     let len = file.len().map_err(FsError::into_midge)?;
-    let (prefix, end) = match inspect_wal_file(file.as_ref(), &path, limits) {
+    let inspected = inspect_wal_file(file.as_ref(), &path, limits)
+        .and_then(|prefix| prefix.require_sync_floor(durable_bytes));
+    let (prefix, end) = match inspected {
         Ok(prefix) => (prefix, OpenEnd::Whole),
         Err(failure)
             if matches!(
@@ -405,46 +407,43 @@ fn probe_open_member(
         {
             return Err(failure.error().replay())
         }
-        Err(failure)
-            if failure.is_incomplete_tail()
-                && durable_bytes
-                    .is_none_or(|bytes| failure.verified_prefix().valid_bytes as u64 >= bytes) =>
-        {
-            (failure.verified_prefix(), OpenEnd::Torn)
-        }
-        Err(failure)
-            if failure.error().is_salvageable()
-                && durable_bytes
-                    .is_some_and(|bytes| failure.verified_prefix().valid_bytes as u64 >= bytes) =>
-        {
-            (failure.verified_prefix(), OpenEnd::Torn)
-        }
-        Err(failure) if failure.error().is_salvageable() => {
-            let prefix = failure.verified_prefix();
-            let suffix_max = if policy == RecoveryPolicy::Salvage {
-                max_verified_suffix_sequence(
-                    file.as_ref(),
-                    &path,
-                    prefix.valid_bytes as u64,
-                    limits,
-                )?
-                .unwrap_or(0)
-            } else {
-                0
-            };
-            (
-                prefix,
-                OpenEnd::Damaged {
-                    reason: failure.error().to_string(),
-                    suffix_max,
-                },
-            )
-        }
         Err(failure) => {
-            return Err(MidgeError::RecoveryFailed(format!(
-                "active WAL failed validation: {}",
-                failure.error()
-            )))
+            let prefix = failure.verified_prefix();
+            let replay_policy = match policy {
+                RecoveryPolicy::Strict => ReplayPolicy::Strict,
+                RecoveryPolicy::Salvage => ReplayPolicy::SalvageValidPrefix,
+            };
+            match open_tail_action(
+                durable_bytes,
+                prefix.valid_bytes as u64,
+                failure.is_incomplete_tail(),
+                failure.error(),
+                replay_policy,
+            ) {
+                ReplayErrorAction::TolerateFinalActiveTail => (prefix, OpenEnd::Torn),
+                ReplayErrorAction::SalvageVerifiedPrefix => {
+                    let suffix_max = max_verified_suffix_sequence(
+                        file.as_ref(),
+                        &path,
+                        prefix.valid_bytes as u64,
+                        limits,
+                    )?
+                    .unwrap_or(0);
+                    (
+                        prefix,
+                        OpenEnd::Damaged {
+                            reason: failure.error().to_string(),
+                            suffix_max,
+                        },
+                    )
+                }
+                ReplayErrorAction::Fail => {
+                    return Err(MidgeError::RecoveryFailed(format!(
+                        "active WAL failed validation: {}",
+                        failure.error()
+                    )))
+                }
+            }
         }
     };
     let Some(scan) = prefix.scan.as_ref() else {

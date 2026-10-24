@@ -31,6 +31,22 @@ impl FsLocation {
         super::read_all(self.fs.as_ref(), &self.path)
     }
 
+    pub(crate) fn read_exact_size(&self, expected: u64) -> FsResult<Bytes> {
+        let file = self.fs.open(&self.path, super::OpenOptions::READ_ONLY)?;
+        if file.len()? != expected {
+            return Err(super::FsError::Corruption(
+                "upload source size changed".into(),
+            ));
+        }
+        let bytes = file.read_at(0, expected)?;
+        if bytes.len() as u64 != expected || file.len()? != expected {
+            return Err(super::FsError::Corruption(
+                "upload source size changed during read".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub(crate) fn len(&self) -> FsResult<u64> {
         self.fs.metadata(&self.path).map(|metadata| metadata.len)
     }

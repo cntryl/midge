@@ -102,6 +102,8 @@ pub(crate) struct HybridQueueLimits {
     pub(crate) upload_entries: usize,
     pub(crate) upload_bytes: u64,
     pub(crate) worker_entries: usize,
+    pub(crate) worker_concurrency: usize,
+    pub(crate) upload_memory_bytes: usize,
     pub(crate) event_entries: usize,
     pub(crate) event_bytes: usize,
     pub(crate) prune_workers: usize,
@@ -116,6 +118,8 @@ impl Default for HybridQueueLimits {
             upload_entries: MAX_PENDING_WAL_UPLOADS,
             upload_bytes: MAX_PENDING_WAL_UPLOAD_BYTES,
             worker_entries: WAL_UPLOAD_WORKER_QUEUE_CAPACITY,
+            worker_concurrency: 4,
+            upload_memory_bytes: 256 * 1024 * 1024,
             event_entries: MAX_PENDING_STORAGE_EVENTS,
             event_bytes: MAX_PENDING_STORAGE_EVENT_BYTES,
             prune_workers: MAX_CONCURRENT_PRUNE_WORKERS,
@@ -298,6 +302,8 @@ impl BoundedEventQueue {
                 StorageOutcome::Err(error) => error.message().len(),
             },
             StorageEvent::CloudAck { .. }
+            | StorageEvent::CloudWalPublicationComplete { .. }
+            | StorageEvent::CloudMetadataMirrorComplete { .. }
             | StorageEvent::BackpressureOn
             | StorageEvent::BackpressureOff => 0,
         };

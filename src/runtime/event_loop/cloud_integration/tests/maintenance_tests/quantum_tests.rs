@@ -222,17 +222,77 @@ fn should_join_owned_wal_retirement_head_before_acknowledging_shutdown(
     // Arrange: hold one already-admitted target HEAD open. Its worker owns the
     // publication gate before shutdown begins, so it must retain that ownership
     // until the provider completes rather than being detached at shutdown.
-    let (mut el, _worker, _) = cloud_debt_with_wal_records(1, WAL_DEBT_RECORDS)?;
     let (read_started, started) = crossbeam::channel::bounded(1);
     let (release, read_release) = crossbeam::channel::bounded(1);
+    let (shutdown_started, shutdown_entered) = crossbeam::channel::bounded(1);
+    let (response_sent, response_ready) = crossbeam::channel::bounded(1);
+    let (begin_shutdown, shutdown_release) = crossbeam::channel::bounded(1);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let control = RetirementShutdownControl {
+        read_started,
+        read_release,
+        shutdown_started,
+        response_sent,
+        shutdown_release,
+        calls: Arc::clone(&calls),
+    };
+    let shutdown = std::thread::spawn(move || run_owned_retirement_shutdown(control));
+    let response = response_ready
+        .recv_timeout(Duration::from_secs(10))
+        .expect("shutdown fixture initialized");
+    started
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the owned retirement entered its target HEAD");
+    begin_shutdown
+        .send(())
+        .expect("allow shutdown after HEAD admission");
+
+    // Act: the negative receive is bounded coordination with a deliberately
+    // held provider callback, not an assertion about provider throughput.
+    shutdown_entered
+        .recv_timeout(Duration::from_secs(1))
+        .expect("shutdown entered the owned preflight join");
+    let premature_response = response.recv_timeout(Duration::from_millis(100));
+    release.send(()).expect("finish the owned provider read");
+    let (outcome, worker_reaped) = shutdown.join().expect("shutdown joined owned workers")?;
+
+    // Assert: Engine may release its lease only after the owner returns.
+    assert!(matches!(
+        premature_response,
+        Err(crossbeam::channel::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(outcome, crate::runtime::event_loop::HandleOutcome::Break);
+    assert!(matches!(
+        response.try_recv(),
+        Ok(RuntimeResponse::Ok { request_id: 91_204 })
+    ));
+    assert!(calls.load(Ordering::Acquire) > 0);
+    assert!(worker_reaped);
+    Ok(())
+}
+
+struct RetirementShutdownControl {
+    read_started: crossbeam::channel::Sender<()>,
+    read_release: crossbeam::channel::Receiver<()>,
+    shutdown_started: crossbeam::channel::Sender<()>,
+    response_sent: crossbeam::channel::Sender<crossbeam::channel::Receiver<RuntimeResponse>>,
+    shutdown_release: crossbeam::channel::Receiver<()>,
+    calls: Arc<AtomicUsize>,
+}
+
+fn run_owned_retirement_shutdown(
+    control: RetirementShutdownControl,
+) -> crate::common::MidgeResult<(crate::runtime::event_loop::HandleOutcome, bool)> {
+    // Construct, run, and destroy thread-bound roots on the owning thread.
+    let (mut el, _worker, _) = cloud_debt_with_wal_records(1, WAL_DEBT_RECORDS)?;
     let cloud = Arc::new(SlowWalRanges {
         inner: Arc::new(crate::storage::filesystem::FileSystem::new(
             el.state.db_path.join("cloud_store"),
         )?),
-        calls: Arc::new(AtomicUsize::new(0)),
+        calls: control.calls,
         pause: Some(Arc::new(FirstWalRangePause {
-            started: read_started,
-            release: read_release,
+            started: control.read_started,
+            release: control.read_release,
             claimed: std::sync::atomic::AtomicBool::new(false),
         })),
     });
@@ -248,46 +308,25 @@ fn should_join_owned_wal_retirement_head_before_acknowledging_shutdown(
         .compaction_actor
         .set_execution_limits(1024 * 1024, 1024 * 1024);
     el.state.set_compaction_enabled(false);
-    el.prune_cloud_wal_segments_covered_by_manifest();
-    started
-        .recv_timeout(Duration::from_secs(1))
-        .expect("the owned retirement entered its target HEAD");
-    assert!(el.actors.cloud_coordinator.cloud_wal_prune_worker.is_some());
-    assert!(el.publication.publication_gate.is_active());
     let request_id = 91_204;
     let response = el.routing.router.register(request_id, "Shutdown");
-    let (shutdown_started, shutdown_entered) = crossbeam::channel::bounded(1);
-
-    // Act: the negative receive is bounded coordination with a deliberately
-    // held provider callback, not an assertion about provider throughput.
-    let shutdown = std::thread::spawn(move || {
-        EventLoop::set_cloud_wal_prune_join_hook_for_test(move || {
-            let _ = shutdown_started.send(());
-        });
-        let outcome = el.handle_shutdown(Some(request_id));
-        (outcome, el)
+    control
+        .response_sent
+        .send(response)
+        .expect("report initialized fixture");
+    el.prune_cloud_wal_segments_covered_by_manifest();
+    assert!(el.actors.cloud_coordinator.cloud_wal_prune_worker.is_some());
+    assert!(el.publication.publication_gate.is_active());
+    control
+        .shutdown_release
+        .recv_timeout(Duration::from_secs(5))
+        .expect("HEAD admitted before shutdown");
+    EventLoop::set_cloud_wal_prune_join_hook_for_test(move || {
+        let _ = control.shutdown_started.send(());
     });
-    shutdown_entered
-        .recv_timeout(Duration::from_secs(1))
-        .expect("shutdown entered the owned preflight join");
-    let premature_response = response.recv_timeout(Duration::from_millis(100));
-    release.send(()).expect("finish the owned provider read");
-    let (outcome, el) = shutdown.join().expect("shutdown joined owned workers");
-
-    // Assert: Engine may release its lease only after this event loop returns.
-    // An already-owned read must finish before that return and its final ack.
-    assert!(matches!(
-        premature_response,
-        Err(crossbeam::channel::RecvTimeoutError::Timeout)
-    ));
-    assert_eq!(outcome, crate::runtime::event_loop::HandleOutcome::Break);
-    assert!(matches!(
-        response.try_recv(),
-        Ok(RuntimeResponse::Ok {
-            request_id: response_id
-        }) if response_id == request_id
-    ));
-    assert!(cloud.calls.load(Ordering::Acquire) > 0);
-    assert!(el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none());
-    Ok(())
+    let outcome = el.handle_shutdown(Some(request_id));
+    Ok((
+        outcome,
+        el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none(),
+    ))
 }

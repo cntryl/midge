@@ -1,13 +1,16 @@
 //! Tier 4 - Compaction write backpressure
 //!
-//! Measures sustained local write throughput while background compaction is enabled.
+//! Measures sustained local and simulated-cloud write throughput with compaction enabled.
 //! The reported throughput is write throughput under compaction pressure, not raw bytes compacted.
 
 #[path = "./stress_config.rs"]
 mod stress_config;
 
 use cntryl_midge::{Engine, MidgeError, WriteOptions};
-use cntryl_stress::{stress, stress_main, LogicalUnit, OperationOutcome, StressContext};
+use cntryl_stress::{
+    stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
+    StressContext,
+};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -151,6 +154,11 @@ fn run_compaction_backpressure_case(
     );
 
     let start = ycsb::capture_runtime_perf_snapshot(&engine);
+    let gate_before = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("capture publication deferrals before measurement")
+        .flush_publication_deferred_by_gate;
     let measured = run_write_phase(
         &engine,
         cf_id,
@@ -161,8 +169,21 @@ fn run_compaction_backpressure_case(
         true,
     );
     let perf = ycsb::runtime_perf_report(&engine, start);
+    let gate_after = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("capture publication deferrals after measurement")
+        .flush_publication_deferred_by_gate;
 
     ctx.parameter("storage_profile", mode);
+    ctx.parameter(
+        "provider_evidence",
+        if mode == "cloud" {
+            "simulated_cloud_no_live_provider"
+        } else {
+            "local_filesystem"
+        },
+    );
     ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter("writers", WRITERS);
     ctx.parameter("write_batch_size", WRITE_BATCH_SIZE);
@@ -186,6 +207,15 @@ fn run_compaction_backpressure_case(
         OperationOutcome::success(measured.writes),
     );
     ycsb::record_runtime_correctness(ctx, &perf);
+    let deferrals = gate_after.saturating_sub(gate_before);
+    let high = u32::try_from(deferrals >> 32).expect("upper counter bits fit u32");
+    let low = u32::try_from(deferrals & u64::from(u32::MAX)).expect("lower counter bits fit u32");
+    ctx.record_observation(
+        "flush_publication_deferred_by_gate",
+        f64::from(high) * 4_294_967_296.0 + f64::from(low),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
 }
 
 #[stress(tier = 4)]
@@ -195,6 +225,16 @@ fn tier4_compaction_write_backpressure_local(ctx: &mut StressContext) {
         "tier4_compaction_write_backpressure_local",
         "local",
         WriteOptions::buffered,
+    );
+}
+
+#[stress(tier = 4)]
+fn tier4_compaction_write_backpressure_cloud_simulated(ctx: &mut StressContext) {
+    run_compaction_backpressure_case(
+        ctx,
+        "tier4_compaction_write_backpressure_cloud_simulated",
+        "cloud",
+        WriteOptions::cloud_async,
     );
 }
 

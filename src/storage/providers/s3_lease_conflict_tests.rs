@@ -276,22 +276,8 @@ fn replace_lease_for_rejection(backend: &MockCloudBackend, key: &str, replace_ow
     else {
         panic!("lease exists before rejection");
     };
-    let generation = uuid::Uuid::new_v4();
-    let objects = [
-        crate::metadata::files::FORMAT,
-        crate::metadata::files::MANIFEST_SNAPSHOT,
-    ]
-    .map(|name| {
-        serde_json::json!({
-            "file_name": name,
-            "object_key": format!("metadata/generations/{generation}/{name}"),
-            "len": 0,
-            "crc32c": 0,
-        })
-    });
-    let pointer = serde_json::json!({"id": 1, "manifest_horizon": 1, "objects": objects});
     let current = String::from_utf8(current).unwrap();
-    assert!(current.contains("metadata: null\n"));
+    assert!(current.starts_with("lease_version: 4\n"));
     let current = if replace_owner {
         current
             .lines()
@@ -308,7 +294,7 @@ fn replace_lease_for_rejection(backend: &MockCloudBackend, key: &str, replace_ow
             .join("\n")
             + "\n"
     } else {
-        current.replace("metadata: null\n", &format!("metadata: {pointer}\n"))
+        current
     };
     let (tx, rx) = std::sync::mpsc::channel();
     backend.submit_put(key, current.into_bytes(), Vec::new(), tx);

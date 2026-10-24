@@ -657,7 +657,7 @@ fn replay_paths(
             );
         };
         let source = frame_reader::source(&*file, &path.path, state.limits);
-        let mut scan = match admit_segment(&source, path, &mut chain) {
+        let mut scan = match admit_segment(&source, path, &mut chain, policy) {
             Ok(scan) => scan,
             Err(error) => {
                 return state.stop_at(storage, paths, (index, 0), policy, error.into());
@@ -688,6 +688,7 @@ fn replay_paths(
                         return state.stop_at(storage, paths, (index, pos), policy, error.into());
                     }
                     progress.completed(next_pos.saturating_sub(pos), 0);
+                    pos = next_pos;
                     break;
                 }
                 Ok(NextWalFrame::Frame(frame)) => frame,
@@ -738,6 +739,7 @@ fn admit_segment(
     source: &crate::wal::frame::FileFrames<'_>,
     path: &ReplayFile,
     chain: &mut Chain,
+    policy: ReplayPolicy,
 ) -> MidgeResult<SegmentScan> {
     let scan = SegmentScan::start(&read_header(source)?)?;
     let file_len = crate::wal::frame::FrameBytes::len(source)?;
@@ -756,7 +758,9 @@ fn admit_segment(
                     "its header {actual:?} is not the ledger's {:?}",
                     member.open
                 ))
-            } else if member.durable_bytes.is_some_and(|bytes| file_len < bytes) {
+            } else if (path.kind == ReplayFileKind::Sealed || policy == ReplayPolicy::Strict)
+                && member.durable_bytes.is_some_and(|bytes| file_len < bytes)
+            {
                 Err("its file is shorter than its persisted fsync boundary".into())
             } else {
                 Ok(())
@@ -838,6 +842,9 @@ impl ReplayState<'_> {
         policy: ReplayPolicy,
     ) -> Option<MidgeResult<()>> {
         let path = &paths[index];
+        if let Err(error) = path.validate_open_end(pos) {
+            return Some(self.stop_at(storage, paths, (index, pos), policy, error.into()));
+        }
         match scan.footer() {
             Some(footer) => {
                 chain.seal(footer.sealed_facts().link);
@@ -869,29 +876,7 @@ impl ReplayState<'_> {
         failure: ReplayFailure,
     ) -> MidgeResult<()> {
         let path = &paths[index];
-        // Only persisted fsync evidence licenses treating corruption as an
-        // unsynced open tail. Never guess from zeros or checksum symptoms.
-        let durable_bytes = match &path.expect {
-            Expectation::Member { member, .. } => member.durable_bytes,
-            Expectation::Published(_) => None,
-        };
-        let action = if path.kind == ReplayFileKind::FinalActive
-            && durable_bytes.is_some_and(|bytes| valid_bytes >= bytes)
-            && failure.error().is_salvageable()
-        {
-            ReplayErrorAction::TolerateFinalActiveTail
-        } else if path.kind == ReplayFileKind::FinalActive
-            && durable_bytes.is_some_and(|bytes| valid_bytes < bytes)
-            && failure.is_incomplete_tail()
-        {
-            if policy == ReplayPolicy::SalvageValidPrefix {
-                ReplayErrorAction::SalvageVerifiedPrefix
-            } else {
-                ReplayErrorAction::Fail
-            }
-        } else {
-            replay_error_action(path, policy, &failure)
-        };
+        let action = replay_error_action(path, policy, &failure, valid_bytes);
         match action {
             ReplayErrorAction::TolerateFinalActiveTail => {
                 tracing::info!(

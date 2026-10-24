@@ -237,16 +237,17 @@ fn should_settle_completed_clear_when_actual_final_receipt_is_delivered_after_de
     Ok(())
 }
 
-fn final_clear_timeout_case() -> MidgeResult<(QueuedEvidence, Vec<ReadEvidence>, PhaseEvidence)> {
+fn final_clear_timeout_case(
+) -> MidgeResult<(QueuedEvidence, Vec<MetadataIoEvidence>, PhaseEvidence)> {
     let mut fixture = BudgetFixture::new()?;
     let (started, response) = fixture.start_manual();
-    // Only the final genuine read should consume the original clock. Keeping
+    // Only the final genuine metadata write consumes the original clock. Keeping
     // prior phases unheld leaves room for the coordinator's durable GC/clear.
     fixture.complete_actual_compute();
     let first = fixture.complete_actual_phase(None);
     assert!(first.error.is_none() && first.completed_at < started + CALLER_BUDGET);
     let final_budget_bound = OperationDeadline::from_start(started, CALLER_BUDGET).remaining();
-    let second = fixture.complete_actual_phase(Some(ReadHold {
+    let second = fixture.complete_actual_phase(Some(MetadataHold {
         phase: CompactionPublishPhase::IntentCleared,
         until: started + CALLER_BUDGET + Duration::from_millis(500),
     }));
@@ -279,7 +280,7 @@ fn final_clear_timeout_case() -> MidgeResult<(QueuedEvidence, Vec<ReadEvidence>,
     let uploads_before = fixture.backend.inner.get_uploads();
     CompactionCoordinator::handle_publication_completion(&mut fixture.el, completion);
     CompactionCoordinator::handle_publication_completion(&mut fixture.el, replay);
-    let reads = fixture.backend.reads.lock().unwrap().clone();
+    let reads = fixture.backend.observations.lock().unwrap().clone();
     assert_eq!(reads.len(), 1);
     assert!(final_budget_bound < CALLER_BUDGET);
     assert!(reads[0].forwarded_at >= started + CALLER_BUDGET);
@@ -294,7 +295,7 @@ fn final_clear_timeout_case() -> MidgeResult<(QueuedEvidence, Vec<ReadEvidence>,
 fn should_keep_typed_timeout_when_actual_final_clear_mirror_exhausts_original_budget(
 ) -> MidgeResult<()> {
     // Arrange: real output/manifest phases leave less than the ordinary I/O cap.
-    // Act: actual final read returns late; replay only that observed error receipt.
+    // Act: the final metadata write returns late; replay its actual error receipt.
     let (evidence, reads, phase) = crate::failpoints::with_read_gate(final_clear_timeout_case)?;
 
     // Assert: safe settled authority and exact row precede error classification.

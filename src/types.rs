@@ -295,8 +295,27 @@ pub struct RuntimeLatencySummaries {
 }
 
 /// Stable operator-facing snapshot of runtime metrics.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RuntimeMetricsSnapshot {
+    /// Durable ledger file sync calls, including failed/unknown attempts.
+    pub wal_ledger_file_sync_attempts: u64,
+    /// Ledger file sync calls which returned success, including checkpoints.
+    pub wal_ledger_file_syncs: u64,
+    /// Durable ledger checkpoint directory sync attempts.
+    pub wal_ledger_directory_sync_attempts: u64,
+    /// Ledger checkpoint directory sync calls which returned success.
+    pub wal_ledger_directory_syncs: u64,
+    /// Successful writer barrier plus ledger file/directory sync calls. This
+    /// excludes segment initialization/repair and other filesystem syncs.
+    pub wal_accounted_syncs: u64,
+    /// Caller time spent in admission slowdown before submission.
+    pub write_slowdown_ns_total: u64,
+    /// Submissions which entered caller-side slowdown.
+    pub write_slowdown_count: u64,
+    /// Encoded background bytes admitted through the shared rate limiter.
+    pub background_rate_limited_bytes: u64,
+    /// Estimated excess bytes assigned to compactable levels.
+    pub estimated_pending_compaction_bytes: u64,
     pub health: EngineHealth,
     pub current_sequence: u64,
     pub active_memtables: usize,
@@ -367,7 +386,7 @@ pub struct RuntimeMetricsSnapshot {
     pub sst_bloom_checks_total: u64,
     /// Checksummed SST data blocks read through the point/range read path.
     pub sst_data_blocks_read_total: u64,
-    /// Immutable flushes waiting for the single worker. Gauge.
+    /// Immutable flushes waiting for an available worker. Gauge.
     pub flush_queue_depth: usize,
     /// Whether any immutable flush is building, built, or publishing. Gauge (zero or one).
     pub flush_inflight: usize,
@@ -379,6 +398,9 @@ pub struct RuntimeMetricsSnapshot {
     pub flush_publish_count: u64,
     pub flush_publish_ns_total: u64,
     pub flush_publish_ns_max: u64,
+    /// Verified flush publication phases first parked behind another local
+    /// publication owner. Re-polls and capture-memory waits are excluded.
+    pub flush_publication_deferred_by_gate: u64,
     pub flush_failures_total: u64,
     pub flush_retries_total: u64,
     pub write_stall_ns_total: u64,
@@ -386,6 +408,12 @@ pub struct RuntimeMetricsSnapshot {
     /// Elapsed nanoseconds in the currently active stall, or zero. Gauge.
     pub write_stall_active_ns: u64,
     pub cloud_async_wal_segments_sealed: u64,
+    /// Bounded remote orphan discovery attempts, including deferred work.
+    pub cloud_orphan_list_attempts: u64,
+    pub cloud_orphan_probes: u64,
+    pub cloud_orphan_delete_attempts: u64,
+    pub cloud_orphan_retained: u64,
+    pub cloud_orphan_inventory_unavailable: u64,
     pub cloud_async_wal_bytes_sealed: u64,
     pub cloud_async_wal_seal_latency_us: u64,
     pub cloud_async_wal_uploads_started: u64,

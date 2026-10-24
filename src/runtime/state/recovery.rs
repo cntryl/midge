@@ -216,6 +216,7 @@ impl RuntimeState {
         let recovered_compaction_output_generation =
             Self::manifest_compaction_output_generation_floor(&manifest)
                 .max(wal_recovery.recovered_sequence);
+        let sst_names = super::SstNameAllocation::recovered(&manifest);
 
         let accounting = crate::metadata::accounting::Owner::new();
         let accounting_medium = if persistence.is_memory() {
@@ -227,6 +228,8 @@ impl RuntimeState {
             #[cfg(test)]
             db_path: db_path.to_path_buf(),
             sequence: wal_recovery.recovered_sequence,
+            applied_sequence: wal_recovery.recovered_sequence,
+            partial_apply_prefix: false,
             compaction_output_generation: recovered_compaction_output_generation,
             transaction: TransactionCoordination {
                 next_id: 0,
@@ -241,7 +244,7 @@ impl RuntimeState {
                 accounting,
                 accounting_medium,
             )),
-            sst_names: super::SstNameAllocation::default(),
+            sst_names,
             recovery_sst_fs: None,
             salvaged_local_ssts: std::collections::HashSet::new(),
             ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),
@@ -277,7 +280,10 @@ impl RuntimeState {
             next_flush_id: 1,
             writer_epoch: 0,
             flush_metrics: super::FlushRuntimeMetrics::default(),
-            write_pressure: WritePressureState { stalled: false },
+            write_pressure: WritePressureState {
+                stalled: false,
+                admission: Arc::default(),
+            },
             total_memtable_bytes: recovered_memtable_bytes,
             recovery_stats: super::RecoveryStats {
                 wal_recovery_records_replayed: wal_recovery.records_replayed,
@@ -1231,6 +1237,24 @@ impl RuntimeState {
 
     /// Replay intent log to recover incomplete mutations
     /// Called during startup to apply any interrupted manifest or durability changes
+    fn replay_sst_move_intent(
+        &self,
+        phase: PublicationPhase,
+        captured: &[crate::metadata::FileMeta],
+        target: u32,
+    ) -> MidgeResult<()> {
+        // The journal alone changes authority. A pre-edit intent retains all
+        // sources; a published intent must already be fully reflected.
+        let reflected =
+            crate::metadata::manifest::validate_sst_move(&self.manifest.files, captured, target)?;
+        if phase == PublicationPhase::ManifestPublished && !reflected {
+            return Err(MidgeError::RecoveryFailed(
+                "published logical SST move has no matching durable edit".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn replay_intent_log(&mut self) -> MidgeResult<()> {
         self.check_startup_scope("intent replay")?;
         if self.intent_log.is_empty() {
@@ -1285,6 +1309,13 @@ impl RuntimeState {
                     manifest_changed |=
                         self.replay_compaction_publish_intent(*phase, removed, added)?;
                 }
+                crate::runtime::IntentLogEntry::MoveSstsPublish {
+                    phase,
+                    captured,
+                    target_level,
+                } => {
+                    self.replay_sst_move_intent(*phase, captured, *target_level)?;
+                }
                 crate::runtime::IntentLogEntry::CompactionApplied { removed, added } => {
                     manifest_changed |= self.replay_compaction_publish_intent(
                         PublicationPhase::ManifestPublished,
@@ -1305,6 +1336,10 @@ impl RuntimeState {
             }
         }
 
+        self.finish_intent_replay(manifest_changed)
+    }
+
+    fn finish_intent_replay(&mut self, manifest_changed: bool) -> MidgeResult<()> {
         if manifest_changed {
             if let Err(error) = self.persist_manifest_checkpoint() {
                 if matches!(error, MidgeError::Timeout(_)) {

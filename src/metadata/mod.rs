@@ -6,6 +6,8 @@ pub(crate) mod accounted_fs;
 pub(crate) mod accounting;
 #[cfg(feature = "internal-testing")]
 pub(crate) mod checkpoint_policy_probe;
+pub(crate) mod cloud_manifest;
+pub(crate) mod codec;
 pub mod files;
 pub mod format;
 pub mod frontiers;
@@ -13,7 +15,7 @@ pub mod journal;
 mod key_bounds;
 pub mod manifest;
 pub mod persistence;
-#[cfg(feature = "internal-testing")]
+#[cfg(any(test, feature = "internal-testing"))]
 #[doc(hidden)]
 pub(crate) mod recovery_progress_fixture;
 pub(crate) mod store;

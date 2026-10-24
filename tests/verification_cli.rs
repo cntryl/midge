@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -19,17 +19,10 @@ fn parse_stdout(output: &Output) -> Value {
 
 fn write_empty_database(path: &Path) {
     std::fs::create_dir_all(path).expect("create database directory");
-    std::fs::write(path.join("FORMAT"), "midge-format-version=8\n").expect("write format marker");
+    std::fs::write(path.join("FORMAT"), "midge-format-version=9\n").expect("write format marker");
     std::fs::write(
         path.join("manifest.json"),
-        serde_json::to_vec_pretty(&json!({
-            "flushed_through": [{"cf_id": 0, "through_sequence": 0}],
-            "files": [],
-            "column_families": [],
-            "next_sst_seqs": {},
-            "edit_checkpoint_id": 0
-        }))
-        .expect("serialize empty manifest"),
+        include_bytes!("fixtures/compatibility/v9_empty_db/manifest.snapshot.json"),
     )
     .expect("write empty manifest");
 }
@@ -80,7 +73,7 @@ fn should_verify_candidate_written_database_when_cli_runs() {
 #[test]
 fn should_emit_v1_json_given_populated_release_fixture_when_midge_verify_runs() {
     // Arrange
-    let path = fixture_path("tests/fixtures/compatibility/v8_populated_v4_sst_db");
+    let path = fixture_path("tests/fixtures/compatibility/v9_populated_v5_sst_db");
     let expected: Value =
         serde_json::from_str(include_str!("fixtures/verification/healthy_v1.json"))
             .expect("parse healthy report golden");
@@ -184,10 +177,10 @@ fn should_emit_v1_storage_error_json_given_missing_database_when_midge_verify_ru
 #[test]
 fn should_emit_v1_corruption_error_json_given_future_format_when_midge_verify_runs() {
     // Arrange
-    let path = fixture_path("tests/fixtures/compatibility/future_v9");
+    let path = fixture_path("tests/fixtures/compatibility/future_v10");
     let output_path = path.to_str().expect("fixture path");
     let expected_message = format!(
-        "Compatibility error: unsupported on-disk format version 9 at '{output_path}'; this build supports versions 8..=8"
+        "Compatibility error: unsupported on-disk format version 10 at '{output_path}'; this build supports versions 9..=9"
     );
     let expected_template = include_str!("fixtures/verification/corruption_error_v1.json").trim();
     let expected: Value = serde_json::from_str(&expected_template.replace(

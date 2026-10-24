@@ -55,6 +55,10 @@ mod factory;
 pub mod gcs;
 #[cfg(feature = "cloud-gcp")]
 mod gcs_resolver;
+#[cfg(all(test, feature = "cloud-all"))]
+mod list_page_contract_tests;
+#[cfg(all(test, feature = "cloud-all"))]
+mod multipart_contract_tests;
 pub(crate) mod preflight;
 #[cfg(all(test, feature = "cloud-all", feature = "sqrzl-tests"))]
 pub mod qualification;
@@ -79,7 +83,7 @@ mod s3_resolver;
     feature = "cloud-azure",
     feature = "cloud-gcp"
 ))]
-mod xml;
+pub(crate) mod xml;
 
 #[cfg(all(test, feature = "cloud-common"))]
 pub(crate) mod test_support {

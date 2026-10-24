@@ -207,8 +207,8 @@ fn copy_fixture(source: &std::path::Path, destination: &std::path::Path) {
 }
 
 #[test]
-fn should_replay_missing_deletion_proof_when_restarting_pre_fix_stuck_history() {
-    // Arrange: real pre-fix bytes, no locally cached WAL or SSTs.
+fn should_reject_unsupported_layout_when_opening_historical_pre_fix_gc_history() {
+    // Arrange: preserve the original pre-FORMAT9 bytes and their stuck prefix.
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     copy_fixture(
@@ -218,28 +218,129 @@ fn should_replay_missing_deletion_proof_when_restarting_pre_fix_stuck_history() 
     );
     let original = catalog(root, false);
     assert_eq!(original.entries().len(), 4);
-    // Act: restart replays WAL state absent from the compacted SST layout.
-    let mut engine = Engine::open(options(root)).unwrap();
-    #[cfg(feature = "internal-testing")]
-    assert_eq!(
-        raw::tombstone_sequences(root, &engine, 2),
-        Vec::<u64>::new()
-    );
-    let data = engine.get_column_family("data").unwrap();
-    let idle = engine.get_column_family("idle").unwrap();
-    assert_value(&engine, data.id(), b"deleted", None);
-    assert_value(&engine, idle.id(), b"idle", Some(b"unflushed"));
-    engine.flush_cf(&data).unwrap();
-    wait_for_retirement(root, &original);
-    engine.shutdown(Duration::from_secs(30)).unwrap();
-    drop(engine);
-    clear_caches(root);
-    let mut recovered = Engine::open(options(root)).unwrap();
+    // Act
+    let Err(error) = Engine::open(options(root)) else {
+        panic!("historical layout must not be silently migrated");
+    };
 
     // Assert
+    assert!(
+        matches!(error, cntryl_midge::MidgeError::LeaseIndeterminate(message)
+            if message.contains("legacy cloud lease layout is unsupported")
+                && message.contains("FORMAT 9"))
+    );
+    assert_eq!(catalog(root, false).entries(), original.entries());
+}
+
+fn current_proof_options(
+    cache: &std::path::Path,
+    store: &cntryl_midge::__internal::simulation::SimulatedObjectStore,
+    clock: &cntryl_midge::__internal::simulation::SimulatedClock,
+) -> OpenOptions {
+    OpenOptions::cloud(
+        cache,
+        cntryl_midge::CloudStorageLocation::new(
+            cntryl_midge::CloudProviderConfig::aws_s3_static(
+                "bucket",
+                "us-east-1",
+                "key",
+                "secret",
+            ),
+            "deletion-proof/",
+        ),
+    )
+    .object_store_for_testing(std::sync::Arc::new(store.process()))
+    .lease_clock_for_testing(std::sync::Arc::new(clock.clone()))
+    .lease_ttl(Duration::from_secs(18))
+    .background_compaction(false)
+    .build()
+    .unwrap()
+}
+
+#[test]
+fn should_replay_deletion_when_cold_restart_has_no_sst_proof() {
+    use cntryl_midge::__internal::simulation::{Schedule, SimulatedClock, SimulatedObjectStore};
+
+    // Arrange: current-format committed WAL is the only deletion proof. The
+    // compacted-history controls separately prove physical tombstone GC;
+    // this legal preimage proves startup cannot infer coverage from absence.
+    let cache = tempfile::tempdir().unwrap();
+    let store = SimulatedObjectStore::new(Schedule::Eager);
+    let clock = SimulatedClock::new();
+    let engine = Engine::open(current_proof_options(cache.path(), &store, &clock)).unwrap();
+    let idle = engine.create_column_family("idle").unwrap();
+    let data = engine.create_column_family("data").unwrap();
+    put(&engine, idle.id(), b"idle", b"unflushed");
+    put(&engine, data.id(), b"deleted", b"old-value");
+    let mut deletion = engine
+        .begin_tx(data.id(), TransactionMode::ReadWrite)
+        .unwrap();
+    deletion.delete(b"deleted".to_vec()).unwrap();
+    deletion.commit(WriteOptions::cloud_strict()).unwrap();
+    assert!(engine
+        .metrics()
+        .get_storage_layout()
+        .unwrap()
+        .levels
+        .iter()
+        .flat_map(|level| &level.files)
+        .all(|file| file.cf_id != data.id()));
+    let image = store.image();
+    let original = WalPublicationCatalog::decode(
+        &image.objects["deletion-proof/wal/publication-catalog.v1.json"],
+    )
+    .unwrap();
+    assert!(original.entries().len() >= 3);
+    let recovered_store = SimulatedObjectStore::from_image(Schedule::Eager, &image);
+    drop(engine);
+    clock.advance(Duration::from_secs(36));
+    let fresh_cache = tempfile::tempdir().unwrap();
+
+    // Act: the independent image excludes every cleanup effect of Drop.
+    let mut recovered = Engine::open(current_proof_options(
+        fresh_cache.path(),
+        &recovered_store,
+        &clock,
+    ))
+    .unwrap();
     assert_value(&recovered, data.id(), b"deleted", None);
     assert_value(&recovered, idle.id(), b"idle", Some(b"unflushed"));
+    assert!(
+        recovered
+            .metrics()
+            .get_recovery_metrics()
+            .unwrap()
+            .wal_recovery_records_replayed
+            > 0
+    );
+    recovered
+        .flush_cf(&recovered.get_column_family("data").unwrap())
+        .unwrap();
+    recovered
+        .flush_cf(&recovered.get_column_family("idle").unwrap())
+        .unwrap();
     recovered.shutdown(Duration::from_secs(30)).unwrap();
+    drop(recovered);
+    let cold_cache = tempfile::tempdir().unwrap();
+    let mut reopened = Engine::open(current_proof_options(
+        cold_cache.path(),
+        &recovered_store,
+        &clock,
+    ))
+    .unwrap();
+
+    // Assert: published coverage survives another complete cache loss.
+    assert_value(&reopened, data.id(), b"deleted", None);
+    assert_value(&reopened, idle.id(), b"idle", Some(b"unflushed"));
+    let retired = WalPublicationCatalog::decode(
+        &recovered_store.image().objects["deletion-proof/wal/publication-catalog.v1.json"],
+    )
+    .unwrap();
+    assert!(original
+        .entries()
+        .iter()
+        .all(|entry| retired.entry(entry.id()).is_none()));
+    reopened.shutdown(Duration::from_secs(30)).unwrap();
 }
 
 #[cfg(feature = "internal-testing")]

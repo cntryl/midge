@@ -87,9 +87,16 @@ impl ManifestCoordinator {
         let result =
             crate::runtime::actors::ManifestActor::persist_for(&mut event_loop.state, origin)
                 .and_then(|()| {
-                    event_loop
-                        .mirror_metadata_after_local_commit_within("manifest persist", &deadline)
+                    event_loop.start_metadata_mirror(
+                        super::metadata_mirror::MirrorContinuation::Request { request_id },
+                        deadline,
+                    )
                 });
+        if matches!(result, Ok(true)) {
+            return HandleOutcome::Continue;
+        }
+        let result =
+            event_loop.accept_metadata_mirror_result(result.map(|_| ()), "manifest persist");
         if let Err(error) = &result {
             // Callers checkpoint after a change already committed through the
             // journal, so this failure cannot undo it; record it for health.
@@ -304,7 +311,18 @@ impl ManifestCoordinator {
         // committed. An auxiliary manifest mirror failure must not report the
         // drop as rejected and leave Engine's handle registry split from
         // runtime state. Surface it through degraded health instead.
-        if let Err(error) = Self::mirror_committed_drop(event_loop, deadline) {
+        // Reclamation above can already own a captured cut containing this
+        // committed drop. No control-file edit follows that capture here.
+        let mirrored_by_reclamation = event_loop
+            .actors
+            .cloud_coordinator
+            .metadata_mirror
+            .is_running();
+        if let Err(error) = if mirrored_by_reclamation {
+            Ok(())
+        } else {
+            Self::mirror_committed_drop(event_loop, deadline)
+        } {
             event_loop.state.mark_persistence_anomaly();
             event_loop.publish_snapshot();
             tracing::warn!(%error, cf_id, "column-family drop committed but metadata mirror remains degraded");

@@ -136,6 +136,41 @@ impl ManifestActor {
     }
 
     /// Persist manifest to disk
+    pub(crate) fn move_ssts(
+        &mut self,
+        state: &mut RuntimeState,
+        captured: &[crate::metadata::FileMeta],
+        target_level: u32,
+    ) -> MidgeResult<()> {
+        let edit = crate::metadata::ManifestEdit::MoveSsts {
+            captured: captured.to_vec(),
+            target_level,
+        };
+        let memory = state.is_memory_mode();
+        let prepared = state.manifest.prepare_edit(&edit)?;
+        let journaled = if memory {
+            None
+        } else {
+            crate::failpoints::fail_point!("midge::manifest::inject_no_space_on_move_edit", |_| {
+                Err(crate::common::MidgeError::NoSpace(
+                    "injected logical move append failure".into(),
+                ))
+            });
+            Some(
+                state
+                    .manifest_store
+                    .append_for(Origin::CompactionBeforeGc, &edit)?,
+            )
+        };
+        prepared.commit();
+        if let Some(id) = journaled {
+            state.manifest.note_applied_journal_edit(id);
+        }
+        self.pending_edits += 1;
+        Ok(())
+    }
+
+    /// Persist manifest to disk
     #[cfg(test)]
     pub fn persist(state: &mut RuntimeState) -> MidgeResult<()> {
         Self::persist_for(state, Origin::Unclassified)
@@ -244,6 +279,7 @@ mod tests {
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
         }
     }
 
@@ -297,7 +333,8 @@ mod tests {
     fn read_snapshot(state: &crate::runtime::state::RuntimeState) -> crate::metadata::Manifest {
         let bytes = std::fs::read(state.db_path.join("manifest.snapshot.json"))
             .expect("snapshot should exist after persist");
-        serde_json::from_slice(&bytes).expect("snapshot should parse")
+        crate::metadata::codec::decode(crate::metadata::codec::MANIFEST, &bytes)
+            .expect("snapshot should parse")
     }
 
     #[derive(Clone, Default)]
@@ -433,6 +470,7 @@ mod tests {
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
         };
 
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
@@ -471,6 +509,7 @@ mod tests {
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
         };
 
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
@@ -516,6 +555,7 @@ mod tests {
             smallest_seq: Some(10),
             largest_seq: Some(10),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
         };
 
         assert_eq!(

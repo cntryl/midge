@@ -79,6 +79,42 @@ fn should_reject_header_when_crc_mismatches() {
 }
 
 #[test]
+fn should_reject_unsupported_segment_version_with_a_valid_header_checksum() {
+    // Arrange: recompute CRC so only the format-version contract rejects it.
+    for version in [0, SEGMENT_VERSION + 1] {
+        let mut bytes = header(7).encode();
+        bytes[8..12].copy_from_slice(&version.to_le_bytes());
+        let checksum = crc32c::crc32c(&bytes[..HEADER_CHECKED_LEN]);
+        bytes[HEADER_CHECKED_LEN..].copy_from_slice(&checksum.to_le_bytes());
+
+        // Act
+        let result = SegmentScan::start(&bytes);
+
+        // Assert
+        assert!(
+            matches!(result, Err(MidgeError::Corruption(message)) if message.contains("format version"))
+        );
+    }
+}
+
+#[test]
+fn should_reject_unsupported_record_version_inside_a_valid_crc_frame() {
+    // Arrange: header and frame checksums are valid; the record is future v3.
+    let mut bytes = SegmentBuilder::new(2, 1, ChainLink::GENESIS).open();
+    let mut payload = crate::wal::encoding::encode(&put(1, 0)).unwrap().to_vec();
+    payload[2] = 3;
+    crate::wal::frame::append_frame(&mut bytes, &payload).expect("valid outer CRC");
+
+    // Act
+    let result = scan(&bytes);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::Corruption(message)) if message.contains("unsupported WAL payload version"))
+    );
+}
+
+#[test]
 fn should_seal_digest_of_bytes_before_footer() {
     // Arrange
     let builder = SegmentBuilder::new(2, 1, ChainLink::GENESIS)

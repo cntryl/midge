@@ -76,12 +76,8 @@ impl MetadataState {
                 b"<Error><Code>PreconditionFailed</Code></Error>".to_vec(),
             );
         }
-        let document = key
-            .ends_with(LEASE_OBJECT_KEY)
-            .then(|| parse_lease_document(std::str::from_utf8(&request.body).unwrap()).unwrap());
-        let is_publication = document.as_ref().is_some_and(|document| {
-            document.committed_metadata.is_some() && !document.is_expired().unwrap()
-        });
+        let is_publication = key.ends_with("metadata/committed-pointer.v1")
+            && request.headers.iter().any(|(name, _)| name == "if-match");
         let version = self.objects.get(&key).map_or(1, |(_, version)| version + 1);
         if is_publication {
             let started = Instant::now();
@@ -153,13 +149,40 @@ fn publish_observation(view: AuthorityView) -> PublicationObservation {
     let expected = test_metadata_generation(40);
     let prior_reads = endpoint.lease_reads.load(Ordering::Acquire);
     let started = Instant::now();
-    let outcome = authority.publish_committed_metadata(
+    let deadline = OperationDeadline::from_start(started, LOGICAL_CAP);
+    let validate = || {
+        authority.validate_epoch_with_timeout(
+            &lease.holder_id(),
+            lease.epoch(),
+            deadline.remaining(),
+        )
+    };
+    validate().unwrap();
+    let mut outcome = authority.publish_committed_metadata(
         &lease.holder_id(),
         lease.epoch(),
         None,
         expected.clone(),
-        LOGICAL_CAP,
+        deadline.remaining(),
     );
+    // Definite pointer contention belongs to the caller's retry loop. A
+    // renewable lease update uses a different object and cannot cause it.
+    if matches!(outcome, Err(LeaseError::AcquisitionFailed(_))) {
+        validate().unwrap();
+        assert_eq!(
+            authority
+                .read_committed_metadata(deadline.remaining())
+                .unwrap(),
+            CloudMetadataHead::Uncommitted
+        );
+        outcome = authority.publish_committed_metadata(
+            &lease.holder_id(),
+            lease.epoch(),
+            None,
+            expected.clone(),
+            deadline.remaining(),
+        );
+    }
     let elapsed = started.elapsed();
     let publication_lease_reads = endpoint.lease_reads.load(Ordering::Acquire) - prior_reads;
     // Read the actual committed pointer through the original native authority
@@ -327,13 +350,14 @@ fn mirror_observation(scope: &DeadlineScope) -> MirrorObservation {
     let committed = store.read_committed_metadata(IO_CAP);
     let mut remote_objects = Vec::new();
     if let Ok(CloudMetadataHead::Committed(generation)) = &committed {
-        for object in &generation.objects {
-            let deadline = OperationDeadline::from_budget(IO_CAP);
-            remote_objects.push((
-                object.file_name.clone(),
-                crate::storage::cloud::BlockingCloud::new(&cloud, &deadline)
-                    .get_optional(&object.object_key),
-            ));
+        let bodies = crate::runtime::hybrid_persistence::metadata_chain::read(
+            &cloud,
+            generation,
+            &OperationDeadline::from_budget(IO_CAP),
+        )
+        .expect("reconstruct checksum-verified native manifest chain");
+        for (name, body) in bodies {
+            remote_objects.push((name, Ok(Some(body))));
         }
     }
     let cleanup = lease.release();
@@ -373,12 +397,8 @@ fn assert_successful_native_mirror(observed: &MirrorObservation) {
         );
     };
     assert_eq!(generation.manifest_horizon, 0);
-    assert_eq!(generation.objects.len(), observed.expected_objects.len());
-    for object in &generation.objects {
-        let expected = &observed.expected_objects[&object.file_name];
-        assert_eq!(object.len, u64::try_from(expected.len()).unwrap());
-        assert_eq!(object.crc32c, crc32c::crc32c(expected));
-    }
+    assert!(crate::runtime::hybrid_persistence::metadata_chain::is_chain(generation));
+    assert_eq!(generation.objects.len(), 1);
     assert_eq!(
         observed.remote_objects.len(),
         observed.expected_objects.len()

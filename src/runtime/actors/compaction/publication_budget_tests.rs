@@ -157,6 +157,7 @@ impl PublicationFixture {
                 &name,
                 &path,
                 CompactionOutputAdmission {
+                    finalized: None,
                     budget: &budget,
                     manual_deadline: None,
                 },
@@ -210,6 +211,7 @@ impl PublicationFixture {
             fs: self.fs.clone(),
             hybrid_storage: Some(self.hybrid.clone()),
             cloud_metadata_storage: None,
+            metadata_cut: None,
             metadata_publication_lock: crate::runtime::MetadataPublicationLock::default(),
             lease_healthy: Some(Arc::new(AtomicBool::new(true))),
             lease_validity: Some(validity),
@@ -218,6 +220,7 @@ impl PublicationFixture {
             publication_memory_limit: 2 * 1024 * 1024,
             runtime_response_timeout: IO_CAP,
             manual_deadline,
+            checkpoint: None,
         })?;
         let completion = rx.recv_timeout(IO_CAP + IO_CAP);
         // Join the actual owner before asserting success/error/retained bytes.
@@ -271,6 +274,7 @@ fn should_stop_early_output_upload_when_original_deadline_expires_in_head() -> M
                 &output.metadata.name,
                 &fixture.directory.join(&output.metadata.name),
                 CompactionOutputAdmission {
+                    finalized: None,
                     budget: &budget,
                     manual_deadline: Some(deadline),
                 },

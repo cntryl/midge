@@ -6,6 +6,7 @@ mod automatic_flush_tests;
 mod automatic_retry_tests;
 mod compaction_budget_tests;
 mod controlled_storage;
+mod metadata_overlap_tests;
 mod paused_compactor;
 mod publication_orders;
 mod retained_work_tests;
@@ -68,7 +69,7 @@ fn submit_manual_flush(
 }
 
 fn flush_while_compute_is_held(el: &mut EventLoop) -> Result<(), String> {
-    for phase in ["build", "publish", "mirror"] {
+    for phase in ["build", "publish", "manifest mirror", "intent clear"] {
         let completion = el
             .pipeline
             .flush_worker_result_rx

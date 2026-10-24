@@ -13,14 +13,55 @@ use crate::sst::bloom::BlockBloomFilter;
 use crate::sst::cache::{BlockCache, CacheFill};
 use crate::sst::index::tuner::IndexKind;
 use crate::sst::trie::TrieReader;
-use crate::sst::types::{BlockHandle, Footer, SST_FORMAT_V4};
+use crate::sst::types::{BlockHandle, Footer, SST_FORMAT_V5};
 use crate::types::{EntryType, KeyState, RangeTombstone};
 
 type IndexEntries = Arc<Vec<(Vec<u8>, BlockHandle)>>;
 
+/// Exercise the same restart/entry decoder used by point and streaming reads.
+///
+/// # Errors
+/// Returns the production decoder error for malformed data or restart entries.
+#[cfg(feature = "internal-testing")]
+#[doc(hidden)]
+pub fn validate_data_block(data: &[u8]) -> MidgeResult<()> {
+    let layout = crate::sst::data_block::DataBlockLayout::parse(data)?;
+    let block = Bytes::copy_from_slice(data);
+    let mut decoder = BlockEntryDecoder::default();
+    while decoder
+        .next(&block, SST_FORMAT_V5, None, "fuzz data key")?
+        .is_some()
+    {}
+    for key in [
+        b"".as_slice(),
+        &data[..data.len().min(32)],
+        &data[data.len().saturating_sub(32)..],
+    ] {
+        let _ = layout.seek_interval(key)?;
+    }
+    for reverse in [false, true] {
+        let mut cursor = BlockEntryCursor::new(block.clone(), SST_FORMAT_V5, reverse)?;
+        while cursor.next()?.is_some() {}
+    }
+    Ok(())
+}
+
+/// Decode sparse index bytes through the production extent/order validator.
+///
+/// # Errors
+/// Returns corruption for malformed entries, handles or key ordering.
+#[cfg(feature = "internal-testing")]
+#[doc(hidden)]
+pub fn validate_index_block(data: &[u8]) -> MidgeResult<()> {
+    let mut reader = SstFileIo::new("fuzz.sst", Arc::new(crate::io::MockFs::new()));
+    reader.block_region_end = u64::MAX - crate::sst::types::SST_FOOTER_SIZE as u64;
+    reader.decode_index_entries(data).map(|_| ())
+}
+
 /// Stable summary of the physical contents of a single SST file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SstFileSummary {
+    pub earliest_expiration_millis: Option<u64>,
     pub size_bytes: u64,
     pub smallest_key: Vec<u8>,
     pub largest_key: Vec<u8>,
@@ -41,6 +82,7 @@ pub(crate) struct SstVerificationStats {
 pub(crate) struct SstPointReadStats {
     pub sst_touched: bool,
     pub blocks_read: u64,
+    pub entries_decoded: u64,
 }
 
 /// SST file reader using `io::Fs` abstraction
@@ -82,33 +124,62 @@ pub struct SstFileIo {
 
 /// Walks one decoded block's entries in either direction without copying.
 struct BlockEntryCursor {
-    block: state::DecodedScanBlock,
+    encoded: Bytes,
+    format_version: u32,
+    block: Option<state::DecodedScanBlock>,
     /// Entries handed out so far, counted from the walk's starting end.
     taken: usize,
     reverse: bool,
+    next_interval: usize,
+    remaining_intervals: usize,
 }
 
 impl BlockEntryCursor {
-    fn new(block: state::DecodedScanBlock, reverse: bool) -> Self {
-        Self {
-            block,
+    fn new(encoded: Bytes, format_version: u32, reverse: bool) -> MidgeResult<Self> {
+        let count = crate::sst::data_block::DataBlockLayout::read(&encoded)?.restart_count;
+        Ok(Self {
+            encoded,
+            format_version,
+            block: None,
             taken: 0,
             reverse,
-        }
+            next_interval: if reverse { count - 1 } else { 0 },
+            remaining_intervals: count,
+        })
     }
 
-    fn next(&mut self) -> Option<state::ScanEntry> {
-        let remaining = self.block.len().checked_sub(self.taken)?;
+    fn next(&mut self) -> MidgeResult<Option<state::ScanEntry>> {
+        let remaining = self
+            .block
+            .as_ref()
+            .map_or(0, |block| block.len().saturating_sub(self.taken));
         if remaining == 0 {
-            return None;
+            self.block = None;
+            if self.remaining_intervals == 0 {
+                return Ok(None);
+            }
+            self.block = Some(SstFileIo::decode_scan_interval(
+                &self.encoded,
+                self.format_version,
+                self.next_interval,
+            )?);
+            self.remaining_intervals -= 1;
+            self.next_interval = if self.reverse {
+                self.next_interval.saturating_sub(1)
+            } else {
+                self.next_interval + 1
+            };
+            self.taken = 0;
         }
+        let block = self.block.as_ref().expect("decoded restart interval");
+        let remaining = block.len() - self.taken;
         let index = if self.reverse {
             remaining - 1
         } else {
             self.taken
         };
         self.taken += 1;
-        Some(self.block.entry(index))
+        Ok(Some(block.entry(index)))
     }
 }
 
@@ -118,9 +189,43 @@ struct BlockEntryDecoder {
     offset: usize,
     previous_key: Vec<u8>,
     key_reservation: Option<crate::common::resource_budget::ResourceReservation>,
+    data_end: Option<usize>,
+    restart_count: usize,
+    next_restart: usize,
+    entries_in_interval: usize,
+    skip_initial_continuation: bool,
 }
 
 impl BlockEntryDecoder {
+    fn at_restart(block: &Bytes, restart: usize) -> MidgeResult<Self> {
+        let layout = crate::sst::data_block::DataBlockLayout::read(block)?;
+        let (offset, _) = layout.restart(restart)?;
+        Ok(Self {
+            offset,
+            data_end: Some(layout.data_end),
+            restart_count: layout.restart_count,
+            next_restart: restart,
+            skip_initial_continuation: restart > 0,
+            ..Self::default()
+        })
+    }
+
+    fn exhausted(&self) -> bool {
+        self.data_end.is_some_and(|end| self.offset >= end)
+    }
+
+    fn restart_at(&self, block: &Bytes, index: usize) -> MidgeResult<(usize, bool)> {
+        let start = self.data_end.expect("initialized layout") + index * 4;
+        let bytes = block
+            .get(start..start + 4)
+            .ok_or_else(|| MidgeError::Corruption("truncated restart offset".into()))?;
+        let raw = u32::from_le_bytes(bytes.try_into().expect("restart word"));
+        Ok((
+            (raw & !crate::sst::data_block::CONTINUED_KEY) as usize,
+            raw & crate::sst::data_block::CONTINUED_KEY != 0,
+        ))
+    }
+
     fn next<'a>(
         &mut self,
         block: &'a Bytes,
@@ -128,11 +233,60 @@ impl BlockEntryDecoder {
         budget: Option<&crate::common::resource_budget::ResourceBudget>,
         resource: &'static str,
     ) -> MidgeResult<Option<crate::sst::encoding::EntryView<'a>>> {
-        if self.offset >= block.len() {
+        if self.data_end.is_none() {
+            *self = Self::at_restart(block, 0)?;
+        }
+        let data_end = self.data_end.expect("initialized layout");
+        if self.offset >= data_end {
             return Ok(None);
         }
-        let (entry, next_offset) =
-            crate::sst::encoding::decode_with_format(block, self.offset, format_version)?;
+        let restart = if self.next_restart < self.restart_count {
+            let (offset, continued) = self.restart_at(block, self.next_restart)?;
+            if self.offset > offset {
+                return Err(MidgeError::Corruption(
+                    "restart offset is inside an SST entry".into(),
+                ));
+            }
+            (self.offset == offset).then_some(continued)
+        } else {
+            None
+        };
+        if restart.is_some() {
+            if self.entries_in_interval != 0
+                && self.entries_in_interval != crate::sst::data_block::RESTART_INTERVAL
+            {
+                return Err(MidgeError::Corruption(
+                    "incorrect SST restart interval".into(),
+                ));
+            }
+            self.entries_in_interval = 0;
+            self.next_restart += 1;
+        } else if self.entries_in_interval == crate::sst::data_block::RESTART_INTERVAL {
+            return Err(MidgeError::Corruption("missing SST restart entry".into()));
+        }
+        let (entry, next_offset) = crate::sst::encoding::decode_with_format(
+            &block[..data_end],
+            self.offset,
+            format_version,
+        )?;
+        if let Some(continued) = restart {
+            if entry.shared_len != 0
+                || (!self.skip_initial_continuation
+                    && continued != (self.offset > 0 && self.previous_key == entry.key_delta))
+            {
+                return Err(MidgeError::Corruption(
+                    "invalid independent SST restart key".into(),
+                ));
+            }
+            self.skip_initial_continuation = false;
+        }
+        if self.next_restart < self.restart_count
+            && next_offset > self.restart_at(block, self.next_restart)?.0
+        {
+            return Err(MidgeError::Corruption(
+                "SST entry crosses a restart offset".into(),
+            ));
+        }
         let shared_len =
             SstFileIo::shared_prefix_len(usize::from(entry.shared_len), self.previous_key.len())?;
         let key_len = shared_len
@@ -152,6 +306,7 @@ impl BlockEntryDecoder {
             self.previous_key.extend_from_slice(entry.key_delta);
         }
         self.offset = next_offset;
+        self.entries_in_interval += 1;
         Ok(Some(entry))
     }
 
@@ -354,10 +509,7 @@ impl SstRawVersionScan {
     fn next_version(&mut self) -> MidgeResult<Option<crate::sst::traits::RawSstVersion>> {
         self.yield_reservation = None;
         loop {
-            let needs_block = self
-                .block
-                .as_ref()
-                .is_none_or(|block| self.decoder.offset >= block.len());
+            let needs_block = self.block.as_ref().is_none_or(|_| self.decoder.exhausted());
             if needs_block {
                 self.block = None;
                 self.block_reservation = None;
@@ -566,14 +718,23 @@ impl SstStateScan {
             &span,
             &mut self.window,
         )?;
-        let decoded = self.reader.decode_scan_block(&block)?;
-        self.block_entries = Some(BlockEntryCursor::new(decoded, self.reverse));
+        self.block_entries = Some(BlockEntryCursor::new(
+            block,
+            self.reader.format_version,
+            self.reverse,
+        )?);
         Ok(true)
     }
 
     fn next_raw_entry(&mut self) -> MidgeResult<Option<state::ScanEntry>> {
         loop {
-            if let Some(entry) = self.block_entries.as_mut().and_then(BlockEntryCursor::next) {
+            let next = self
+                .block_entries
+                .as_mut()
+                .map(BlockEntryCursor::next)
+                .transpose()?
+                .flatten();
+            if let Some(entry) = next {
                 if self
                     .start
                     .as_deref()
@@ -706,7 +867,7 @@ impl SstFileIo {
                 crate::sst::read_path_metrics::DetachedSstReadObserver::default(),
             ),
             index_entries: ArcSwapOption::empty(),
-            format_version: SST_FORMAT_V4,
+            format_version: SST_FORMAT_V5,
             index_kind: IndexKind::Sparse,
             smallest_key: None,
             largest_key: None,
@@ -885,6 +1046,7 @@ impl SstFileIo {
         for version in &mut cursor {
             let version = version?;
             accumulator.observe(size_bytes, &version.key, version.seq, budget.as_ref())?;
+            accumulator.observe_expiration(version.expiration);
         }
         accumulator
             .summary

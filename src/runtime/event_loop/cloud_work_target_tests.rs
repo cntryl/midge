@@ -91,6 +91,7 @@ fn observed_targets() -> Vec<FileMeta> {
 fn observed_cloud_layout(
     storage_policy: StorageBudgetPolicy,
     configured_target: usize,
+    compaction_config: crate::compaction::LeveledCompactionConfig,
 ) -> MidgeResult<EventLoop> {
     let local_bytes = storage_policy.max_local_bytes;
     let mut el = create_test_cloud_event_loop(storage_policy)?;
@@ -101,6 +102,14 @@ fn observed_cloud_layout(
         .test_mut()
         .files
         .extend(observed_targets());
+    let factory = super::resources::compaction_sst_factory(
+        Arc::clone(&el.state.fs),
+        crate::codec::CompressionPolicy::default(),
+    );
+    el.actors.compaction_actor = crate::runtime::actors::CompactionActor::new_with_config(
+        Arc::new(factory),
+        compaction_config,
+    );
     // Use the observed engine execution limits. The fixture backend's upload
     // copies determine its own immutable partition target, unlike HTTP's target.
     // Reattach through production wiring after applying those execution limits.
@@ -125,7 +134,11 @@ fn should_shrink_cloud_source_batch_when_observed_overlap_exceeds_publication_wo
 ) -> MidgeResult<()> {
     // Arrange: 3 L1 inputs plus their 12 complete L2 overlaps total 312 MB.
     // Cloud's immutable-file workspace is stricter than the local pool/2 goal.
-    let mut el = observed_cloud_layout(StorageBudgetPolicy::default(), 128 * MIB)?;
+    let mut el = observed_cloud_layout(
+        StorageBudgetPolicy::default(),
+        128 * MIB,
+        crate::compaction::LeveledCompactionConfig::default(),
+    )?;
     let storage = el.actors.cloud_coordinator.hybrid_storage.as_ref().unwrap();
     let work_target = storage.immutable_file_partition_target(256 * MIB) * 4;
     assert!(u64::try_from(work_target).unwrap() < 312_357_666);
@@ -162,7 +175,16 @@ fn should_fragment_observed_broad_source_when_cloud_singleton_overlap_exceeds_wo
     // Arrange: the retained second source alone overlaps all 12 targets. A
     // later disjoint source keeps L1 overfull after the earlier narrow source
     // is gone; its presence must not force another 288 MB complete merge.
-    let mut el = observed_cloud_layout(StorageBudgetPolicy::default(), 128 * MIB)?;
+    let mut el = observed_cloud_layout(
+        StorageBudgetPolicy::default(),
+        128 * MIB,
+        crate::compaction::LeveledCompactionConfig {
+            // This regression exercises the retained legacy fallback. Current
+            // conforming overlap spans stream a complete merge instead.
+            max_grandparent_overlap_bytes: 0,
+            ..Default::default()
+        },
+    )?;
     let earlier = name(1, SOURCE_GENERATION, 0);
     el.state
         .manifest
@@ -214,7 +236,11 @@ fn should_fragment_observed_broad_source_when_cloud_singleton_overlap_exceeds_wo
 }
 
 fn disjoint_cloud_layout(local_bytes: u64, configured_target: usize) -> MidgeResult<EventLoop> {
-    let mut el = observed_cloud_layout(StorageBudgetPolicy::new(local_bytes), configured_target)?;
+    let mut el = observed_cloud_layout(
+        StorageBudgetPolicy::new(local_bytes),
+        configured_target,
+        crate::compaction::LeveledCompactionConfig::default(),
+    )?;
     // Eleven healthy, disjoint 4 MiB inputs leave L1 over its 40 MiB goal.
     // The default four-source batch costs 16 MiB, with no target overlap.
     el.state.manifest.test_mut().files = (0..11)

@@ -12,6 +12,7 @@ const MANIFEST_BITS: usize = COLUMN_FAMILIES * LEVELS;
 
 fn proof_config() -> LeveledCompactionConfig {
     LeveledCompactionConfig {
+        max_grandparent_overlap_bytes: 0,
         l0_compaction_threshold: u64::MAX,
         l0_file_count_threshold: 1,
         max_compaction_input_files: 64,

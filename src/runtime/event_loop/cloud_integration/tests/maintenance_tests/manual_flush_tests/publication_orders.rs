@@ -287,16 +287,13 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
         .expect("actual publisher GET held");
     let names_before = name_work_snapshot(&el, &metadata, cf_id)?;
     el.handle_flush_worker_result(build);
-    let parked = el
-        .state
-        .immutable_flush_by_id(flush_id)
-        .is_some_and(|(_, flush)| {
-            flush.phase == crate::runtime::state::ImmutableFlushPhase::Queued
-                && flush
-                    .built
-                    .as_ref()
-                    .is_some_and(|built| built.reservation.is_some())
-        });
+    let independently_publishing =
+        el.state
+            .immutable_flush_by_id(flush_id)
+            .is_some_and(|(_, flush)| {
+                flush.phase == crate::runtime::state::ImmutableFlushPhase::Publishing
+                    && flush.failures == 0
+            });
     let identity_unchanged = assigned_name(&el, flush_id) == Some((name.clone(), sst_seq));
     let names_after = name_work_snapshot(&el, &metadata, cf_id)?;
     let inputs_retained = inputs
@@ -309,7 +306,7 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
     // Assert: all actual workers were released before the safety assertions.
     assert!(names_before.bound > bound_before && sst_seq == bound_before);
     assert_eq!(names_after, names_before);
-    assert!(parked && identity_unchanged && inputs_retained && no_early_ok);
+    assert!(independently_publishing && identity_unchanged && inputs_retained && no_early_ok);
     assert!(matches!(
         response.recv_timeout(TEST_WAIT),
         Ok(RuntimeResponse::Ok { request_id: 91_312 })
@@ -320,7 +317,8 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
 }
 
 #[test]
-fn should_defer_compaction_completion_when_manual_flush_publishes_first() -> MidgeResult<()> {
+fn should_admit_compaction_completion_while_manual_flush_provider_task_is_owned() -> MidgeResult<()>
+{
     // Arrange
     let (mut el, worker, _) = cloud_debt(4)?;
     el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
@@ -340,7 +338,7 @@ fn should_defer_compaction_completion_when_manual_flush_publishes_first() -> Mid
     el.state.set_compaction_enabled(false);
     let sequence = acknowledge_put(&mut el, cf_id, 91_313)?;
 
-    // Act: acquire Flush publication before dispatching real compute completion.
+    // Act: the flush keeps its upload owner after releasing its local turn.
     let response = submit_manual_flush(&mut el, cf_id, 91_314);
     let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
     let (name, _) = assigned_name(&el, flush_id).expect("canonical identity before build");
@@ -352,11 +350,11 @@ fn should_defer_compaction_completion_when_manual_flush_publishes_first() -> Mid
     assert!(matches!(build, FlushWorkerResult::Build(_)));
     el.handle_flush_worker_result(build);
     let flush_owner = ManifestPublicationOwner::Flush { flush_id };
-    let owner_before = el.publication.publication_gate.is_owned_by(&flush_owner);
+    let local_turn_released = !el.publication.publication_gate.is_owned_by(&flush_owner);
     compute_release.release();
     complete_compaction(&mut el, &worker);
-    let completion_deferred = el.publication.publication_gate.deferred_messages_len() == 1;
-    let no_compaction_publication = el.publication.compaction_publication.get().is_none();
+    let completion_admitted = el.publication.publication_gate.deferred_messages_len() == 0;
+    let compaction_publication = el.publication.compaction_publication.get().is_some();
     let inputs_retained = inputs
         .iter()
         .all(|input| remote_sst_path_for_test(&el, input).exists());
@@ -365,9 +363,9 @@ fn should_defer_compaction_completion_when_manual_flush_publishes_first() -> Mid
 
     // Assert
     assert!(
-        owner_before
-            && completion_deferred
-            && no_compaction_publication
+        local_turn_released
+            && completion_admitted
+            && compaction_publication
             && inputs_retained
             && no_early_ok
     );
@@ -436,16 +434,13 @@ fn should_reuse_automatic_flush_name_when_compaction_publication_wins_build_race
         .expect("actual publisher GET held");
     let names_before = name_work_snapshot(&el, &metadata, cf_id)?;
     el.handle_flush_worker_result(build);
-    let parked = el
-        .state
-        .immutable_flush_by_id(flush_id)
-        .is_some_and(|(_, flush)| {
-            flush.phase == crate::runtime::state::ImmutableFlushPhase::Queued
-                && flush
-                    .built
-                    .as_ref()
-                    .is_some_and(|built| built.reservation.is_some())
-        });
+    let independently_publishing =
+        el.state
+            .immutable_flush_by_id(flush_id)
+            .is_some_and(|(_, flush)| {
+                flush.phase == crate::runtime::state::ImmutableFlushPhase::Publishing
+                    && flush.failures == 0
+            });
     let identity_unchanged = assigned_name(&el, flush_id) == Some((name.clone(), sst_seq));
     let names_after = name_work_snapshot(&el, &metadata, cf_id)?;
     let inputs_retained = inputs
@@ -459,7 +454,7 @@ fn should_reuse_automatic_flush_name_when_compaction_publication_wins_build_race
     // Assert: the same automatic output survives both actual metadata publications.
     assert!(names_before.bound > bound_before && sst_seq == bound_before);
     assert_eq!(names_after, names_before);
-    assert!(parked && identity_unchanged && inputs_retained && no_early_release);
+    assert!(independently_publishing && identity_unchanged && inputs_retained && no_early_release);
     assert!(no_manual_waiter && el.publication.flush_barrier_waiters.is_empty());
     assert!(el.state.immutable_flush_by_id(flush_id).is_none());
     assert_acknowledged_and_recovered_rows(&el, cf_id, sequence);
@@ -468,7 +463,8 @@ fn should_reuse_automatic_flush_name_when_compaction_publication_wins_build_race
 }
 
 #[test]
-fn should_defer_compaction_completion_when_automatic_flush_publishes_first() -> MidgeResult<()> {
+fn should_admit_compaction_completion_while_automatic_flush_provider_task_is_owned(
+) -> MidgeResult<()> {
     // Arrange: use actual compute and provider metadata, without a flush request.
     let (mut el, worker, _) = cloud_debt(4)?;
     el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
@@ -488,7 +484,7 @@ fn should_defer_compaction_completion_when_automatic_flush_publishes_first() -> 
     el.state.set_compaction_enabled(false);
     let sequence = acknowledge_put(&mut el, cf_id, 91_416)?;
 
-    // Act: let automatic flush own publication before real compute completes.
+    // Act: the automatic flush keeps its upload owner after its local turn.
     let flush_id = schedule_automatic_flush(&mut el, cf_id)?;
     let assigned = assigned_name(&el, flush_id);
     if assigned.is_none() {
@@ -505,11 +501,11 @@ fn should_defer_compaction_completion_when_automatic_flush_publishes_first() -> 
     assert!(matches!(build, FlushWorkerResult::Build(_)));
     el.handle_flush_worker_result(build);
     let flush_owner = ManifestPublicationOwner::Flush { flush_id };
-    let owner_before = el.publication.publication_gate.is_owned_by(&flush_owner);
+    let local_turn_released = !el.publication.publication_gate.is_owned_by(&flush_owner);
     compute_release.release();
     complete_compaction(&mut el, &worker);
-    let completion_deferred = el.publication.publication_gate.deferred_messages_len() == 1;
-    let no_compaction_publication = el.publication.compaction_publication.get().is_none();
+    let completion_admitted = el.publication.publication_gate.deferred_messages_len() == 0;
+    let compaction_publication = el.publication.compaction_publication.get().is_some();
     let inputs_retained = inputs
         .iter()
         .all(|input| remote_sst_path_for_test(&el, input).exists());
@@ -517,8 +513,8 @@ fn should_defer_compaction_completion_when_automatic_flush_publishes_first() -> 
     let no_manual_waiter = el.publication.flush_barrier_waiters.is_empty();
     settle_owned_work(&mut el, &worker);
 
-    // Assert: the gate preserves both the accepted row and the compaction inputs.
-    assert!(owner_before && completion_deferred && no_compaction_publication);
+    // Assert: independent captures retain both accepted rows and input proofs.
+    assert!(local_turn_released && completion_admitted && compaction_publication);
     assert!(inputs_retained && no_early_release);
     assert!(no_manual_waiter && el.publication.flush_barrier_waiters.is_empty());
     assert!(el.state.immutable_flush_by_id(flush_id).is_none());

@@ -82,6 +82,11 @@ fn cloud_debt_with_wal_records(
         }
     }
     publish_test_flush_frontier(&mut el, 0, last);
+    // Seed setup reserves both families through real journal/mirror work,
+    // before tests measure their accepted asynchronous compute/publication.
+    for _ in [0, other] {
+        el.prefetch_flush_sst_names_if_due();
+    }
     let (tx, rx) = crossbeam::channel::unbounded();
     el.pipeline.worker_msg_tx = Some(tx);
     el.pipeline.inline_flush_worker = false;

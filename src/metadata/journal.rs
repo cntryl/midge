@@ -1,7 +1,6 @@
 use crate::common::MidgeResult;
 use crate::io::FsError;
 use crate::metadata::manifest::FileMeta;
-use crc32fast::Hasher as Crc32;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::path::Path;
@@ -52,11 +51,11 @@ pub(crate) fn with_manifest_writer_lock_within<T>(
 }
 
 fn journal_serialize<T: ?Sized + serde::Serialize>(value: &T) -> MidgeResult<Vec<u8>> {
-    serde_json::to_vec(value).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))
+    super::codec::encode(super::codec::JOURNAL, value)
 }
 
 fn journal_deserialize<T: serde::de::DeserializeOwned>(payload: &[u8]) -> MidgeResult<T> {
-    serde_json::from_slice(payload).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))
+    super::codec::decode(super::codec::JOURNAL, payload)
 }
 
 fn millis_since_epoch() -> u64 {
@@ -80,6 +79,16 @@ pub enum ManifestEdit {
     AddSst(FileMeta),
     RemoveSst {
         name: String,
+    },
+    /// Reclassify existing immutable objects without retiring their names.
+    MoveSsts {
+        captured: Vec<FileMeta>,
+        target_level: u32,
+    },
+    /// The pinned retired identity has been physically deleted (or proven
+    /// absent). A failed callback must never emit this acknowledgement.
+    CompleteSstDelete {
+        file: FileMeta,
     },
     CreateColumnFamily {
         id: u32,
@@ -137,6 +146,8 @@ impl ManifestEdit {
         match self {
             ManifestEdit::AddSst(_) => 1,
             ManifestEdit::RemoveSst { .. } => 2,
+            ManifestEdit::CompleteSstDelete { .. } => 13,
+            ManifestEdit::MoveSsts { .. } => 14,
             ManifestEdit::CreateColumnFamily { .. } => 3,
             ManifestEdit::AdvanceFlushFrontier { .. } => 12,
             ManifestEdit::BumpNextSstSeq { .. } => 6,
@@ -152,8 +163,16 @@ impl ManifestEdit {
         }
 
         match self {
-            ManifestEdit::AddSst(meta) => validate(&meta.name),
+            ManifestEdit::AddSst(meta) | ManifestEdit::CompleteSstDelete { file: meta } => {
+                validate(&meta.name)
+            }
             ManifestEdit::RemoveSst { name } => validate(name),
+            ManifestEdit::MoveSsts { captured, .. } => {
+                for file in captured {
+                    validate(&file.name)?;
+                }
+                Ok(())
+            }
             ManifestEdit::DropColumnFamilyAt {
                 dropped_sst_names, ..
             }
@@ -192,6 +211,7 @@ const FSYNC_MARKER_TYPE: u8 = 9;
 const DROP_COLUMN_FAMILY_AT_RECORD_TYPE: u8 = 10;
 const RECLAIM_COLUMN_FAMILY_RECORD_TYPE: u8 = 11;
 const ADVANCE_FLUSH_FRONTIER_RECORD_TYPE: u8 = 12;
+const COMPLETE_SST_DELETE_RECORD_TYPE: u8 = 13;
 
 const JOURNAL_FILE: &str = super::files::JOURNAL;
 const JOURNAL_REPAIR_TEMP_FILE: &str = "manifest.journal.repair.tmp";
@@ -201,15 +221,13 @@ fn encode_journal_record<T: ?Sized + serde::Serialize>(
     value: &T,
 ) -> MidgeResult<Vec<u8>> {
     let payload = journal_serialize(value)?;
-    let mut hasher = Crc32::new();
-    hasher.update(&payload);
-    let crc = hasher.finalize();
+    let crc = crc32c::crc32c(&payload);
 
     let mut record = Vec::with_capacity(1 + 4 + payload.len() + 4);
     record.push(record_type);
     record.extend_from_slice(&payload_len_u32(&payload)?.to_le_bytes());
     record.extend_from_slice(&payload);
-    record.extend_from_slice(&crc.to_le_bytes());
+    record.extend_from_slice(&crc.to_be_bytes());
     Ok(record)
 }
 
@@ -241,8 +259,7 @@ pub(crate) fn checkpoint_edit_id_with_fs(
         .map_err(FsError::into_midge)?;
     let len = file.len().map_err(FsError::into_midge)?;
     let bytes = file.read_at(0, len).map_err(FsError::into_midge)?;
-    let manifest: crate::metadata::Manifest = serde_json::from_slice(&bytes)
-        .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))?;
+    let manifest: crate::metadata::Manifest = super::codec::decode(super::codec::MANIFEST, &bytes)?;
     Ok(manifest.edit_checkpoint_id)
 }
 
@@ -270,6 +287,7 @@ pub(crate) use recovery::{
     highest_edit_id_with_fs, highest_edit_id_with_fs_unlocked,
     highest_edit_id_with_repair_with_fs_unlocked, next_edit_id_after,
     preserve_corrupt_journal_with_fs_unlocked, replay_edits_after_with_fs_unlocked,
+    replay_identified_edits_after_with_fs_unlocked,
     replay_identified_edits_after_with_fs_unlocked_within,
     salvage_edits_after_with_fs_unlocked_within,
 };
@@ -339,6 +357,38 @@ pub(crate) fn truncate_journal_with_fs_unlocked(
         .map_err(FsError::into_midge)?;
 
     Ok(())
+}
+
+/// Retain the durable tail newer than a captured checkpoint. The caller holds
+/// the manifest writer lock, so appends cannot race the replacement.
+pub(crate) fn retain_edits_after_with_fs_unlocked(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    edits: &[(u64, ManifestEdit)],
+) -> MidgeResult<()> {
+    let mut bytes = Vec::new();
+    for (edit_id, edit) in edits {
+        bytes.extend_from_slice(&encode_journal_record(
+            edit.record_type(),
+            &JournalEditEnvelope {
+                edit_id: *edit_id,
+                edit: edit.clone(),
+            },
+        )?);
+        bytes.extend_from_slice(&encode_journal_record(
+            FSYNC_MARKER_TYPE,
+            &FsyncMarker {
+                last_persisted_sequence: *edit_id,
+                ts_millis: millis_since_epoch(),
+            },
+        )?);
+    }
+    crate::io::staging::stage_bytes_typed(
+        fs,
+        &crate::io::FsPath::new(JOURNAL_REPAIR_TEMP_FILE),
+        &crate::io::FsPath::new(JOURNAL_FILE),
+        &bytes,
+        || Ok(()),
+    )
 }
 
 #[cfg(test)]

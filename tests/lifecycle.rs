@@ -71,6 +71,10 @@ mod engine_gc {
                     tx.put(key.into_bytes(), b"v1".to_vec(), None)
                         .expect("put compaction seed");
                 }
+                // GC needs obsolete physical inputs. Repeating one existing
+                // key makes these generations overlap, requiring a rewrite.
+                tx.put(b"key_0_0000".to_vec(), b"v1".to_vec(), None)
+                    .expect("overlap physical rewrite inputs");
                 tx.commit(buffered_write_options(mode)).expect("commit");
                 engine.flush_cf(&cf).expect("flush L0 generation");
             }
@@ -279,6 +283,8 @@ mod engine_gc {
                     tx.put(key.as_bytes().to_vec(), b"v2".to_vec(), None)
                         .expect("stage second generation");
                 }
+                tx.put(b"persist_key_0000".to_vec(), b"v1".to_vec(), None)
+                    .expect("overlap physical GC generations");
                 tx.commit(buffered_write_options(mode)).expect("commit");
                 engine.flush_cf(&cf).expect("flush");
 

@@ -241,6 +241,16 @@ publication preserves the maximum reserved sequence in its journal and snapshot.
 Every checkpoint still uses the existing lease, intent, SST upload, manifest,
 and cloud metadata barriers, with serialized publication and installation.
 
+The 0.5.0 candidate reserves ordinary runtime flush names ahead in blocks of 16.
+Background progress prewarms live families and starts another reservation when
+eight names remain. Its exact epoch completion admits the new bound; a queued
+or failed mirror does not admit names. Output launch consumes already admitted
+names without a journal append or cloud mirror. Exhaustion retains the output
+and waits for the owned asynchronous reservation. Compaction identities still
+follow the global WAL sequence, so arbitrary sequence jumps can require this
+asynchronous fallback; this candidate does not claim every compaction launch
+finds an ahead-reserved block. Recovery's reservation barrier remains separate.
+
 The `midge::recovery` tracing target reports durable `name_reservation`
 publications and separate
 `recovery_checkpoint_reservation`, `recovery_checkpoint_construction`,

@@ -1,73 +1,65 @@
-//! Lock-free snapshot cache for read-path bypass
+//! Per-family snapshot publication. The event loop is the sole publisher.
 //!
-//! Allows `begin_tx` to capture a read snapshot without sending a message
-//! through the event loop. The event loop publishes updated snapshots after
-//! each write/flush/rotation, and readers load them atomically via `ArcSwap`.
-//!
-//! # Design
-//!
-//! - The event loop is the sole writer (calls `publish`)
-//! - Engine threads are concurrent readers (call `load_snapshot`)
-//! - `ArcSwap` provides wait-free reads and lock-free writes
-//! - Snapshot includes sequence number + per-CF memtable/SST refs
-//! - Consistency: sequence and memtable refs are atomically swapped together
+//! A family slot is stored before the global applied cut is released. A reader
+//! first acquires that cut, then the family slot. An untouched family's sources
+//! remain valid at the newer cut; a slot ahead of the cut is already fully
+//! applied and carries its own sequence. No reader uses an allocated-only cut.
 
 use crate::runtime::read_snapshot::ReadSnapshot;
 use arc_swap::ArcSwap;
-use std::collections::HashMap;
+use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Per-CF snapshot data published by the event loop.
-#[derive(Debug, Clone)]
-pub(crate) struct CfSnapshotData {
-    pub snapshot: Arc<ReadSnapshot>,
+struct FamilySnapshot {
+    sequence: u64,
+    snapshot: Arc<ReadSnapshot>,
 }
 
-/// Atomically published snapshot state for all column families.
-///
-/// Swapped as a single unit to ensure cross-CF consistency
-/// (e.g., sequence number matches memtable state).
-#[derive(Debug, Clone)]
-pub(crate) struct PublishedSnapshot {
-    /// Current global sequence number at publish time.
-    pub sequence: u64,
-    /// Per-CF snapshots keyed by CF ID.
-    pub cf_snapshots: HashMap<u32, CfSnapshotData>,
-}
-
-/// Lock-free snapshot cache shared between event loop and engine threads.
-///
-/// Event loop calls `publish()` to atomically update the snapshot.
-/// Engine threads call `load()` to get the latest snapshot without
-/// any message passing or lock contention.
 pub(crate) struct SnapshotCache {
-    inner: ArcSwap<PublishedSnapshot>,
+    families: DashMap<u32, ArcSwap<FamilySnapshot>>,
+    applied_sequence: AtomicU64,
 }
 
 impl SnapshotCache {
-    /// Create a new empty snapshot cache.
     pub fn new() -> Self {
         Self {
-            inner: ArcSwap::from_pointee(PublishedSnapshot {
-                sequence: 0,
-                cf_snapshots: HashMap::new(),
-            }),
+            families: DashMap::new(),
+            applied_sequence: AtomicU64::new(0),
         }
     }
 
-    /// Atomically publish a new snapshot (called by event loop only).
-    pub fn publish(&self, snapshot: PublishedSnapshot) {
-        self.inner.store(Arc::new(snapshot));
+    pub fn publish_family(&self, cf_id: u32, sequence: u64, snapshot: Arc<ReadSnapshot>) {
+        let published = Arc::new(FamilySnapshot { sequence, snapshot });
+        match self.families.entry(cf_id) {
+            dashmap::mapref::entry::Entry::Occupied(slot) => slot.get().store(published),
+            dashmap::mapref::entry::Entry::Vacant(slot) => {
+                slot.insert(ArcSwap::from(published));
+            }
+        }
     }
 
-    /// Load the current snapshot (wait-free, called by any thread).
-    pub fn load(&self) -> arc_swap::Guard<Arc<PublishedSnapshot>> {
-        self.inner.load()
+    pub fn finish_publication(&self, sequence: u64) {
+        self.applied_sequence.store(sequence, Ordering::Release);
+    }
+
+    pub fn retain_families(&self, is_live: impl Fn(u32) -> bool) {
+        self.families.retain(|cf_id, _| is_live(*cf_id));
+    }
+
+    pub fn load_family(&self, cf_id: u32) -> Option<(u64, Arc<ReadSnapshot>)> {
+        let applied = self.applied_sequence.load(Ordering::Acquire);
+        let slot = self.families.get(&cf_id)?;
+        let published = slot.load();
+        Some((
+            applied.max(published.sequence),
+            Arc::clone(&published.snapshot),
+        ))
     }
 }
 
 impl std::fmt::Debug for SnapshotCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SnapshotCache").finish()
+        f.debug_struct("SnapshotCache").finish_non_exhaustive()
     }
 }

@@ -23,9 +23,12 @@ fn should_publish_accepted_immutable_without_manual_waiter_while_cloud_compactio
     let cf_id = plan.cf_id;
     let inputs = plan.input_files.clone();
     el.launch_compaction(plan)?;
-    reached
-        .recv_timeout(TEST_WAIT)
-        .expect("actual compute pause");
+    let deadline = Instant::now() + TEST_WAIT;
+    while reached.try_recv().is_err() {
+        el.reap_metadata_mirror();
+        assert!(Instant::now() < deadline, "actual compute pause");
+        std::thread::sleep(Duration::from_millis(1));
+    }
     el.state.set_compaction_enabled(false);
     let sequence = acknowledge_put(&mut el, cf_id, 91_401)?;
     el.freeze_active_memtable(cf_id)?;

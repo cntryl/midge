@@ -497,6 +497,28 @@ pub trait CloudReadCapability: Send + Sync {
 /// impl CloudWriteCapability for MissingWrite {}
 /// ```
 pub trait CloudWriteCapability: Send + Sync {
+    fn supports_file_upload(&self) -> bool {
+        false
+    }
+
+    fn write_file_with_receipt(
+        &self,
+        key: &str,
+        _source: crate::storage::StorageFileUpload,
+        _options: CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        let _ = callback.send(CloudEvent::PutReceipt {
+            key: key.into(),
+            result: Err(CloudError::Protocol(
+                "backend has no conditional streaming upload capability".into(),
+            )),
+        });
+    }
+
+    /// Configure retries; this does not authorize replay of shared-key mutations.
+    fn set_retry_policy(&self, _policy: super::CloudRetryPolicy) {}
+
     /// [`crate::storage::StorageBackend::write_payload_copies`]. A provider
     /// lowers the conservative default only when it bounds its own copies.
     fn write_payload_copies(&self) -> usize {
@@ -611,6 +633,19 @@ pub trait CloudDeleteCapability: Send + Sync {
 /// impl CloudListCapability for MissingList {}
 /// ```
 pub trait CloudListCapability: Send + Sync {
+    /// At most one physical LIST attempt; no implicit pagination or retries.
+    /// `None` means this backend cannot provide the bounded capability. It
+    /// must never emulate it by collecting a complete prefix first.
+    fn list_page(
+        &self,
+        _prefix: &str,
+        _page: super::CloudListPageRequest,
+        _options: CloudRequestOptions,
+        callback: super::CloudListPageCallback,
+    ) {
+        let _ = callback.send(Ok(None));
+    }
+
     /// Submit a LIST with typed deadline controls.
     fn list(&self, prefix: &str, options: CloudRequestOptions, callback: CloudCallback) {
         if options.timeout().is_some_and(|timeout| timeout.is_zero()) {
@@ -645,6 +680,12 @@ pub trait CloudListCapability: Send + Sync {
 /// impl CloudHeadCapability for MissingHead {}
 /// ```
 pub trait CloudHeadCapability: Send + Sync {
+    /// Pin the identity used by conditional range reads. Native object stores
+    /// use ordinary HEAD; adapters may expose a distinct immutable-read token.
+    fn head_for_range(&self, key: &str, options: CloudRequestOptions, callback: CloudCallback) {
+        self.head(key, options, callback);
+    }
+
     /// Submit a HEAD with typed deadline controls.
     fn head(&self, key: &str, options: CloudRequestOptions, callback: CloudCallback) {
         if options.timeout().is_some_and(|timeout| timeout.is_zero()) {

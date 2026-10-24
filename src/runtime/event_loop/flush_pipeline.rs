@@ -10,9 +10,11 @@ use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod mirror_retry;
 mod publication;
 mod scheduling;
 mod settlement;
+pub(super) use mirror_retry::PendingFlushMirror;
 
 #[cfg(test)]
 mod tests;

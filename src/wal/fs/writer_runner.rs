@@ -29,6 +29,14 @@ pub(crate) struct PendingSync {
     pub(crate) id: u64,
     pub(crate) writes_through: u64,
     pub(crate) effect: PendingWriterEffect,
+    pub(crate) completion: Option<PendingSyncCompletion>,
+}
+
+pub(crate) struct PendingSyncCompletion {
+    pub(crate) prefix: crate::wal::traits::WalSyncPrefix,
+    pub(crate) sender: std::sync::mpsc::SyncSender<
+        crate::common::MidgeResult<crate::wal::traits::WalSyncCompletion>,
+    >,
 }
 
 impl SyncState {
@@ -75,9 +83,22 @@ pub(crate) fn writer_error(
 
 pub(crate) struct QueuedWrite {
     pub(crate) data: Vec<u8>,
-    pub(crate) ack: std::sync::mpsc::SyncSender<Result<u64, WalAppendError>>,
+    ack: WriteAcknowledgement,
+    raw: Option<Vec<crate::wal::sequenced::SequencedWalUnit>>,
+    encoded_len: usize,
+    last_record_offset: u64,
+    service_elapsed: Duration,
+    _reservation: Option<crate::common::resource_budget::ResourceReservation>,
     effect: Option<PendingWriterEffect>,
     id: u64,
+}
+
+enum WriteAcknowledgement {
+    Legacy(std::sync::mpsc::SyncSender<Result<u64, WalAppendError>>),
+    Sequenced {
+        prefix: crate::wal::append_completion::WalAppendPrefix,
+        sender: std::sync::mpsc::SyncSender<crate::wal::append_completion::AppendResult>,
+    },
 }
 
 impl QueuedWrite {
@@ -98,10 +119,52 @@ impl QueuedWrite {
         id: u64,
     ) -> Self {
         Self {
+            encoded_len: data.len(),
             data,
-            ack,
+            ack: WriteAcknowledgement::Legacy(ack),
+            raw: None,
+            last_record_offset: 0,
+            service_elapsed: Duration::ZERO,
+            _reservation: None,
             effect: Some(effect),
             id,
+        }
+    }
+
+    pub(crate) fn sequenced(
+        units: Vec<crate::wal::sequenced::SequencedWalUnit>,
+        completion: (
+            crate::wal::append_completion::WalAppendPrefix,
+            std::sync::mpsc::SyncSender<crate::wal::append_completion::AppendResult>,
+        ),
+        effect: PendingWriterEffect,
+        id: u64,
+        reservation: crate::common::resource_budget::ResourceReservation,
+    ) -> Self {
+        Self {
+            data: Vec::new(),
+            ack: WriteAcknowledgement::Sequenced {
+                prefix: completion.0,
+                sender: completion.1,
+            },
+            raw: Some(units),
+            encoded_len: 0,
+            last_record_offset: 0,
+            service_elapsed: Duration::ZERO,
+            _reservation: Some(reservation),
+            effect: Some(effect),
+            id,
+        }
+    }
+
+    fn fail(&self, error: WalAppendError) {
+        match &self.ack {
+            WriteAcknowledgement::Legacy(sender) => {
+                let _ = sender.send(Err(error));
+            }
+            WriteAcknowledgement::Sequenced { sender, .. } => {
+                let _ = sender.send(Err(error));
+            }
         }
     }
 }
@@ -195,7 +258,6 @@ impl WriterRunner {
             };
 
             if !batch.is_empty() {
-                let batch_len = batch.iter().map(|entry| entry.data.len()).sum::<usize>() as u64;
                 let start_pos = match self.write_batch(&mut file_opt, &mut batch) {
                     Ok(start_pos) => start_pos,
                     Err(message) => {
@@ -203,6 +265,7 @@ impl WriterRunner {
                         return;
                     }
                 };
+                let batch_len = batch.iter().map(|entry| entry.encoded_len).sum::<usize>() as u64;
                 self.complete_flushes_after_write(start_pos, batch_len, &batch);
                 self.recycle_batch(batch);
             }
@@ -276,7 +339,7 @@ impl WriterRunner {
         file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
         batch: &mut [QueuedWrite],
     ) -> Result<u64, WriteFailure> {
-        let big_bytes = bytes::Bytes::from(Self::coalesce_batch(batch));
+        let service_start = Instant::now();
         let effects = batch
             .iter_mut()
             .map(|entry| {
@@ -291,6 +354,12 @@ impl WriterRunner {
                 error,
                 unchanged: true,
             })?;
+        self.encode_sequenced_batch(batch)
+            .map_err(|error| WriteFailure {
+                error,
+                unchanged: true,
+            })?;
+        let big_bytes = bytes::Bytes::from(Self::coalesce_batch(batch));
         let write_start = Instant::now();
         let start_pos = self.append_with_effects(file_opt, &big_bytes, &effects)?;
         let write_elapsed = write_start.elapsed();
@@ -303,7 +372,37 @@ impl WriterRunner {
             start_pos.saturating_add(big_bytes.len() as u64),
             std::sync::atomic::Ordering::SeqCst,
         );
+        let elapsed = service_start.elapsed();
+        for entry in batch {
+            entry.service_elapsed = elapsed;
+        }
         Ok(start_pos)
+    }
+
+    fn encode_sequenced_batch(&self, batch: &mut [QueuedWrite]) -> crate::common::MidgeResult<()> {
+        for entry in batch {
+            let Some(units) = entry.raw.take() else {
+                continue;
+            };
+            crate::failpoints::fail_point!("midge::wal::before_writer_encode");
+            let started = Instant::now();
+            entry.data = self.config.buf_pool.lock().pop().unwrap_or_default();
+            entry.data.clear();
+            for unit in units {
+                entry.last_record_offset = entry.data.len() as u64;
+                let record = unit.encode_record()?;
+                crate::wal::frame::append_frame_encoded(&mut entry.data, |payload| {
+                    crate::wal::encoding::encode_into(&record, payload)
+                })?;
+            }
+            entry.encoded_len = entry.data.len();
+            self.config.counters.record(|metrics| {
+                metrics.record_wal_encode(
+                    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                );
+            });
+        }
+        Ok(())
     }
 
     fn coalesce_batch(batch: &mut [QueuedWrite]) -> Vec<u8> {
@@ -468,7 +567,6 @@ impl WriterRunner {
     }
 
     fn complete_flushes_after_write(&self, start_pos: u64, batch_len: u64, batch: &[QueuedWrite]) {
-        Self::ack_batch_success(batch, start_pos);
         self.config.current_pos.store(
             start_pos.saturating_add(batch_len),
             std::sync::atomic::Ordering::SeqCst,
@@ -481,6 +579,12 @@ impl WriterRunner {
             s.completed_flushes = s.pending_flushes;
         }
         self.config.sync_cond.notify_all();
+        drop(s);
+        drop(queue);
+        // The next loop turn may submit an exact-prefix sync as soon as it
+        // observes this acknowledgement. Publish its completed-write proof
+        // first, without requiring the caller to win a second worker race.
+        Self::ack_batch_success(batch, start_pos);
     }
 
     fn complete_pending_flushes(&self) {
@@ -514,48 +618,22 @@ impl WriterRunner {
             .last()
             .expect("nonempty ready sync requests have a final barrier")
             .id;
-        let effects = match requests
+        let (pending_effects, completions): (Vec<_>, Vec<_>) = requests
             .into_iter()
-            .map(|request| request.effect.activate())
+            .map(|request| (request.effect, request.completion))
+            .unzip();
+        let result = pending_effects
+            .into_iter()
+            .map(PendingWriterEffect::activate)
             .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(effects) => effects,
-            Err(error) => {
-                self.mark_sync_failure(error);
-                return Err(());
-            }
-        };
-
-        if file_opt.is_none() {
-            match self.open_file_handle() {
-                Ok(file) => *file_opt = Some(file),
-                Err(error) => {
-                    tracing::error!(error = ?error, "WAL fsync failed before sync - marking sync as failed");
-                    self.mark_sync_failure(writer_error(
-                        "wal writer could not reopen file handle for fsync",
-                        &error,
-                    ));
-                    return Err(());
-                }
-            }
-        }
-        let sync_result = Self::run_with_effects(&effects, || {
-            if let Some(file) = file_opt.as_mut() {
-                let sync_start = Instant::now();
-                file.sync(Durability::Durable)
-                    .map(|()| sync_start.elapsed())
-            } else {
-                Ok(Duration::ZERO)
-            }
-        });
-        let sync_result = match sync_result {
-            Ok(result) => result,
-            Err(error) => {
-                self.mark_sync_failure(error.error);
-                return Err(());
-            }
-        };
-        match sync_result {
+            .and_then(|effects| {
+                let result = self.perform_physical_sync(file_opt, &effects);
+                // A terminal receipt must not leave an active child behind
+                // for the loop-owned lexical root to wait on.
+                drop(effects);
+                result
+            });
+        match &result {
             Ok(sync_elapsed) => {
                 self.config.counters.record(|m| {
                     m.record_wal_fsync_ns(
@@ -563,18 +641,54 @@ impl WriterRunner {
                     );
                     m.record_wal_fsync_count();
                 });
+                self.config.sync_state.lock().completed_fsyncs = completed;
+                self.config.sync_cond.notify_all();
             }
-            Err(error) => {
-                tracing::error!(error = ?error, "WAL fsync failed - marking sync as failed");
-                self.mark_sync_failure(writer_error("wal writer fsync failed", &error));
-                return Err(());
+            Err(error) => self.mark_sync_failure(error.replay()),
+        }
+        for completion in completions.into_iter().flatten() {
+            let receipt = result
+                .as_ref()
+                .map(|elapsed| crate::wal::traits::WalSyncCompletion {
+                    prefix: completion.prefix,
+                    elapsed: *elapsed,
+                })
+                .map_err(crate::common::MidgeError::replay);
+            let _ = completion.sender.send(receipt);
+        }
+        result.map(|_| ()).map_err(|_| ())
+    }
+
+    fn perform_physical_sync<'a>(
+        &'a self,
+        file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
+        effects: &[ActiveRequestEffect],
+    ) -> crate::common::MidgeResult<Duration> {
+        if file_opt.is_none() {
+            match self.open_file_handle() {
+                Ok(file) => *file_opt = Some(file),
+                Err(error) => {
+                    tracing::error!(error = ?error, "WAL fsync failed before sync - marking sync as failed");
+                    return Err(writer_error(
+                        "wal writer could not reopen file handle for fsync",
+                        &error,
+                    ));
+                }
             }
         }
-
-        let mut s = self.config.sync_state.lock();
-        s.completed_fsyncs = completed;
-        self.config.sync_cond.notify_all();
-        Ok(())
+        let sync_result = Self::run_with_effects(effects, || {
+            if let Some(file) = file_opt.as_mut() {
+                let sync_start = Instant::now();
+                crate::failpoints::fail_point!("midge::wal::before_physical_sync");
+                file.sync(Durability::Durable)
+                    .map(|()| sync_start.elapsed())
+            } else {
+                Ok(Duration::ZERO)
+            }
+        });
+        sync_result
+            .map_err(|error| error.error)?
+            .map_err(|error| writer_error("wal writer fsync failed", &error))
     }
 
     fn take_ready_syncs(&self) -> Result<Vec<PendingSync>, ()> {
@@ -607,8 +721,21 @@ impl WriterRunner {
         let mut next_pos = batch_start_pos;
         for entry in batch {
             let entry_pos = next_pos;
-            next_pos = next_pos.saturating_add(entry.data.len() as u64);
-            let _ = entry.ack.send(Ok(entry_pos));
+            next_pos = next_pos.saturating_add(entry.encoded_len as u64);
+            match &entry.ack {
+                WriteAcknowledgement::Legacy(sender) => {
+                    let _ = sender.send(Ok(entry_pos));
+                }
+                WriteAcknowledgement::Sequenced { prefix, sender } => {
+                    let _ = sender.send(Ok(crate::wal::append_completion::WalAppendCompletion {
+                        prefix: *prefix,
+                        start_offset: entry_pos,
+                        last_record_offset: entry_pos.saturating_add(entry.last_record_offset),
+                        end_offset: next_pos,
+                        elapsed: entry.service_elapsed,
+                    }));
+                }
+            }
         }
     }
 
@@ -645,10 +772,10 @@ impl WriterRunner {
         // Publish the terminal state before acknowledging any failed append.
         // No further writes from this batch can occur after this proof is sent.
         for entry in batch {
-            let _ = entry.ack.send(Err(WalAppendError {
+            entry.fail(WalAppendError {
                 error: failure.error.replay(),
                 unchanged: failure.unchanged,
-            }));
+            });
         }
         self.config.sync_cond.notify_all();
         self.config.queue_cond.notify_all();
@@ -673,9 +800,7 @@ impl Drop for WriterRunner {
         drop(state);
         drop(queue);
         for entry in pending {
-            let _ = entry
-                .ack
-                .send(Err(WalAppendError::unchanged(error.replay())));
+            entry.fail(WalAppendError::unchanged(error.replay()));
         }
         self.config.sync_cond.notify_all();
         self.config.queue_cond.notify_all();
@@ -941,6 +1066,7 @@ mod tests {
                     id: state.pending_fsyncs,
                     writes_through: state.completed_writes,
                     effect,
+                    completion: None,
                 };
                 state.requests.push_back(request);
             }

@@ -5,6 +5,94 @@ use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, F
 use crate::wal::format::{ChainLink, SealedFacts};
 use crate::wal::ledger::{HolderId, LedgerEdit, OpenFacts};
 
+#[test]
+fn should_count_exact_ledger_barriers_at_their_production_boundaries() {
+    // Arrange
+    let device = CrashDevice::new();
+    let fs = crash_fs(&device);
+    let mut store = LedgerStore::create(fs.clone(), &genesis_ledger()).unwrap();
+    let created = store.sync_counts();
+
+    // Act
+    store.append(&rotate(1)).unwrap();
+    let appended = store.sync_counts();
+    store.compact().unwrap();
+    let checkpointed = store.sync_counts();
+
+    // Assert: an append syncs one file; snapshot publication also syncs its
+    // directory. The counters do not count a logical edit as a directory sync.
+    assert_eq!((created.file_attempts, created.file_completed), (1, 1));
+    assert_eq!(
+        (created.directory_attempts, created.directory_completed),
+        (1, 1)
+    );
+    assert_eq!(appended.file_completed, created.file_completed + 1);
+    assert_eq!(appended.directory_completed, created.directory_completed);
+    assert_eq!(checkpointed.file_completed, appended.file_completed + 1);
+    assert_eq!(
+        checkpointed.directory_completed,
+        appended.directory_completed + 1
+    );
+    for_each_power_loss(&device, |fs| {
+        assert_eq!(loaded(fs).0, applied(&genesis_ledger(), &[rotate(1)]));
+    });
+}
+
+#[test]
+fn should_count_failed_ledger_sync_as_an_attempt_without_claiming_durability() {
+    for effect in [FaultEffect::Before, FaultEffect::After] {
+        // Arrange
+        let device = CrashDevice::new();
+        let fs = crash_fs(&device);
+        let mut store = LedgerStore::create(fs, &genesis_ledger()).unwrap();
+        let before = store.sync_counts();
+        let fault = device.inject(Fault {
+            op: FaultOp::Sync,
+            path: LEDGER_FILE.into(),
+            nth: 1,
+            effect,
+            error: FaultError::Io,
+        });
+
+        // Act
+        let result = store.append(&rotate(1));
+        let after = store.sync_counts();
+
+        // Assert: even an after-effect error is not a successful receipt.
+        assert!(result.is_err());
+        assert!(device.fired(fault));
+        assert_eq!(after.file_attempts, before.file_attempts + 1);
+        assert_eq!(after.file_completed, before.file_completed);
+        assert_eq!(after.directory_attempts, before.directory_attempts);
+    }
+}
+
+#[test]
+fn should_keep_directory_sync_failure_separate_from_a_completed_checkpoint_file_sync() {
+    // Arrange
+    let device = CrashDevice::new();
+    let mut store = LedgerStore::create(crash_fs(&device), &genesis_ledger()).unwrap();
+    let before = store.sync_counts();
+    let fault = device.inject(Fault {
+        op: FaultOp::SyncDir,
+        path: String::new(),
+        nth: 1,
+        effect: FaultEffect::After,
+        error: FaultError::Io,
+    });
+
+    // Act
+    let result = store.compact();
+    let after = store.sync_counts();
+
+    // Assert
+    assert!(result.is_err());
+    assert!(device.fired(fault));
+    assert_eq!(after.file_completed, before.file_completed + 1);
+    assert_eq!(after.directory_attempts, before.directory_attempts + 1);
+    assert_eq!(after.directory_completed, before.directory_completed);
+}
+
 /// Segment `k` of the canonical history these tests build holds the one
 /// record `k`: it starts at `k`, and its link names `k` as last sequence.
 fn link(id: u64) -> ChainLink {

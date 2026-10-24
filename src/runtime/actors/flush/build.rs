@@ -60,11 +60,18 @@ pub(super) fn write(
     let mut bounds = Bounds::default();
     let mut smallest_seq = u64::MAX;
     let mut largest_seq = 0;
+    let mut earliest_expiration_millis = None;
     task.memtable
         .visit_frozen_versions(budget, |key, value, sequence, expiration, op_type| {
             bounds.include(key, budget)?;
             smallest_seq = smallest_seq.min(sequence);
             largest_seq = largest_seq.max(sequence);
+            if let Some(expiration) = expiration {
+                earliest_expiration_millis = Some(
+                    earliest_expiration_millis
+                        .map_or(expiration, |previous: u64| previous.min(expiration)),
+                );
+            }
             let entry_type = crate::memtable::entry_type_of(op_type);
             writer.add_sorted_with_meta(key, value, sequence, entry_type, expiration)
         })?;
@@ -94,5 +101,6 @@ pub(super) fn write(
         smallest_seq: Some(smallest_seq),
         largest_seq: Some(largest_seq),
         key_bounds_complete: true,
+        earliest_expiration_millis,
     })
 }

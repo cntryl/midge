@@ -1350,8 +1350,9 @@ impl StorageBackend for NeverCompletesBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        let _ = (request, callback);
-        panic!("test backend received undeclared range HEAD capability");
+        crate::storage::dispatch_head_request(request, callback, |_key, _, callback| {
+            self.retain_callback(callback);
+        });
     }
 
     fn submit_metadata_read_request(
@@ -2165,10 +2166,10 @@ fn should_readback_remote_wal_before_upload_worker_emits_ack() {
     );
     assert!(
         mock_cloud
-            .get_downloads()
+            .get_range_downloads()
             .iter()
             .any(|key| key.ends_with("wal/epochs/00000000000000000001/00000000000000000009.wal")),
-        "upload worker must read back the remote WAL before ack"
+        "upload worker must read back identity-pinned remote WAL ranges before ack"
     );
 }
 
@@ -2614,6 +2615,24 @@ pub(crate) struct SharedRetirementFixture {
 }
 
 impl SharedRetirementFixture {
+    pub(crate) fn orphan_context<'a>(
+        &'a self,
+        storage: &'a HybridStorage,
+        deadline: &'a crate::common::OperationDeadline,
+    ) -> OrphanSweepContext<'a> {
+        OrphanSweepContext {
+            storage,
+            metadata: &self.cloud,
+            authority: CloudMetadataMirrorAuthority {
+                store: self.store.as_ref(),
+                holder_id: "writer",
+                writer_epoch: 2,
+            },
+            publication_lock: &self.lock,
+            deadline,
+        }
+    }
+
     pub(crate) fn new(manifest: &Manifest) -> Self {
         use crate::lease::LeaderStore;
         let directory = tempfile::tempdir().unwrap();
@@ -2663,6 +2682,7 @@ impl SharedRetirementFixture {
             self.store.clone(),
             "writer".into(),
             2,
+            self.lock.clone(),
         )
         .committed_retirement_authority_within(&crate::common::OperationDeadline::unbounded())
         .unwrap()

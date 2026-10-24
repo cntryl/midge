@@ -24,6 +24,9 @@ impl RuntimeDispatcher {
         msg: RuntimeMsg,
         msg_rx: &Receiver<RuntimeMsg>,
     ) -> HandleOutcome {
+        let Some(msg) = event_loop.gate_message_for_wal_pipeline(msg) else {
+            return HandleOutcome::Continue;
+        };
         if let Some(outcome) = Self::handle_early_control(event_loop, &msg) {
             return outcome;
         }
@@ -35,6 +38,10 @@ impl RuntimeDispatcher {
         };
 
         match msg {
+            RuntimeMsg::MemtableApplyProgress => {
+                event_loop.progress_wal_pipeline();
+                HandleOutcome::Continue
+            }
             RuntimeMsg::CheckWriteStall { request_id, cf_id } => {
                 event_loop.handle_check_write_stall(request_id, cf_id);
                 HandleOutcome::Continue
@@ -185,6 +192,7 @@ impl RuntimeDispatcher {
                     durability_policy,
                     start_sequence,
                     conflict_policy,
+                    validation: None,
                 },
                 response_tx,
             ),
@@ -206,6 +214,7 @@ impl RuntimeDispatcher {
                     durability_policy,
                     start_sequence,
                     conflict_policy,
+                    validation: None,
                 },
                 response_tx,
             ),

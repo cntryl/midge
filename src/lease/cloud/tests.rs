@@ -360,6 +360,7 @@ struct NoCasTokenBackend {
 
 struct BlockingRenewalBackend {
     inner: crate::storage::cloud::MockCloudBackend,
+    blocked_key: &'static str,
     conditional_puts: std::sync::atomic::AtomicUsize,
     renewal_seen: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
     allow_renewal: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
@@ -566,7 +567,7 @@ impl crate::storage::cloud::CloudWriteCapability for BlockingRenewalBackend {
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        let conditional = key.ends_with(LEASE_OBJECT_KEY)
+        let conditional = key.ends_with(self.blocked_key)
             && headers.iter().any(|(name, _)| {
                 name.eq_ignore_ascii_case("if-match") || name.eq_ignore_ascii_case("if-none-match")
             });
@@ -1107,6 +1108,7 @@ fn should_not_resurrect_authority_when_provider_put_lands_after_watchdog_fence()
     let (allow_renewal_tx, allow_renewal_rx) = std::sync::mpsc::channel();
     let backend = Arc::new(BlockingRenewalBackend {
         inner: crate::storage::cloud::MockCloudBackend::new(),
+        blocked_key: LEASE_OBJECT_KEY,
         conditional_puts: std::sync::atomic::AtomicUsize::new(0),
         renewal_seen: std::sync::Mutex::new(Some(renewal_seen_tx)),
         allow_renewal: std::sync::Mutex::new(allow_renewal_rx),
@@ -1676,7 +1678,7 @@ fn should_increment_remote_epoch_given_expired_provider_lease_when_reacquiring()
     put_remote_lease(
         &cloud,
         format_lease_document(&LeaseDocument {
-            version: LeaseDocumentVersion::V3,
+            version: LeaseDocumentVersion::V4,
             epoch: Some(41),
             holder_id: "old-holder@host".to_string(),
             owner_token: Some("old-token".to_string()),
@@ -2154,7 +2156,7 @@ fn should_retry_first_lease_when_pending_sentinel_outlives_failed_create() {
             .get_leader_store()
             .unwrap()
             .read_committed_metadata(Duration::from_secs(1)),
-        Err(LeaseError::Indeterminate(_))
+        Ok(CloudMetadataHead::MissingLease)
     ));
     let second = make_lease();
     let acquired = Arc::clone(&second).try_acquire();
@@ -2195,8 +2197,9 @@ fn should_keep_first_lease_inactive_when_marker_activation_fails() {
             .get_leader_store()
             .unwrap()
             .read_committed_metadata(Duration::from_secs(1)),
-        Err(LeaseError::Indeterminate(_))
+        Ok(CloudMetadataHead::Uncommitted)
     ));
+    assert!(first.validity.remaining(1).is_err());
 }
 
 #[test]
@@ -2483,8 +2486,12 @@ fn should_preserve_committed_metadata_pointer_when_provider_lease_renews() {
         CloudMetadataHead::Committed(generation)
     );
     let wire = read_remote_lease(&cloud);
-    assert!(wire.starts_with("lease_version: 3\n"), "{wire}");
-    assert!(!wire.contains("holder_id: "), "old readers must reject V3");
+    assert!(wire.starts_with("lease_version: 4\n"), "{wire}");
+    assert!(
+        !wire.contains("metadata: "),
+        "metadata authority has its own pointer"
+    );
+    assert!(!wire.contains("holder_id: "), "old readers must reject V4");
 }
 
 #[test]
@@ -2592,7 +2599,10 @@ fn should_reject_stale_snapshot_when_same_epoch_pointer_advanced_during_upload()
     );
 
     // Assert
-    assert!(matches!(stale_result, Err(LeaseError::RenewalFailed(_))));
+    assert!(
+        matches!(stale_result, Err(LeaseError::AcquisitionFailed(_))),
+        "{stale_result:?}"
+    );
     assert_eq!(
         store
             .read_committed_metadata(Duration::from_secs(1))
@@ -2609,6 +2619,7 @@ fn should_reject_metadata_pointer_cas_that_lands_after_successor_acquires() {
     let (allow_put_tx, allow_put_rx) = std::sync::mpsc::channel();
     let backend = Arc::new(BlockingRenewalBackend {
         inner: crate::storage::cloud::MockCloudBackend::new(),
+        blocked_key: "metadata/committed-pointer.v1",
         conditional_puts: std::sync::atomic::AtomicUsize::new(0),
         renewal_seen: std::sync::Mutex::new(Some(put_seen_tx)),
         allow_renewal: std::sync::Mutex::new(allow_put_rx),
@@ -2666,7 +2677,7 @@ fn should_reject_metadata_pointer_cas_that_lands_after_successor_acquires() {
 
     // Assert
     assert!(
-        matches!(stale, Err(LeaseError::RenewalFailed(_))),
+        matches!(stale, Err(LeaseError::AcquisitionFailed(_))),
         "{stale:?}"
     );
     assert_eq!(
@@ -2678,12 +2689,13 @@ fn should_reject_metadata_pointer_cas_that_lands_after_successor_acquires() {
 }
 
 #[test]
-fn should_retry_metadata_pointer_cas_after_same_epoch_heartbeat_renews() {
+fn should_complete_metadata_pointer_cas_when_same_epoch_heartbeat_renews() {
     // Arrange
     let (put_seen_tx, put_seen_rx) = std::sync::mpsc::channel();
     let (allow_put_tx, allow_put_rx) = std::sync::mpsc::channel();
     let backend = Arc::new(BlockingRenewalBackend {
         inner: crate::storage::cloud::MockCloudBackend::new(),
+        blocked_key: "metadata/committed-pointer.v1",
         conditional_puts: std::sync::atomic::AtomicUsize::new(0),
         renewal_seen: std::sync::Mutex::new(Some(put_seen_tx)),
         allow_renewal: std::sync::Mutex::new(allow_put_rx),
@@ -2738,13 +2750,14 @@ fn should_retry_metadata_pointer_cas_after_same_epoch_heartbeat_renews() {
 }
 
 #[test]
-fn should_retry_provider_renewal_when_same_epoch_pointer_cas_wins() {
+fn should_complete_provider_renewal_when_same_epoch_pointer_cas_wins() {
     // Arrange: hold the first renewal CAS after it reads the lease, then
     // commit a metadata pointer through the same lease object.
     let (renewal_seen_tx, renewal_seen_rx) = std::sync::mpsc::channel();
     let (allow_renewal_tx, allow_renewal_rx) = std::sync::mpsc::channel();
     let backend = Arc::new(BlockingRenewalBackend {
         inner: crate::storage::cloud::MockCloudBackend::new(),
+        blocked_key: LEASE_OBJECT_KEY,
         conditional_puts: std::sync::atomic::AtomicUsize::new(0),
         renewal_seen: std::sync::Mutex::new(Some(renewal_seen_tx)),
         allow_renewal: std::sync::Mutex::new(allow_renewal_rx),
@@ -2803,6 +2816,7 @@ fn should_not_report_pointer_commit_success_after_local_validity_is_fenced() {
     let (allow_put_tx, allow_put_rx) = std::sync::mpsc::channel();
     let backend = Arc::new(BlockingRenewalBackend {
         inner: crate::storage::cloud::MockCloudBackend::new(),
+        blocked_key: "metadata/committed-pointer.v1",
         conditional_puts: std::sync::atomic::AtomicUsize::new(0),
         renewal_seen: std::sync::Mutex::new(Some(put_seen_tx)),
         allow_renewal: std::sync::Mutex::new(allow_put_rx),
@@ -2849,12 +2863,13 @@ fn should_not_report_pointer_commit_success_after_local_validity_is_fenced() {
 }
 
 #[test]
-fn should_retry_provider_release_when_same_epoch_pointer_cas_wins() {
+fn should_complete_provider_release_when_same_epoch_pointer_cas_wins() {
     // Arrange
     let (release_seen_tx, release_seen_rx) = std::sync::mpsc::channel();
     let (allow_release_tx, allow_release_rx) = std::sync::mpsc::channel();
     let backend = Arc::new(BlockingRenewalBackend {
         inner: crate::storage::cloud::MockCloudBackend::new(),
+        blocked_key: LEASE_OBJECT_KEY,
         conditional_puts: std::sync::atomic::AtomicUsize::new(0),
         renewal_seen: std::sync::Mutex::new(Some(release_seen_tx)),
         allow_renewal: std::sync::Mutex::new(allow_release_rx),
@@ -2898,7 +2913,13 @@ fn should_retry_provider_release_when_same_epoch_pointer_cas_wins() {
     assert_eq!(lease.epoch(), 0);
     assert!(lease.validity.remaining(epoch).is_err());
     let persisted = provider_read_doc(&cloud).unwrap().expect("lease document");
-    assert_eq!(persisted.committed_metadata, Some(generation));
+    assert!(persisted.committed_metadata.is_none());
+    assert_eq!(
+        store
+            .read_committed_metadata(Duration::from_secs(1))
+            .unwrap(),
+        CloudMetadataHead::Committed(generation)
+    );
     assert!(persisted
         .is_expired_with_tolerance(lease.clock_skew_tolerance, chrono::Utc::now())
         .unwrap());

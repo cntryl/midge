@@ -231,8 +231,23 @@ pub(in crate::runtime::event_loop) fn create_test_event_loop(
 pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
     storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
 ) -> crate::common::MidgeResult<EventLoop> {
+    create_test_cloud_event_loop_with_reserved_names(storage_policy, None)
+}
+
+pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_reserved_names(
+    storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
+    next_sst: Option<u64>,
+) -> crate::common::MidgeResult<EventLoop> {
     let db_path = unique_test_db_path("midge_event_loop_cloud");
     std::fs::create_dir_all(&db_path).expect("create temp cloud event loop dir");
+    if let Some(next) = next_sst {
+        let fs = crate::io::real::test_root(&db_path);
+        crate::metadata::ensure_or_create_format_marker(&fs, &db_path)?;
+        let mut manifest = crate::metadata::Manifest::default();
+        manifest.next_sst_seqs.insert(0, next);
+        crate::metadata::ManifestPersistence::save_with_fs(&fs, &manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+    }
 
     // The history starts under the event loop's lease, so its first segment
     // stays open.
@@ -246,10 +261,12 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
         cloud.clone(),
         Duration::from_secs(5),
     ));
+    let inventory: Arc<dyn crate::storage::inventory::ObjectInventory> = cloud.clone();
     let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
         cloud,
         storage_policy,
     ));
+    hybrid_storage.configure_object_inventories(Arc::clone(&inventory), inventory)?;
     let store: Arc<dyn crate::lease::LeaderStore> =
         Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
             crate::io::real::test_root(db_path.join("cloud_store")),
@@ -876,6 +893,7 @@ fn test_manifest_l0_file_meta(name: &str, largest_seq: u64) -> crate::metadata::
         smallest_seq: Some(largest_seq),
         largest_seq: Some(largest_seq),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
         ..Default::default()
     }
 }
@@ -900,6 +918,7 @@ fn write_runtime_l0_sst_for_test(
         smallest_seq: Some(largest_seq),
         largest_seq: Some(largest_seq),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
     }
 }
 
@@ -1313,9 +1332,7 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
             (Err(crate::MidgeError::Fenced(message)), "ddl") => {
                 message.contains("DDL authority is ambiguous")
             }
-            (Err(crate::MidgeError::Busy(message)), "publication") => {
-                message.contains("manifest publication is already in progress")
-            }
+            (Ok(false), "publication") => event_loop.publication.publication_gate.is_active(),
             (Err(crate::MidgeError::Fenced(message)), "unsettled") => {
                 message.contains("compaction publication is unsettled")
             }
@@ -1936,10 +1953,10 @@ fn should_assign_compaction_output_sequence_when_plan_has_zero() {
 
     // Act
     // Assert
-    assert_eq!(assigned.output_seq, 42);
+    assert_eq!(assigned.output_seq, 1);
     assert_eq!(
-        event_loop.state.sequence, 42,
-        "assigning a compaction output sequence must consume one global sequence"
+        event_loop.state.sequence, 41,
+        "SST name allocation must not consume a transaction sequence"
     );
 }
 
@@ -1995,7 +2012,7 @@ fn should_advance_compaction_output_sequence_past_recovered_manifest_name() {
 
     // Assert
     assert_eq!(assigned.output_seq, 410);
-    assert_eq!(event_loop.state.sequence, 410);
+    assert_eq!(event_loop.state.sequence, 408);
 }
 
 mod compaction_scheduling {
@@ -2030,11 +2047,11 @@ mod compaction_scheduling {
             .prepare_compaction_plan_for_launch(plan)
             .expect("prepare compaction plan");
 
-        assert_eq!(prepared.output_seq, 42);
+        assert_eq!(prepared.output_seq, 1);
         assert_eq!(prepared.snapshot_horizon, Some(37));
         assert_eq!(
-            event_loop.state.sequence, 42,
-            "compaction launch must consume one global sequence for raw plans"
+            event_loop.state.sequence, 41,
+            "compaction launch uses the independently reserved SST name cursor"
         );
     }
 
@@ -3371,4 +3388,106 @@ fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
     // Assert
     assert_eq!(after_writes, baseline, "plain writes must not prune");
     assert_eq!(after_manifest_change, baseline + 1);
+}
+
+#[test]
+fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let mut event_loop = create_test_event_loop()?;
+    for index in 1..100 {
+        event_loop.state.create_cf(format!("family-{index}"))?;
+    }
+    let cache = Arc::new(crate::runtime::snapshot_cache::SnapshotCache::new());
+    event_loop.set_snapshot_cache(Arc::clone(&cache));
+    let before = event_loop
+        .state
+        .column_families
+        .keys()
+        .map(|&id| (id, cache.load_family(id).expect("published family").1))
+        .collect::<std::collections::HashMap<_, _>>();
+    let (_sender, receiver) = crossbeam::channel::unbounded();
+
+    // Act
+    event_loop.process_wake_msg(
+        RuntimeMsg::ApplyTransaction {
+            request_id: 98_924,
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"snapshot-cut"),
+                value: bytes::Bytes::from_static(b"visible"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::BestEffort),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+            response_tx: None,
+        },
+        &receiver,
+        16,
+    );
+
+    // Assert: source-stable families allocate no replacement ReadSnapshot.
+    for (&id, previous) in &before {
+        let (sequence, current) = cache.load_family(id).expect("published family");
+        assert!(Arc::ptr_eq(previous, &current), "source changed for {id}");
+        let expected = (id == 0).then(|| b"visible".to_vec());
+        assert_eq!(current.get(b"snapshot-cut", sequence)?, expected);
+    }
+    let accounted = event_loop.state.total_memtable_bytes;
+    event_loop.state.recompute_total_memtable_bytes();
+    assert_eq!(accounted, event_loop.state.total_memtable_bytes);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_publish_applied_sequence_given_failed_group_when_snapshot_published(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = create_test_local_event_loop()?;
+    let cache = Arc::new(crate::runtime::snapshot_cache::SnapshotCache::new());
+    event_loop.set_snapshot_cache(Arc::clone(&cache));
+    let params = |request_id, key| crate::runtime::actors::wal::TransactionAppendParams {
+        request_id,
+        ops: vec![crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(key),
+            value: bytes::Bytes::from_static(b"value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+        start_sequence: None,
+        conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+    };
+    let (applied, _, _) = event_loop
+        .actors
+        .wal_actor
+        .append_transaction(&mut event_loop.state, params(98_978, b"applied"))?;
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return").expect("inject sync failure");
+
+    // Act
+    let result = event_loop
+        .actors
+        .wal_actor
+        .append_transaction(&mut event_loop.state, params(98_979, b"unapplied"));
+    fail::remove("midge::wal::inject_no_space_on_sync");
+    event_loop.publish_snapshot();
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::OutcomeUnknown(_))
+    ));
+    assert!(event_loop.state.sequence > applied);
+    let (visible, snapshot) = cache.load_family(0).expect("published family");
+    assert_eq!(visible, applied);
+    assert_eq!(snapshot.get(b"applied", visible)?, Some(b"value".to_vec()));
+    assert_eq!(snapshot.get(b"unapplied", visible)?, None);
+    Ok(())
 }

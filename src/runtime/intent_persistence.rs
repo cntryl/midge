@@ -1,6 +1,6 @@
 //! Intent log persistence - serialization and file I/O
 //!
-//! Persists runtime intent log to disk in JSON format to enable recovery of
+//! Persists append-only checksummed runtime intent edits to enable recovery of
 //! actor intent states across restarts.
 
 use crate::common::{MidgeError, MidgeResult};
@@ -12,16 +12,22 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct IntentPersistence;
+mod edits;
 
 impl IntentPersistence {
     const INTENT_FILE: &'static str = crate::metadata::files::INTENT_LOG;
     const INTENT_FILE_TEMP: &'static str = "intent_log.json.tmp";
 
     #[cfg(test)]
-    pub fn intent_path(db_path: &Path) -> PathBuf {
+    pub(crate) fn intent_path(db_path: &Path) -> PathBuf {
         db_path.join(Self::INTENT_FILE)
     }
 
+    /// Replay durable intent edits under the requested recovery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unreadable storage or invalid intent history.
     pub fn load_with_fs_and_policy(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
@@ -33,47 +39,11 @@ impl IntentPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
     ) -> MidgeResult<Vec<IntentLogEntry>> {
-        use crate::io::traits::FsPath;
-
-        let p = FsPath::new(Self::INTENT_FILE);
-        match fs.exists(&p) {
-            Ok(false) => {
-                tracing::debug!(path = ?p, "intent file not found, using empty log");
-                return Ok(Vec::new());
-            }
-            Err(e) => return Err(recovery_io_error(e, "fs exists error")),
-            Ok(true) => {}
-        }
-
-        let file = fs
-            .open(
-                &p,
-                crate::io::traits::OpenOptions {
-                    mode: crate::io::traits::OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
-            .map_err(|error| recovery_io_error(error, "failed to open intent file"))?;
-        let len = file
-            .len()
-            .map_err(|error| recovery_io_error(error, "failed to stat intent file"))?;
-        let data = file
-            .read_at(0, len)
-            .map_err(|error| recovery_io_error(error, "failed to read intent file"))?;
-        let intents: Vec<IntentLogEntry> = serde_json::from_slice(&data).map_err(|e| {
-            if recovery_policy == crate::config::RecoveryPolicy::Strict {
-                MidgeError::RecoveryFailed(format!("failed to parse intent JSON: {e}"))
-            } else {
-                MidgeError::RecoveryFailed(format!(
-                    "failed to parse intent JSON (salvage mode): {e}"
-                ))
-            }
-        })?;
+        // Byte corruption remains an error in both modes. Only a genuine
+        // partial final append can retain the preceding durable state.
+        let _ = recovery_policy;
+        let intents = edits::load(fs)?;
         Self::validate_persisted_sst_names(&intents).map_err(MidgeError::RecoveryFailed)?;
-
-        tracing::debug!(path = ?p, entries = intents.len(), "intent log loaded");
         Ok(intents)
     }
 
@@ -93,6 +63,11 @@ impl IntentPersistence {
                 IntentLogEntry::CompactionPlanned { input_files, .. } => {
                     for name in input_files {
                         validate(name, "compaction plan input")?;
+                    }
+                }
+                IntentLogEntry::MoveSstsPublish { captured, .. } => {
+                    for file in captured {
+                        validate(&file.name, "logical move")?;
                     }
                 }
                 IntentLogEntry::FlushPublish { file_meta, .. }
@@ -118,7 +93,7 @@ impl IntentPersistence {
     }
 
     #[cfg(test)]
-    pub fn load(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
+    pub(crate) fn load(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
@@ -128,37 +103,16 @@ impl IntentPersistence {
         Self::load_with_fs_and_policy(&fs, crate::config::RecoveryPolicy::Strict)
     }
 
+    /// Append and durably synchronize the requested intent state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid SST identities or failed durable I/O.
     pub fn save_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         intents: &[IntentLogEntry],
     ) -> Result<(), String> {
-        use crate::io::staging;
-        use crate::io::traits::FsPath;
-
-        Self::validate_persisted_sst_names(intents)?;
-        crate::failpoints::fail_point!("midge::intent::before_save");
-
-        let json = serde_json::to_vec_pretty(intents)
-            .map_err(|e| format!("failed to serialize intent log to JSON: {e}"))?;
-
-        let temp = FsPath::new(Self::INTENT_FILE_TEMP);
-        let target = FsPath::new(Self::INTENT_FILE);
-        staging::stage_bytes_with_hook(
-            fs,
-            &temp,
-            &target,
-            &json,
-            || {
-                crate::failpoints::fail_point!("midge::intent::inject_no_space_on_save", |_| Err(
-                    "failpoint: no space while saving intent log".to_string()
-                ));
-                Ok(())
-            },
-            |msg| msg,
-        )?;
-
-        tracing::debug!(path = ?Self::INTENT_FILE, entries = intents.len(), "intent log persisted");
-        Ok(())
+        Self::save_with_fs_typed(fs, intents).map_err(|error| error.to_string())
     }
 
     pub(crate) fn save_with_fs_typed(
@@ -166,25 +120,11 @@ impl IntentPersistence {
         intents: &[IntentLogEntry],
     ) -> MidgeResult<()> {
         Self::validate_persisted_sst_names(intents).map_err(MidgeError::RecoveryFailed)?;
-        crate::failpoints::fail_point!("midge::intent::before_save");
-        let json = serde_json::to_vec_pretty(intents)
-            .map_err(|error| MidgeError::Internal(format!("serialize intent log: {error}")))?;
-        crate::io::staging::stage_bytes_typed(
-            fs,
-            &crate::io::FsPath::new(Self::INTENT_FILE_TEMP),
-            &crate::io::FsPath::new(Self::INTENT_FILE),
-            &json,
-            || {
-                crate::failpoints::fail_point!("midge::intent::inject_no_space_on_save", |_| Err(
-                    MidgeError::NoSpace("failpoint: no space while saving intent log".into())
-                ));
-                Ok(())
-            },
-        )
+        edits::save(fs, intents)
     }
 
     #[cfg(test)]
-    pub fn save(db_path: &Path, intents: &[IntentLogEntry]) -> Result<(), String> {
+    pub(crate) fn save(db_path: &Path, intents: &[IntentLogEntry]) -> Result<(), String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
@@ -195,7 +135,7 @@ impl IntentPersistence {
     }
 
     #[cfg(test)]
-    pub fn delete(db_path: &Path) -> Result<(), String> {
+    pub(crate) fn delete(db_path: &Path) -> Result<(), String> {
         let p = Self::intent_path(db_path);
         let temp = db_path.join(Self::INTENT_FILE_TEMP);
         if p.exists() {
@@ -252,7 +192,7 @@ mod tests {
 
         // Assert
         assert!(
-            error.contains("failed to parse intent JSON"),
+            error.contains("unsupported metadata encoding"),
             "expected strict intent parse error, got: {error}"
         );
     }
@@ -329,6 +269,7 @@ mod tests {
                 smallest_seq: None,
                 largest_seq: None,
                 key_bounds_complete: false,
+                earliest_expiration_millis: None,
             },
         }];
 

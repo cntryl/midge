@@ -3,7 +3,6 @@ use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::super::EventLoop;
 use crate::runtime::durability::{DurabilityWaiter, TestDurabilityWaiter};
 use crate::runtime::hybrid_persistence::CloudPersistence;
-use crate::storage::cloud::CloudReadCapability;
 
 /// Wrap the raw hybrid backend in the runtime persistence layer under test.
 fn cloud_persistence(storage: &Arc<crate::storage::HybridStorage>) -> CloudPersistence {
@@ -21,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
 };
 use std::time::{Duration, Instant};
 
@@ -120,6 +119,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
         let bytes = add_valid_manifest_sst_for_test(&mut el, &name, 81);
         write_test_file(el.state.host_sst_dir().join(&name), &bytes);
     }
+    el.prefetch_flush_sst_names_if_due();
     let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
     el.pipeline.worker_msg_tx = Some(worker_tx);
     // This test drives both worker channels explicitly at each turn boundary.
@@ -154,7 +154,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
         el.actors.flush_actor.is_inflight(),
         "flush work resumes after the compaction and retirement turns"
     );
-    for phase in ["build", "publish", "mirror"] {
+    for phase in ["build", "publish", "manifest mirror", "intent clear mirror"] {
         let completion = el
             .pipeline
             .flush_worker_result_rx
@@ -346,6 +346,7 @@ fn should_release_wal_disk_budget_only_after_local_segment_removal(
 
 fn assertion_only_cloud_request(request_id: u64, start_sequence: u64) -> ApplyTransactionRequest {
     ApplyTransactionRequest {
+        validation: None,
         request_id,
         ops: Vec::new(),
         assertions: vec![KeyAssertion {
@@ -416,6 +417,7 @@ fn should_not_add_confirmation_waiter_when_cloud_assertion_only_sequence_has_pen
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop.state.sequence = 1;
+    event_loop.state.applied_sequence = 1;
     event_loop.state.wal.frontiers.set_cloud_durable_for_test(0);
     event_loop
         .pipeline
@@ -623,8 +625,7 @@ impl crate::storage::cloud::CloudWriteCapability for FailThirdIntentPutBackend {
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        if key.contains("metadata/generations/")
-            && key.ends_with("/intent_log.json")
+        if is_cloud_manifest_key_for_test(key)
             && self.intent_puts.fetch_add(1, Ordering::SeqCst) >= 2
         {
             let key = key.to_string();
@@ -671,6 +672,14 @@ struct ObserveIntentBeforeRemoteSstBackend {
     remote_existed_at_intent_publish: Arc<AtomicBool>,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct MetadataPointerForTest {
+    writer_epoch: u64,
+    holder_id: String,
+    owner_token: String,
+    committed: Option<crate::lease::CloudMetadataGeneration>,
+}
+
 impl crate::storage::cloud::CloudReadCapability for ObserveIntentBeforeRemoteSstBackend {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata);
 
@@ -690,7 +699,7 @@ impl crate::storage::cloud::CloudWriteCapability for ObserveIntentBeforeRemoteSs
         let event = rx
             .recv_timeout(Duration::from_secs(1))
             .expect("observe metadata provider put");
-        if key.ends_with(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+        if key.ends_with("metadata/committed-pointer.v1")
             && matches!(
                 &event,
                 crate::storage::cloud::CloudEvent::Put {
@@ -699,30 +708,21 @@ impl crate::storage::cloud::CloudWriteCapability for ObserveIntentBeforeRemoteSs
                 }
             )
         {
-            let document = String::from_utf8(data).expect("lease document UTF-8");
-            let generation = document
-                .lines()
-                .find_map(|line| line.strip_prefix("metadata: "))
-                .and_then(|json| {
-                    serde_json::from_str::<Option<crate::lease::CloudMetadataGeneration>>(json)
-                        .expect("parse committed lease metadata")
-                });
-            if let Some(intent) = generation.and_then(|generation| {
-                generation
-                    .objects
-                    .into_iter()
-                    .find(|object| object.file_name == crate::metadata::files::INTENT_LOG)
-            }) {
-                let (tx, rx) = std::sync::mpsc::channel();
-                self.inner.submit_get(
-                    &format!("{}/{}", self.metadata_prefix, intent.object_key),
-                    tx,
+            let pointer: MetadataPointerForTest =
+                crate::metadata::codec::decode(4, &data).expect("decode committed pointer");
+            if let Some(generation) = pointer.committed {
+                let cloud = crate::storage::cloud::CloudStorage::new(
+                    self.inner.clone(),
+                    self.metadata_prefix.clone(),
                 );
-                if let Ok(crate::storage::cloud::CloudEvent::Get {
-                    result: crate::storage::cloud::CloudOutcome::Ok(intent_bytes),
-                    ..
-                }) = rx.recv_timeout(Duration::from_secs(1))
-                {
+                let bodies =
+                    crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
+                        &cloud,
+                        &generation,
+                        &crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+                    )
+                    .expect("validate selected intent closure");
+                if let Some(intent_bytes) = bodies.get(crate::metadata::files::INTENT_LOG) {
                     if intent_bytes
                         .windows(b"CompactionPublish".len())
                         .any(|window| window == b"CompactionPublish")
@@ -790,6 +790,7 @@ struct DelayedCommitDdlBackend {
     inner: Arc<crate::storage::filesystem::FileSystem>,
     delay_first_registry_cas: AtomicBool,
     commit_complete: Arc<AtomicBool>,
+    commit_gate: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl DelayedCommitDdlBackend {
@@ -798,11 +799,25 @@ impl DelayedCommitDdlBackend {
             inner,
             delay_first_registry_cas: AtomicBool::new(true),
             commit_complete: Arc::new(AtomicBool::new(false)),
+            commit_gate: Arc::new((Mutex::new(false), Condvar::new())),
         }
     }
 
     fn commit_complete(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.commit_complete)
+    }
+
+    fn release_commit(&self) {
+        let (released, ready) = &*self.commit_gate;
+        *released.lock().unwrap() = true;
+        ready.notify_all();
+    }
+}
+
+impl Drop for DelayedCommitDdlBackend {
+    fn drop(&mut self) {
+        // Also release the provider worker if an earlier test assertion fails.
+        self.release_commit();
     }
 }
 
@@ -1121,8 +1136,18 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
             let key = request.key.clone();
             let inner = Arc::clone(&self.inner);
             let commit_complete = Arc::clone(&self.commit_complete);
+            let commit_gate = Arc::clone(&self.commit_gate);
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100));
+                let (released, ready) = &*commit_gate;
+                drop(
+                    ready
+                        .wait_while(released.lock().unwrap(), |released| !*released)
+                        .unwrap(),
+                );
+                // This fixture models a provider mutation already admitted
+                // before the caller's timeout, with no cancellation guarantee.
+                let mut request = request;
+                request.deadline = crate::common::OperationDeadline::unbounded();
                 let (tx, rx) = std::sync::mpsc::channel();
                 inner.submit_write_request(request, data, tx);
                 let committed = matches!(
@@ -1685,6 +1710,7 @@ fn add_valid_versions_manifest_sst_for_test(
             smallest_seq: Some(*sequences.start()),
             largest_seq: Some(*sequences.end()),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             ..Default::default()
         });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
@@ -1711,6 +1737,7 @@ fn add_valid_manifest_sst_for_test(
             smallest_seq: Some(max_sequence),
             largest_seq: Some(max_sequence),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             ..Default::default()
         });
     write_test_file(remote_sst_path_for_test(el, sst_name), &bytes);
@@ -1820,6 +1847,11 @@ fn attach_provider_metadata_lease(
     el.authority.fencing.leader_holder_id = Some(lease.holder_id());
     el.authority.fencing.leader_store = lease.get_leader_store();
     el.actors.cloud_coordinator.cloud_metadata_storage = Some(cloud);
+    if let Some(storage) = el.actors.cloud_coordinator.hybrid_storage.clone() {
+        // Rebind the physical retirement reader to this fixture's newly
+        // attached metadata authority, as production construction does.
+        el.set_hybrid_storage(storage);
+    }
     lease
 }
 
@@ -1839,6 +1871,32 @@ fn get_cloud_metadata_for_test(
     }
 }
 
+fn publish_retired_sst_for_gc_test(
+    el: &mut EventLoop,
+    name: &str,
+    bytes: &[u8],
+) -> crate::common::MidgeResult<()> {
+    // Deletion fixtures need the original durable identity and retirement
+    // horizon, just as a real compaction/reclamation publishes before GC.
+    let file = crate::metadata::FileMeta {
+        name: name.into(),
+        size_bytes: bytes.len() as u64,
+        content_crc32c: Some(crc32c::crc32c(bytes)),
+        ..crate::metadata::FileMeta::default()
+    };
+    let edit = crate::metadata::ManifestEdit::Batch(vec![
+        crate::metadata::ManifestEdit::AddSst(file),
+        crate::metadata::ManifestEdit::RemoveSst { name: name.into() },
+    ]);
+    let id = el
+        .state
+        .manifest_store
+        .append_for(crate::metadata::accounting::Origin::Administration, &edit)?;
+    el.state.manifest.apply_edit(&edit)?;
+    el.state.manifest.note_applied_journal_edit(id);
+    el.mirror_metadata_to_authoritative_cloud()
+}
+
 fn get_committed_cloud_metadata_for_test(
     cloud: &crate::storage::cloud::CloudStorage,
     lease: &crate::lease::CloudStorageLease,
@@ -1854,29 +1912,18 @@ fn get_committed_cloud_metadata_for_test(
         crate::lease::CloudMetadataHead::Committed(generation) => generation,
         head => panic!("expected committed metadata generation, got {head:?}"),
     };
-    let object = generation
-        .objects
-        .iter()
-        .find(|object| object.file_name == file_name)
-        .unwrap_or_else(|| panic!("committed generation omits '{file_name}'"));
-    let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_get(&object.object_key, tx);
-    let bytes = match rx.recv_timeout(Duration::from_secs(1)) {
-        Ok(crate::storage::cloud::CloudEvent::Get {
-            result: crate::storage::cloud::CloudOutcome::Ok(bytes),
-            ..
-        }) => bytes,
-        other => panic!(
-            "committed metadata get for '{}' failed: {other:?}",
-            object.object_key
-        ),
-    };
-    assert_eq!(
-        u64::try_from(bytes.len()).expect("metadata length"),
-        object.len
-    );
-    assert_eq!(crc32c::crc32c(&bytes), object.crc32c);
-    bytes
+    crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
+        cloud,
+        &generation,
+        &crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+    )
+    .expect("validate committed metadata closure")
+    .remove(file_name)
+    .unwrap_or_else(|| panic!("committed generation omits '{file_name}'"))
+}
+
+fn is_cloud_manifest_key_for_test(key: &str) -> bool {
+    key.starts_with("manifest/") || key.contains("/manifest/")
 }
 
 fn put_all_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, db_path: &Path) {
@@ -1920,7 +1967,7 @@ impl crate::storage::cloud::CloudReadCapability for ProviderTimeoutMetadataBacke
     crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata);
 
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        if !key.contains("/metadata/generations/") {
+        if !is_cloud_manifest_key_for_test(key) {
             self.inner.submit_get(key, callback);
             return;
         }
@@ -2146,8 +2193,7 @@ impl crate::storage::cloud::CloudWriteCapability for AdvanceCommittedPointerBefo
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        let is_pointer_cas = key
-            .ends_with(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+        let is_pointer_cas = key.ends_with("metadata/committed-pointer.v1")
             && headers
                 .iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case("if-match"));
@@ -2160,19 +2206,13 @@ impl crate::storage::cloud::CloudWriteCapability for AdvanceCommittedPointerBefo
             None
         };
         if let Some(generation) = competing_generation {
-            let candidate = String::from_utf8(data.clone()).expect("UTF-8 lease document");
-            let metadata_line = candidate
-                .lines()
-                .find(|line| line.starts_with("metadata: "))
-                .expect("V2 lease metadata field");
-            let replacement = format!(
-                "metadata: {}",
-                serde_json::to_string(&Some(generation)).expect("serialize advanced pointer")
-            );
-            let advanced = candidate.replacen(metadata_line, &replacement, 1);
+            let mut candidate: MetadataPointerForTest =
+                crate::metadata::codec::decode(4, &data).expect("decode candidate pointer");
+            candidate.committed = Some(generation);
+            let advanced =
+                crate::metadata::codec::encode(4, &candidate).expect("encode advanced pointer");
             let (tx, rx) = std::sync::mpsc::channel();
-            self.inner
-                .submit_put(key, advanced.into_bytes(), headers.clone(), tx);
+            self.inner.submit_put(key, advanced, headers.clone(), tx);
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(crate::storage::cloud::CloudEvent::Put {
                     result: crate::storage::cloud::CloudOutcome::Ok(()),
@@ -2361,7 +2401,7 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
     let commit_complete = delayed_cloud.commit_complete();
     el.actors.cloud_coordinator.hybrid_storage =
         Some(Arc::new(crate::storage::HybridStorage::with_policy(
-            delayed_cloud,
+            delayed_cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )));
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -2417,6 +2457,8 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
     assert!(el.authority.fencing.ddl_authority_ambiguous);
     assert!(el.state.db_path.join("ddl.prepare.json").exists());
 
+    assert!(!commit_complete.load(Ordering::SeqCst));
+    delayed_cloud.release_commit();
     // The provider worker may run late under a loaded test runner. The
     // operation's one-second timeout is exercised above; completion is a
     // separate condition, so give it a load-tolerant deadline.
@@ -2490,7 +2532,7 @@ fn should_preserve_provider_timeout_from_manifest_metadata_mirror() -> crate::co
             error: crate::common::MidgeError::Timeout(message),
             ..
         } => assert!(
-            message.contains("metadata"),
+            message.contains("manifest/") && message.contains("request timed out after 30 ms"),
             "unexpected timeout: {message}"
         ),
         other => panic!("expected typed metadata timeout, got {other:?}"),
@@ -2581,7 +2623,8 @@ fn should_not_overwrite_remote_manifest_when_writer_lease_moved_before_newer_pub
     put_cloud_metadata_for_test(
         &metadata_storage,
         "manifest.snapshot.json",
-        serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &remote_manifest)
+            .expect("serialize remote manifest"),
     );
     el.actors.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
     el.authority.fencing.writer_epoch = 1;
@@ -2598,10 +2641,10 @@ fn should_not_overwrite_remote_manifest_when_writer_lease_moved_before_newer_pub
         matches!(error, crate::common::MidgeError::Fenced(_)),
         "expected Fenced, got {error:?}"
     );
-    let retained: crate::metadata::Manifest = serde_json::from_slice(&get_cloud_metadata_for_test(
-        &metadata_storage,
-        "manifest.snapshot.json",
-    ))
+    let retained: crate::metadata::Manifest = crate::metadata::codec::decode(
+        crate::metadata::codec::MANIFEST,
+        &get_cloud_metadata_for_test(&metadata_storage, "manifest.snapshot.json"),
+    )
     .expect("parse retained remote manifest");
     assert_eq!(
         test_flush_frontier(&retained, 0),
@@ -2659,6 +2702,7 @@ fn should_not_overwrite_newer_remote_manifest_metadata_when_mirroring(
             .unwrap()
             .clone(),
         el.state.writer_epoch,
+        el.publication.metadata_publication_lock.clone(),
     );
     let authority = loader.committed_retirement_authority_within(
         &crate::common::OperationDeadline::from_budget(Duration::from_secs(5)),
@@ -2741,41 +2785,19 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
     el.mirror_metadata_to_authoritative_cloud()?;
 
     let leader_store = lease.get_leader_store().expect("provider leader store");
-    let mut advanced_generation = match leader_store
+    let baseline = match leader_store
         .read_committed_metadata(Duration::from_secs(1))
         .expect("read baseline pointer")
     {
         crate::lease::CloudMetadataHead::Committed(generation) => generation,
         head => panic!("expected baseline committed generation, got {head:?}"),
     };
-    let advanced_bytes =
-        serde_json::to_vec_pretty(&advanced_manifest).expect("serialize advanced manifest");
-    let advanced_object = advanced_generation
-        .objects
-        .iter_mut()
-        .find(|object| object.file_name == crate::metadata::files::MANIFEST_SNAPSHOT)
-        .expect("baseline generation has a manifest snapshot");
-    advanced_object.object_key = format!(
-        "metadata/generations/{}/{}",
-        uuid::Uuid::new_v4(),
-        crate::metadata::files::MANIFEST_SNAPSHOT
-    );
-    advanced_object.len = u64::try_from(advanced_bytes.len()).expect("advanced manifest length");
-    advanced_object.crc32c = crc32c::crc32c(&advanced_bytes);
-    let (put_tx, put_rx) = std::sync::mpsc::channel();
-    metadata_storage.submit_put(&advanced_object.object_key, advanced_bytes, vec![], put_tx);
-    assert!(matches!(
-        put_rx.recv_timeout(Duration::from_secs(1)),
-        Ok(crate::storage::cloud::CloudEvent::Put {
-            result: crate::storage::cloud::CloudOutcome::Ok(()),
-            ..
-        })
-    ));
-    advanced_generation.id = advanced_generation
-        .id
-        .checked_next()
-        .expect("generation space");
-    advanced_generation.manifest_horizon = advanced_manifest.edit_checkpoint_id;
+    let advanced_generation = stage_competing_generation_for_test(
+        &metadata_storage,
+        &el.state.manifest,
+        &advanced_manifest,
+    )?;
+    assert_eq!(advanced_generation.id, baseline.id.checked_next().unwrap());
 
     // A local sequence-30 edit requires another pointer commit. The backend
     // installs the newer complete generation after preflight, just before CAS.
@@ -2795,7 +2817,8 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
         "unexpected metadata mirror race error: {error}"
     );
     assert!(metadata_backend.advanced.load(Ordering::SeqCst));
-    let retained: crate::metadata::Manifest = serde_json::from_slice(
+    let retained: crate::metadata::Manifest = crate::metadata::codec::decode(
+        crate::metadata::codec::MANIFEST,
         &get_committed_cloud_metadata_for_test(&metadata_storage, &lease, "manifest.snapshot.json"),
     )
     .expect("parse retained committed race manifest");
@@ -2806,6 +2829,47 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
     );
 
     Ok(())
+}
+
+fn stage_competing_generation_for_test(
+    cloud: &crate::storage::cloud::CloudStorage,
+    baseline: &crate::metadata::Manifest,
+    advanced: &crate::metadata::Manifest,
+) -> crate::common::MidgeResult<crate::lease::CloudMetadataGeneration> {
+    use crate::lease::LeaderStore as _;
+    let directory = tempfile::tempdir()?;
+    let fs = crate::io::real::test_root(directory.path());
+    crate::metadata::ensure_or_create_format_marker(&fs, directory.path())?;
+    let store = crate::lease::fs_leader_store::FsLeaderStore::new(
+        fs.clone(),
+        crate::lease::LeaseClock::default(),
+    );
+    store.acquire_leadership("competing")?;
+    let lock = crate::runtime::MetadataPublicationLock::default();
+    for manifest in [baseline, advanced] {
+        crate::metadata::ManifestPersistence::save_with_fs(&fs, manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+                cloud,
+                fs: fs.as_ref(),
+                publication_lock: &lock,
+                lock_wait_budget: Duration::from_secs(5),
+                deadline: &deadline,
+                authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                    store: &store,
+                    holder_id: "competing",
+                    writer_epoch: 1,
+                },
+            },
+            |_| Ok(()),
+        )?;
+    }
+    match store.read_committed_metadata(Duration::from_secs(1))? {
+        crate::lease::CloudMetadataHead::Committed(generation) => Ok(generation),
+        head => panic!("expected competing committed generation, got {head:?}"),
+    }
 }
 
 #[test]
@@ -3175,6 +3239,7 @@ fn should_retry_manifest_reclamation_after_metadata_publication_timeout(
             .expect("hybrid storage"),
     )
     .write_sst_object(sst_name, &sst_bytes)?;
+    publish_retired_sst_for_gc_test(&mut el, sst_name, &sst_bytes)?;
     el.actors
         .gc_actor
         .queue_manifest_reclamation([sst_name.to_string()]);
@@ -3188,6 +3253,11 @@ fn should_retry_manifest_reclamation_after_metadata_publication_timeout(
     std::thread::sleep(Duration::from_millis(25));
     let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
     el.progress_pass(&msg_rx);
+    let until = Instant::now() + Duration::from_secs(5);
+    while el.actors.gc_actor.has_manifest_reclamation() && Instant::now() < until {
+        el.progress_pass(&msg_rx);
+        std::thread::sleep(Duration::from_millis(1));
+    }
     el.actors.gc_actor.shutdown_workers();
 
     // Assert
@@ -3239,6 +3309,11 @@ fn should_retry_manifest_reclamation_under_continuous_request_load(
     // Act: process one normal request while another remains queued.
     let first = msg_rx.recv().expect("receive first queued request");
     el.process_one(first, &msg_rx);
+    let until = Instant::now() + Duration::from_secs(5);
+    while el.actors.gc_actor.has_manifest_reclamation() && Instant::now() < until {
+        el.progress_pass(&msg_rx);
+        std::thread::sleep(Duration::from_millis(1));
+    }
     el.actors.gc_actor.shutdown_workers();
 
     // Assert
@@ -3476,6 +3551,7 @@ fn should_prune_remote_wal_when_flush_intent_clear_is_mirrored() -> crate::commo
         smallest_seq: Some(max_sequence),
         largest_seq: Some(max_sequence),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
     };
 
     let metadata_backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
@@ -3510,25 +3586,13 @@ fn should_prune_remote_wal_when_flush_intent_clear_is_mirrored() -> crate::commo
     let metadata_uploads = metadata_backend.get_uploads();
     let immutable_uploads: Vec<_> = metadata_uploads
         .iter()
-        .filter(|(key, _)| key.contains("metadata/generations/"))
+        .filter(|(key, _)| is_cloud_manifest_key_for_test(key))
         .collect();
-    let expected_metadata_uploads = crate::metadata::files::CLOUD_MIRRORED
-        .iter()
-        .filter(|file_name| el.state.db_path.join(file_name).exists())
-        .count();
     assert_eq!(
             immutable_uploads.len(),
-            expected_metadata_uploads,
+            1,
             "flush publication should use the existing metadata mirror, not perform a second full mirror: {metadata_uploads:?}"
         );
-    assert_eq!(
-        immutable_uploads
-            .iter()
-            .filter(|(key, _)| key.ends_with("/intent_log.json"))
-            .count(),
-        1,
-        "intent metadata should be uploaded once as part of the existing mirror"
-    );
     assert!(
         !remote_wal_path_for_test(&el, segment_id).exists(),
         "remote WAL should prune after flush coverage and current cloud metadata are both verified"
@@ -3884,6 +3948,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
     cloud_persistence(&hybrid_storage).write_sst_object(sst_name, &sst_bytes)?;
+    publish_retired_sst_for_gc_test(&mut el, sst_name, &sst_bytes)?;
 
     let request_id = 4546;
     let response_rx = el.routing.router.register(request_id, "TestRequest");
@@ -3969,6 +4034,7 @@ fn should_retry_failed_cloud_sst_delete_without_runtime_restart() -> crate::comm
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
     cloud_persistence(&hybrid_storage).write_sst_object(sst_name, &sst_bytes)?;
+    publish_retired_sst_for_gc_test(&mut el, sst_name, &sst_bytes)?;
 
     let (retry_tx, retry_rx) = crossbeam::channel::unbounded();
     el.actors.gc_actor.set_retry_notifier(Some(retry_tx));
@@ -4046,6 +4112,7 @@ fn should_join_cloud_gc_worker_before_runtime_shutdown() -> crate::common::Midge
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
     cloud_persistence(&hybrid_storage).write_sst_object(sst_name, &sst_bytes)?;
+    publish_retired_sst_for_gc_test(&mut el, sst_name, &sst_bytes)?;
 
     let request_id = 4547;
     let (_response_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -4203,11 +4270,7 @@ fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common
     else {
         panic!("committed fixture")
     };
-    let body = generation
-        .objects
-        .iter()
-        .find(|object| object.file_name == crate::metadata::files::MANIFEST_SNAPSHOT)
-        .unwrap();
+    let body = generation.objects.first().unwrap();
     let body_path = el.state.db_path.join("cloud_store").join(&body.object_key);
     let body_bytes = std::fs::read(&body_path)?;
     std::fs::remove_file(&body_path).expect("remove exact committed immutable manifest body");
@@ -6651,6 +6714,7 @@ fn should_reject_later_write_when_cloud_seal_cannot_find_leader_record(
         &mut event_loop,
         &msg_rx,
         ApplyTransactionRequest {
+            validation: None,
             request_id: 91_001,
             ops: vec![crate::runtime::TransactionOp::Put {
                 cf_id: 0,
@@ -7270,10 +7334,24 @@ fn should_back_off_failed_cloud_seal_while_normal_requests_make_progress(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: the first lease validation permits the WAL flush, then every
     // post-flush validation fails slowly. The active segment remains retryable.
+    struct SealRetryClock(Mutex<Instant>);
+    impl crate::runtime::retry_schedule::RetryClock for SealRetryClock {
+        fn now(&self) -> Instant {
+            *self.0.lock().unwrap()
+        }
+    }
+    let retry_clock = Arc::new(SealRetryClock(Mutex::new(Instant::now())));
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
+    el.pipeline
+        .durability
+        .set_cloud_seal_retry_clock(retry_clock.clone());
     append_cloud_async_put(&mut el)?;
+    // Finish the unrelated real name prefetch before installing the slow
+    // lease fixture, so provider counts below describe WAL seal attempts.
+    el.prefetch_flush_sst_names_if_due();
+    assert!(el.state.sst_names.reserved_through.contains_key(&0));
     let leader_store = Arc::new(FailAfterFirstLeaderStore::new(
         Duration::from_millis(75),
         "writer-1",
@@ -7298,21 +7376,20 @@ fn should_back_off_failed_cloud_seal_while_normal_requests_make_progress(
 
     // Act: process unrelated requests immediately after the failed attempt,
     // then drive two maintenance passes after the retry becomes due.
-    let request_start = Instant::now();
     for _ in 0..response_receivers.len() {
         let message = msg_rx.recv().expect("receive unrelated request");
         el.process_one(message, &msg_rx);
     }
-    let request_elapsed = request_start.elapsed();
-    std::thread::sleep(Duration::from_millis(25));
+    let reads_after_requests = leader_store.reads();
+    *retry_clock.0.lock().unwrap() += Duration::from_millis(25);
     el.progress_pass(&msg_rx);
     let reads_after_due_retry = leader_store.reads();
     el.progress_pass(&msg_rx);
 
     // Assert
-    assert!(
-        request_elapsed < Duration::from_millis(50),
-        "seal maintenance delayed normal request progress: {request_elapsed:?}"
+    assert_eq!(
+        reads_after_requests, reads_after_failure,
+        "normal requests must finish before the backoff admits another provider check"
     );
     for (request_id, response_rx) in response_receivers {
         assert!(matches!(
@@ -8017,6 +8094,7 @@ fn should_defer_metadata_cleanup_before_body_reads_when_shared_budget_is_exhaust
         lease.get_leader_store().expect("shared authority"),
         lease.holder_id(),
         lease.epoch(),
+        crate::runtime::MetadataPublicationLock::default(),
     );
 
     // Act
@@ -8032,7 +8110,7 @@ fn should_defer_metadata_cleanup_before_body_reads_when_shared_budget_is_exhaust
     assert!(provider
         .get_downloads()
         .iter()
-        .all(|key| !key.contains("metadata/generations/")));
+        .all(|key| !is_cloud_manifest_key_for_test(key)));
     assert_eq!(provider.get_range_downloads().len(), 0);
     drop(reservation);
     assert_eq!(budget.used(), 0);
@@ -8566,6 +8644,7 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
                 smallest_seq: Some(11),
                 largest_seq: Some(11),
                 key_bounds_complete: true,
+                earliest_expiration_millis: None,
             },
             proof: Some(proof),
         },
@@ -9437,5 +9516,157 @@ fn should_wait_for_recovered_tail_when_cloud_durability_targets_a_reserved_seque
         response.recv_timeout(Duration::from_secs(1)),
         Ok(RuntimeResponse::Ok { request_id: id }) if id == request_id
     ));
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+struct ReleasePublicationWork(crossbeam::channel::Sender<()>);
+
+#[cfg(feature = "failpoints")]
+impl Drop for ReleasePublicationWork {
+    fn drop(&mut self) {
+        let _ = self.0.try_send(());
+    }
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_reconcile_cloud_publication_only_under_current_authority(
+) -> crate::common::MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    for lose_authority in [false, true] {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let sequence = append_cloud_async_put(&mut el)?;
+        let (segment_id, max_sequence) = el.seal_cloud_wal_without_enqueue_for_test()?;
+        copy_local_segment_to_remote_wal_for_test(&el, segment_id);
+        el.pipeline.inline_flush_worker = false;
+        let healthy = Arc::new(AtomicBool::new(true));
+        el.authority.fencing.lease_healthy = Some(Arc::clone(&healthy));
+        let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam::channel::bounded(1);
+        let release = ReleasePublicationWork(release_tx);
+        let held = AtomicBool::new(false);
+        let boundary = if lose_authority {
+            "midge::cloud::after_wal_publication_work"
+        } else {
+            "midge::cloud::before_wal_publication_work"
+        };
+        fail::cfg_callback(boundary, move || {
+            if !held.swap(true, Ordering::AcqRel) {
+                entered_tx.send(()).expect("announce held worker");
+                release_rx.recv().expect("release held worker");
+            }
+        })
+        .expect("hold first publication operation");
+        let response = el
+            .routing
+            .router
+            .register(98_907, "best-effort while cloud work is held");
+        let (_sender, receiver) = crossbeam::channel::unbounded();
+
+        // Act: remote work is held while the same loop applies another unit.
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id,
+            max_sequence,
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker reached boundary");
+        assert_eq!(el.actors.cloud_coordinator.held_uploads().entries, 1);
+        WalCoordinator::apply_transaction(
+            &mut el,
+            &receiver,
+            ApplyTransactionRequest {
+                request_id: 98_907,
+                validation: None,
+                ops: vec![crate::runtime::TransactionOp::Put {
+                    cf_id: 0,
+                    key: Bytes::from_static(b"while-remote-held"),
+                    value: Bytes::from_static(b"visible"),
+                    ttl_seconds: None,
+                    insert_only: false,
+                }],
+                assertions: Vec::new(),
+                durability_policy: Some(DurabilityPolicy::BestEffort),
+                start_sequence: None,
+                conflict_policy: ConflictPolicy::LastWriteWins,
+            },
+            None,
+        );
+
+        // Assert: progress is observable before the remote operation is released.
+        assert!(matches!(
+            response.try_recv(),
+            Ok(RuntimeResponse::TransactionApplied { .. })
+        ));
+        let snapshot = el.create_read_snapshot(0).expect("default family snapshot");
+        assert_eq!(
+            snapshot.get(b"while-remote-held", el.state.applied_sequence)?,
+            Some(b"visible".to_vec())
+        );
+        if lose_authority {
+            healthy.store(false, Ordering::Release);
+        }
+        release.0.try_send(()).expect("release publication");
+        el.drain_cloud_publication_within(&crate::common::OperationDeadline::from_budget(
+            Duration::from_secs(5),
+        ))?;
+        fail::remove(boundary);
+        if lose_authority {
+            assert!(el.actors.wal_actor.is_fenced());
+            assert!(el.state.wal.frontiers.cloud_durable() < sequence);
+        } else {
+            assert!(el.state.wal.frontiers.cloud_durable() >= sequence);
+            let frontier = el.state.wal.frontiers.cloud_durable();
+            el.handle_storage_event(crate::storage::StorageEvent::CloudWalPublicationComplete {
+                operation_id: 1,
+                writer_epoch: el.state.writer_epoch,
+            });
+            assert_eq!(el.state.wal.frontiers.cloud_durable(), frontier);
+        }
+    }
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_keep_catalog_authority_contiguous_when_four_worker_acknowledgements_reorder(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let mut segments = Vec::new();
+    for _ in 0..4 {
+        append_cloud_async_put(&mut el)?;
+        let segment = el.seal_cloud_wal_without_enqueue_for_test()?;
+        copy_local_segment_to_remote_wal_for_test(&el, segment.0);
+        segments.push(segment);
+    }
+    el.pipeline.inline_flush_worker = false;
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+
+    // Act: later verified uploads cannot bridge the first missing acknowledgement.
+    for &(segment_id, max_sequence) in segments[1..].iter().rev() {
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id,
+            max_sequence,
+        });
+    }
+    el.drain_cloud_publication_within(&deadline)?;
+
+    // Assert
+    assert!(el.state.wal.frontiers.cloud_durable() < segments[0].1);
+    let (segment_id, max_sequence) = segments[0];
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+    el.drain_cloud_publication_within(&deadline)?;
+    assert!(el.state.wal.frontiers.cloud_durable() >= segments[3].1);
     Ok(())
 }

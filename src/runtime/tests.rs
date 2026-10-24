@@ -671,7 +671,7 @@ fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_r
     // and memtable mutation, then exposes its unmatched completion as late.
     assert!(matches!(
         caller_result,
-        Ok(Err(MidgeError::Timeout(message)))
+        Ok(Err(MidgeError::OutcomeUnknown(message)))
             if message.contains("ApplyTransaction")
                 && message.contains(&format!("request_id={request_id}"))
     ));
@@ -687,6 +687,17 @@ fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_r
 
 #[cfg(feature = "failpoints")]
 fn assert_strict_runtime_value(handle: &RuntimeHandle, key: &[u8], expected: &[u8]) {
+    // Control queries remain available at the old applied cut while strict
+    // I/O runs. Wait for the genuine unmatched transaction completion before
+    // selecting the snapshot whose committed value this assertion protects.
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while handle.router.late_responses_total() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "accepted transaction did not finish after its caller stopped waiting"
+        );
+        thread::yield_now();
+    }
     let sequence = match handle
         .send_and_wait_timeout(
             RuntimeMsg::Test(TestRuntimeMsg::GetCurrentSequence {
@@ -900,6 +911,7 @@ fn write_side_request_response_messages() -> Vec<RuntimeMsg> {
         smallest_seq: None,
         largest_seq: None,
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     };
     let compaction_plan = CompactionPlan {
         input_files: vec!["input.sst".to_string()],
@@ -1359,10 +1371,10 @@ fn should_bound_routed_transaction_response_when_runtime_accepts_without_respond
     // Assert
     assert!(matches!(
         result,
-        Err(MidgeError::Timeout(message))
+        Err(MidgeError::OutcomeUnknown(message))
             if message.contains("ApplyTransaction")
                 && message.contains(&format!("request_id={request_id}"))
-                && message.contains("20ms")
+                && message.contains("exceeded response timeout")
     ));
 
     handle.lifecycle.mark_closed();
@@ -1437,6 +1449,7 @@ fn should_clone_file_meta_preserving_all_fields() {
         smallest_seq: Some(1),
         largest_seq: Some(100),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
     };
 
     // Act
@@ -1524,7 +1537,7 @@ fn should_count_abandoned_request_given_routed_transaction_when_caller_times_out
     let result = handle.send_apply_transaction_and_wait(request_id, submission);
 
     // Assert
-    assert!(matches!(result, Err(MidgeError::Timeout(_))));
+    assert!(matches!(result, Err(MidgeError::OutcomeUnknown(_))));
     assert_eq!(
         handle.router.abandoned_requests_total(),
         1,
@@ -1625,6 +1638,7 @@ fn should_classify_test_hooks_through_the_test_table_when_publication_gate_class
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
         },
     });
     let inert_hook = RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 2 });

@@ -164,7 +164,7 @@ pub(super) struct InventoryCloudBackend {
     expected_sizes: std::collections::HashMap<String, u64>,
     completed_keys: Mutex<std::collections::HashSet<String>>,
     observations: Arc<FixtureObservations>,
-    held: Mutex<Option<crate::storage::cloud::CloudCallback>>,
+    held: Mutex<Vec<crate::storage::cloud::CloudCallback>>,
 }
 
 #[cfg(any(test, feature = "cloud-common"))]
@@ -184,7 +184,7 @@ impl InventoryCloudBackend {
                 .collect(),
             completed_keys: Mutex::new(std::collections::HashSet::new()),
             observations,
-            held: Mutex::new(None),
+            held: Mutex::new(Vec::new()),
         })
     }
 
@@ -197,7 +197,7 @@ impl InventoryCloudBackend {
                     result: Err(CloudError::Protocol(error.to_string())),
                 });
             } else {
-                *self.held.lock() = Some(callback);
+                self.held.lock().push(callback);
             }
             return;
         }

@@ -381,7 +381,7 @@ impl EventLoop {
                 "CloudAsync WAL recovery uploads are still draining".to_string(),
             ));
         }
-        storage.ensure_wal_write_admission(self.actors.cloud_coordinator.cloud_wal.held_uploads())
+        storage.ensure_wal_write_admission(self.actors.cloud_coordinator.held_uploads())
     }
 
     pub(in crate::runtime::event_loop) fn drain_cloud_wal_upload_backlog(&mut self) {

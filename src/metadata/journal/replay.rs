@@ -1,8 +1,8 @@
 use super::{
-    journal_deserialize, Crc32, FsError, FsyncMarker, JournalEdit, JournalEditEnvelope,
-    ManifestEdit, MidgeResult, ADVANCE_FLUSH_FRONTIER_RECORD_TYPE, BATCH_RECORD_TYPE,
-    DROP_COLUMN_FAMILY_AT_RECORD_TYPE, FSYNC_MARKER_TYPE, JOURNAL_FILE,
-    RECLAIM_COLUMN_FAMILY_RECORD_TYPE,
+    journal_deserialize, FsError, FsyncMarker, JournalEdit, JournalEditEnvelope, ManifestEdit,
+    MidgeResult, ADVANCE_FLUSH_FRONTIER_RECORD_TYPE, BATCH_RECORD_TYPE,
+    COMPLETE_SST_DELETE_RECORD_TYPE, DROP_COLUMN_FAMILY_AT_RECORD_TYPE, FSYNC_MARKER_TYPE,
+    JOURNAL_FILE, RECLAIM_COLUMN_FAMILY_RECORD_TYPE,
 };
 
 pub(super) fn replay_journal_with_state(
@@ -285,7 +285,7 @@ pub(super) fn read_journal_record(
         .map_err(FsError::into_midge)?;
     let crc_offset = payload_offset + len as u64;
     let crc_bytes = file.read_at(crc_offset, 4).map_err(FsError::into_midge)?;
-    let got_crc = u32::from_le_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+    let got_crc = u32::from_be_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
 
     Ok(JournalRecordStatus::Record(JournalRecord {
         record_start,
@@ -324,10 +324,10 @@ fn contains_verified_fsync_marker(bytes: &[u8]) -> bool {
             continue;
         };
         let payload = &bytes[payload_start..crc_start];
-        let mut hasher = Crc32::new();
-        hasher.update(payload);
-        let expected = u32::from_le_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
-        if hasher.finalize() == expected && journal_deserialize::<FsyncMarker>(payload).is_ok() {
+        let expected = u32::from_be_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+        if crc32c::crc32c(payload) == expected
+            && journal_deserialize::<FsyncMarker>(payload).is_ok()
+        {
             return true;
         }
     }
@@ -335,7 +335,7 @@ fn contains_verified_fsync_marker(bytes: &[u8]) -> bool {
 }
 
 fn validate_journal_record_type(record_type: u8, record_start: u64) -> MidgeResult<()> {
-    if matches!(record_type, 1 | 2 | 3 | 6 | 8 | 9 | 10 | 11 | 12) {
+    if matches!(record_type, 1 | 2 | 3 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 14) {
         return Ok(());
     }
 
@@ -345,9 +345,7 @@ fn validate_journal_record_type(record_type: u8, record_start: u64) -> MidgeResu
 }
 
 fn validate_journal_record_crc(record: &JournalRecord) -> MidgeResult<()> {
-    let mut hasher = Crc32::new();
-    hasher.update(&record.payload);
-    let calc = hasher.finalize();
+    let calc = crc32c::crc32c(&record.payload);
     if calc == record.got_crc {
         return Ok(());
     }
@@ -408,12 +406,13 @@ fn handle_manifest_edit_record(
     record: &JournalRecord,
     state: &mut JournalReplayState,
 ) -> MidgeResult<()> {
-    let is_single_edit_record = matches!(record.typ, 1 | 2 | 3 | 6)
+    let is_single_edit_record = matches!(record.typ, 1 | 2 | 3 | 6 | 14)
         || matches!(
             record.typ,
             DROP_COLUMN_FAMILY_AT_RECORD_TYPE
                 | RECLAIM_COLUMN_FAMILY_RECORD_TYPE
                 | ADVANCE_FLUSH_FRONTIER_RECORD_TYPE
+                | COMPLETE_SST_DELETE_RECORD_TYPE
         );
     if !is_single_edit_record {
         return Err(crate::common::MidgeError::Corruption(format!(

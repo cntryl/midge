@@ -177,6 +177,16 @@ pub(crate) fn persist_sst_stream_to_path(
     source: &mut dyn Read,
     path: &Path,
 ) -> MidgeResult<()> {
+    persist_sst_stream_with_identity(fs, source, path).map(|_| ())
+}
+
+/// Compute the digest over the same chunks consumed by atomic staging. No
+/// identity escapes until file sync, rename and directory sync succeed.
+pub(crate) fn persist_sst_stream_with_identity(
+    fs: &Arc<dyn Fs>,
+    source: &mut dyn Read,
+    path: &Path,
+) -> MidgeResult<(u64, u32)> {
     let finish_start = std::time::Instant::now();
     crate::failpoints::fail_point!("midge::sst::inject_no_space_on_finish_to_path", |_| Err(
         MidgeError::NoSpace("failpoint: no space while finalizing SST".to_string())
@@ -184,10 +194,14 @@ pub(crate) fn persist_sst_stream_to_path(
 
     let target_path = fs_relative_sst_path(fs, path)?;
     let temp_path = FsPath::new(format!("{}.tmp", target_path.0));
-    let write_bytes =
-        crate::io::staging::stage_stream(fs, &temp_path, &target_path, source, |message| {
-            MidgeError::from(std::io::Error::other(message))
-        })?;
+    let mut checksummed = ChecksummedSstReader { source, crc: 0 };
+    let write_bytes = crate::io::staging::stage_stream(
+        fs,
+        &temp_path,
+        &target_path,
+        &mut checksummed,
+        |message| MidgeError::from(std::io::Error::other(message)),
+    )?;
 
     tracing::info!(
         path = ?path,
@@ -196,7 +210,20 @@ pub(crate) fn persist_sst_stream_to_path(
         "sst finished to path"
     );
 
-    Ok(())
+    Ok((write_bytes, checksummed.crc))
+}
+
+struct ChecksummedSstReader<'a> {
+    source: &'a mut dyn Read,
+    crc: u32,
+}
+
+impl Read for ChecksummedSstReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.source.read(buffer)?;
+        self.crc = crc32c::crc32c_append(self.crc, &buffer[..count]);
+        Ok(count)
+    }
 }
 
 #[cfg(test)]

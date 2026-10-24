@@ -21,6 +21,7 @@ mod cloud_eventual_flush {
             wal_seal_min_segment_bytes: usize::MAX,
             wal_seal_max_flush_delay: Duration::from_hours(1),
             wal_seal_max_pending_writes: 1,
+            ..CloudWritePolicy::default()
         }
     }
 
@@ -284,6 +285,7 @@ mod cloud_eventual_flush {
             wal_seal_min_segment_bytes: usize::MAX,
             wal_seal_max_flush_delay: Duration::from_hours(1),
             wal_seal_max_pending_writes: 1,
+            ..CloudWritePolicy::default()
         });
 
         {

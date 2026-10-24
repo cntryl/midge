@@ -31,8 +31,9 @@ Tier 3 and Tier 4 stress benchmarks:
 - No workflow enforces these budgets automatically: every `bench-tier*.yml`
   workflow is dispatched by hand (Tiers 5 and 6 also on a schedule), and
   `ci.yml` runs no benchmarks. The 15% budget for the memory-mode batched-write
-  row is checked by comparing three base and three candidate reports from the
-  same machine in the pull request, following
+  row is checked with three alternating base/candidate pairs on the same
+  machine, reporting the median pair delta and retaining inconclusive rows,
+  following
   [the baseline procedure](baseline-procedure.md).
 
 ## External LSM Comparisons
@@ -111,6 +112,9 @@ Hybrid:
 - `tier2_subsystem_durability_commit_latency` owns 1-, 16-, and 64-writer local
   strict throughput, commit p50/p99, WAL append/fsync counts, and commits per
   physical fsync.
+  [WAL sync accounting](wal-sync-accounting.md) distinguishes the writer-only
+  metric from ledger file/directory calls and the explicitly scoped accounted
+  sum; adding those counters does not approve amortized ledger floors.
 - `tier2_subsystem_hybrid_durability_lag` owns the hybrid claim's two numbers
   side by side on the object-store simulator: `cloud_async()` and
   `cloud_strict()` commit p50/p99 against the cloud-durable lag sampled during
@@ -118,6 +122,10 @@ Hybrid:
   uploaded per committed byte, with the local `sync()` row as the floor. Rows
   are `gate` trust; the simulator is not a provider, so Sqrzl and live-provider
   lag are qualified separately.
+- `tier5_hybrid_durability_lag` contains the Sqrzl diagnostic counterparts and
+  local floor. The [provider qualification guide](hybrid-lag-provider-qualification.md)
+  defines sampler health and observed native HTTP cost scope; execution and
+  committed provider evidence remain pending.
 - `tier4_system_strict_group_commit` owns fixed-work complete-system strict
   throughput through flush, compaction, clean shutdown, reopen digest
   verification, and final SST footprint. The current window selection and
@@ -131,6 +139,43 @@ Hybrid:
   backlog health tags.
 
 ## Recommended Verification
+
+### Preregistered 0.5.0 pipeline targets
+
+Issues #941 and #906 use aggregate reference
+`172c941201f42e0206ca912d080e65c23ff4133c`, which includes ordered fsync and
+completed-prefix acknowledgement. These targets are hypotheses for qualification,
+not measured gains. Before concurrent apply starts, also pin the completed
+#941/#947 prerequisite SHA to isolate apply's contribution.
+
+The pinned isolated #906 baseline is
+`c1e6e9423fdd55f7f2766c3d83220c8eadc96f7e`, after those resident Strict
+encoding and raw-value copy candidates. Within-group concurrent effects must
+settle before one ordered visibility publication; partial or unknown apply
+fences subsequent mutation until recovery.
+
+| Change | Primary target | Guardrails |
+| --- | --- | --- |
+| #941 writer encoding | At least 20% lower event-loop CPU/service nanoseconds per committed 4 KiB unit on `tier2_durability_commit_sync_local_4k_rotation` | Writer encode/compression/CRC/XXH3/append service per unit at most 10% worse; 16/64-writer Strict throughput at least 10% higher in each row, commit p99 at most 5% worse |
+| #906 concurrent apply | At least 10% higher throughput on `tier4_system_local_throughput_regression` | Transaction p99 at most 5% worse; 16/64-writer Strict throughput at least 10% higher in each row, commit p99 at most 5% worse |
+
+For both, retain `tier4_complete_local_strict_group_commit_total` as the complete
+system guard, including its digest, reopen and footprint checks. Use three
+alternating base/candidate pairs on the same machine; retain both exact SHAs,
+six raw artifacts, all pair deltas and their median. Missing CPU/service timing
+is inconclusive and cannot be inferred from wall latency. Unstable observations
+remain inconclusive. Use the existing benchmark facilities without a new runner.
+
+Held-worker read/control progress, byte-compatible WAL, ordered whole-transaction
+visibility, fencing and terminal memory ownership remain hard correctness gates.
+
+#947 uses `90eb0b5c` as its writer-encoding reference. Its raw/fallback value
+path targets one fewer allocation and 4096 fewer copied value bytes for the
+deterministic incompressible 4 KiB fixture before final frame construction.
+Borrowed pointer identity and byte-equal frames cover the construction claim;
+allocation/copy measurements remain required where existing facilities expose
+them. The rotation benchmark uses compressible repeated bytes, so its A/B
+result is an end-to-end guardrail and does not prove this raw-value saving.
 
 Run focused checks before broad suites:
 

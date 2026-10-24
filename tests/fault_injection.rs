@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "fault_injection/maintenance_concurrency.rs"]
+mod maintenance_concurrency;
+
 #[path = "fault_injection/wal_authority_regressions.rs"]
 mod wal_authority_regressions;
 
@@ -1120,7 +1123,9 @@ mod failure_injection {
         level: u32,
         size_bytes: u64,
         cf_id: u32,
+        #[serde(serialize_with = "crate::common::metadata_fixtures::serialize_key_bound")]
         smallest_key: Option<Vec<u8>>,
+        #[serde(serialize_with = "crate::common::metadata_fixtures::serialize_key_bound")]
         largest_key: Option<Vec<u8>>,
         smallest_seq: Option<u64>,
         largest_seq: Option<u64>,
@@ -1137,7 +1142,9 @@ mod failure_injection {
         level: u32,
         size_bytes: u64,
         cf_id: u32,
+        #[serde(serialize_with = "crate::common::metadata_fixtures::serialize_key_bound")]
         smallest_key: Option<Vec<u8>>,
+        #[serde(serialize_with = "crate::common::metadata_fixtures::serialize_key_bound")]
         largest_key: Option<Vec<u8>>,
         smallest_seq: Option<u64>,
         largest_seq: Option<u64>,
@@ -1264,7 +1271,7 @@ mod failure_injection {
         };
         std::fs::write(
             db_path.join("manifest.json"),
-            serde_json::to_string_pretty(&empty_manifest).expect("serialize empty manifest"),
+            crate::common::metadata_fixtures::manifest(&empty_manifest),
         )
         .expect("write empty manifest");
         std::fs::write(db_path.join("manifest.journal"), b"").expect("truncate manifest journal");
@@ -1284,7 +1291,7 @@ mod failure_injection {
         }];
         std::fs::write(
             db_path.join("intent_log.json"),
-            serde_json::to_string_pretty(&replay_intent).expect("serialize replay intent"),
+            crate::common::metadata_fixtures::intents(&replay_intent),
         )
         .expect("write replay intent log");
 
@@ -1368,7 +1375,7 @@ mod failure_injection {
         };
         std::fs::write(
             db_path.join("manifest.json"),
-            serde_json::to_string_pretty(&empty_manifest).expect("serialize empty manifest"),
+            crate::common::metadata_fixtures::manifest(&empty_manifest),
         )
         .expect("write empty manifest");
         std::fs::write(db_path.join("manifest.journal"), b"").expect("truncate manifest journal");
@@ -1388,7 +1395,7 @@ mod failure_injection {
         }];
         std::fs::write(
             db_path.join("intent_log.json"),
-            serde_json::to_string_pretty(&replay_intent).expect("serialize replay intent"),
+            crate::common::metadata_fixtures::intents(&replay_intent),
         )
         .expect("write replay intent log");
 
@@ -5743,6 +5750,7 @@ mod shutdown_orchestration {
                 wal_seal_min_segment_bytes: usize::MAX,
                 wal_seal_max_flush_delay: Duration::from_mins(1),
                 wal_seal_max_pending_writes: 1,
+                ..CloudWritePolicy::default()
             })
             .shutdown_cloud_drain_timeout_for_testing(shutdown_cloud_drain_timeout)
             .on_lease_loss(move || {
@@ -7380,6 +7388,7 @@ mod cloud_crash_recovery {
             wal_seal_min_segment_bytes: usize::MAX,
             wal_seal_max_flush_delay: Duration::from_hours(1),
             wal_seal_max_pending_writes: 1,
+            ..CloudWritePolicy::default()
         }
     }
 
@@ -7389,6 +7398,7 @@ mod cloud_crash_recovery {
             wal_seal_min_segment_bytes: usize::MAX,
             wal_seal_max_flush_delay: Duration::from_hours(1),
             wal_seal_max_pending_writes: usize::MAX,
+            ..CloudWritePolicy::default()
         }
     }
 
@@ -11687,18 +11697,17 @@ mod storage_verification_hardening {
     }
 
     fn write_empty_storage_fixture(db_path: &Path) {
-        std::fs::write(db_path.join("FORMAT"), "midge-format-version=8\n")
+        std::fs::write(db_path.join("FORMAT"), "midge-format-version=9\n")
             .expect("write format marker");
         std::fs::write(
             db_path.join("manifest.json"),
-            serde_json::to_vec_pretty(&json!({
+            crate::common::metadata_fixtures::manifest(&json!({
                 "flushed_through": [{"cf_id": 0, "through_sequence": 0}],
                 "files": [],
                 "column_families": [],
                 "next_sst_seqs": {},
                 "edit_checkpoint_id": 0
-            }))
-            .expect("serialize empty manifest"),
+            })),
         )
         .expect("write empty manifest");
     }
@@ -11735,7 +11744,7 @@ mod storage_verification_hardening {
         write_empty_storage_fixture(temp_dir.path());
         std::fs::write(
             temp_dir.path().join("intent_log.json"),
-            serde_json::to_vec_pretty(&json!([
+            crate::common::metadata_fixtures::intents(&json!([
                 {
                     "SstAdded": {
                         "file_meta": {
@@ -11748,8 +11757,7 @@ mod storage_verification_hardening {
                         }
                     }
                 }
-            ]))
-            .expect("serialize unsafe intent"),
+            ])),
         )
         .expect("write unsafe intent");
 
@@ -11771,15 +11779,14 @@ mod storage_verification_hardening {
         write_empty_storage_fixture(temp_dir.path());
         std::fs::write(
             temp_dir.path().join("intent_log.json"),
-            serde_json::to_vec_pretty(&json!([
+            crate::common::metadata_fixtures::intents(&json!([
                 {
                     "CompactionApplied": {
                         "removed": ["/tmp/escape.sst"],
                         "added": []
                     }
                 }
-            ]))
-            .expect("serialize unsafe intent"),
+            ])),
         )
         .expect("write unsafe intent");
 
@@ -11801,15 +11808,14 @@ mod storage_verification_hardening {
         write_empty_storage_fixture(temp_dir.path());
         std::fs::write(
             temp_dir.path().join("intent_log.json"),
-            serde_json::to_vec_pretty(&json!([
+            crate::common::metadata_fixtures::intents(&json!([
                 {
                     "WalSynced": {
                         "segment_id": 7,
                         "seqno": 11
                     }
                 }
-            ]))
-            .expect("serialize recovery intent"),
+            ])),
         )
         .expect("write recovery intent");
 

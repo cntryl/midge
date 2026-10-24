@@ -56,7 +56,9 @@ use std::time::{Duration, Instant};
 mod control_io;
 pub(crate) use control_io::{ControlObject, ControlWriteFailure};
 mod file_publication;
+mod inventory;
 pub(crate) use file_publication::ImmutableFileSource;
+use inventory::ObjectInventories;
 mod object_io;
 mod proofs;
 mod publication;
@@ -131,7 +133,7 @@ struct ObjectStores {
 /// The sender and worker must be closed together while the lease is held.
 struct WalUploadWorker {
     tx: Option<mpsc::SyncSender<UploadState>>,
-    handle: Option<JoinHandle<()>>,
+    handles: Vec<JoinHandle<()>>,
 }
 
 pub(crate) type StorageWriteAuthority = Arc<dyn Fn() -> MidgeResult<()> + Send + Sync>;
@@ -163,6 +165,7 @@ pub struct HybridStorage {
 
     /// Maximum wait for a callback-based storage backend to respond.
     callback_timeout: Duration,
+    immutable_retry: crate::storage::cloud::CloudRetryPolicy,
 
     /// Flag indicating if WAL upload worker thread failed to spawn
     upload_worker_failed: bool,
@@ -175,6 +178,7 @@ pub struct HybridStorage {
     wal_catalog_cache: Mutex<Option<(ControlObject, StorageObjectMetadata)>>,
     maintenance_memory: std::sync::OnceLock<crate::common::resource_budget::ResourceBudget>,
     write_authority: std::sync::OnceLock<StorageWriteAuthority>,
+    object_inventories: std::sync::OnceLock<ObjectInventories>,
 
     /// Remote WAL prune workers are tracked so shutdown can join them before
     /// releasing the lease that fenced their conditional deletes.
@@ -204,12 +208,31 @@ impl HybridStorage {
     }
 
     /// Create hybrid storage with independently managed cloud object classes.
+    #[cfg(test)]
     pub(crate) fn new_with_class_stores_and_event_sender(
         wal_cloud: Arc<dyn StorageBackend>,
         sst_cloud: Arc<dyn StorageBackend>,
         control_cloud: Arc<dyn StorageBackend>,
         external_event_tx: cb::Sender<StorageEvent>,
         callback_timeout: Duration,
+    ) -> Self {
+        Self::new_with_class_stores_upload_policy_and_event_sender(
+            wal_cloud,
+            sst_cloud,
+            control_cloud,
+            external_event_tx,
+            callback_timeout,
+            &crate::storage::cloud::CloudWritePolicy::default(),
+        )
+    }
+
+    pub(crate) fn new_with_class_stores_upload_policy_and_event_sender(
+        wal_cloud: Arc<dyn StorageBackend>,
+        sst_cloud: Arc<dyn StorageBackend>,
+        control_cloud: Arc<dyn StorageBackend>,
+        external_event_tx: cb::Sender<StorageEvent>,
+        callback_timeout: Duration,
+        policy: &crate::storage::cloud::CloudWritePolicy,
     ) -> Self {
         Self::with_class_stores_policy_event_sender_and_limits(
             wal_cloud,
@@ -219,6 +242,8 @@ impl HybridStorage {
             Some(external_event_tx),
             HybridQueueLimits {
                 callback_timeout,
+                worker_concurrency: policy.wal_upload_concurrency,
+                upload_memory_bytes: policy.wal_upload_memory_bytes,
                 ..HybridQueueLimits::default()
             },
         )
@@ -306,21 +331,26 @@ impl HybridStorage {
             limits.event_entries.max(terminal_capacity),
             limits.event_bytes.max(terminal_bytes),
         )));
-        // Single background worker for WAL uploads.
-        // This avoids spawning one OS thread per segment, which is extremely
-        // expensive under CloudAsync + synchronous write APIs (e.g. 10k puts).
+        // A fixed pool uploads immutable objects; runtime catalog publication
+        // remains a separate single-writer protocol.
         let (wal_upload_tx, wal_upload_rx) =
             mpsc::sync_channel::<UploadState>(limits.worker_entries.max(1));
         let counters = crate::telemetry::CounterSink::default();
         let verified_uploads = Arc::new(Mutex::new(HashMap::new()));
-        let (upload_worker_handle, upload_worker_failed) = Self::spawn_wal_upload_worker(
+        let (upload_worker_handles, upload_worker_failed) = Self::spawn_wal_upload_worker(
             &counters,
             wal_upload_rx,
-            Arc::clone(&wal_cloud),
-            event_queue.clone(),
-            external_event_tx.clone(),
-            limits.callback_timeout,
-            Arc::clone(&verified_uploads),
+            &wal_cloud,
+            &event_queue,
+            external_event_tx.as_ref(),
+            &uploads::WalUploadWorkerConfig {
+                timeout: limits.callback_timeout,
+                concurrency: limits.worker_concurrency.clamp(1, 64),
+                memory: crate::common::resource_budget::ResourceBudget::new(
+                    limits.upload_memory_bytes,
+                ),
+            },
+            &verified_uploads,
         );
 
         Self {
@@ -338,14 +368,16 @@ impl HybridStorage {
             external_event_tx,
             wal_upload_worker: Mutex::new(WalUploadWorker {
                 tx: Some(wal_upload_tx),
-                handle: upload_worker_handle,
+                handles: upload_worker_handles,
             }),
             callback_timeout: limits.callback_timeout,
+            immutable_retry: crate::storage::cloud::CloudRetryPolicy::default(),
             upload_worker_failed,
             wal_catalog_mutation: Mutex::new(()),
             wal_catalog_cache: Mutex::new(None),
             maintenance_memory: std::sync::OnceLock::new(),
             write_authority: std::sync::OnceLock::new(),
+            object_inventories: std::sync::OnceLock::new(),
             prune_workers: Arc::new(Mutex::new(PruneWorkerRegistry::new(
                 limits.prune_workers,
                 limits.prune_requests,
@@ -437,7 +469,7 @@ impl HybridStorage {
     pub(crate) fn shutdown_wal_upload_worker(&self) {
         let mut worker = self.wal_upload_worker.lock();
         worker.tx.take();
-        if let Some(handle) = worker.handle.take() {
+        for handle in worker.handles.drain(..) {
             let start = Instant::now();
             match handle.join() {
                 Ok(()) => tracing::debug!(

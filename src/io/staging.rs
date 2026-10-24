@@ -11,6 +11,22 @@ use bytes::Bytes;
 use std::io::Read;
 use std::sync::Arc;
 
+#[derive(Clone, Copy)]
+pub(crate) enum StagingSyncEvent {
+    FileAttempt,
+    FileComplete,
+    DirectoryAttempt,
+    DirectoryComplete,
+}
+
+pub(crate) type StagingSyncObserver<'a> = &'a dyn Fn(StagingSyncEvent);
+
+fn observe_sync(observer: Option<StagingSyncObserver<'_>>, event: StagingSyncEvent) {
+    if let Some(observer) = observer {
+        observer(event);
+    }
+}
+
 fn cleanup_temp_file(fs: &Arc<dyn Fs>, temp_path: &FsPath) {
     if let Err(error) = fs.remove_file(temp_path) {
         tracing::debug!(
@@ -146,6 +162,7 @@ where
         data,
         before_rename,
         |message, _| map_error(message),
+        None,
     )
 }
 
@@ -161,6 +178,20 @@ pub(crate) fn stage_bytes_typed<F>(
 where
     F: FnOnce() -> crate::common::MidgeResult<()>,
 {
+    stage_bytes_typed_observed(fs, temp_path, target_path, data, before_rename, None)
+}
+
+pub(crate) fn stage_bytes_typed_observed<F>(
+    fs: &Arc<dyn Fs>,
+    temp_path: &FsPath,
+    target_path: &FsPath,
+    data: &[u8],
+    before_rename: F,
+    observer: Option<StagingSyncObserver<'_>>,
+) -> crate::common::MidgeResult<()>
+where
+    F: FnOnce() -> crate::common::MidgeResult<()>,
+{
     stage_bytes_classified(
         fs,
         temp_path,
@@ -168,6 +199,7 @@ where
         data,
         before_rename,
         |message, cause| classified_error(cause, message),
+        observer,
     )
 }
 
@@ -195,6 +227,7 @@ fn stage_bytes_classified<E, F, M>(
     data: &[u8],
     before_rename: F,
     map_error: M,
+    observer: Option<StagingSyncObserver<'_>>,
 ) -> Result<(), E>
 where
     F: FnOnce() -> Result<(), E>,
@@ -225,12 +258,14 @@ where
                     Some(&error),
                 )
             })?;
+        observe_sync(observer, StagingSyncEvent::FileAttempt);
         file.sync(Durability::Durable).map_err(|error| {
             map_error(
                 format!("failed to sync staging file {temp_path:?}: {error:?}"),
                 Some(&error),
             )
         })?;
+        observe_sync(observer, StagingSyncEvent::FileComplete);
         drop(file);
 
         crate::failpoints::fail_point!("midge::io::staging::before_rename", |_| Err(map_error(
@@ -255,6 +290,7 @@ where
                 || FsPath::new("."),
                 |parent| FsPath::new(parent.to_string_lossy()),
             );
+        observe_sync(observer, StagingSyncEvent::DirectoryAttempt);
         fs.sync_dir(&parent_path, Durability::Durable)
             .map_err(|error| {
                 map_error(
@@ -262,6 +298,7 @@ where
                     Some(&error),
                 )
             })?;
+        observe_sync(observer, StagingSyncEvent::DirectoryComplete);
 
         Ok(())
     })();

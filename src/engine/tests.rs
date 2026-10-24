@@ -3,6 +3,7 @@ use crate::lease::PrimaryLease;
 use crate::types::EntryType;
 
 mod cloud_read_fencing;
+mod drop_reaper;
 
 #[cfg(feature = "internal-testing")]
 mod checkpoint_origins;
@@ -63,6 +64,7 @@ fn install_underfull_overlap_fixture(
                     .chain((name == &names[0]).then_some(2))
                     .max(),
                 key_bounds_complete: true,
+                earliest_expiration_millis: None,
                 ..Default::default()
             },
         ));
@@ -1013,7 +1015,8 @@ fn publish_test_metadata_generation(
         lease,
         manifest.edit_checkpoint_id,
         format_marker,
-        serde_json::to_vec_pretty(manifest).expect("serialize test manifest"),
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, manifest)
+            .expect("serialize test manifest"),
     )
 }
 
@@ -1105,7 +1108,8 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
             || error.to_string().contains("stale"),
         "unexpected stale engine metadata mirror error: {error}"
     );
-    let retained: crate::metadata::Manifest = serde_json::from_slice(
+    let retained: crate::metadata::Manifest = crate::metadata::codec::decode(
+        crate::metadata::codec::MANIFEST,
         &Engine::blocking_cloud_get(&cloud, &generation.objects[1].object_key)
             .expect("download retained remote manifest"),
     )
@@ -1301,7 +1305,8 @@ fn should_ignore_stale_manifest_json_during_strict_cloud_recovery() {
     Engine::blocking_cloud_put(
         &cloud,
         "metadata/manifest.json",
-        serde_json::to_vec_pretty(&current_manifest).expect("serialize current manifest"),
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &current_manifest)
+            .expect("serialize current manifest"),
     )
     .expect("upload newer manifest");
 
@@ -1334,7 +1339,8 @@ fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
     Engine::blocking_cloud_put(
         &cloud,
         "metadata/manifest.json",
-        serde_json::to_vec_pretty(&current_manifest).expect("serialize current manifest"),
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &current_manifest)
+            .expect("serialize current manifest"),
     )
     .expect("upload newer manifest");
 
@@ -1422,7 +1428,8 @@ fn should_reject_missing_or_corrupt_committed_cloud_metadata_in_every_recovery_p
             Engine::blocking_cloud_put(
                 &cloud,
                 "metadata/manifest.snapshot.json",
-                serde_json::to_vec(&manifest).expect("encode mutable mirror"),
+                crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &manifest)
+                    .expect("encode mutable mirror"),
             )
             .expect("upload mutable mirror");
             if missing {
@@ -1473,7 +1480,8 @@ fn should_reject_checksums_valid_but_malformed_committed_manifest_in_every_recov
             &lease,
             42,
             current_test_format_marker(),
-            b"not a manifest".to_vec(),
+            crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &42_u64)
+                .expect("valid binary frame containing an invalid manifest value"),
         );
 
         // Act
@@ -1717,6 +1725,7 @@ fn should_exclude_unrelated_manifest_inventory_when_staging_interrupted_publicat
         smallest_seq: None,
         largest_seq: None,
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     };
     state
         .intent_log
@@ -2130,6 +2139,7 @@ fn should_reject_intent_replay_sst_when_cloud_object_crc_differs_from_intent() {
                 smallest_seq: Some(1),
                 largest_seq: Some(1),
                 key_bounds_complete: true,
+                earliest_expiration_millis: None,
             },
         });
     let cloud = cloud_with_stale_sst_listing();

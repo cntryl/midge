@@ -16,11 +16,24 @@ use std::sync::mpsc::RecvTimeoutError;
 pub(crate) struct BlockingCloud<'a> {
     cloud: &'a CloudStorage,
     deadline: &'a OperationDeadline,
+    reservation: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
 }
 
 impl<'a> BlockingCloud<'a> {
     pub(crate) fn new(cloud: &'a CloudStorage, deadline: &'a OperationDeadline) -> Self {
-        Self { cloud, deadline }
+        Self {
+            cloud,
+            deadline,
+            reservation: None,
+        }
+    }
+
+    pub(crate) fn with_reservation(
+        mut self,
+        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+    ) -> Self {
+        self.reservation = Some(reservation);
+        self
     }
 
     fn timeout(&self, operation: &str, key: &str) -> MidgeResult<std::time::Duration> {
@@ -93,7 +106,16 @@ impl<'a> BlockingCloud<'a> {
         let read_deadline = self.begin("get", key)?;
         let (tx, rx) = std::sync::mpsc::channel();
         let request_timeout = self.remaining(&read_deadline, "get", key)?;
-        self.cloud.submit_get_within(key, request_timeout, tx);
+        if let Some(reservation) = &self.reservation {
+            self.cloud.submit_get_within_reserved(
+                key,
+                request_timeout,
+                Some(std::sync::Arc::clone(reservation)),
+                tx,
+            );
+        } else {
+            self.cloud.submit_get_within(key, request_timeout, tx);
+        }
         self.wait(&rx, &read_deadline, "get", key, |event| match event {
             CloudEvent::Get { result, .. } => Some(result),
             _ => None,
@@ -123,6 +145,42 @@ impl<'a> BlockingCloud<'a> {
         Ok(keys.unwrap_or_default())
     }
 
+    pub(crate) fn list_page(
+        &self,
+        prefix: &str,
+        page: super::CloudListPageRequest,
+    ) -> MidgeResult<Option<super::CloudListPage>> {
+        let deadline = self.begin("LIST page", prefix)?;
+        let timeout = self.remaining(&deadline, "LIST page", prefix)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let expected = page.clone();
+        self.cloud
+            .submit_list_page_within(prefix, page, deadline, tx);
+        let result = rx.recv_timeout(timeout).map_err(|error| {
+            MidgeError::Timeout(format!("bounded cloud LIST page callback: {error}"))
+        })?;
+        self.remaining(&deadline, "LIST page", prefix)?;
+        result
+            .map_err(|error| {
+                contextualize_operation_error(
+                    &error,
+                    format_args!("bounded cloud LIST page '{prefix}' failed"),
+                    self.deadline,
+                )
+            })?
+            .map(|result| {
+                expected
+                    .accept(
+                        &self.cloud.full_path(prefix),
+                        result.keys,
+                        result.continuation,
+                    )
+                    .map_err(|error| MidgeError::Corruption(error.to_string()))
+            })
+            .transpose()
+    }
+
+    #[cfg(test)]
     pub(crate) fn put_with_headers(
         &self,
         key: &str,
@@ -157,6 +215,7 @@ impl<'a> BlockingCloud<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn put_with_precondition(
         &self,
         key: &str,

@@ -2,6 +2,7 @@
 
 use super::{MidgeResult, PublicationPhase, RuntimeState};
 use crate::metadata::accounting::Origin;
+mod moves;
 
 #[derive(Clone, Copy)]
 pub(crate) struct FlushManifestPublication<'a> {
@@ -266,7 +267,6 @@ impl RuntimeState {
         Ok(superseded_outputs)
     }
 
-    #[cfg(test)]
     pub fn transition_flush_publication_intent(
         &mut self,
         sst_name: &str,
@@ -398,6 +398,24 @@ impl RuntimeState {
         &mut self,
         publication: FlushManifestPublication<'_>,
     ) -> MidgeResult<()> {
+        self.commit_flush_publication_in_phase(publication, None)
+    }
+
+    pub(crate) fn commit_flush_manifest_retaining_intent(
+        &mut self,
+        publication: FlushManifestPublication<'_>,
+    ) -> MidgeResult<()> {
+        self.commit_flush_publication_in_phase(
+            publication,
+            Some(PublicationPhase::ManifestPublished),
+        )
+    }
+
+    fn commit_flush_publication_in_phase(
+        &mut self,
+        publication: FlushManifestPublication<'_>,
+        retained_phase: Option<PublicationPhase>,
+    ) -> MidgeResult<()> {
         let FlushManifestPublication {
             origin,
             cf_id,
@@ -476,7 +494,7 @@ impl RuntimeState {
                 crate::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
             }
         }
-        self.clear_flush_publication_intent(&file_meta.name)?;
+        self.finish_local_flush_intent(&file_meta.name, retained_phase)?;
         if ordinary_local
             && !forced_path
             && bounded_record
@@ -491,6 +509,17 @@ impl RuntimeState {
             return Ok(());
         }
         self.checkpoint_flush_publication(publication)
+    }
+
+    fn finish_local_flush_intent(
+        &mut self,
+        sst_name: &str,
+        retained_phase: Option<PublicationPhase>,
+    ) -> MidgeResult<()> {
+        match retained_phase {
+            Some(phase) => self.transition_flush_publication_intent(sst_name, phase),
+            None => self.clear_flush_publication_intent(sst_name),
+        }
     }
 
     pub fn transition_compaction_publication_intent(
@@ -731,6 +760,7 @@ mod l0_level_order_tests {
             smallest_seq: Some(seqs.0),
             largest_seq: Some(seqs.1),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             sublevel: 0,
             read_count: std::sync::Arc::default(),
         }
@@ -832,6 +862,7 @@ mod checkpoint_bound_tests {
                 smallest_seq: Some(u64::MAX),
                 largest_seq: Some(u64::MAX),
                 key_bounds_complete: true,
+                earliest_expiration_millis: None,
             };
 
             // Act

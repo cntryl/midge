@@ -124,6 +124,7 @@ impl FacadeAssembly {
                 ),
             ),
             ttl_clock: opts.ttl_clock(),
+            drop_transaction_wait_timeout: opts.drop_transaction_wait_timeout(),
         })
     }
 }

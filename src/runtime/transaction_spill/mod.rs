@@ -4,6 +4,7 @@
 //! runtime can therefore replay a spilled transaction in caller order without
 //! reconstructing its complete write set in memory.
 use super::TransactionOp;
+use crate::common::resource_budget::ResourceBudget;
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Fs, FsError, FsPath};
 use bytes::Bytes;
@@ -18,14 +19,14 @@ mod scan;
 
 #[cfg(test)]
 use format::u64_to_usize;
-use format::{
-    for_each_run_ordinal, lookup_run_key, lookup_run_points, remove_run,
-    write_run_with_reader_cache, RunHeader, RunReader,
-};
 #[cfg(test)]
 use format::{
-    peak_run_files, read_header, read_op_frame, reset_peak_run_files, reset_sparse_index_decodes,
-    sparse_index_decodes, write_run, write_run_with_budget, RunFile,
+    for_each_run_ordinal, peak_run_files, read_header, read_op_frame, reset_peak_run_files,
+    reset_sparse_index_decodes, sparse_index_decodes, write_run, write_run_with_budget, RunFile,
+};
+use format::{
+    lookup_run_key, lookup_run_points, remove_run, write_run_with_reader_cache, RunHeader,
+    RunReader,
 };
 #[cfg(test)]
 use range::read_range_header;
@@ -188,6 +189,8 @@ struct SpillRun {
     path: FsPath,
     range_path: FsPath,
     record_count: usize,
+    max_operation_bytes: usize,
+    frame_limit: usize,
     /// Smallest and largest primary key in the run; point probes outside the
     /// bounds cannot hit and skip the run.
     key_bounds: Option<(Bytes, Bytes)>,
@@ -215,6 +218,21 @@ impl SpillRun {
         action: impl FnOnce(&mut RunReader) -> MidgeResult<T>,
     ) -> MidgeResult<T> {
         self.reader_cache.with_reader(self, action)
+    }
+
+    fn with_reader_bounded<T>(
+        &self,
+        budget: Option<&ResourceBudget>,
+        action: impl FnOnce(&mut RunReader) -> MidgeResult<T>,
+    ) -> MidgeResult<T> {
+        if let Some(budget) = budget {
+            // Detached passes do not leave budget-owned buffers in the
+            // caller's cached readers after the job has completed.
+            let mut reader = RunReader::open_bounded(self, Some(budget))?;
+            action(&mut reader)
+        } else {
+            self.with_reader(action)
+        }
     }
 
     fn header(&self) -> MidgeResult<RunHeader> {
@@ -538,6 +556,41 @@ pub(crate) struct TransactionOpSource {
 }
 
 impl TransactionOpSource {
+    /// Proportional ceiling for one streamed pass. Actual allocations below
+    /// are reserved individually and Bytes clones retain their own charge.
+    /// The range walk keeps only indices on a fixed stack, never ancestor
+    /// key buffers. The source's resident intents remain separately owned.
+    pub(crate) fn streaming_memory_bound(&self) -> MidgeResult<usize> {
+        let max_operation = self
+            .runs
+            .iter()
+            .map(|run| run.max_operation_bytes)
+            .chain(self.resident.iter().map(|entry| op_heap_bytes(&entry.op)))
+            .max()
+            .unwrap_or(0);
+        max_operation
+            .checked_mul(8)
+            .and_then(|bytes| bytes.checked_add(128 * 1024))
+            .ok_or_else(|| {
+                MidgeError::ResourceLimit("spill streaming memory bound overflow".into())
+            })
+    }
+
+    pub(crate) fn retained_memory_bytes(&self) -> usize {
+        self.resident_bytes
+            .saturating_add(self.runs.iter().fold(0usize, |total, run| {
+                total
+                    .saturating_add(std::mem::size_of::<SpillRun>())
+                    .saturating_add(run.path.0.len())
+                    .saturating_add(run.range_path.0.len())
+                    .saturating_add(
+                        run.key_bounds
+                            .as_ref()
+                            .map_or(0, |(first, last)| first.len().saturating_add(last.len())),
+                    )
+            }))
+    }
+
     #[must_use]
     pub(crate) fn len(&self) -> usize {
         self.op_count
@@ -552,8 +605,21 @@ impl TransactionOpSource {
     where
         F: FnMut(u64, TransactionOp) -> MidgeResult<()>,
     {
+        self.for_each_bounded(None, &mut visitor)
+    }
+
+    pub(crate) fn for_each_bounded<F>(
+        &self,
+        budget: Option<&ResourceBudget>,
+        mut visitor: F,
+    ) -> MidgeResult<()>
+    where
+        F: FnMut(u64, TransactionOp) -> MidgeResult<()>,
+    {
         for run in &self.runs {
-            for_each_run_ordinal(run, |ordinal_op| visitor(ordinal_op.ordinal, ordinal_op.op))?;
+            format::for_each_run_ordinal_bounded(run, budget, |ordinal_op| {
+                visitor(ordinal_op.ordinal, ordinal_op.op)
+            })?;
         }
         let mut resident = self.resident.iter().collect::<Vec<_>>();
         resident.sort_unstable_by_key(|entry| entry.ordinal);
@@ -568,9 +634,18 @@ impl TransactionOpSource {
         ordinal: u64,
         key: &[u8],
     ) -> MidgeResult<Option<IntentLookup>> {
+        self.latest_before_bounded(ordinal, key, None)
+    }
+
+    pub(crate) fn latest_before_bounded(
+        &self,
+        ordinal: u64,
+        key: &[u8],
+        budget: Option<&ResourceBudget>,
+    ) -> MidgeResult<Option<IntentLookup>> {
         let mut latest = None;
         for run in &self.runs {
-            lookup_run_key(run, key, ordinal, &mut latest)?;
+            format::lookup_run_key_bounded(run, key, ordinal, &mut latest, budget)?;
         }
         for candidate in &self.resident {
             if candidate.ordinal < ordinal {

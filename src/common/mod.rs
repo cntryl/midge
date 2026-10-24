@@ -7,6 +7,7 @@ pub(crate) mod latency_histogram;
 #[doc(hidden)]
 pub mod resource_budget;
 pub mod time;
+pub(crate) mod write_rate;
 
 pub use deadline::OperationDeadline;
 pub(crate) use deadline_scope::DeadlineScope;

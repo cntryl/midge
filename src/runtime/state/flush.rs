@@ -52,16 +52,27 @@ impl RuntimeState {
         Some(flush)
     }
 
+    #[cfg(test)]
     pub(crate) fn begin_next_immutable_flush(&mut self) -> Option<ImmutableFlush> {
+        self.begin_next_immutable_flush_matching(|_, _| true)
+    }
+
+    pub(crate) fn begin_next_immutable_flush_matching(
+        &mut self,
+        eligible: impl Fn(u32, u64) -> bool,
+    ) -> Option<ImmutableFlush> {
+        let eligible = &eligible;
         let (cf_id, flush_id) = self
             .column_families
             .iter()
             .flat_map(|(cf_id, cf)| {
                 cf.immutable_flushes.iter().filter_map(move |flush| {
-                    matches!(
+                    (matches!(
                         flush.phase,
                         ImmutableFlushPhase::Queued | ImmutableFlushPhase::RetryPending
-                    )
+                    ) && (flush.phase != ImmutableFlushPhase::RetryPending
+                        || flush.retry.is_ready())
+                        && eligible(*cf_id, flush.flush_id))
                     .then_some((*cf_id, flush.flush_id, flush.sequence))
                 })
             })
@@ -150,19 +161,21 @@ impl RuntimeState {
     }
 
     pub(crate) fn has_due_immutable_flush(&self) -> bool {
-        self.column_families
-            .values()
-            .flat_map(|cf_state| cf_state.immutable_flushes.iter())
-            .filter(|flush| {
-                matches!(
-                    flush.phase,
-                    ImmutableFlushPhase::Queued | ImmutableFlushPhase::RetryPending
-                )
+        self.has_due_immutable_flush_matching(|_, _| true)
+    }
+
+    pub(crate) fn has_due_immutable_flush_matching(
+        &self,
+        eligible: impl Fn(u32, u64) -> bool,
+    ) -> bool {
+        self.column_families.iter().any(|(cf_id, cf)| {
+            cf.immutable_flushes.iter().any(|flush| {
+                eligible(*cf_id, flush.flush_id)
+                    && (flush.phase == ImmutableFlushPhase::Queued
+                        || (flush.phase == ImmutableFlushPhase::RetryPending
+                            && flush.retry.is_ready()))
             })
-            .min_by_key(|flush| (flush.sequence, flush.flush_id))
-            .is_some_and(|flush| {
-                flush.phase == ImmutableFlushPhase::Queued || flush.retry.is_ready()
-            })
+        })
     }
 
     pub(crate) fn flush_retry_deadline_timeout(&self) -> Option<Duration> {
@@ -271,6 +284,7 @@ impl RuntimeState {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn recompute_total_memtable_bytes(&mut self) {
         self.total_memtable_bytes = self
             .column_families
@@ -291,6 +305,9 @@ impl RuntimeState {
     /// This intentionally excludes active memtable size: active memtable pressure
     /// should trigger flush, not block the flush that would relieve it.
     pub fn should_hard_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+        if self.write_pressure.admission.hard_pending_limit() {
+            return true;
+        }
         if self.write_pressure.stalled {
             return true;
         }
@@ -304,6 +321,9 @@ impl RuntimeState {
     }
 
     pub fn has_any_hard_write_stall(&self) -> bool {
+        if self.write_pressure.admission.hard_pending_limit() {
+            return true;
+        }
         if self.write_pressure.stalled || self.is_total_memtable_hard_limit_exceeded() {
             return true;
         }

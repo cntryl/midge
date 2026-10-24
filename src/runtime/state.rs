@@ -79,6 +79,7 @@ pub(crate) struct FlushRuntimeMetrics {
     pub publish_count: u64,
     pub publish_ns_total: u64,
     pub publish_ns_max: u64,
+    pub publication_deferred_by_gate: u64,
     pub failures_total: u64,
     pub retries_total: u64,
     pub write_stall_ns_total: u64,
@@ -148,6 +149,20 @@ impl ColumnFamilyState {
 pub(crate) struct SstNameAllocation {
     pub(crate) cursor: HashMap<crate::types::ColumnFamilyId, u64>,
     pub(crate) reserved_through: HashMap<crate::types::ColumnFamilyId, u64>,
+    pub(crate) prefetch_retry_at: Option<std::time::Instant>,
+    /// Captured from recovered authority before this session reserves any
+    /// output name. Never derive orphan eligibility from the moving counter.
+    pub(crate) startup_floor: HashMap<crate::types::ColumnFamilyId, u64>,
+    pub(crate) startup_floor_epoch: Option<u64>,
+}
+
+impl SstNameAllocation {
+    fn recovered(manifest: &Manifest) -> Self {
+        Self {
+            startup_floor: manifest.next_sst_seqs.clone(),
+            ..Default::default()
+        }
+    }
 }
 
 /// WAL state
@@ -332,7 +347,7 @@ impl RuntimeLimits {
             memtable_flush_threshold: 64 * 1024 * 1024,
             eventual_flush_segment_gap: crate::runtime::CloudRuntimePolicy::default()
                 .eventual_flush_segment_gap,
-            max_immutable_memtables: 10,
+            max_immutable_memtables: crate::config::DEFAULT_MAX_IMMUTABLE_MEMTABLES,
             l0_compaction_trigger: crate::compaction::LeveledCompactionConfig::default()
                 .l0_file_count_threshold,
             compaction_config: CompactionConfig {
@@ -483,6 +498,7 @@ impl std::ops::Deref for ManifestRuntimeState {
 
 pub struct WritePressureState {
     pub stalled: bool,
+    pub(crate) admission: Arc<crate::runtime::write_admission::WriteAdmission>,
 }
 
 struct TransactionCoordination {
@@ -521,8 +537,14 @@ pub struct RuntimeState {
     pub db_path: PathBuf,
 
     // === Sequence Numbers ===
-    /// Global monotonic sequence number
+    /// Highest allocated sequence, including prepared but unapplied units.
     pub sequence: u64,
+    /// Highest completely applied transaction cut. Snapshot visibility never
+    /// follows allocation ahead of this boundary.
+    pub(crate) applied_sequence: u64,
+    /// A failed effect left entries above the published cut. No family may
+    /// advance that global cut until restart reconstructs whole WAL units.
+    pub(crate) partial_apply_prefix: bool,
     /// Highest compaction output generation observed or allocated. This is
     /// recovered from canonical output names without advancing WAL authority.
     pub(crate) compaction_output_generation: u64,
@@ -737,7 +759,21 @@ impl RuntimeState {
         telemetry: &crate::telemetry::metrics::MetricsSnapshot,
         read_path: &crate::diagnostics::ReadPathDiagnosticsSnapshot,
     ) -> crate::types::RuntimeMetricsSnapshot {
+        let ledger_syncs = self.wal.history.ledger_sync_counts();
+        let admission = &self.write_pressure.admission;
         crate::types::RuntimeMetricsSnapshot {
+            wal_ledger_file_sync_attempts: ledger_syncs.file_attempts,
+            wal_ledger_file_syncs: ledger_syncs.file_completed,
+            wal_ledger_directory_sync_attempts: ledger_syncs.directory_attempts,
+            wal_ledger_directory_syncs: ledger_syncs.directory_completed,
+            wal_accounted_syncs: telemetry
+                .wal_fsync_count
+                .saturating_add(ledger_syncs.file_completed)
+                .saturating_add(ledger_syncs.directory_completed),
+            write_slowdown_ns_total: admission.slowdown_ns.load(Ordering::Relaxed),
+            write_slowdown_count: admission.slowdown_count.load(Ordering::Relaxed),
+            background_rate_limited_bytes: admission.limited_bytes.load(Ordering::Relaxed),
+            estimated_pending_compaction_bytes: self.write_pressure.admission.pending_bytes(),
             health: self.health(),
             current_sequence: self.sequence,
             active_memtables: gauges.active_memtables,
@@ -784,9 +820,6 @@ impl RuntimeState {
             wal_fsync_ns_total: telemetry.wal_fsync_ns_total,
             wal_fsync_ns_max: telemetry.wal_fsync_ns_max,
             latency: telemetry.latency,
-            durability_waiters_fanned_out_total: 0,
-            abandoned_runtime_requests_total: 0,
-            late_runtime_responses_total: 0,
             sst_bloom_rejects_total: read_path.bloom_rejects,
             sst_bloom_checks_total: read_path.bloom_checks,
             sst_data_blocks_read_total: read_path.data_blocks_read,
@@ -799,12 +832,18 @@ impl RuntimeState {
             flush_publish_count: self.flush_metrics.publish_count,
             flush_publish_ns_total: self.flush_metrics.publish_ns_total,
             flush_publish_ns_max: self.flush_metrics.publish_ns_max,
+            flush_publication_deferred_by_gate: self.flush_metrics.publication_deferred_by_gate,
             flush_failures_total: self.flush_metrics.failures_total,
             flush_retries_total: self.flush_metrics.retries_total,
             write_stall_ns_total: gauges.write_stall_ns_total,
             write_stall_ns_max: gauges.write_stall_ns_max,
             write_stall_active_ns: gauges.write_stall_active_ns,
             cloud_async_wal_segments_sealed: telemetry.cloud_async_wal_segments_sealed,
+            cloud_orphan_list_attempts: telemetry.cloud_orphan_list_attempts,
+            cloud_orphan_probes: telemetry.cloud_orphan_probes,
+            cloud_orphan_delete_attempts: telemetry.cloud_orphan_delete_attempts,
+            cloud_orphan_retained: telemetry.cloud_orphan_retained,
+            cloud_orphan_inventory_unavailable: telemetry.cloud_orphan_inventory_unavailable,
             cloud_async_wal_bytes_sealed: telemetry.cloud_async_wal_bytes_sealed,
             cloud_async_wal_seal_latency_us: telemetry.cloud_async_wal_seal_latency_us,
             cloud_async_wal_uploads_started: telemetry.cloud_async_wal_uploads_started,
@@ -812,21 +851,11 @@ impl RuntimeState {
             cloud_async_wal_uploads_failed: telemetry.cloud_async_wal_uploads_failed,
             cloud_async_wal_upload_latency_us: telemetry.cloud_async_wal_upload_latency_us,
             cloud_async_wal_ack_latency_us: telemetry.cloud_async_wal_ack_latency_us,
-            hybrid_max_local_bytes: 0,
-            hybrid_total_committed_bytes: 0,
-            hybrid_free_bytes: 0,
-            hybrid_usage_percent: 0,
-            hybrid_pending_evictions: 0,
-            local_storage: None,
-            remote_range_requests_total: 0,
-            remote_range_bytes_total: 0,
-            remote_range_failures_total: 0,
-            remote_range_latency_ns_total: 0,
-            remote_range_latency_ns_max: 0,
             wal_recovery_records_replayed: self.recovery_stats.wal_recovery_records_replayed,
             wal_recovery_bytes_replayed: self.recovery_stats.wal_recovery_bytes_replayed,
             intent_log_replay_runs: self.recovery_stats.intent_log_replay_runs,
             intent_log_entries_replayed: self.recovery_stats.intent_log_entries_replayed,
+            ..Default::default()
         }
     }
 
@@ -1360,13 +1389,6 @@ impl RuntimeState {
         self.sequence = last;
         self.wal.frontiers.advance_local_to(last);
         Ok(sealed)
-    }
-
-    pub(crate) fn next_compaction_output_generation(&mut self) -> MidgeResult<u64> {
-        self.raise_sequence_to(self.compaction_output_generation);
-        let generation = *self.allocate_sequences(1)?.end();
-        self.compaction_output_generation = generation;
-        Ok(generation)
     }
 
     pub fn restore_sequence_floor_from_manifest(&mut self) {

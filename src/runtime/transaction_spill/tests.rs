@@ -1,5 +1,7 @@
 use super::*;
 
+mod bounded_decode;
+
 fn root_at(directory: &std::path::Path) -> Arc<dyn Fs> {
     crate::io::real::test_root(directory)
 }

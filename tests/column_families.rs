@@ -800,6 +800,12 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
             .find(|level| level.level == 0)
             .map_or(0, |level| level.file_count);
         assert_eq!(l0_before, 8, "both families must have four L0 files");
+        let original_identities: std::collections::HashMap<_, _> = layout_before
+            .levels
+            .iter()
+            .flat_map(|level| &level.files)
+            .map(|file| (file.name.clone(), file.cf_id))
+            .collect();
 
         // Act
         engine
@@ -826,9 +832,16 @@ fn should_isolate_compaction_given_per_cf_data_when_compacting() {
             "compact_all must drain residual L0 debt in every column family"
         );
         assert_eq!(
-            l1_after, 4,
-            "each column family must publish isolated outputs for its configured batch and residual file in mode {mode}"
+            l1_after, 8,
+            "each column family's disjoint immutable inputs are promoted in mode {mode}"
         );
+        for file in layout_after.levels.iter().flat_map(|level| &level.files) {
+            assert_eq!(
+                original_identities.get(&file.name),
+                Some(&file.cf_id),
+                "logical promotion must preserve the exact immutable identity and family"
+            );
+        }
         let tx_read1 = engine
             .begin_tx(cf1.id(), cntryl_midge::TransactionMode::ReadOnly)
             .unwrap();

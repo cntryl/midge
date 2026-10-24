@@ -13,12 +13,13 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-const FLUSH_WORKER_CHANNEL_CAPACITY: usize = 1;
 #[cfg(test)]
 const DEFAULT_FLUSH_MEMORY_BYTES: usize = 256 * 1024 * 1024;
 
 #[path = "flush/build.rs"]
 mod build;
+#[cfg(all(test, feature = "failpoints"))]
+mod phase_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlushIdentity {
@@ -56,6 +57,19 @@ pub(crate) trait FlushStorage: Send + Sync {
         authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
         validate_lease: &mut dyn FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
     ) -> MidgeResult<bool>;
+
+    fn mirror_captured_control_metadata(
+        &self,
+        _cut: &crate::runtime::CapturedMetadataCut,
+        _publication_lock: &crate::runtime::MetadataPublicationLock,
+        _deadline: &crate::common::OperationDeadline,
+        _authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
+        _validate_lease: &mut dyn FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
+    ) -> MidgeResult<bool> {
+        Err(MidgeError::NotSupported(
+            "storage does not support captured metadata publication".into(),
+        ))
+    }
 }
 
 #[derive(Clone, Default)]
@@ -119,6 +133,35 @@ impl FlushStorage for HybridFlushStorage {
         )?;
         Ok(true)
     }
+
+    fn mirror_captured_control_metadata(
+        &self,
+        cut: &crate::runtime::CapturedMetadataCut,
+        publication_lock: &crate::runtime::MetadataPublicationLock,
+        deadline: &crate::common::OperationDeadline,
+        authority: Option<crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>>,
+        validate_lease: &mut dyn FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
+    ) -> MidgeResult<bool> {
+        let Some(cloud) = &self.cloud_metadata else {
+            return Ok(false);
+        };
+        let authority = authority.ok_or_else(|| {
+            MidgeError::Fenced("cloud metadata mirror has no leader store".into())
+        })?;
+        crate::runtime::hybrid_persistence::mirror_captured_control_metadata_within(
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+                cloud,
+                fs: cut.fs().as_ref(),
+                publication_lock,
+                lock_wait_budget: cloud.callback_timeout(),
+                deadline,
+                authority,
+            },
+            cut,
+            validate_lease,
+        )?;
+        Ok(true)
+    }
 }
 
 pub(crate) struct FlushBuildCompletion {
@@ -158,20 +201,30 @@ pub(crate) struct FlushPublishCompletion {
     pub result: MidgeResult<FlushPublicationDelta>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlushMirrorPhase {
+    ManifestPublished,
+    IntentCleared,
+}
+
 pub(crate) struct FlushMirrorTask {
+    pub phase: FlushMirrorPhase,
     pub delta: FlushPublicationDelta,
     pub reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     pub fs: Arc<dyn crate::io::Fs>,
+    pub metadata_cut: Option<Arc<crate::runtime::CapturedMetadataCut>>,
     pub storage: Arc<dyn FlushStorage>,
     pub metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     pub lease_healthy: Option<Arc<AtomicBool>>,
     pub lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
-    pub runtime_response_timeout: std::time::Duration,
+    pub deadline: crate::common::OperationDeadline,
 }
 
 pub(crate) struct FlushMirrorCompletion {
+    pub phase: FlushMirrorPhase,
+    pub deadline: crate::common::OperationDeadline,
     pub delta: FlushPublicationDelta,
     pub reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     pub result: MidgeResult<bool>,
@@ -181,6 +234,16 @@ pub(crate) enum FlushWorkerResult {
     Build(FlushBuildCompletion),
     Publish(FlushPublishCompletion),
     Mirror(FlushMirrorCompletion),
+}
+
+impl FlushWorkerResult {
+    pub(crate) fn identity(&self) -> FlushIdentity {
+        match self {
+            Self::Build(result) => result.identity,
+            Self::Publish(result) => result.identity,
+            Self::Mirror(result) => result.delta.identity,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -199,21 +262,42 @@ enum FlushWorkerTask {
     Shutdown,
 }
 
-/// One persistent worker with one executing task and one bounded channel slot.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FlushPhase {
+    Build,
+    Publish,
+    Mirror(FlushMirrorPhase),
+}
+
+struct SubmittedFlushTask {
+    task: FlushWorkerTask,
+    finished: Arc<AtomicBool>,
+    gate: crate::failpoints::WorkerGate,
+}
+
+struct FlushOwner {
+    identity: FlushIdentity,
+    phase: Option<FlushPhase>,
+    finished: Arc<AtomicBool>,
+}
+
+/// Bounded reusable workers, with one owned pipeline per column family.
 pub struct FlushActor {
-    in_progress: usize,
+    owners: std::collections::HashMap<u64, FlushOwner>,
+    worker_limit: usize,
+    submitted: u64,
     memory_mode: bool,
-    task_tx: Option<crossbeam::channel::Sender<FlushWorkerTask>>,
-    worker_handle: Option<JoinHandle<()>>,
+    task_tx: Option<crossbeam::channel::Sender<SubmittedFlushTask>>,
+    worker_handles: Vec<JoinHandle<()>>,
 }
 
 impl FlushActor {
     #[cfg(test)]
     pub fn new(
-        fs: Arc<dyn crate::io::Fs>,
+        fs: &Arc<dyn crate::io::Fs>,
         memory_mode: bool,
-        compression_policy: crate::codec::CompressionPolicy,
-        completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
+        compression_policy: &crate::codec::CompressionPolicy,
+        completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
     ) -> MidgeResult<Self> {
         Self::new_with_memory_limit(
             fs,
@@ -227,46 +311,204 @@ impl FlushActor {
     /// Start the worker. It builds SSTs through `fs`, the database root, so
     /// staging, scratch and final outputs are all root-relative paths in it.
     pub(crate) fn new_with_memory_limit(
-        fs: Arc<dyn crate::io::Fs>,
+        fs: &Arc<dyn crate::io::Fs>,
         memory_mode: bool,
-        compression_policy: crate::codec::CompressionPolicy,
-        completion_tx: crossbeam::channel::Sender<FlushWorkerResult>,
+        compression_policy: &crate::codec::CompressionPolicy,
+        completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
         memory_bytes: usize,
     ) -> MidgeResult<Self> {
-        if memory_mode {
-            return Ok(Self {
-                in_progress: 0,
-                memory_mode: true,
-                task_tx: None,
-                worker_handle: None,
-            });
+        Self::new_with_write_limiter(
+            fs,
+            memory_mode,
+            compression_policy,
+            completion_tx,
+            memory_bytes,
+            None,
+        )
+    }
+
+    pub(crate) fn new_with_write_limiter(
+        fs: &Arc<dyn crate::io::Fs>,
+        memory_mode: bool,
+        compression_policy: &crate::codec::CompressionPolicy,
+        completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
+        memory_bytes: usize,
+        limiter: Option<&Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+    ) -> MidgeResult<Self> {
+        Self::new_with_worker_count(
+            fs,
+            memory_mode,
+            compression_policy,
+            completion_tx,
+            memory_bytes,
+            limiter,
+            1,
+        )
+    }
+
+    pub(crate) fn new_with_worker_count(
+        fs: &Arc<dyn crate::io::Fs>,
+        memory_mode: bool,
+        compression_policy: &crate::codec::CompressionPolicy,
+        completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
+        memory_bytes: usize,
+        limiter: Option<&Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+        workers: usize,
+    ) -> MidgeResult<Self> {
+        if !(1..=64).contains(&workers) {
+            return Err(MidgeError::InvalidArgument(
+                "flush concurrency must be in 1..=64".into(),
+            ));
         }
-
-        let sst_factory = Arc::new(
-            crate::sst::FsSstFactoryIo::new(fs, 64 * 1024)
-                .with_compression_policy(compression_policy)
-                .with_compaction_scratch_directory(PathBuf::from(
-                    crate::sst::fs::FLUSH_STAGING_DIR,
-                )),
-        );
-        let (task_tx, task_rx) =
-            crossbeam::channel::bounded::<FlushWorkerTask>(FLUSH_WORKER_CHANNEL_CAPACITY);
+        let mut actor = Self {
+            owners: std::collections::HashMap::new(),
+            worker_limit: workers,
+            submitted: 0,
+            memory_mode,
+            task_tx: None,
+            worker_handles: Vec::new(),
+        };
+        if memory_mode {
+            return Ok(actor);
+        }
+        let (task_tx, task_rx) = crossbeam::channel::bounded::<SubmittedFlushTask>(workers);
+        actor.task_tx = Some(task_tx);
         let budget = crate::common::resource_budget::ResourceBudget::new(memory_bytes);
-        let worker_handle = std::thread::Builder::new()
-            .name("midge-flush".to_string())
-            .spawn(move || Self::worker_loop(&task_rx, &completion_tx, &sst_factory, &budget))
-            .map_err(|error| MidgeError::Internal(format!("spawn flush worker: {error}")))?;
-
-        Ok(Self {
-            in_progress: 0,
-            memory_mode: false,
-            task_tx: Some(task_tx),
-            worker_handle: Some(worker_handle),
-        })
+        for index in 0..workers {
+            // Scratch cleanup belongs to this worker, while memory and write
+            // throttling share their original engine-wide admission ledgers.
+            let factory = Arc::new(
+                crate::sst::FsSstFactoryIo::new(Arc::clone(fs), 64 * 1024)
+                    .with_write_limiter(limiter.cloned())
+                    .with_compression_policy(compression_policy.clone())
+                    .with_compaction_scratch_directory(PathBuf::from(
+                        crate::sst::fs::FLUSH_STAGING_DIR,
+                    )),
+            );
+            let task_rx = task_rx.clone();
+            let completion_tx = completion_tx.clone();
+            let budget = budget.clone();
+            let worker = std::thread::Builder::new()
+                .name(format!("midge-flush-{index}"))
+                .spawn(move || Self::worker_loop(&task_rx, &completion_tx, &factory, &budget))
+                .map_err(|error| MidgeError::Internal(format!("spawn flush worker: {error}")))?;
+            actor.worker_handles.push(worker);
+        }
+        Ok(actor)
     }
 
     pub(crate) fn is_inflight(&self) -> bool {
-        self.in_progress != 0
+        self.owners.values().any(|owner| owner.phase.is_some())
+    }
+
+    pub(crate) fn has_capacity(&self) -> bool {
+        self.owners.len() < self.worker_limit
+    }
+    #[cfg(test)]
+    pub(crate) fn has_pipeline(&self, id: u64) -> bool {
+        self.owners.contains_key(&id)
+    }
+    pub(crate) fn submitted_work(&self) -> u64 {
+        self.submitted
+    }
+    pub(crate) fn owns_pipeline(&self, cf_id: u32, flush_id: u64) -> bool {
+        self.owners
+            .get(&flush_id)
+            .is_some_and(|owner| owner.identity.cf_id == cf_id)
+    }
+    pub(crate) fn can_start_or_resume(&self, cf_id: u32, flush_id: u64) -> bool {
+        self.owners
+            .get(&flush_id)
+            .is_some_and(|owner| owner.identity.cf_id == cf_id && owner.phase.is_none())
+            || (self.has_capacity()
+                && !self
+                    .owners
+                    .values()
+                    .any(|owner| owner.identity.cf_id == cf_id))
+    }
+
+    fn submit_task(
+        &mut self,
+        identity: FlushIdentity,
+        task: FlushWorkerTask,
+        resume: bool,
+    ) -> MidgeResult<()> {
+        if !self.can_start_or_resume(identity.cf_id, identity.flush_id)
+            || (!resume && self.owners.contains_key(&identity.flush_id))
+        {
+            return Err(MidgeError::Busy(
+                "flush pipeline capacity or column family is owned".into(),
+            ));
+        }
+        if self
+            .owners
+            .get(&identity.flush_id)
+            .is_some_and(|owner| owner.identity != identity)
+        {
+            return Err(MidgeError::Fenced(
+                "flush task changed its accepted identity".into(),
+            ));
+        }
+        let phase = match &task {
+            FlushWorkerTask::Build(_) => FlushPhase::Build,
+            FlushWorkerTask::Publish(_) => FlushPhase::Publish,
+            FlushWorkerTask::Mirror(task) => FlushPhase::Mirror(task.phase),
+            FlushWorkerTask::Shutdown => {
+                return Err(MidgeError::Internal(
+                    "shutdown is not a flush pipeline task".into(),
+                ))
+            }
+        };
+        let finished = Arc::new(AtomicBool::new(false));
+        self.task_tx
+            .as_ref()
+            .ok_or_else(|| MidgeError::Internal("flush workers are unavailable".into()))?
+            .try_send(SubmittedFlushTask {
+                task,
+                finished: Arc::clone(&finished),
+                gate: crate::failpoints::worker_gate(),
+            })
+            .map_err(|error| MidgeError::Busy(format!("flush worker queue is full: {error}")))?;
+        self.owners.insert(
+            identity.flush_id,
+            FlushOwner {
+                identity,
+                phase: Some(phase),
+                finished,
+            },
+        );
+        self.submitted = self.submitted.saturating_add(1);
+        Ok(())
+    }
+
+    /// A generic notification cannot finish an executing task, another phase,
+    /// or another immutable generation. The worker owns the terminal flag.
+    pub(crate) fn completion_is_ready(&self, completion: &FlushWorkerResult) -> bool {
+        let (identity, phase) = match completion {
+            FlushWorkerResult::Build(result) => (result.identity, FlushPhase::Build),
+            FlushWorkerResult::Publish(result) => (result.identity, FlushPhase::Publish),
+            FlushWorkerResult::Mirror(result) => {
+                (result.delta.identity, FlushPhase::Mirror(result.phase))
+            }
+        };
+        let Some(owner) = self.owners.get(&identity.flush_id) else {
+            return false;
+        };
+        owner.identity == identity
+            && owner.phase == Some(phase)
+            && owner.finished.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn take_completion(&mut self, completion: &FlushWorkerResult) -> bool {
+        if !self.completion_is_ready(completion) {
+            return false;
+        }
+        let owner = self
+            .owners
+            .get_mut(&completion.identity().flush_id)
+            .expect("validated completion owner exists");
+        owner.phase = None;
+        true
     }
 
     pub(crate) fn submit_build(
@@ -279,11 +521,6 @@ impl FlushActor {
         if self.memory_mode {
             return Ok(());
         }
-        if self.is_inflight() {
-            return Err(MidgeError::Busy(
-                "flush worker already has an in-flight task".to_string(),
-            ));
-        }
         let task = FlushWorkerTask::Build(FlushBuildTask {
             identity,
             memtable,
@@ -291,40 +528,41 @@ impl FlushActor {
             reservation: None,
             hybrid_storage,
         });
-        self.task_tx
-            .as_ref()
-            .ok_or_else(|| MidgeError::Internal("flush worker is unavailable".to_string()))?
-            .try_send(task)
-            .map_err(|error| MidgeError::Busy(format!("flush worker queue is full: {error}")))?;
-        self.in_progress = 1;
-        Ok(())
+        self.submit_task(identity, task, false)
     }
 
     pub(crate) fn submit_publish(&mut self, task: FlushPublishTask) -> MidgeResult<()> {
         if self.memory_mode {
             return Ok(());
         }
-        self.task_tx
-            .as_ref()
-            .ok_or_else(|| MidgeError::Internal("flush worker is unavailable".to_string()))?
-            .send(FlushWorkerTask::Publish(Box::new(task)))
-            .map_err(|error| MidgeError::Internal(format!("submit flush publication: {error}")))?;
-        self.in_progress = 1;
-        Ok(())
+        self.submit_task(
+            task.build.identity,
+            FlushWorkerTask::Publish(Box::new(task)),
+            true,
+        )
     }
 
     pub(crate) fn submit_mirror(&mut self, task: FlushMirrorTask) -> MidgeResult<()> {
-        self.task_tx
-            .as_ref()
-            .ok_or_else(|| MidgeError::Internal("flush worker is unavailable".to_string()))?
-            .send(FlushWorkerTask::Mirror(Box::new(task)))
-            .map_err(|error| MidgeError::Internal(format!("submit flush mirror: {error}")))?;
-        self.in_progress = 1;
-        Ok(())
+        self.submit_task(
+            task.delta.identity,
+            FlushWorkerTask::Mirror(Box::new(task)),
+            true,
+        )
     }
 
-    pub(crate) fn finish_pipeline(&mut self) {
-        self.in_progress = 0;
+    pub(crate) fn finish_pipeline(&mut self, flush_id: u64) {
+        if self
+            .owners
+            .get(&flush_id)
+            .is_some_and(|owner| owner.phase.is_some())
+        {
+            tracing::warn!(
+                flush_id,
+                "retaining flush owner until its physical completion is consumed"
+            );
+            return;
+        }
+        self.owners.remove(&flush_id);
     }
 
     pub(crate) fn reserve_flush(
@@ -378,108 +616,140 @@ impl FlushActor {
     }
 
     pub(crate) fn shutdown_and_join(&mut self) -> MidgeResult<()> {
-        if self.worker_handle.is_none() {
+        if self.worker_handles.is_empty() {
             return Ok(());
         }
         if let Some(task_tx) = &self.task_tx {
-            let _ = task_tx.send(FlushWorkerTask::Shutdown);
+            for _ in &self.worker_handles {
+                let _ = task_tx.send(SubmittedFlushTask {
+                    task: FlushWorkerTask::Shutdown,
+                    finished: Arc::new(AtomicBool::new(false)),
+                    gate: crate::failpoints::worker_gate(),
+                });
+            }
         }
-        if let Some(worker) = self.worker_handle.take() {
-            worker.join().map_err(|_| {
-                MidgeError::Internal("flush worker panicked during shutdown".into())
-            })?;
+        let mut error = None;
+        for worker in self.worker_handles.drain(..) {
+            if worker.join().is_err() {
+                error = Some(MidgeError::Internal(
+                    "flush worker panicked during shutdown".into(),
+                ));
+            }
         }
         self.task_tx = None;
-        Ok(())
+        self.owners.clear();
+        error.map_or(Ok(()), Err)
     }
 
     fn worker_loop(
-        task_rx: &crossbeam::channel::Receiver<FlushWorkerTask>,
+        task_rx: &crossbeam::channel::Receiver<SubmittedFlushTask>,
         completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
         sst_factory: &Arc<crate::sst::FsSstFactoryIo>,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) {
-        while let Ok(task) = task_rx.recv() {
-            match task {
-                FlushWorkerTask::Build(mut task) => {
-                    let started = Instant::now();
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        crate::failpoints::fail_point!("midge::flush_worker::before_build");
-                        build::write(sst_factory, &mut task, budget)
-                    }));
-                    let build_ns = elapsed_ns(started);
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(panic) => {
-                            tracing::error!(?panic, "flush build task panicked");
-                            Err(MidgeError::Internal(
-                                "flush build task panicked".to_string(),
-                            ))
-                        }
-                    };
-                    if !sst_factory.compaction_scratch_cleanup_verified() {
-                        // A failed scratch unlink must not return disk capacity.
-                        // The hybrid ledger retains this token until startup
-                        // reconciles physical residue; block later builds too.
-                        task.reservation = None;
-                    }
-                    let _ = completion_tx.send(FlushWorkerResult::Build(FlushBuildCompletion {
-                        identity: task.identity,
-                        memtable: task.memtable,
-                        staging_path: task.staging_path,
-                        reservation: task.reservation,
-                        build_ns,
-                        result,
-                    }));
-                }
-                FlushWorkerTask::Publish(task) => {
-                    let task = *task;
-                    let fallback = task.clone();
-                    let started = Instant::now();
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        crate::failpoints::fail_point!("midge::flush_worker::before_publication");
-                        Self::publish_with_budget(&task, budget)
-                    }));
-                    let publish_ns = elapsed_ns(started);
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(panic) => {
-                            tracing::error!(?panic, "flush publication task panicked");
-                            Err(MidgeError::Internal(
-                                "flush publication task panicked".to_string(),
-                            ))
-                        }
-                    };
-                    let _ =
-                        completion_tx.send(FlushWorkerResult::Publish(FlushPublishCompletion {
-                            identity: fallback.build.identity,
-                            reservation: fallback.build.reservation,
-                            publish_ns,
-                            result,
-                        }));
-                }
-                FlushWorkerTask::Mirror(task) => {
-                    let task = *task;
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        mirror_after_local_commit(&task)
-                    }));
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(panic) => {
-                            tracing::error!(?panic, "flush mirror task panicked");
-                            Err(MidgeError::Internal(
-                                "flush mirror task panicked".to_string(),
-                            ))
-                        }
-                    };
-                    let _ = completion_tx.send(FlushWorkerResult::Mirror(FlushMirrorCompletion {
-                        delta: task.delta,
-                        reservation: task.reservation,
-                        result,
-                    }));
-                }
-                FlushWorkerTask::Shutdown => break,
+        while let Ok(SubmittedFlushTask {
+            task,
+            finished,
+            gate,
+        }) = task_rx.recv()
+        {
+            if matches!(task, FlushWorkerTask::Shutdown) {
+                break;
             }
+            gate.run(|| Self::run_worker_task(task, &finished, completion_tx, sst_factory, budget));
+        }
+    }
+
+    fn run_worker_task(
+        task: FlushWorkerTask,
+        finished: &AtomicBool,
+        completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
+        sst_factory: &Arc<crate::sst::FsSstFactoryIo>,
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) {
+        match task {
+            FlushWorkerTask::Build(mut task) => {
+                let started = Instant::now();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::failpoints::fail_point!("midge::flush_worker::before_build");
+                    build::write(sst_factory, &mut task, budget)
+                }));
+                let build_ns = elapsed_ns(started);
+                let result = match result {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        tracing::error!(?panic, "flush build task panicked");
+                        Err(MidgeError::Internal(
+                            "flush build task panicked".to_string(),
+                        ))
+                    }
+                };
+                if !sst_factory.compaction_scratch_cleanup_verified() {
+                    // A failed scratch unlink must not return disk capacity.
+                    // The hybrid ledger retains this token until startup
+                    // reconciles physical residue; block later builds too.
+                    task.reservation = None;
+                }
+                finished.store(true, Ordering::Release);
+                let _ = completion_tx.send(FlushWorkerResult::Build(FlushBuildCompletion {
+                    identity: task.identity,
+                    memtable: task.memtable,
+                    staging_path: task.staging_path,
+                    reservation: task.reservation,
+                    build_ns,
+                    result,
+                }));
+            }
+            FlushWorkerTask::Publish(task) => {
+                let task = *task;
+                let fallback = task.clone();
+                let started = Instant::now();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::failpoints::fail_point!("midge::flush_worker::before_publication");
+                    Self::publish_with_budget(&task, budget)
+                }));
+                let publish_ns = elapsed_ns(started);
+                let result = match result {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        tracing::error!(?panic, "flush publication task panicked");
+                        Err(MidgeError::Internal(
+                            "flush publication task panicked".to_string(),
+                        ))
+                    }
+                };
+                finished.store(true, Ordering::Release);
+                let _ = completion_tx.send(FlushWorkerResult::Publish(FlushPublishCompletion {
+                    identity: fallback.build.identity,
+                    reservation: fallback.build.reservation,
+                    publish_ns,
+                    result,
+                }));
+            }
+            FlushWorkerTask::Mirror(task) => {
+                let task = *task;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mirror_after_local_commit(&task)
+                }));
+                let result = match result {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        tracing::error!(?panic, "flush mirror task panicked");
+                        Err(MidgeError::Internal(
+                            "flush mirror task panicked".to_string(),
+                        ))
+                    }
+                };
+                finished.store(true, Ordering::Release);
+                let _ = completion_tx.send(FlushWorkerResult::Mirror(FlushMirrorCompletion {
+                    phase: task.phase,
+                    deadline: task.deadline,
+                    delta: task.delta,
+                    reservation: task.reservation,
+                    result,
+                }));
+            }
+            FlushWorkerTask::Shutdown => {}
         }
     }
 
@@ -609,33 +879,69 @@ fn validate_monotonic_lease(
 }
 
 fn mirror_after_local_commit(task: &FlushMirrorTask) -> MidgeResult<bool> {
-    let validate = || {
-        validate_publication_lease(
-            task.delta.identity,
-            task.lease_healthy.as_ref(),
-            task.lease_validity.as_ref(),
-            task.leader_store.as_ref(),
-            task.leader_holder_id.as_deref(),
-        )
-    };
+    let deadline = task.deadline;
+    let validate = || validate_mirror_lease(task, &deadline);
     validate()?;
-    let deadline = crate::common::OperationDeadline::from_budget(task.runtime_response_timeout);
     let mut validate_lease = |_deadline: &crate::common::OperationDeadline| validate();
-    let mirrored = task.storage.mirror_control_metadata(
-        task.fs.as_ref(),
-        &task.metadata_publication_lock,
-        &deadline,
-        task.leader_store.as_deref().map(|store| {
-            crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
-                store,
-                holder_id: task.leader_holder_id.as_deref().unwrap_or_default(),
-                writer_epoch: task.delta.identity.writer_epoch,
-            }
-        }),
-        &mut validate_lease,
-    )?;
+    let authority = task.leader_store.as_deref().map(|store| {
+        crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+            store,
+            holder_id: task.leader_holder_id.as_deref().unwrap_or_default(),
+            writer_epoch: task.delta.identity.writer_epoch,
+        }
+    });
+    let mirrored = if let Some(cut) = &task.metadata_cut {
+        task.storage.mirror_captured_control_metadata(
+            cut,
+            &task.metadata_publication_lock,
+            &deadline,
+            authority,
+            &mut validate_lease,
+        )
+    } else {
+        task.storage.mirror_control_metadata(
+            task.fs.as_ref(),
+            &task.metadata_publication_lock,
+            &deadline,
+            authority,
+            &mut validate_lease,
+        )
+    }?;
     crate::failpoints::fail_point!("midge::flush_worker::after_control_metadata_publication");
+    crate::common::DeadlineScope::new(deadline).check("flush metadata mirror completion")?;
     Ok(mirrored || task.storage.has_hybrid_storage())
+}
+
+fn validate_mirror_lease(
+    task: &FlushMirrorTask,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<()> {
+    crate::common::DeadlineScope::new(*deadline).check("flush metadata mirror authority")?;
+    if task
+        .lease_healthy
+        .as_ref()
+        .is_some_and(|healthy| !healthy.load(Ordering::Acquire))
+    {
+        return Err(MidgeError::Fenced(
+            "flush metadata mirror lease is unhealthy".into(),
+        ));
+    }
+    let epoch = task.delta.identity.writer_epoch;
+    if let Some(validity) = &task.lease_validity {
+        validity
+            .remaining(epoch)
+            .map_err(|error| error.into_validation_error("flush mirror lease validity"))?;
+    }
+    if let Some(store) = &task.leader_store {
+        store
+            .validate_metadata_epoch_with_timeout(
+                task.leader_holder_id.as_deref().unwrap_or_default(),
+                epoch,
+                deadline.remaining(),
+            )
+            .map_err(|error| error.into_validation_error("flush mirror writer authority"))?;
+    }
+    crate::common::DeadlineScope::new(*deadline).check("flush metadata mirror authority completion")
 }
 
 fn finalize_staged_sst(
@@ -985,16 +1291,20 @@ mod tests {
 
     fn mirror_task(fixture: &PublicationFixture, delta: FlushPublicationDelta) -> FlushMirrorTask {
         FlushMirrorTask {
+            phase: FlushMirrorPhase::IntentCleared,
             delta,
             reservation: None,
             fs: Arc::clone(&fixture.task.fs),
+            metadata_cut: None,
             storage: Arc::clone(&fixture.task.storage),
             metadata_publication_lock: fixture.metadata_publication_lock.clone(),
             lease_validity: fixture.task.lease_validity.clone(),
             lease_healthy: fixture.task.lease_healthy.clone(),
             leader_store: fixture.task.leader_store.clone(),
             leader_holder_id: fixture.task.leader_holder_id.clone(),
-            runtime_response_timeout: crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
+            deadline: crate::common::OperationDeadline::from_budget(
+                crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
+            ),
         }
     }
 
@@ -1047,9 +1357,18 @@ mod tests {
         };
         let (tx, rx) = crossbeam::channel::unbounded();
         let (completed, results) = crossbeam::channel::unbounded();
-        tx.send(FlushWorkerTask::Build(task.clone())).unwrap();
-        tx.send(FlushWorkerTask::Build(task)).unwrap();
-        tx.send(FlushWorkerTask::Shutdown).unwrap();
+        for task in [
+            FlushWorkerTask::Build(task.clone()),
+            FlushWorkerTask::Build(task),
+            FlushWorkerTask::Shutdown,
+        ] {
+            tx.send(SubmittedFlushTask {
+                task,
+                finished: Arc::new(AtomicBool::new(false)),
+                gate: crate::failpoints::worker_gate(),
+            })
+            .unwrap();
+        }
         let budget = crate::common::resource_budget::ResourceBudget::new(1024 * 1024);
 
         // Act
@@ -1346,14 +1665,14 @@ mod tests {
 
         // Act
         let mut actor = FlushActor::new(
-            crate::io::real::test_root(directory.path()),
+            &crate::io::real::test_root(directory.path()),
             false,
-            crate::codec::CompressionPolicy::default(),
-            completion_tx,
+            &crate::codec::CompressionPolicy::default(),
+            &completion_tx,
         )?;
 
         // Assert
-        assert!(actor.worker_handle.is_some());
+        assert_eq!(actor.worker_handles.len(), 1);
         assert!(!actor.is_inflight());
         actor.shutdown_and_join()?;
         Ok(())
@@ -1366,14 +1685,14 @@ mod tests {
 
         // Act
         let actor = FlushActor::new(
-            Arc::new(crate::io::MockFs::new()),
+            &(Arc::new(crate::io::MockFs::new()) as Arc<dyn crate::io::Fs>),
             true,
-            crate::codec::CompressionPolicy::default(),
-            completion_tx,
+            &crate::codec::CompressionPolicy::default(),
+            &completion_tx,
         )?;
 
         // Assert
-        assert!(actor.worker_handle.is_none());
+        assert!(actor.worker_handles.is_empty());
         Ok(())
     }
 
@@ -1519,7 +1838,8 @@ mod tests {
         let publication_lock = fixture.metadata_publication_lock.clone();
         let guard = publication_lock.lock();
         let mut task = mirror_task(&fixture, delta);
-        task.runtime_response_timeout = std::time::Duration::from_millis(100);
+        task.deadline =
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_millis(100));
         let (result_tx, result_rx) = std::sync::mpsc::channel();
 
         // Act: keep the lock on this thread so the old blocking lock path

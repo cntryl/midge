@@ -95,6 +95,7 @@ impl BlockSink for VecBlockSink {
 
 /// Scratch-file destination used by flush and compaction writers.
 pub(super) struct ScratchBlockSink {
+    limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
     scratch: super::super::scratch::TrackedScratch,
     offset: u64,
     budget: Option<ResourceBudget>,
@@ -115,12 +116,20 @@ impl ScratchBlockSink {
         directory: Option<&Path>,
     ) -> MidgeResult<Self> {
         Ok(Self {
+            limiter: None,
             scratch: super::super::scratch::TrackedScratch::new(fs, outstanding, directory)?,
             offset: 0,
             budget,
             current_reservations: Vec::new(),
             persistent_reservations: Vec::new(),
         })
+    }
+
+    pub(super) fn set_write_limiter(
+        &mut self,
+        limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+    ) {
+        self.limiter = limiter;
     }
 
     pub(super) fn reserve_finalization(
@@ -144,7 +153,13 @@ impl BlockSink for ScratchBlockSink {
     }
 
     fn append(&mut self, bytes: &[u8]) -> MidgeResult<()> {
-        self.scratch.append(bytes)
+        for chunk in bytes.chunks(64 * 1024) {
+            if let Some(limiter) = &self.limiter {
+                limiter.acquire(chunk.len())?;
+            }
+            self.scratch.append(chunk)?;
+        }
+        Ok(())
     }
 
     fn advance_after_append(&mut self, bytes: u64) -> MidgeResult<()> {

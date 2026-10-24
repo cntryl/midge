@@ -417,14 +417,6 @@ impl PrimaryLease for FileSystemLease {
     }
 }
 
-// SAFETY: FileSystemLease is Send + Sync because:
-// - `leader_store` (FsLeaderStore) contains Arc<dyn Fs> which is Send + Sync.
-// - `holder_id` is immutable after construction.
-// - `acquired` uses AtomicBool for lock-free thread-safe access.
-// - `acquired_epoch` uses AtomicU64 for lock-free thread-safe access.
-unsafe impl Send for FileSystemLease {}
-unsafe impl Sync for FileSystemLease {}
-
 #[cfg(test)]
 mod tests {
     use super::super::traits::{format_leader_record, LeaderRecord};

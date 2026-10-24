@@ -3,6 +3,9 @@
 //! Each function is gated by exactly the providers that call it, so no
 //! feature combination compiles code it does not use.
 
+mod list_page;
+pub(super) use list_page::submit_list_page;
+
 #[cfg(any(
     feature = "cloud-aws",
     feature = "cloud-oci",
@@ -52,6 +55,10 @@ pub(super) struct PagedList<P: ListPageParser> {
 ))]
 pub(super) trait ListPageParser {
     fn url(&self, prefix: &str, token: Option<&str>) -> String;
+    fn list_limit_parameter(&self) -> &'static str;
+    fn page_request(&self, url: String) -> CloudRequest {
+        CloudRequest::new(reqwest::Method::GET, url)
+    }
     fn parse_page(
         &self,
         response: &crate::storage::cloud::CloudResponse,
