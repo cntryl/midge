@@ -618,6 +618,10 @@ fn should_preserve_later_flush_when_successful_earlier_pointer_cas_callback_is_l
 }
 
 fn verify_held_publication(kind: HoldKind) -> MidgeResult<()> {
+    crate::failpoints::with_read_gate(|| verify_held_publication_with_stable_failpoints(kind))
+}
+
+fn verify_held_publication_with_stable_failpoints(kind: HoldKind) -> MidgeResult<()> {
     // Arrange: both flush and compaction use the real Background actors and
     // one conditional metadata provider; only its actual earlier PUT is held.
     let mut fixture = Fixture::new()?;
