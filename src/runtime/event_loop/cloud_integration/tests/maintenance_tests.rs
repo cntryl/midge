@@ -102,7 +102,7 @@ fn complete_compaction(el: &mut EventLoop, worker: &crossbeam::channel::Receiver
 }
 
 fn complete_flush(el: &mut EventLoop) {
-    for phase in ["build", "publish", "mirror"] {
+    for phase in ["build", "publish", "manifest mirror", "intent clear"] {
         let completion = el
             .pipeline
             .flush_worker_result_rx
@@ -180,10 +180,12 @@ fn should_keep_compact_all_pending_while_fair_turns_service_other_work(
     complete_compaction(&mut el, &worker);
     drain_prune_completion_for_test(&mut el);
     el.schedule_next_flush_worker();
-    assert!(matches!(
-        response.recv_timeout(Duration::from_secs(1)),
-        Ok(RuntimeResponse::Ok { request_id: 91_001 })
-    ));
+    manual_flush_tests::settle_owned_work(&mut el, &worker);
+    let outcome = response.recv_timeout(Duration::from_secs(1));
+    assert!(
+        matches!(outcome, Ok(RuntimeResponse::Ok { request_id: 91_001 })),
+        "{outcome:?}"
+    );
     assert!(el.state.manifest.files.iter().all(|file| file.level > 0));
     assert!(el.state.pending_compaction_waits.is_empty());
     Ok(())

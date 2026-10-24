@@ -131,16 +131,53 @@ fn metadata_fixture(el: &mut EventLoop) -> MidgeResult<MetadataFixture> {
     ));
     let lease = attach_provider_metadata_lease(el, Arc::clone(&cloud), "manual-compaction-order");
     assert_eq!(el.state.writer_epoch, lease.epoch());
+    let store = lease.get_leader_store().expect("actual provider authority");
+    let head = || {
+        store
+            .read_committed_metadata(TEST_WAIT)
+            .map_err(|error| error.into_validation_error("publication fixture baseline authority"))
+    };
+    assert_eq!(
+        head()?,
+        crate::lease::CloudMetadataHead::Uncommitted,
+        "acquiring a lease does not publish the seeded manifest"
+    );
+    el.mirror_metadata_to_authoritative_cloud_within(
+        &crate::common::OperationDeadline::from_budget(TEST_WAIT),
+    )?;
+    let baseline = head()?;
+    assert!(matches!(
+        baseline,
+        crate::lease::CloudMetadataHead::Committed(_)
+    ));
     let (publisher_tx, publisher_rx) = crossbeam::channel::unbounded();
     el.actors.compaction_publish_actor = CompactionPublishActor::new(publisher_tx, false)?;
     el.publication.compaction_publish_result_rx = publisher_rx;
-    Ok(MetadataFixture {
+    let fixture = MetadataFixture {
         cloud,
         backend,
         lease,
         release: PublisherRelease(Some(release)),
         reached: arrived,
-    })
+    };
+    let committed = read_committed_manifest(&fixture)?;
+    assert_eq!(committed.files.len(), el.state.manifest.files.len());
+    for file in &el.state.manifest.files {
+        assert!(
+            committed
+                .files
+                .iter()
+                .any(|remote| remote.same_identity(file)),
+            "every held-publication input must already be authoritative: {file:?}"
+        );
+    }
+    assert_eq!(committed.next_sst_seqs, el.state.manifest.next_sst_seqs);
+    assert_eq!(
+        head()?,
+        baseline,
+        "baseline verification must not select a new head"
+    );
+    Ok(fixture)
 }
 
 fn force_next_reservation_block(el: &mut EventLoop, cf_id: u32) {
@@ -151,6 +188,30 @@ fn force_next_reservation_block(el: &mut EventLoop, cf_id: u32) {
 fn assigned_name(el: &EventLoop, flush_id: u64) -> Option<(String, u64)> {
     let (_, flush) = el.state.immutable_flush_by_id(flush_id)?;
     Some((flush.sst_name.clone()?, flush.sst_seq?))
+}
+
+fn receive_named_build(el: &mut EventLoop, flush_id: u64) -> (String, u64, FlushWorkerResult) {
+    let until = Instant::now() + TEST_WAIT;
+    loop {
+        // An exhausted name block is mirrored asynchronously. Complete only
+        // that real reservation; keep the Build receipt owned by this test so
+        // its dispatch can race the deliberately held compaction publication.
+        el.reap_metadata_mirror();
+        el.schedule_next_flush_worker();
+        if let Ok(build) = el.pipeline.flush_worker_result_rx.try_recv() {
+            assert!(matches!(&build, FlushWorkerResult::Build(result)
+                if result.identity.flush_id == flush_id && result.result.is_ok()));
+            let (name, sequence) = assigned_name(el, flush_id)
+                .expect("canonical identity must be durable before Build completion");
+            return (name, sequence, build);
+        }
+        assert!(
+            Instant::now() < until,
+            "actual named Build: {}",
+            describe_settle_state(el)
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -263,21 +324,7 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
     // Act: the event loop owns name reservation before the worker's result.
     let response = submit_manual_flush(&mut el, cf_id, 91_312);
     let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
-    let assigned = assigned_name(&el, flush_id);
-    let build = el
-        .pipeline
-        .flush_worker_result_rx
-        .recv_timeout(TEST_WAIT)
-        .expect("actual flush Build");
-    if assigned.is_none() {
-        // A lane-only implementation must fail this control without blocking
-        // its event-loop mirror behind an intentionally held publisher.
-        el.handle_flush_worker_result(build);
-        compute_release.release();
-        settle_owned_work(&mut el, &worker);
-        panic!("canonical flush identity must be durable before Build completion");
-    }
-    let (name, sst_seq) = assigned.expect("captured assigned identity");
+    let (name, sst_seq, build) = receive_named_build(&mut el, flush_id);
     metadata.backend.armed.store(true, Ordering::Release);
     compute_release.release();
     complete_compaction(&mut el, &worker);
@@ -412,19 +459,7 @@ fn should_reuse_automatic_flush_name_when_compaction_publication_wins_build_race
 
     // Act: hold the real conditional publisher before dispatching the flush build.
     let flush_id = schedule_automatic_flush(&mut el, cf_id)?;
-    let assigned = assigned_name(&el, flush_id);
-    if assigned.is_none() {
-        compute_release.release();
-        settle_owned_work(&mut el, &worker);
-        panic!("ordinary due flush must reserve its canonical identity during compute");
-    }
-    let (name, sst_seq) = assigned.expect("automatic identity before build");
-    let build = el
-        .pipeline
-        .flush_worker_result_rx
-        .recv_timeout(TEST_WAIT)
-        .expect("actual automatic flush Build");
-    assert!(matches!(build, FlushWorkerResult::Build(_)));
+    let (name, sst_seq, build) = receive_named_build(&mut el, flush_id);
     metadata.backend.armed.store(true, Ordering::Release);
     compute_release.release();
     complete_compaction(&mut el, &worker);

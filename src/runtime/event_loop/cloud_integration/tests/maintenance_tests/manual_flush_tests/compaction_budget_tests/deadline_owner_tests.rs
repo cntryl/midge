@@ -297,7 +297,7 @@ fn should_preserve_background_owner_when_later_manual_waiter_expires() -> MidgeR
         let outcome = fixture.drive_manual_response(&response);
         let rows = rows_for_generation(&fixture, &receipt);
         let committed = fixture.committed_manifest();
-        fixture.el.actors.gc_actor.shutdown_workers();
+        drain_retired_inputs(&mut fixture, &[&receipt]);
         let retired = retired_inputs(&fixture, &receipt);
         let has_intent = fixture
             .el
@@ -371,7 +371,7 @@ fn should_keep_manual_origin_when_later_shorter_waiter_expires() -> MidgeResult<
         let long_outcome = fixture.drive_manual_response(&long_response);
         let rows = rows_for_generation(&fixture, &receipt);
         let committed = fixture.committed_manifest();
-        fixture.el.actors.gc_actor.shutdown_workers();
+        drain_retired_inputs(&mut fixture, &[&receipt]);
         let retired = retired_inputs(&fixture, &receipt);
         let healthy = fixture.el.check_lease_health();
         fixture.stop()?;
@@ -620,7 +620,7 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
         let outcome = fixture.drive_manual_response(&response);
         let first_rows = rows_for_generation(&fixture, &first);
         let committed = fixture.committed_manifest();
-        fixture.el.actors.gc_actor.shutdown_workers();
+        drain_retired_inputs(&mut fixture, &[&first]);
         let first_retired = retired_inputs(&fixture, &first);
         let second_retained = retained_inputs(&fixture, &second);
         let second_intent = fixture

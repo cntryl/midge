@@ -92,7 +92,10 @@ fn journal_len(el: &EventLoop) -> MidgeResult<u64> {
     }
 }
 
-fn settle_owned_work(el: &mut EventLoop, worker: &crossbeam::channel::Receiver<RuntimeMsg>) {
+pub(super) fn settle_owned_work(
+    el: &mut EventLoop,
+    worker: &crossbeam::channel::Receiver<RuntimeMsg>,
+) {
     let (_, messages) = crossbeam::channel::unbounded();
     let deadline = Instant::now() + TEST_WAIT;
     let mut failures = Vec::new();
@@ -113,9 +116,10 @@ fn settle_owned_work(el: &mut EventLoop, worker: &crossbeam::channel::Receiver<R
         if let Some(message) = el.routing.pending_msg.take() {
             el.process_restored_one(message, &messages);
         }
-        el.tick_hybrid_storage();
-        el.drain_hybrid_storage_events();
-        el.reap_cloud_wal_prune_worker();
+        // Real idle/request progress owns capture retries, metadata mirror
+        // continuations and accepted worker reaping; a partial pump can leave
+        // a valid publication parked forever despite released provider work.
+        el.run_request_fairness_slot();
         if el.state.active_compactions.load(Ordering::Acquire) == 0
             && !el.actors.flush_actor.is_inflight()
             && !el.actors.compaction_publish_actor.is_inflight()
@@ -127,6 +131,8 @@ fn settle_owned_work(el: &mut EventLoop, worker: &crossbeam::channel::Receiver<R
                 .all(|cf| cf.immutable_flushes.is_empty())
             && el.routing.pending_msg.is_none()
             && el.publication.publication_gate.deferred_messages_is_empty()
+            && !el.actors.cloud_coordinator.metadata_mirror.is_running()
+            && el.state.pending_compaction_waits.is_empty()
         {
             // Settle already accepted ownership; another optional prune turn
             // would keep a completed fixture busy without draining its work.
@@ -181,8 +187,9 @@ fn describe_settle_state(el: &EventLoop) -> String {
         })
         .collect();
     let publication = el.publication.compaction_publication.get().is_some();
+    let capture_retry = CompactionCoordinator::capture_retry_timeout(el);
     format!(
-        "db={:?}, compute={}, flush_worker={}, publisher={}, publication={publication:?}, gate={}, deferred={:?}, pending={:?}, prune={}, flushes={flushes:?}",
+        "db={:?}, compute={}, flush_worker={}, publisher={}, publication={publication:?}, capture_retry={capture_retry:?}, gate={}, deferred={:?}, pending={:?}, prune={}, flushes={flushes:?}",
         el.state.db_path,
         el.state.active_compactions.load(Ordering::Acquire),
         el.actors.flush_actor.is_inflight(),
