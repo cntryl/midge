@@ -1,8 +1,8 @@
 use super::{
     journal_deserialize, FsError, FsyncMarker, JournalEdit, JournalEditEnvelope, ManifestEdit,
     MidgeResult, ADVANCE_FLUSH_FRONTIER_RECORD_TYPE, BATCH_RECORD_TYPE,
-    DROP_COLUMN_FAMILY_AT_RECORD_TYPE, FSYNC_MARKER_TYPE, JOURNAL_FILE,
-    RECLAIM_COLUMN_FAMILY_RECORD_TYPE,
+    COMPLETE_SST_DELETE_RECORD_TYPE, DROP_COLUMN_FAMILY_AT_RECORD_TYPE, FSYNC_MARKER_TYPE,
+    JOURNAL_FILE, RECLAIM_COLUMN_FAMILY_RECORD_TYPE,
 };
 
 pub(super) fn replay_journal_with_state(
@@ -335,7 +335,7 @@ fn contains_verified_fsync_marker(bytes: &[u8]) -> bool {
 }
 
 fn validate_journal_record_type(record_type: u8, record_start: u64) -> MidgeResult<()> {
-    if matches!(record_type, 1 | 2 | 3 | 6 | 8 | 9 | 10 | 11 | 12) {
+    if matches!(record_type, 1 | 2 | 3 | 6 | 8 | 9 | 10 | 11 | 12 | 13) {
         return Ok(());
     }
 
@@ -412,6 +412,7 @@ fn handle_manifest_edit_record(
             DROP_COLUMN_FAMILY_AT_RECORD_TYPE
                 | RECLAIM_COLUMN_FAMILY_RECORD_TYPE
                 | ADVANCE_FLUSH_FRONTIER_RECORD_TYPE
+                | COMPLETE_SST_DELETE_RECORD_TYPE
         );
     if !is_single_edit_record {
         return Err(crate::common::MidgeError::Corruption(format!(

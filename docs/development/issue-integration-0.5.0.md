@@ -770,3 +770,13 @@ warnings); these tests and allocation/A/B measurements have not executed.
 The preregistered construction target is one allocation and 4096 copied value
 bytes on the incompressible 4 KiB fixture; the existing rotation row is
 compressible and cannot establish that saving.
+
+#943 persists known-retired SST deletion obligations in the manifest decision
+and checkpoints, then hydrates them after a cold restart. Deletion requires
+the original length/CRC, bounded reads pinned to one provider identity, fresh
+writer authority and a conditional DELETE. Missing proof and replacement
+objects remain retained. Terminal confirmation journals the original identity
+and refuses active or replaced metadata. Active tests cover durable queue
+replay, cold hydration, replacement races, writer fencing and snapshot pins.
+Test targets compile; execution/crash qualification remains pending. General
+SST orphan and catalog-anchor WAL rediscovery are still separate code gaps.

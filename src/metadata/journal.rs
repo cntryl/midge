@@ -80,6 +80,11 @@ pub enum ManifestEdit {
     RemoveSst {
         name: String,
     },
+    /// The pinned retired identity has been physically deleted (or proven
+    /// absent). A failed callback must never emit this acknowledgement.
+    CompleteSstDelete {
+        file: FileMeta,
+    },
     CreateColumnFamily {
         id: u32,
         name: String,
@@ -136,6 +141,7 @@ impl ManifestEdit {
         match self {
             ManifestEdit::AddSst(_) => 1,
             ManifestEdit::RemoveSst { .. } => 2,
+            ManifestEdit::CompleteSstDelete { .. } => 13,
             ManifestEdit::CreateColumnFamily { .. } => 3,
             ManifestEdit::AdvanceFlushFrontier { .. } => 12,
             ManifestEdit::BumpNextSstSeq { .. } => 6,
@@ -151,7 +157,9 @@ impl ManifestEdit {
         }
 
         match self {
-            ManifestEdit::AddSst(meta) => validate(&meta.name),
+            ManifestEdit::AddSst(meta) | ManifestEdit::CompleteSstDelete { file: meta } => {
+                validate(&meta.name)
+            }
             ManifestEdit::RemoveSst { name } => validate(name),
             ManifestEdit::DropColumnFamilyAt {
                 dropped_sst_names, ..
@@ -191,6 +199,7 @@ const FSYNC_MARKER_TYPE: u8 = 9;
 const DROP_COLUMN_FAMILY_AT_RECORD_TYPE: u8 = 10;
 const RECLAIM_COLUMN_FAMILY_RECORD_TYPE: u8 = 11;
 const ADVANCE_FLUSH_FRONTIER_RECORD_TYPE: u8 = 12;
+const COMPLETE_SST_DELETE_RECORD_TYPE: u8 = 13;
 
 const JOURNAL_FILE: &str = super::files::JOURNAL;
 const JOURNAL_REPAIR_TEMP_FILE: &str = "manifest.journal.repair.tmp";

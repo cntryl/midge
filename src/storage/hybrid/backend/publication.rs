@@ -127,31 +127,4 @@ impl HybridStorage {
             other => MidgeError::Internal(format!("{context}: {other}")),
         }
     }
-
-    /// Delete one immutable key from the remote backend. The caller owns any
-    /// manifest or lifecycle decision.
-    pub(crate) fn delete_immutable_object_blocking(
-        &self,
-        key: &str,
-    ) -> crate::common::MidgeResult<()> {
-        match Self::delete_object_from_backend_blocking(
-            &self.stores.sst,
-            key,
-            self.callback_timeout,
-        ) {
-            Ok(true) => {
-                tracing::info!(key, "deleted obsolete remote immutable object");
-            }
-            Ok(false) => {
-                tracing::debug!(key, "remote immutable object already missing");
-            }
-            Err(error) => {
-                return Err(crate::common::MidgeError::Internal(format!(
-                    "remote immutable object delete failed: {error}"
-                )));
-            }
-        }
-
-        Ok(())
-    }
 }

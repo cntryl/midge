@@ -21,6 +21,7 @@ mod catalog;
 pub(crate) mod metadata_chain;
 mod metadata_retention;
 mod metadata_snapshot;
+mod retired_sst;
 use crate::storage::hybrid::backend::ControlObject;
 pub(crate) use catalog::refusal_error;
 pub(crate) use catalog::AdmittedCatalog;
@@ -514,13 +515,6 @@ impl CloudPersistence {
         cleanup.schedule();
         results.sort_by_key(|(id, _)| *id);
         Ok(results)
-    }
-
-    pub(crate) fn delete_sst_object_blocking(&self, sst_name: &str) -> MidgeResult<()> {
-        crate::failpoints::fail_point!("midge::cloud::inject_fail_sst_delete", |_| Err(
-            MidgeError::Internal("failpoint: cloud SST delete failed".to_string())
-        ));
-        self.delete_immutable_object_blocking(&crate::cloud_layout::object_key(sst_name))
     }
 }
 

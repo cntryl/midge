@@ -24,6 +24,10 @@ pub struct Manifest {
     /// SST file metadata
     #[serde(default)]
     pub files: Vec<FileMeta>,
+    /// Removed immutable identities whose physical deletion is not yet
+    /// durably confirmed. The removing publication carries this obligation.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub retired_ssts: HashMap<String, FileMeta>,
     /// Column families
     #[serde(default)]
     pub column_families: Vec<ColumnFamilyMeta>,
@@ -87,6 +91,13 @@ impl Manifest {
             if !file_names.insert(&file.name) {
                 return Err(invalid_transition("duplicate SST name"));
             }
+            self.flushed_through.get(file.cf_id)?;
+        }
+        for (name, file) in &self.retired_ssts {
+            if name != &file.name || file_names.contains(name) {
+                return Err(invalid_transition("retired SST overlaps active authority"));
+            }
+            crate::cloud_layout::PersistedSstName::parse(name)?;
             self.flushed_through.get(file.cf_id)?;
         }
         for id in self.next_sst_seqs.keys() {
@@ -281,6 +292,9 @@ impl Manifest {
 
     /// Remove a file from the manifest
     pub fn remove_file(&mut self, name: &str) {
+        if let Some(file) = self.files.iter().find(|file| file.name == name) {
+            self.retired_ssts.insert(name.to_owned(), file.clone());
+        }
         self.files.retain(|f| f.name != name);
     }
 
@@ -422,5 +436,7 @@ impl Manifest {
     }
 }
 
+#[cfg(test)]
+mod delete_tests;
 #[cfg(test)]
 mod tests;

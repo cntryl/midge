@@ -72,6 +72,7 @@ impl MetadataMirrorCache {
         local: &BTreeMap<String, Vec<u8>>,
     ) -> Self {
         manifest.files.clear();
+        manifest.retired_ssts.clear();
         manifest.next_sst_seqs.clear();
         for family in &mut manifest.column_families {
             family.dropped_sst_names.clear();
