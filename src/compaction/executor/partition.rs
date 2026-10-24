@@ -609,24 +609,8 @@ fn survives_tombstone_gc<'a>(
             && tombstone.covers(&version.key)
             && tombstone.seq >= version.seq
     });
-    // Dropping the newest expired value also drops its selected older versions;
-    // never fall back to an older nonexpired value. Unselected versions require
-    // the same complete overlap proof as a point tombstone. A raw caller that
-    // does not retain original snapshot sources cannot discard a value needed
-    // by any older TTL read time merely from a sequence horizon.
-    let expired = gc.point_eligible
-        && (gc.retained_snapshot_sources || gc.snapshot_horizon.is_none())
-        // Original read sources cannot contain writes made after that read's
-        // start. Keep their sequence evidence for commit conflict validation.
-        && tombstone_is_obsolete(version.seq, gc.snapshot_horizon)
-        && gc.compaction_time_millis.is_some_and(|time| {
-            version
-                .expiration
-                .is_some_and(|expiration| expiration <= time)
-        });
     !(covered_by_active
         || covered_by_start
-        || expired
         || (gc.point_eligible
             && version.is_tombstone
             && tombstone_is_obsolete(version.seq, gc.snapshot_horizon)))
@@ -984,8 +968,6 @@ fn write_fragment_key_events(
         snapshot_horizon: None,
         point_eligible: false,
         range_eligible: false,
-        retained_snapshot_sources: false,
-        compaction_time_millis: None,
     };
     let key = events[0].event.key();
     // Splitting off an outer endpoint already retained by a range would add

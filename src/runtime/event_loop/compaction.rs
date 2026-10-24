@@ -73,11 +73,6 @@ impl EventLoop {
         let memory_limit = self.actors.compaction_actor.memory_limit_for_plan(&plan);
         let mut plan = self.assign_compaction_output_sequence_within(plan, manual_deadline)?;
         plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
-        // Read snapshots pin their original SST names through GC's exclusive
-        // capture/registration sampling boundary. Rewriting cannot remove the
-        // source of a pre-delete read until its final snapshot unpins.
-        plan.retained_snapshot_sources = true;
-        plan.compaction_time_millis = Some(self.state.observed_time_millis());
         let grandparent_level = plan.target_level.saturating_add(1);
         plan.grandparent_overlap = crate::compaction::GrandparentOverlap::from_files(
             self.state
@@ -325,12 +320,6 @@ impl EventLoop {
     }
 
     pub(super) fn schedule_compaction_after_flush_publication(&mut self, sst_name: &str) {
-        let next_check = self.next_background_compaction_delay();
-        if self.background_maintenance_timeout() > next_check {
-            self.pipeline
-                .background_compaction_schedule
-                .defer_for(next_check);
-        }
         match self.schedule_one_background_compaction_if_needed("flush publication") {
             Ok(true) => tracing::debug!(
                 sst_name,
@@ -352,26 +341,6 @@ impl EventLoop {
             .unwrap_or(Duration::ZERO)
     }
 
-    fn next_background_compaction_delay(&self) -> Duration {
-        if !self.state.compaction_enabled() {
-            return BACKGROUND_COMPACTION_CHECK_INTERVAL;
-        }
-        let now = self.state.observed_time_millis();
-        self.state
-            .manifest
-            .files
-            .iter()
-            .filter_map(|file| file.earliest_expiration_millis)
-            .min()
-            .map_or(BACKGROUND_COMPACTION_CHECK_INTERVAL, |expiration| {
-                // Recheck due/uncertain TTL debt at a bounded cadence instead
-                // of busy-spinning when a job or publication owns the pool.
-                Duration::from_millis(expiration.saturating_sub(now))
-                    .max(Duration::from_secs(1))
-                    .min(BACKGROUND_COMPACTION_CHECK_INTERVAL)
-            })
-    }
-
     pub(super) fn run_background_compaction_maintenance_if_due(&mut self) {
         // A restored request owns the publication turn that released it.
         if self.routing.pending_msg.is_some()
@@ -380,10 +349,9 @@ impl EventLoop {
             return;
         }
 
-        let next_check = self.next_background_compaction_delay();
         self.pipeline
             .background_compaction_schedule
-            .defer_for(next_check);
+            .defer_for(BACKGROUND_COMPACTION_CHECK_INTERVAL);
         match self.schedule_one_background_compaction_if_needed("periodic maintenance") {
             Ok(true) => tracing::debug!("Scheduled background compaction during maintenance"),
             Ok(false) => {}
@@ -511,8 +479,6 @@ impl CompactionCoordinator {
             snapshot_horizon: None,
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
-            retained_snapshot_sources: false,
-            compaction_time_millis: None,
             grandparent_overlap: crate::compaction::GrandparentOverlap::default(),
         };
 

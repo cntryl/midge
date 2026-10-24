@@ -638,25 +638,6 @@ impl CompactionJobActor {
             }
         }
 
-        self.check_expired_compaction(state)
-    }
-
-    fn check_expired_compaction(
-        &mut self,
-        state: &RuntimeState,
-    ) -> MidgeResult<Option<crate::compaction::CompactionPlan>> {
-        for cf_id in self.round_robin_cf_ids(state) {
-            if let Some(plan) = self.compactor.pick_expired_compaction(
-                &state.manifest.files,
-                cf_id,
-                state.observed_time_millis(),
-            )? {
-                if self.jobs.available(&plan, &state.manifest.files) {
-                    return Ok(Some(self.record_scheduled_plan(plan)));
-                }
-            }
-        }
-
         Ok(None)
     }
 

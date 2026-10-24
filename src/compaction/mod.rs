@@ -183,8 +183,6 @@ pub(crate) fn execute_compaction_at_target(
                 snapshot_horizon: plan.snapshot_horizon,
                 point_eligible: plan.point_tombstone_gc_eligible,
                 range_eligible: plan.range_tombstone_gc_eligible,
-                retained_snapshot_sources: plan.retained_snapshot_sources,
-                compaction_time_millis: plan.compaction_time_millis,
             },
             output_size_limit,
             grandparent_overlap: &plan.grandparent_overlap,
@@ -1403,9 +1401,6 @@ mod tests {
             .with_output_seq(49)
             .with_snapshot_horizon(Some(10))
             .with_tombstone_gc_eligibility(true, true);
-        // Original read sources contain no post-start writes. Retaining those
-        // sources cannot replace the conflict history in these new tombstones.
-        plan.retained_snapshot_sources = true;
         plan.add_test_source("input.sst".to_string());
 
         // Act
@@ -2534,8 +2529,6 @@ mod tests {
                     snapshot_horizon: None,
                     point_eligible: false,
                     range_eligible: false,
-                    retained_snapshot_sources: false,
-                    compaction_time_millis: None,
                 },
                 output_size_limit: None,
                 grandparent_overlap: &executor::GrandparentOverlap::default(),

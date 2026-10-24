@@ -135,6 +135,10 @@ The 45 open issues at batch start are:
 | Measurement and tracking | #929, #932, #935, #937 |
 | Gated evaluations/designs | #922, #925, #928, #939, #958 |
 
+The user subsequently deferred destructive TTL reclamation (#912) to the next
+batch to preserve clock-correction recovery. Its implementation is excluded
+from the current PR; the issue remains open.
+
 The authoritative requirements are the issue bodies and
 [roadmap](roadmap-0.5.0.md), including the slice dependencies from
 [the WAL design](wal-pipeline-873.md). A finding refuted by a production-path
@@ -497,29 +501,29 @@ before the compatibility gate can pass. Existing FORMAT 8 bytes stay as an
 explicit rejected fixture. #914's new committed cloud chain is not part of
 this codec commit.
 
-### #912: TTL compaction candidate implemented
+### #912: destructive TTL reclamation deferred
 
-Compaction captures the engine's observed clock at plan launch. The newest
-expired version and its selected older versions are removed only with complete
-point-overlap coverage and retained original snapshot sources (or no active
-snapshot for standalone callers). Expiration never selects an older non-TTL
-value as a replacement. Uncertain coverage keeps the expired masking value.
+The user chose to preserve recovery after correcting an erroneously advanced
+clock. #912 remains open for the next batch. This PR removes its destructive
+expired-value drop, captured compaction-clock/source-retention capabilities,
+expiration-driven picker, early maintenance timer and TTL exception to trivial
+moves. Point/range tombstone GC and the post-start conflict-history horizon
+remain independent and active.
+
+Compaction preserves the latest raw TTL value and its expiration. Reads apply
+their snapshot read time; reopening after clock correction can expose that
+same value again without resurrecting an older non-TTL version. The original
+TTL and clock-skew recovery tests remain unchanged. An active physical-output
+regression also preserves expired values across snapshot horizons and proves
+both expiration masking and corrected-time reads.
 
 Writers, flush publication, metadata conversion and independent SST summaries
-carry an advisory earliest expiration. Existing periodic maintenance uses it
-to pay cold TTL debt below normal size/count thresholds: bounded ordinary
-closures drain shallower levels before a bottom-level rewrite can prove no
-resurrection. Files without recorded TTL debt avoid periodic rewrites. This
-may promote extra files in an expired family; write-amplification measurements
-remain required.
-
-Active raw-output tests cover captured clock, overlap proof and snapshot
-retention conditions. Public local/simulated-cloud tests require physical
-manifest reclamation, a held pre-expiry snapshot, no older-value resurrection
-on restart, and idle reclamation without new writes/manual compaction.
-`cargo check --locked --tests --features failpoints` passes on the combined
-working tree. Test execution, crash campaigns and space measurements remain
-pending.
+still carry the optional advisory earliest expiration. It is inert metadata;
+it selects no TTL compaction and authorizes no deletion. Keeping that coherent
+field avoids an unrelated binary layout change. The two new physical/idle
+reclamation candidate tests are removed with the explicitly excluded feature.
+Future destructive reclamation requires a recovery-safe retention design or
+an explicitly approved contract change before implementation and measurement.
 
 ### #907/#916: WAL publication worker and upload pool implemented candidates
 
@@ -672,13 +676,10 @@ qualification. No actual provider request/peak-memory performance result is
 claimed from compile checks. Provider protocol details and limits are recorded
 in cloud-file-publication-915.md.
 
-TTL maintenance also advances the next periodic check toward the earliest
-recorded expiration, bounded between1second and the normal30second interval.
-Flush publication shortens a later scheduled check. Due or uncertain TTL debt
-retries at that bounded cadence instead of busy-spinning behind an occupied
-worker/publication. This makes the existing idle-reclamation regression's
-bounded wait meaningful; the previous30second-only schedule would not do so.
-Failpoint test targets compile for this follow-up; execution is still pending.
+The #912 expiration-driven maintenance follow-up is also deferred by the
+clock-correction decision above. Ordinary compaction retains its existing
+periodic cadence and size/count/repair admission; advisory expiration alone
+does not schedule a rewrite.
 
 The #953 compatibility slice now includes populated/empty binary FORMAT9
 fixtures and a futureFORMAT10 fixture. Historical FORMAT8 bytes remain rejected

@@ -24,10 +24,6 @@ pub(super) fn eligible(plan: &CompactionPlan, files: &[FileMeta]) -> bool {
                 || file.cf_id != plan.cf_id
                 || file.size_bytes > plan.target_sst_size as u64
                 || file
-                    .earliest_expiration_millis
-                    .zip(plan.compaction_time_millis)
-                    .is_some_and(|(expiration, now)| expiration <= now)
-                || file
                     .smallest_key
                     .as_deref()
                     .zip(file.largest_key.as_deref())
