@@ -228,6 +228,10 @@ impl CloudReplay {
             .map(|cf| cf.memtable.size_bytes())
             .sum();
         runtime.reinitialize_active_memtable_segment_tracking();
+        // Replay installs only complete WAL units, after every checkpoint and
+        // final memtable has succeeded. Snapshot visibility must follow that
+        // installed cut; allocation alone never publishes it on an error path.
+        runtime.applied_sequence = runtime.sequence;
         Ok(())
     }
 }
