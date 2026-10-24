@@ -35,25 +35,51 @@ pub(super) struct CompactionJobGuard {
 impl CompactionJobs {
     pub(super) fn available(&self, plan: &CompactionPlan, files: &[FileMeta]) -> bool {
         let candidate = ReservedJob::capture(plan, files);
-        let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.active.len() < self.limit && !state.active.values().any(|job| job.conflicts(&candidate))
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active.len() < self.limit
+            && !state.active.values().any(|job| job.conflicts(&candidate))
     }
 
     pub(super) fn active_count(&self) -> usize {
-        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).active.len()
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .len()
     }
 
     pub(super) fn source_available(&self, file: &FileMeta, target_level: u32) -> bool {
-        let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.active.len() < self.limit && state.active.values().all(|job| {
-            if job.exclusive || job.inputs.contains(&file.name) { return false; }
-            if job.cf_id != file.cf_id { return true; }
-            if job.source_level == 0 && file.level == 0 { return false; }
-            let shared = [file.level, target_level].iter().any(|level| *level == job.source_level || *level == job.target_level);
-            if !shared { return true; }
-            job.bounds.as_ref().zip(file.smallest_key.as_ref().zip(file.largest_key.as_ref()))
-                .is_some_and(|((lower, upper), (first, last))| file.key_bounds_complete && (upper < first || last < lower))
-        })
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active.len() < self.limit
+            && state.active.values().all(|job| {
+                if job.exclusive || job.inputs.contains(&file.name) {
+                    return false;
+                }
+                if job.cf_id != file.cf_id {
+                    return true;
+                }
+                if job.source_level == 0 && file.level == 0 {
+                    return false;
+                }
+                let shared = [file.level, target_level]
+                    .iter()
+                    .any(|level| *level == job.source_level || *level == job.target_level);
+                if !shared {
+                    return true;
+                }
+                job.bounds
+                    .as_ref()
+                    .zip(file.smallest_key.as_ref().zip(file.largest_key.as_ref()))
+                    .is_some_and(|((lower, upper), (first, last))| {
+                        file.key_bounds_complete && (upper < first || last < lower)
+                    })
+            })
     }
     pub(super) fn new(limit: usize) -> Arc<Self> {
         Arc::new(Self {

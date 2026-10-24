@@ -240,11 +240,15 @@ impl OpenOptions {
     /// Maximum independent compaction owners; memory and range admission may
     /// reduce the number which can run together. Defaults to one.
     #[must_use]
-    pub fn compaction_concurrency(&self) -> usize { self.compaction_concurrency }
+    pub fn compaction_concurrency(&self) -> usize {
+        self.compaction_concurrency
+    }
 
     /// Maximum flush pipelines, with at most one active pipeline per family.
     #[must_use]
-    pub fn flush_concurrency(&self) -> usize { self.flush_concurrency }
+    pub fn flush_concurrency(&self) -> usize {
+        self.flush_concurrency
+    }
     /// Optional caller admission and background output limits.
     #[must_use]
     pub fn write_backpressure(&self) -> &crate::config::WriteBackpressureConfig {
@@ -960,8 +964,12 @@ impl OpenOptionsBuilder {
     /// providers' millisecond-granularity deadlines, and the enclosing runtime
     /// response timeout must be greater than the storage I/O timeout.
     pub fn build(self) -> MidgeResult<OpenOptions> {
-        if !(1..=64).contains(&self.compaction_concurrency) || !(1..=64).contains(&self.flush_concurrency) {
-            return Err(MidgeError::InvalidArgument("compaction and flush concurrency must be in 1..=64".into()));
+        if !(1..=64).contains(&self.compaction_concurrency)
+            || !(1..=64).contains(&self.flush_concurrency)
+        {
+            return Err(MidgeError::InvalidArgument(
+                "compaction and flush concurrency must be in 1..=64".into(),
+            ));
         }
         self.validate_storage()?;
         if self.io_timeouts.storage < Duration::from_millis(1) {

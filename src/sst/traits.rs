@@ -394,7 +394,9 @@ pub struct FinalizedSst {
 pub trait SstFactory: Send + Sync {
     /// Independent scratch ownership for one background worker, retaining the
     /// same filesystem, compression and shared I/O admission configuration.
-    fn fork_for_worker(&self) -> Option<std::sync::Arc<dyn SstFactory>> { None }
+    fn fork_for_worker(&self) -> Option<std::sync::Arc<dyn SstFactory>> {
+        None
+    }
     /// Filesystem that owns SST outputs and their metadata, identity and cleanup.
     fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs>;
 

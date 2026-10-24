@@ -312,12 +312,12 @@ pub use sst::cache::CacheFill;
 
 // Observability and diagnostics
 pub use config::{
-    WriteBackpressureConfig,
     AwsS3Config, AzureBlobConfig, AzureCredentialSource, CloudCheckCode, CloudCheckOutcome,
     CloudPreflightOptions, CloudProviderConfig, CloudProviderKind, CloudStorageLocation,
     CloudStorageRole, CloudStorageTopology, CloudValidationFinding, CloudValidationMode,
     CloudValidationReport, EngineHealth, GcsApiStyle, GcsConfig, GcsCredentialSource,
     OciCredentialSource, OciObjectStorageConfig, S3CompatibleConfig, S3CredentialSource,
+    WriteBackpressureConfig,
 };
 pub use types::{
     HybridStorageBudgetSnapshot, LocalStorageUsage, StorageAdmissionBlock, StorageAdmissionKind,

@@ -94,7 +94,8 @@ impl EventLoop {
             // another compaction and retirement still wait for the compute owner.
             let before = self.actors.flush_actor.submitted_work();
             self.schedule_next_flush_worker();
-            let started = (self.actors.flush_actor.submitted_work() != before).then_some(MaintenanceTask::Flush);
+            let started = (self.actors.flush_actor.submitted_work() != before)
+                .then_some(MaintenanceTask::Flush);
             self.actors
                 .cloud_coordinator
                 .complete_maintenance_turn(started);

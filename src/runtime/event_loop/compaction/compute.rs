@@ -12,8 +12,26 @@ impl EventLoop {
                 self.publication.publication_gate.defer(message);
                 continue;
             }
-            if let RuntimeMsg::CompactionComplete { request_id, input_ssts, output_ssts, cf_id, target_level, succeeded } = message {
-                CompactionCoordinator::complete(self, CompactionCompleteRequest { request_id, input_ssts, output_ssts, cf_id, target_level, succeeded });
+            if let RuntimeMsg::CompactionComplete {
+                request_id,
+                input_ssts,
+                output_ssts,
+                cf_id,
+                target_level,
+                succeeded,
+            } = message
+            {
+                CompactionCoordinator::complete(
+                    self,
+                    CompactionCompleteRequest {
+                        request_id,
+                        input_ssts,
+                        output_ssts,
+                        cf_id,
+                        target_level,
+                        succeeded,
+                    },
+                );
             }
         }
     }

@@ -74,13 +74,17 @@ impl CompactionPool {
 }
 
 impl CompactionTask {
-    pub(super) fn is_ready(&self) -> bool { !self.completed.is_empty() }
+    pub(super) fn is_ready(&self) -> bool {
+        !self.completed.is_empty()
+    }
 
     pub(super) fn try_join(&self) -> Option<Completion> {
         match self.completed.try_recv() {
             Ok(result) => Some(result),
             Err(crossbeam::channel::TryRecvError::Empty) => None,
-            Err(crossbeam::channel::TryRecvError::Disconnected) => Some(Err(Box::new("compaction completion disconnected".to_string()))),
+            Err(crossbeam::channel::TryRecvError::Disconnected) => Some(Err(Box::new(
+                "compaction completion disconnected".to_string(),
+            ))),
         }
     }
 
