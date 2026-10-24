@@ -1000,7 +1000,12 @@ impl CompactionJobActor {
         sba: Option<&Arc<dyn CompactionStorage>>,
     ) {
         self.worker_cancel.store(true, Ordering::Release);
-        let staged_outputs = self.join_worker();
+        let mut staged_outputs = self.join_worker();
+        if self.active_trivial_move() {
+            // A logical move returns its live input identities. It created no
+            // replacement bytes that cancellation could safely unlink.
+            staged_outputs.clear();
+        }
         if !self.compaction_running {
             return;
         }

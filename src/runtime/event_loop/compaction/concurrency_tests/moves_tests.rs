@@ -112,6 +112,45 @@ fn should_promote_existing_l0_identity_without_reading_or_writing_sst_bytes() ->
 }
 
 #[test]
+fn should_retain_live_identity_when_logical_move_is_canceled_before_publication() -> MidgeResult<()>
+{
+    crate::failpoints::with_read_gate(|| {
+        // Arrange: the real move worker returns existing immutable names.
+        let (mut fixture, name) = move_fixture()?;
+        let original = std::fs::read(fixture.directory.path().join("sst").join(&name))?;
+        fixture
+            .event_loop
+            .launch_compaction(fixture.plan(&name, 0, 1))?;
+        let completion = fixture
+            .workers
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert!(matches!(completion, RuntimeMsg::CompactionComplete {
+            output_ssts, succeeded: true, ..
+        } if output_ssts == [name.clone()]));
+        assert_eq!(fixture.event_loop.actors.compaction_actor.active_count(), 1);
+
+        // Act: shutdown owns the native ticket before any publication begins.
+        fixture
+            .event_loop
+            .actors
+            .compaction_actor
+            .cancel_and_join_worker(&mut fixture.event_loop.state, None);
+
+        // Assert: the canceled logical edit leaves its exact live SST intact.
+        assert_eq!(current_level(&fixture, &name), 0);
+        assert_eq!(fixture.event_loop.actors.compaction_actor.active_count(), 0);
+        assert!(fixture.event_loop.state.intent_log.is_empty());
+        assert_eq!(
+            std::fs::read(fixture.directory.path().join("sst").join(&name))?,
+            original
+        );
+        fixture.assert_rows(&[(b"key", b"value")])?;
+        fixture.restart(&[(b"key", b"value")])
+    })
+}
+
+#[test]
 fn should_preserve_newest_l0_visibility_when_hot_sources_overlap_cold_predecessors(
 ) -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
