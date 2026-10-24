@@ -472,21 +472,28 @@ impl FlushActor {
 
     /// A generic notification cannot finish an executing task, another phase,
     /// or another immutable generation. The worker owns the terminal flag.
-    pub(crate) fn take_completion(&mut self, completion: &FlushWorkerResult) -> bool {
+    pub(crate) fn completion_is_ready(&self, completion: &FlushWorkerResult) -> bool {
         let (identity, phase) = match completion {
             FlushWorkerResult::Build(result) => (result.identity, FlushPhase::Build),
             FlushWorkerResult::Publish(result) => (result.identity, FlushPhase::Publish),
             FlushWorkerResult::Mirror(result) => (result.delta.identity, FlushPhase::Mirror),
         };
-        let Some(owner) = self.owners.get_mut(&identity.flush_id) else {
+        let Some(owner) = self.owners.get(&identity.flush_id) else {
             return false;
         };
-        if owner.identity != identity
-            || owner.phase != Some(phase)
-            || !owner.finished.load(Ordering::Acquire)
-        {
+        owner.identity == identity
+            && owner.phase == Some(phase)
+            && owner.finished.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn take_completion(&mut self, completion: &FlushWorkerResult) -> bool {
+        if !self.completion_is_ready(completion) {
             return false;
         }
+        let owner = self
+            .owners
+            .get_mut(&completion.identity().flush_id)
+            .expect("validated completion owner exists");
         owner.phase = None;
         true
     }

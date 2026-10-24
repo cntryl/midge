@@ -215,6 +215,12 @@ impl EventLoop {
     }
 
     pub(in crate::runtime::event_loop) fn drain_flush_worker_results(&mut self) {
+        if !self.publication.publication_gate.is_active() {
+            let ready = std::mem::take(&mut self.pipeline.deferred_flush_results);
+            for result in ready {
+                self.handle_flush_worker_result(result);
+            }
+        }
         while let Ok(result) = self.pipeline.flush_worker_result_rx.try_recv() {
             self.handle_flush_worker_result(result);
         }

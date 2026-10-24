@@ -47,6 +47,12 @@ impl EventLoop {
         if !self.pipeline.flush_worker_result_rx.is_empty() {
             return true;
         }
+        if !self.publication.publication_gate.is_active()
+            && (!self.pipeline.deferred_flush_results.is_empty()
+                || self.publication.deferred_compaction_result.is_some())
+        {
+            return true;
+        }
         if self
             .actors
             .cloud_coordinator

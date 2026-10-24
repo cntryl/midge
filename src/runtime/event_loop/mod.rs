@@ -194,6 +194,7 @@ struct PublicationCoordination {
     verification_barrier: VerificationBarrier,
     publication_gate: ManifestPublicationGate,
     compaction_publish_result_rx: crossbeam::channel::Receiver<CompactionPublishCompletion>,
+    deferred_compaction_result: Option<CompactionPublishCompletion>,
     compaction_publication: compaction::PublicationSlot<compaction::PendingCompactionPublication>,
     flush_barrier_waiters: HashMap<crate::types::ColumnFamilyId, Vec<flush::FlushBarrierWaiter>>,
 }
@@ -205,6 +206,7 @@ struct PipelineCoordination {
     durability: DurabilityCoordinator,
     wal_transition: crate::runtime::wal_transition::WalTransitionProtocol,
     flush_worker_result_rx: crossbeam::channel::Receiver<FlushWorkerResult>,
+    deferred_flush_results: std::collections::VecDeque<FlushWorkerResult>,
     inline_flush_worker: bool,
     background_compaction_schedule: crate::runtime::retry_schedule::RetrySchedule,
     worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
@@ -348,6 +350,7 @@ impl EventLoop {
                 verification_barrier: VerificationBarrier::default(),
                 publication_gate: ManifestPublicationGate::default(),
                 compaction_publish_result_rx,
+                deferred_compaction_result: None,
                 compaction_publication: compaction::PublicationSlot::default(),
                 flush_barrier_waiters: HashMap::new(),
             },
@@ -358,6 +361,7 @@ impl EventLoop {
                 durability,
                 wal_transition: crate::runtime::wal_transition::WalTransitionProtocol::new(),
                 flush_worker_result_rx,
+                deferred_flush_results: std::collections::VecDeque::new(),
                 inline_flush_worker,
                 background_compaction_schedule,
                 worker_msg_tx,
@@ -586,8 +590,7 @@ impl EventLoop {
         self.actors
             .compaction_actor
             .configure_work_target(Some(storage.as_ref()));
-        storage
-            .configure_maintenance_memory(self.actors.compaction_actor.total_memory_limit());
+        storage.configure_maintenance_memory(self.actors.compaction_actor.total_memory_limit());
         self.actors
             .wal_actor
             .set_storage_budget(Arc::clone(&storage));

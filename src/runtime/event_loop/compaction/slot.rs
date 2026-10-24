@@ -1,10 +1,9 @@
-//! A publication in flight, tied to the manifest-publication gate it holds.
+//! A publication in flight, retaining its exact local-turn owner.
 //!
-//! The gate serializes manifest-authority changes. A pending publication may
-//! exist only while its owner holds that gate, and settling the publication
-//! must release exactly that owner. Keeping both behind this type means no
-//! path can clear the pending state and forget the gate, or release another
-//! owner's gate.
+//! Installation requires the local gate. Background publication releases it
+//! after admitting an immutable metadata cut and reacquires it for each local
+//! edit. The pending operation survives that provider work. Settlement may
+//! release only its own gate; a stale result cannot release another owner.
 
 use crate::runtime::event_loop::coordination::{ManifestPublicationGate, ManifestPublicationOwner};
 
@@ -55,8 +54,8 @@ impl<P> PublicationSlot<P> {
         self.pending.as_mut().map(|(_, pending)| pending)
     }
 
-    /// Settle the in-flight publication: take it and release its owner's
-    /// hold on `gate` in one step. Returns `None` and leaves `gate` untouched
+    /// Settle the in-flight publication and release its owner's local turn
+    /// if still held. Returns `None` and leaves `gate` untouched
     /// when nothing is in flight.
     pub(in crate::runtime::event_loop) fn finish(
         &mut self,
@@ -132,5 +131,25 @@ mod tests {
             gate.is_active(),
             "an empty slot must not release another owner"
         );
+    }
+
+    #[test]
+    fn should_retain_other_local_turn_when_settling_detached_publication() {
+        // Arrange
+        let mut gate = ManifestPublicationGate::default();
+        let owner = compaction_owner(7);
+        assert!(gate.try_acquire(owner.clone()));
+        let mut slot = PublicationSlot::default();
+        slot.install(&gate, owner.clone(), "captured")
+            .expect("install");
+        assert!(gate.release(&owner));
+        assert!(gate.try_acquire(ManifestPublicationOwner::WalPrune));
+
+        // Act
+        let finished = slot.finish(&mut gate);
+
+        // Assert
+        assert_eq!(finished, Some("captured"));
+        assert!(gate.is_owned_by(&ManifestPublicationOwner::WalPrune));
     }
 }

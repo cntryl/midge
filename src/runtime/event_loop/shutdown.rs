@@ -157,6 +157,8 @@ impl EventLoop {
 
     fn drain_local_shutdown_flush_pipeline(&mut self) {
         while self.actors.flush_actor.is_inflight() {
+            self.reap_cloud_wal_prune_worker();
+            self.drain_flush_worker_results();
             match self
                 .pipeline
                 .flush_worker_result_rx
@@ -324,6 +326,13 @@ impl EventLoop {
 
     fn drain_shutdown_compaction_publication(&mut self) -> crate::common::MidgeResult<()> {
         while self.actors.compaction_publish_actor.is_inflight() {
+            self.reap_cloud_wal_prune_worker();
+            crate::runtime::event_loop::compaction::CompactionCoordinator::drain_publish_results(
+                self,
+            );
+            if !self.actors.compaction_publish_actor.is_inflight() {
+                break;
+            }
             match self
                 .publication
                 .compaction_publish_result_rx
@@ -374,6 +383,8 @@ impl EventLoop {
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
         loop {
+            self.reap_cloud_wal_prune_worker();
+            self.drain_flush_worker_results();
             let pending = self
                 .state
                 .column_families

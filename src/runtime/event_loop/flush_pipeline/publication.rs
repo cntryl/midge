@@ -149,14 +149,9 @@ impl EventLoop {
             flush.phase = ImmutableFlushPhase::Built;
             flush.clone()
         };
-        // A compaction publication owns the metadata turn from its durable
-        // intent through the final mirrored clear. Park this completed flush
-        // as Queued with its build retained so it cannot start a second
-        // metadata writer mid-turn; the scheduler resumes queued flushes when
-        // the gate is released and publishes a retained build directly. The
-        // compute worker is free, but this exact CF pipeline retains its slot
-        // until publication settles; another CF can use another bounded slot.
-        if self.publication.publication_gate.is_active() {
+        // Inline compatibility publication still serializes its live-file
+        // mirror. Background workers publish captured cuts independently.
+        if self.pipeline.inline_flush_worker && self.publication.publication_gate.is_active() {
             if let Some((_, current)) = self.state.immutable_flush_by_id_mut(identity.flush_id) {
                 current.phase = ImmutableFlushPhase::Queued;
             }

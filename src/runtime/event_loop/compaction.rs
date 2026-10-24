@@ -1265,11 +1265,27 @@ impl CompactionCoordinator {
         }
         if pending.expected_phase != CompactionPublishPhase::IntentCleared
             && event_loop.actors.compaction_actor.active_count() > 0
-            && !event_loop.actors.compaction_actor.select_job(pending.token.request_id)
+            && !event_loop
+                .actors
+                .compaction_actor
+                .select_job(pending.token.request_id)
         {
             event_loop.authority.compaction_fence.degrade();
             event_loop.state.mark_persistence_anomaly();
-            tracing::error!(job_id = pending.token.request_id, "retaining publication whose compute owner cannot be selected");
+            tracing::error!(
+                job_id = pending.token.request_id,
+                "retaining publication whose compute owner cannot be selected"
+            );
+            return;
+        }
+        let owner = Self::publication_owner(&pending.token);
+        if !event_loop.publication.publication_gate.is_owned_by(&owner)
+            && !event_loop.publication.publication_gate.try_acquire(owner)
+        {
+            event_loop
+                .publication
+                .deferred_compaction_result
+                .get_or_insert(completion);
             return;
         }
         event_loop.actors.compaction_publish_actor.finish_task();
@@ -1480,7 +1496,14 @@ impl CompactionCoordinator {
             publication_memory_limit: event_loop.actors.compaction_actor.compaction_memory_limit(),
             runtime_response_timeout: event_loop.routing.runtime_response_timeout,
         };
-        event_loop.actors.compaction_publish_actor.submit(task)
+        let owner = Self::publication_owner(&task.token);
+        let submitted = event_loop.actors.compaction_publish_actor.submit(task);
+        if !event_loop.pipeline.inline_flush_worker {
+            // An admitted immutable cut owns the provider obligation; only
+            // local validation/edit/capture turns need this event-loop gate.
+            event_loop.publication.publication_gate.release(&owner);
+        }
+        submitted
     }
 
     fn manifest_authority_switched(
@@ -2021,6 +2044,11 @@ impl CompactionCoordinator {
     }
 
     pub(super) fn drain_publish_results(event_loop: &mut EventLoop) {
+        if !event_loop.publication.publication_gate.is_active() {
+            if let Some(completion) = event_loop.publication.deferred_compaction_result.take() {
+                Self::handle_publication_completion(event_loop, completion);
+            }
+        }
         while let Ok(completion) = event_loop
             .publication
             .compaction_publish_result_rx

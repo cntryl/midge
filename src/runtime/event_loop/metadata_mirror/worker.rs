@@ -37,9 +37,8 @@ impl EventLoop {
             ));
         }
         let admitted = self.spawn_metadata_mirror(id, continuation, deadline, cloud);
-        if admitted.is_err() {
-            self.publication.publication_gate.release(&owner);
-        }
+        // Capture registered the owned cut before provider work can run.
+        self.publication.publication_gate.release(&owner);
         admitted.map(|()| true)
     }
 
