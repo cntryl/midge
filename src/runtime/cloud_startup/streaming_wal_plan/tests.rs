@@ -53,6 +53,142 @@ fn limits() -> StreamingReplayLimits {
     }
 }
 
+/// One open history with a recorded floor, then a missing or corrupt suffix.
+fn damaged_floor_fixture(
+    synced_suffix: bool,
+    suffix_bytes: Option<usize>,
+    corrupt_suffix: bool,
+) -> MidgeResult<(Fixture, u64)> {
+    let mut fixture = Fixture::new()?;
+    let first = framed_wal(1, b"verified prefix");
+    let second = framed_wal(2, b"later value");
+    let mut body = first.clone();
+    body.extend_from_slice(&second);
+    let path = fixture.active(if synced_suffix { &body } else { &first })?;
+    drop(fixture.history()?);
+    let mut damaged = with_header(&path, &body)?;
+    let prefix_end = crate::wal::format::HEADER_LEN + first.len();
+    if let Some(bytes) = suffix_bytes {
+        damaged.truncate(prefix_end + bytes);
+    }
+    if corrupt_suffix {
+        damaged[prefix_end + crate::wal::frame::WAL_FRAME_HEADER_LEN] ^= 0x80;
+    }
+    std::fs::write(path, damaged)?;
+    Ok((fixture, prefix_end as u64))
+}
+
+#[test]
+fn should_match_recovery_adapters_given_damage_around_the_durable_floor() -> MidgeResult<()> {
+    for (name, synced_suffix, suffix_bytes, corrupt_suffix) in [
+        ("missing acknowledged frame", true, Some(0), false),
+        ("partial acknowledged frame", true, Some(3), false),
+        ("corrupt acknowledged frame", true, None, true),
+        ("partial unsynced frame", false, Some(3), false),
+        ("corrupt unsynced frame", false, None, true),
+    ] {
+        for policy in [RecoveryPolicy::Strict, RecoveryPolicy::Salvage] {
+            // Arrange: both adapters read exactly the same history and bytes.
+            let (fixture, prefix_end) =
+                damaged_floor_fixture(synced_suffix, suffix_bytes, corrupt_suffix)?;
+            let history = fixture.history()?;
+            let wal = crate::io::RealFs::new(fixture.directory.path().join("local/wal"))
+                .map_err(FsError::into_midge)?;
+            let segments = ReplaySegments::from_ledger(history.ledger(), |id| {
+                FsPath::new(crate::wal::segment_file_name(id))
+            });
+            let replay_policy = match policy {
+                RecoveryPolicy::Strict => crate::wal::recovery::ReplayPolicy::Strict,
+                RecoveryPolicy::Salvage => crate::wal::recovery::ReplayPolicy::SalvageValidPrefix,
+            };
+            let mut memtables = std::collections::HashMap::new();
+
+            // Act
+            let local = crate::wal::recovery::replay_wal_with_frontiers_within(
+                &wal,
+                &segments,
+                &mut memtables,
+                replay_policy,
+                &crate::metadata::frontiers::FlushFrontiers::default(),
+                None,
+            );
+            let cloud = fixture.plan_only(policy, limits());
+
+            // Assert: error variants are adapter-specific, the safety outcome is not.
+            if synced_suffix && policy == RecoveryPolicy::Strict {
+                assert!(
+                    matches!(local, Err(MidgeError::Corruption(_))),
+                    "{name}: {local:?}"
+                );
+                assert!(
+                    matches!(&cloud, Err(MidgeError::RecoveryFailed(_))),
+                    "{name}: {:?}",
+                    cloud.as_ref().err()
+                );
+                continue;
+            }
+            let local = local.expect(name);
+            let cloud = cloud.map_err(|error| {
+                MidgeError::Internal(format!("{name} under {policy:?}: {error}"))
+            })?;
+            assert_eq!(local.max_sequence, Some(1), "{name}");
+            assert_eq!(open_tail_sequence(&cloud), Some(1), "{name}");
+            assert_eq!(local.had_corruption, synced_suffix, "{name}");
+            assert_eq!(cloud.plan.opened_in_salvage_mode, synced_suffix, "{name}");
+            if synced_suffix {
+                let stop = local.salvage_stop.expect("salvage stop below floor");
+                assert_eq!(stop.valid_bytes, prefix_end, "{name}");
+            } else {
+                let tail = local.tolerated_active_tail.expect("unsynced tail");
+                assert_eq!(tail.valid_bytes, prefix_end, "{name}");
+            }
+            assert_eq!(
+                cloud
+                    .plan
+                    .open_cut
+                    .expect("settle damaged tail/floor")
+                    .valid_bytes,
+                prefix_end
+            );
+            assert_eq!(
+                memtables[&0].get(b"key")?.as_deref(),
+                Some(&b"verified prefix"[..])
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn should_reopen_strictly_after_cloud_salvage_lowers_the_lost_sync_floor() -> MidgeResult<()> {
+    for (suffix_bytes, corrupt_suffix) in [(Some(0), false), (Some(3), false), (None, true)] {
+        // Arrange: save the actual damaged evidence before salvage settles it.
+        let (fixture, prefix_end) = damaged_floor_fixture(true, suffix_bytes, corrupt_suffix)?;
+        let id = fixture.open_segment();
+        let path = fixture.segment(id);
+        let damaged = std::fs::read(&path)?;
+
+        // Act: commit the recovery plan, then restart under strict policy.
+        let salvaged = fixture.build(RecoveryPolicy::Salvage)?;
+        let reopened = fixture.build(RecoveryPolicy::Strict)?;
+
+        // Assert: both prefix and original evidence survive; the lowered floor
+        // is durable even when the missing suffix ended at a frame boundary.
+        assert!(salvaged.plan.opened_in_salvage_mode);
+        assert!(!reopened.plan.opened_in_salvage_mode);
+        assert_eq!(open_tail_sequence(&reopened), Some(1));
+        assert_eq!(std::fs::metadata(&path)?.len(), prefix_end);
+        assert_eq!(
+            std::fs::read(path.with_file_name(format!(
+                "{}.salvage-retained",
+                crate::wal::segment_file_name(id)
+            )))?,
+            damaged
+        );
+    }
+    Ok(())
+}
+
 /// The epoch a fixture's writer uses unless a test names another.
 const FIXTURE_EPOCH: u64 = 7;
 

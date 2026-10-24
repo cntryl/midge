@@ -571,7 +571,7 @@ impl Planner {
                 true
             }
         };
-        if open.valid_bytes != open.len {
+        if open.valid_bytes != open.len || matches!(open.end, OpenEnd::Damaged { .. }) {
             self.open_cut = Some(OpenCut {
                 id,
                 valid_bytes: open.valid_bytes,

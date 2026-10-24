@@ -53,8 +53,37 @@ regression is triaged explicitly rather than implemented to match its text.
 
 ## Progress
 
-- Active: #974, local/cloud durable-floor parity. The new public salvage
-  regression failed because the acknowledged first value was absent; the
-  parity regression failed because cloud strict recovery accepted a missing
-  acknowledged frame. Implementation and qualification are in progress.
-- No issue is claimed delivered by this local branch yet.
+### #974: implemented locally
+
+Local replay and cloud planning now share the open-tail classification rule.
+Salvage keeps the verified prefix below a recorded floor; strict recovery
+rejects missing acknowledged bytes even at a clean frame boundary. Cloud
+salvage durably repairs that floor before a later strict reopen. Local strict
+admission still rejects a known-short file before replay/checkpoint effects.
+The adapters retain their native strict error variants: local `Corruption`,
+cloud `RecoveryFailed`.
+
+Red evidence on the starting source: the public salvage regression returned
+no first value, and the parity test found cloud strict recovery accepting a
+missing acknowledged frame. Both tests then passed with the implementation.
+
+Validation recorded during the slice:
+
+- Public WAL-floor restart tests: 2 passed, including post-salvage writes and
+  strict reopen without sequence reuse.
+- Local WAL recovery suite with failpoints: 76 passed before the additional
+  footer/floor case; that case also passed in the broad run below.
+- Cloud streaming WAL planning suite: 47 passed, including five damage cases
+  under both policies and durable salvage followed by strict reopen.
+- Storage-root injection and WAL crash campaigns with failpoints: 20 + 15 passed.
+- Full failpoint unit run: 3,396 passed, 1 failed. The shutdown-flood test
+  observed 1.988651875 seconds against its one-second assertion; a focused
+  rerun passed in 0.12 seconds. This is an unresolved broad-run timing result,
+  not a claim that the full suite is green or that it was reproduced on the
+  unchanged base. Its memory-mode workload does not use the changed recovery
+  path.
+- Workspace/all-target/all-feature pedantic Clippy and cntryl-tools test
+  structure validation passed. No ignored tests or relaxed assertions.
+
+Next: #893's deterministic DDL provider-commit barrier, then #975's writer
+contract. No issue is claimed merged or production-qualified by local commits.

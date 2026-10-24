@@ -184,7 +184,7 @@ fn should_not_tolerate_generic_corruption_based_on_incomplete_tail_error_text() 
     ));
 
     // Act
-    let action = replay_error_action(&replay_file, ReplayPolicy::Strict, &failure);
+    let action = replay_error_action(&replay_file, ReplayPolicy::Strict, &failure, 0);
 
     // Assert
     assert_eq!(action, ReplayErrorAction::Fail);
