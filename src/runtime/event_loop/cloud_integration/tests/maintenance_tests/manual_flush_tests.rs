@@ -69,7 +69,7 @@ fn submit_manual_flush(
 }
 
 fn flush_while_compute_is_held(el: &mut EventLoop) -> Result<(), String> {
-    for phase in ["build", "publish", "mirror"] {
+    for phase in ["build", "publish", "manifest mirror", "intent clear"] {
         let completion = el
             .pipeline
             .flush_worker_result_rx

@@ -44,6 +44,7 @@ impl FragmentFixture {
                 l0_file_count_threshold: 2,
                 l1_target_size: 1,
                 max_levels: 3,
+                max_grandparent_overlap_bytes: 0,
                 ..Default::default()
             },
         );
@@ -316,7 +317,6 @@ fn should_reject_fragment_publication_when_source_or_replacement_changes() -> Mi
         let plan = fixture.plan()?;
         assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));
         let completion = fixture.compute(plan)?;
-        fixture.el.actors.compaction_actor.join_completed_worker();
         let (inputs, outputs, target_level) = match &completion {
             RuntimeMsg::CompactionComplete {
                 input_ssts,
@@ -364,7 +364,8 @@ fn should_reject_fragment_publication_when_source_or_replacement_changes() -> Mi
 
         // Assert: neither failed guard creates durable publication authority or removes inputs.
         assert!(matches!(replacement, Err(MidgeError::Fenced(_))));
-        assert!(matches!(stale, Err(MidgeError::Fenced(_))));
+        assert!(matches!(stale, Err(MidgeError::Aborted(message))
+            if message == "compaction input identity or ordering changed; replan"));
         assert!(fixture.el.state.intent_log.is_empty());
         assert!(!fixture.el.publication.publication_gate.is_active());
         assert!(fixture
@@ -390,7 +391,6 @@ fn should_reject_fragment_publication_when_cut_or_source_neighbors_change() -> M
         let plan = fixture.plan()?;
         assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));
         let completion = fixture.compute(plan)?;
-        fixture.el.actors.compaction_actor.join_completed_worker();
         let (inputs, outputs, target_level) = match &completion {
             RuntimeMsg::CompactionComplete {
                 input_ssts,
@@ -474,7 +474,6 @@ fn should_recover_fragment_when_publication_stops_after_durable_manifest_batch()
         let plan = fixture.plan()?;
         assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));
         let completion = fixture.compute(plan)?;
-        fixture.el.actors.compaction_actor.join_completed_worker();
         Ok::<_, MidgeError>((fixture, expected, completion))
     })?;
     let _guard = crate::failpoints::test_failpoint_guard();

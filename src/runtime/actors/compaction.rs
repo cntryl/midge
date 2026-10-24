@@ -1197,7 +1197,18 @@ impl CompactionJobActor {
         input_ssts: &[String],
         storage: Option<&Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<()> {
-        let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1);
+        let cf_id = input_ssts
+            .first()
+            .and_then(|name| {
+                crate::cloud_layout::parse_file_name(name)
+                    .map(|(cf, _, _)| cf)
+                    .or_else(|| {
+                        crate::cloud_layout::parse_compaction_file_name(name)
+                            .map(|(cf, _, _, _)| cf)
+                    })
+            })
+            .unwrap_or(0);
+        let mut plan = crate::compaction::CompactionPlan::new(cf_id, 0, 1);
         plan.input_files = input_ssts.to_vec();
         self.prepare_compaction(state, &plan, storage)
     }

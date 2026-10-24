@@ -1332,9 +1332,7 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
             (Err(crate::MidgeError::Fenced(message)), "ddl") => {
                 message.contains("DDL authority is ambiguous")
             }
-            (Err(crate::MidgeError::Busy(message)), "publication") => {
-                message.contains("manifest publication is already in progress")
-            }
+            (Ok(false), "publication") => event_loop.publication.publication_gate.is_active(),
             (Err(crate::MidgeError::Fenced(message)), "unsettled") => {
                 message.contains("compaction publication is unsettled")
             }
@@ -1955,10 +1953,10 @@ fn should_assign_compaction_output_sequence_when_plan_has_zero() {
 
     // Act
     // Assert
-    assert_eq!(assigned.output_seq, 42);
+    assert_eq!(assigned.output_seq, 1);
     assert_eq!(
-        event_loop.state.sequence, 42,
-        "assigning a compaction output sequence must consume one global sequence"
+        event_loop.state.sequence, 41,
+        "SST name allocation must not consume a transaction sequence"
     );
 }
 
@@ -2014,7 +2012,7 @@ fn should_advance_compaction_output_sequence_past_recovered_manifest_name() {
 
     // Assert
     assert_eq!(assigned.output_seq, 410);
-    assert_eq!(event_loop.state.sequence, 410);
+    assert_eq!(event_loop.state.sequence, 408);
 }
 
 mod compaction_scheduling {
@@ -2049,11 +2047,11 @@ mod compaction_scheduling {
             .prepare_compaction_plan_for_launch(plan)
             .expect("prepare compaction plan");
 
-        assert_eq!(prepared.output_seq, 42);
+        assert_eq!(prepared.output_seq, 1);
         assert_eq!(prepared.snapshot_horizon, Some(37));
         assert_eq!(
-            event_loop.state.sequence, 42,
-            "compaction launch must consume one global sequence for raw plans"
+            event_loop.state.sequence, 41,
+            "compaction launch uses the independently reserved SST name cursor"
         );
     }
 

@@ -20,6 +20,7 @@ struct NotificationFixture {
 struct Receipt {
     message: RuntimeMsg,
     notification_id: u64,
+    inputs: Vec<String>,
     outputs: Vec<String>,
     succeeded: bool,
 }
@@ -44,6 +45,22 @@ impl NotificationFixture {
         } else {
             el.state.host_sst_dir().join(&input)
         })?;
+        {
+            // Identical overlapping sources require a physical merge; a
+            // singleton could legally move without reading its data blocks.
+            let mut overlap = el.state.manifest.files[0].clone();
+            overlap.sst_seq = 2;
+            overlap.name = crate::cloud_layout::file_name(0, overlap.level, overlap.sst_seq);
+            std::fs::write(el.state.host_sst_dir().join(&overlap.name), &input_bytes)?;
+            if cloud {
+                std::fs::write(remote_sst_path_for_test(&el, &overlap.name), &input_bytes)?;
+            }
+            el.state.manifest.test_mut().files.push(overlap);
+            el.state.manifest.test_mut().next_sst_seqs.insert(0, 3);
+            el.state.restore_sequence_floor_from_manifest();
+            crate::metadata::ManifestPersistence::save_with_fs(&el.state.fs, &el.state.manifest)
+                .map_err(MidgeError::Internal)?;
+        }
         Ok(Self {
             el,
             worker,
@@ -64,14 +81,22 @@ impl NotificationFixture {
         self.el.launch_compaction(plan)
     }
 
-    fn receive(&self) -> Receipt {
-        let message = self
-            .worker
-            .recv_timeout(WAIT)
-            .expect("actual compute receipt");
+    fn receive(&mut self) -> Receipt {
+        let deadline = Instant::now() + WAIT;
+        let message = loop {
+            if let Ok(message) = self.worker.try_recv() {
+                break message;
+            }
+            // Accepted SST-name reservation must complete before its compute
+            // worker can start. Its native notification stays unrouted.
+            self.el.reap_metadata_mirror();
+            assert!(Instant::now() < deadline, "actual compute receipt");
+            std::thread::sleep(Duration::from_millis(1));
+        };
         assert_eq!(message.request_id(), None);
         let RuntimeMsg::CompactionComplete {
             request_id,
+            input_ssts,
             output_ssts,
             succeeded,
             ..
@@ -85,6 +110,7 @@ impl NotificationFixture {
         );
         Receipt {
             notification_id: *request_id,
+            inputs: input_ssts.clone(),
             outputs: output_ssts.clone(),
             succeeded: *succeeded,
             message,
@@ -316,6 +342,10 @@ fn should_retain_inputs_without_routing_notification_when_publication_validation
         let outputs = receipt.outputs.clone();
         fixture.el.state.manifest.test_mut().files[0].size_bytes += 1;
         let response = fixture.register_manual();
+        assert!(
+            response.try_recv().is_err(),
+            "manual caller must remain pending while accepted compute awaits publication"
+        );
 
         // Act
         fixture.dispatch(receipt);
@@ -326,16 +356,35 @@ fn should_retain_inputs_without_routing_notification_when_publication_validation
         assert!(outputs
             .iter()
             .all(|name| !fixture.el.state.manifest_has_file(name)));
+        let outcome = assert_one_manual_response(&response);
         assert!(
-            matches!(assert_one_manual_response(&response), RuntimeResponse::Error {
-            error: MidgeError::Fenced(message), .. }
-            if message.contains("input metadata changed"))
+            matches!(&outcome, RuntimeResponse::Error {
+            error: MidgeError::Aborted(message), .. }
+            if message == "compaction input identity or ordering changed; replan"),
+            "actual rejected publication: {outcome:?}"
         );
         assert!(fixture.el.state.intent_log.is_empty());
         fixture.assert_settled();
         assert_eq!(fixture.el.routing.router.late_responses_total(), 0);
         Ok(())
     })
+}
+
+fn committed_intents(
+    cloud: &crate::storage::cloud::CloudStorage,
+    lease: &crate::lease::CloudStorageLease,
+) -> MidgeResult<Vec<crate::runtime::IntentLogEntry>> {
+    let directory = tempfile::tempdir()?;
+    let bytes =
+        get_committed_cloud_metadata_for_test(cloud, lease, crate::metadata::files::INTENT_LOG);
+    std::fs::write(
+        directory.path().join(crate::metadata::files::INTENT_LOG),
+        bytes,
+    )?;
+    crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+        &crate::io::real::test_root(directory.path()),
+        crate::config::RecoveryPolicy::Strict,
+    )
 }
 
 fn mirror_failure_case(fail_first: bool) -> MidgeResult<()> {
@@ -356,6 +405,7 @@ fn mirror_failure_case(fail_first: bool) -> MidgeResult<()> {
     let response = fixture.register_manual();
     let receipt = fixture.receive();
     assert!(receipt.succeeded);
+    let inputs = receipt.inputs.clone();
     let outputs = receipt.outputs.clone();
 
     fixture.dispatch(receipt);
@@ -365,7 +415,7 @@ fn mirror_failure_case(fail_first: bool) -> MidgeResult<()> {
         matches!(
             &result,
             RuntimeResponse::Error {
-                error: MidgeError::Internal(_),
+                error: MidgeError::Internal(_) | MidgeError::Corruption(_),
                 ..
             }
         ),
@@ -380,7 +430,7 @@ fn mirror_failure_case(fail_first: bool) -> MidgeResult<()> {
         assert!(fixture
             .el
             .state
-            .has_compaction_publication_intent(std::slice::from_ref(&fixture.input), &outputs));
+            .has_compaction_publication_intent(&inputs, &outputs));
         assert!(outputs
             .iter()
             .all(|name| remote_sst_path_for_test(&fixture.el, name).exists()));
@@ -389,13 +439,12 @@ fn mirror_failure_case(fail_first: bool) -> MidgeResult<()> {
         assert!(!fixture.el.state.manifest_has_file(&fixture.input));
         assert!(!remote_sst_path_for_test(&fixture.el, &fixture.input).exists());
         assert!(fixture.el.state.intent_log.is_empty());
-        let committed = get_committed_cloud_metadata_for_test(
-            &cloud,
-            &lease,
-            crate::metadata::files::INTENT_LOG,
-        );
+        let committed = committed_intents(&cloud, &lease)?;
         assert!(
-            String::from_utf8(committed).unwrap().contains(&outputs[0]),
+            committed.iter().any(|intent| matches!(intent,
+                crate::runtime::IntentLogEntry::CompactionPublish { added, .. }
+                    if added.iter().any(|file| file.name == outputs[0])
+            )),
             "the failed clear retains the previously committed remote intent"
         );
         assert!(matches!(&result, RuntimeResponse::Error { error, .. }
