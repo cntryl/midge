@@ -612,3 +612,16 @@ metadata::codec::tests::should_reopen_populated_fixture_contents_when_encoded_as
 is superseded. Full codec/fuzz/compatibility qualification remains pending.
 The later #918 SSTV5 slice must preserve this V4 artifact as rejection evidence
 and add the corresponding current V5 fixture.
+
+The next #914 slice stores control-metadata changes in versioned
+`manifest/{ordinal}/{operation_uuid}` objects using the shared binary codec.
+Objects identify epoch, operation and exact parent identity; the committed
+pointer selects the head. Recovery follows its bounded snapshot/edit closure,
+checks ordinal/parent/epoch lineage and reconstructs exact control files. LIST's
+largest uploaded ordinal has no commitment authority. Snapshot resets bound the
+closure (provisional16objects/64MiB,16KiBedit policy).
+
+Active checkpoint/recovery and orphan-high-ordinal regressions are included.
+Library compilation passes; behavioral execution is pending. Cached common-path
+request reduction, #913/#943 retention and crash/provider qualification remain
+required; this commit does not claim the two-request target.

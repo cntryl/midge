@@ -53,13 +53,27 @@ fail closed when initialized authority disappears. Embedded metadata pointers
 from the old lease layout are rejected. FORMAT 8 data is rejected rather than
 migrated by FORMAT 9 binaries.
 
+## Versioned snapshots and edits
+
+The default writer publishes one object at
+`manifest/{ordinal:020}/{operation_uuid}` for a metadata change. The shared
+codec records writer epoch, stable operation identity, exact predecessor
+reference and control-file suffix edits. A standalone snapshot records the
+complete file presence map. The pointer carries the exact ordered closure,
+bounded to 16 objects and 64 MiB encoded bytes. Recovery checks contiguous
+ordinals, predecessor identities and nondecreasing writer epochs before
+applying the oldest snapshot and following edits. It never chooses a LIST
+candidate by ordinal.
+
+At 16 retained objects or 16 KiB of edit history the next publication starts
+a new snapshot. An individual edit above 16 KiB also becomes a snapshot.
+The operation UUID prevents an uncommitted orphan from blocking a later
+attempt to publish the same ordinal. Upload receipt validation or exact
+readback must complete before pointer CAS.
+
 ## Remaining implementation and qualification
 
-The epoch-claim slice keeps the existing immutable generation-body layout.
-The next slice replaces whole control-file mirroring with versioned shared-codec
-snapshot/edit objects, including writer epoch, stable publication identity and
-an exact predecessor reference. Checkpoint thresholds must bound the edit tail.
-Recovery must follow only the pointer-selected chain. Cached writer admission
+Cached writer admission
 and validated receipts are prerequisites for the common edit-PUT/pointer-CAS
 two-request path; this slice does not claim that request target.
 
@@ -70,7 +84,8 @@ pointer slice. General orphan collection (#943) additionally needs active
 snapshot sources, compaction inputs and admitted effects, with final authority
 revalidation under capture-to-pin exclusion.
 
-Active tests cover stale writers learning successor identities and delayed
-predecessor CAS after an epoch claim. The implementation-first pass defers
+Active tests cover stale writers learning successor identities, delayed
+predecessor CAS, initialization crashes, bounded snapshot/edit replay and an
+unselected high ordinal. The implementation-first pass defers
 execution, the simulator crash campaign, heartbeat/publication interleavings,
 provider qualification and A/B measurements. Those remain acceptance gates.

@@ -1115,6 +1115,45 @@ pub(super) fn validate_metadata_generation(
             "committed shared generation has zero ordinal".into(),
         ));
     }
+    if generation
+        .objects
+        .first()
+        .is_some_and(|object| object.file_name == crate::metadata::cloud_manifest::CHAIN_FILE_NAME)
+    {
+        if generation.objects.len() > crate::metadata::cloud_manifest::MAX_CHAIN_OBJECTS {
+            return Err(LeaseError::Indeterminate(
+                "cloud manifest chain exceeds object bound".into(),
+            ));
+        }
+        let mut total = 0_u64;
+        for (index, object) in generation.objects.iter().enumerate() {
+            let ordinal = generation
+                .id
+                .get()
+                .checked_sub(index as u64)
+                .ok_or_else(|| {
+                    LeaseError::Indeterminate("cloud manifest ordinal underflow".into())
+                })?;
+            if object.file_name != crate::metadata::cloud_manifest::CHAIN_FILE_NAME
+                || object.len == 0
+            {
+                return Err(LeaseError::Indeterminate(
+                    "invalid cloud manifest chain reference".into(),
+                ));
+            }
+            crate::metadata::cloud_manifest::validate_key(&object.object_key, ordinal)
+                .map_err(|error| LeaseError::Indeterminate(error.to_string()))?;
+            total = total.checked_add(object.len).ok_or_else(|| {
+                LeaseError::Indeterminate("cloud manifest length overflow".into())
+            })?;
+        }
+        if total > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
+            return Err(LeaseError::Indeterminate(
+                "cloud manifest chain exceeds read bound".into(),
+            ));
+        }
+        return Ok(());
+    }
     if generation.objects.is_empty()
         || generation.objects.len() > crate::metadata::files::CLOUD_MIRRORED.len()
     {

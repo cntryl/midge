@@ -137,6 +137,22 @@ pub(crate) fn read_committed_metadata_bodies_within(
             "committed metadata has zero generation ordinal".into(),
         ));
     }
+    if super::metadata_chain::is_chain(generation) {
+        let bodies = super::metadata_chain::read(cloud, generation, deadline)?;
+        for required in [files::FORMAT, files::MANIFEST_SNAPSHOT] {
+            if !bodies.contains_key(required) {
+                return Err(MidgeError::Corruption(format!(
+                    "committed cloud manifest lacks '{required}'"
+                )));
+            }
+        }
+        if bodies[files::FORMAT] != crate::metadata::format::current_format_marker_bytes() {
+            return Err(MidgeError::CompatibilityError(
+                "cloud manifest FORMAT differs from the current format".into(),
+            ));
+        }
+        return Ok(bodies);
+    }
     let io = BlockingCloud::new(cloud, deadline);
     let mut bodies = BTreeMap::new();
     for object in &generation.objects {
@@ -321,55 +337,6 @@ fn verify_unchanged_publication(
     Ok(())
 }
 
-fn publish_metadata_objects(
-    context: &CloudMetadataMirrorContext<'_>,
-    local: &BTreeMap<String, Vec<u8>>,
-    previous: Option<&CloudMetadataGeneration>,
-    old_bodies: Option<&BTreeMap<String, Vec<u8>>>,
-    validate_lease: &mut impl FnMut(&OperationDeadline) -> MidgeResult<()>,
-) -> MidgeResult<Vec<crate::lease::CloudMetadataObject>> {
-    let immutable_id = uuid::Uuid::new_v4();
-    let io = BlockingCloud::new(context.cloud, context.deadline);
-    let mut objects = Vec::with_capacity(local.len());
-    for (name, bytes) in local {
-        if let Some(previous) = previous.and_then(|generation| {
-            generation
-                .objects
-                .iter()
-                .find(|object| &object.file_name == name)
-        }) {
-            if old_bodies.and_then(|bodies| bodies.get(name)) == Some(bytes) {
-                objects.push(previous.clone());
-                continue;
-            }
-        }
-        let object_key = format!("metadata/generations/{immutable_id}/{name}");
-        validate_lease(context.deadline)?;
-        io.put_with_precondition(
-            &object_key,
-            bytes.clone(),
-            &crate::storage::StoragePrecondition::IfAbsent,
-        )?;
-        let readback = io.get_optional(&object_key)?.ok_or_else(|| {
-            MidgeError::Corruption(format!(
-                "new cloud metadata '{object_key}' is missing after upload"
-            ))
-        })?;
-        if &readback != bytes {
-            return Err(MidgeError::Corruption(format!(
-                "new cloud metadata '{object_key}' failed exact readback"
-            )));
-        }
-        objects.push(crate::lease::CloudMetadataObject {
-            file_name: name.clone(),
-            object_key,
-            len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            crc32c: crc32c::crc32c(bytes),
-        });
-    }
-    Ok(objects)
-}
-
 fn commit_metadata_generation(
     context: &CloudMetadataMirrorContext<'_>,
     previous: Option<&CloudMetadataGeneration>,
@@ -480,12 +447,12 @@ pub(crate) fn mirror_control_metadata_within(
         .ok_or_else(|| {
             MidgeError::ResourceLimit("shared metadata generation ordinal exhausted".into())
         })?;
-    let objects = publish_metadata_objects(
+    let objects = super::metadata_chain::publish(
         &context,
         &local,
         previous.as_ref(),
         old_bodies.as_ref(),
-        &mut validate_lease,
+        id,
     )?;
     let generation = CloudMetadataGeneration {
         id,
@@ -569,6 +536,91 @@ mod tests {
         // Assert
         assert_eq!(fixture.generation(), previous);
         assert_eq!(previous.id, SharedGenerationId::FIRST);
+    }
+
+    #[test]
+    fn should_recover_control_files_when_versioned_suffix_edits_cross_checkpoint_limit() {
+        // Arrange
+        let fixture = Fixture::new();
+        fixture.mirror().unwrap();
+
+        // Act
+        for sequence in 1..=20 {
+            crate::runtime::IntentPersistence::save_with_fs(
+                &fixture.fs,
+                &[crate::runtime::IntentLogEntry::SeqnoAllocated {
+                    seqno: sequence,
+                    cf_id: 0,
+                }],
+            )
+            .unwrap();
+            fixture.mirror().unwrap();
+            assert!(
+                fixture.generation().objects.len()
+                    <= crate::metadata::cloud_manifest::MAX_CHAIN_OBJECTS
+            );
+        }
+        let generation = fixture.generation();
+        let bodies = read_committed_metadata_bodies_within(
+            &fixture.cloud,
+            &generation,
+            &OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+        )
+        .unwrap();
+
+        // Assert: the bounded pointer closure reconstructs exact local bytes,
+        // including intent suffixes and a reset to a standalone snapshot.
+        assert!(super::super::metadata_chain::is_chain(&generation));
+        assert!(generation.objects.len() < 16);
+        assert_eq!(
+            bodies[files::MANIFEST_SNAPSHOT],
+            crate::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::MANIFEST_SNAPSHOT))
+                .unwrap()
+        );
+        assert_eq!(
+            bodies[files::INTENT_LOG],
+            crate::io::read_all(fixture.fs.as_ref(), &FsPath::new(files::INTENT_LOG)).unwrap()
+        );
+    }
+
+    #[test]
+    fn should_ignore_uncommitted_high_ordinal_when_loading_cloud_manifest() {
+        // Arrange
+        let fixture = Fixture::new();
+        fixture.mirror().unwrap();
+        let committed = fixture.generation();
+        let deadline = OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let context = CloudMetadataMirrorContext {
+            cloud: &fixture.cloud,
+            fs: fixture.fs.as_ref(),
+            publication_lock: &fixture.lock,
+            lock_wait_budget: std::time::Duration::from_secs(5),
+            deadline: &deadline,
+            authority: CloudMetadataMirrorAuthority {
+                store: fixture.store.as_ref(),
+                holder_id: "writer",
+                writer_epoch: 1,
+            },
+        };
+        let local = capture_local_metadata(&context).unwrap();
+        // Upload a valid independent snapshot without selecting it in authority.
+        super::super::metadata_chain::publish(
+            &context,
+            &local,
+            None,
+            None,
+            SharedGenerationId::new(99).unwrap(),
+        )
+        .unwrap();
+
+        // Act
+        let bodies =
+            read_committed_metadata_bodies_within(&fixture.cloud, &fixture.generation(), &deadline)
+                .unwrap();
+
+        // Assert
+        assert_eq!(fixture.generation(), committed);
+        assert_eq!(bodies, local);
     }
 
     #[test]

@@ -123,6 +123,7 @@ impl<'a> BlockingCloud<'a> {
         Ok(keys.unwrap_or_default())
     }
 
+    #[cfg(test)]
     pub(crate) fn put_with_headers(
         &self,
         key: &str,
@@ -157,6 +158,7 @@ impl<'a> BlockingCloud<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn put_with_precondition(
         &self,
         key: &str,

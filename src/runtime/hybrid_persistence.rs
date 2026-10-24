@@ -18,6 +18,7 @@ use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use std::sync::Arc;
 
 mod catalog;
+pub(crate) mod metadata_chain;
 mod metadata_snapshot;
 use crate::storage::hybrid::backend::ControlObject;
 pub(crate) use catalog::refusal_error;
