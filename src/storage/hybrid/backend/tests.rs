@@ -925,6 +925,79 @@ fn should_recompute_remaining_budget_before_each_round_trip_when_reading_object_
     );
 }
 
+#[test]
+fn should_confirm_filesystem_wal_upload_when_range_identity_is_unchanged() -> MidgeResult<()> {
+    // Arrange: FileSystem has no provider receipt, and ordinary HEAD returns
+    // a content checksum while range HEAD returns the pinned file identity.
+    let local = tempfile::tempdir()?;
+    let remote = tempfile::tempdir()?;
+    let bytes = vec![7; 130 * 1024];
+    let path = local.path().join("segment.wal");
+    std::fs::write(&path, &bytes)?;
+    let cloud: Arc<dyn StorageBackend> =
+        Arc::new(crate::storage::filesystem::FileSystem::new(remote.path())?);
+    let storage = HybridStorage::with_policy(cloud, policy::StorageBudgetPolicy::default());
+    let upload = UploadState {
+        segment_id: 10,
+        object_key: "wal/epochs/7/segment.wal".into(),
+        source: Arc::new(crate::io::FsLocation::host_file(&path)),
+        status: UploadStatus::InFlight {
+            started_at: Instant::now(),
+        },
+        max_sequence: 14,
+        retries: 0,
+        size_bytes: u64::try_from(bytes.len()).unwrap(),
+    };
+    let (terminal, events) = cb::bounded(4);
+    let mut identities = Vec::new();
+
+    // Act: the second attempt reconciles an existing immutable object.
+    for _ in 0..2 {
+        HybridStorage::process_wal_upload_attempt(
+            storage.counters(),
+            &upload,
+            &storage.stores.wal,
+            &storage.event_queue,
+            Some(&terminal),
+            &super::uploads::UploadAttemptAdmission {
+                timeout: Duration::from_secs(2),
+                memory: None,
+            },
+            &storage.verified_uploads,
+        );
+        identities.push(
+            HybridStorage::head_range_object_from_backend(
+                &storage.stores.wal,
+                &upload.object_key,
+                Duration::from_secs(2),
+            )
+            .expect("published WAL range identity"),
+        );
+    }
+    let results = events.try_iter().collect::<Vec<_>>();
+
+    // Assert: complete byte verification grants both ACKs without replacing
+    // the immutable remote object or losing the recoverable local source.
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(
+        results.iter().all(|event| matches!(
+            event,
+            StorageEvent::CloudAck {
+                segment_id: 10,
+                max_sequence: 14,
+            }
+        )),
+        "{results:?}"
+    );
+    assert_eq!(
+        std::fs::read(remote.path().join(&upload.object_key))?,
+        bytes
+    );
+    assert!(identities[0].same_version(&identities[1]));
+    assert_eq!(std::fs::read(path)?, bytes);
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {

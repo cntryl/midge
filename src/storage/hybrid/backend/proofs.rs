@@ -168,7 +168,7 @@ impl HybridStorage {
         Ok(())
     }
 
-    fn head_range_object_from_backend(
+    pub(super) fn head_range_object_from_backend(
         backend: &Arc<dyn StorageBackend>,
         key: &str,
         timeout: Duration,

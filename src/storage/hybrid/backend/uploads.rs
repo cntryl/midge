@@ -782,8 +782,7 @@ fn verify_upload_ranges(
 ) -> Result<(), crate::storage::StorageError> {
     use crate::storage::{StorageError, StorageErrorKind, StoragePrecondition, StorageRequest};
     let deadline = crate::common::OperationDeadline::from_budget(admission.timeout);
-    let metadata =
-        HybridStorage::head_object_from_backend_blocking(cloud, key, deadline.remaining())?;
+    let metadata = HybridStorage::head_range_object_from_backend(cloud, key, deadline.remaining())?;
     if metadata.size != expected.len() as u64 || !metadata.same_version(&metadata) {
         return Err(StorageError::new(
             StorageErrorKind::Corruption,
@@ -814,8 +813,7 @@ fn verify_upload_ranges(
             ));
         }
     }
-    let current =
-        HybridStorage::head_object_from_backend_blocking(cloud, key, deadline.remaining())?;
+    let current = HybridStorage::head_range_object_from_backend(cloud, key, deadline.remaining())?;
     if deadline.is_expired() {
         return Err(crate::storage::storage_timeout_error(
             "WAL upload verification deadline exhausted",
