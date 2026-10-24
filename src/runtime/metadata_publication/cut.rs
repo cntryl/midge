@@ -14,6 +14,9 @@ use std::sync::{Arc, Weak};
 const MAX_CAPTURED_CUTS: usize = 64;
 type CopiedControlFiles = (Arc<dyn Fs>, BTreeMap<String, Vec<u8>>);
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CutWitness {
     ordinal: u64,
@@ -316,6 +319,7 @@ impl MetadataPublicationLock {
         &self,
         encoded: u64,
     ) -> MidgeResult<Arc<ResourceReservation>> {
+        self.prune_released_cut_receipts();
         if encoded > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
             return Err(MidgeError::ResourceLimit(
                 "metadata capture exceeds cloud body bound".into(),
@@ -338,6 +342,15 @@ impl MetadataPublicationLock {
         });
         pool.reserve(admitted, "owned metadata capture and decoder workspace")
             .map(Arc::new)
+    }
+
+    fn prune_released_cut_receipts(&self) {
+        // Final source drop can skip its opportunistic prune while any
+        // registry reader owns the mutex. Cleanup must precede admission;
+        // otherwise its obsolete receipt can occupy all available workspace.
+        let mut registry = self.cuts.lock();
+        registry.owned.retain(|cut| cut.strong_count() > 0);
+        prune_intent_receipts(&mut registry, &PublicationIntentBoundary::default());
     }
 }
 
