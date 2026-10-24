@@ -163,6 +163,10 @@ impl ManifestPersistence {
     }
 
     /// Load manifest using the requested recovery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if storage cannot be read or durable metadata is invalid.
     pub fn load_with_fs_and_policy(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         recovery_policy: crate::config::RecoveryPolicy,

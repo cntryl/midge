@@ -21,8 +21,12 @@ fn write_and_flush(engine: &Engine, round: u32) {
     let mut tx = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
         .expect("begin write");
-    tx.put(format!("key-{round}").into_bytes(), b"value".to_vec(), None)
-        .expect("put");
+    tx.put(
+        b"overlapping-key".to_vec(),
+        round.to_be_bytes().to_vec(),
+        None,
+    )
+    .expect("put");
     tx.commit(WriteOptions::sync()).expect("commit");
     engine.flush_cf(&cf).expect("flush");
 }

@@ -23,6 +23,11 @@ impl IntentPersistence {
         db_path.join(Self::INTENT_FILE)
     }
 
+    /// Replay durable intent edits under the requested recovery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unreadable storage or invalid intent history.
     pub fn load_with_fs_and_policy(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
@@ -98,6 +103,11 @@ impl IntentPersistence {
         Self::load_with_fs_and_policy(&fs, crate::config::RecoveryPolicy::Strict)
     }
 
+    /// Append and durably synchronize the requested intent state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid SST identities or failed durable I/O.
     pub fn save_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         intents: &[IntentLogEntry],
