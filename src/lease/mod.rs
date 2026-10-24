@@ -41,7 +41,7 @@ pub use filesystem::FileSystemLease;
 #[cfg(test)]
 mod auto_trait_tests {
     #[test]
-    fn should_derive_send_and_sync_for_lease_fields_without_unsafe_implementations() {
+    fn should_derive_thread_safety_for_lease_fields_without_unsafe_implementations() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<super::FileSystemLease>();
         assert_send_sync::<super::CloudStorageLease>();

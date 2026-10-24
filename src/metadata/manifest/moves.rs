@@ -150,12 +150,13 @@ mod tests {
             files: vec![older, newer.clone()],
             ..Default::default()
         };
-        // Act and Assert
+        // Act: attempt the move using the production transition helper.
+        // Assert: the helper requires rejection with byte-identical authority.
         rejected_unchanged(manifest, vec![newer]);
     }
 
     #[test]
-    fn should_reject_incomplete_range_bounds_and_target_conflicts_without_retiring_sources() {
+    fn should_reject_unprovable_move_coverage_without_retiring_sources() {
         // Arrange
         let source = file(0, 1, b"a", b"z");
         let target = file(1, 2, b"m", b"n");
@@ -163,7 +164,8 @@ mod tests {
             files: vec![source.clone(), target],
             ..Default::default()
         };
-        // Act and Assert: complete bounds include range-tombstone endpoints.
+        // Act: complete bounds include range-tombstone endpoints.
+        // Assert: the atomic helper rejects either unprovable coverage case.
         rejected_unchanged(conflicting, vec![source.clone()]);
         let mut unknown = source;
         unknown.key_bounds_complete = false;
@@ -177,8 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn should_preserve_identity_and_retirement_ledger_when_replaying_an_atomic_move_twice(
-    ) -> MidgeResult<()> {
+    fn should_preserve_immutable_move_identity_when_replaying_the_edit_twice() -> MidgeResult<()> {
         // Arrange
         let first = file(0, 1, b"a", b"b");
         let second = file(0, 2, b"x", b"z");
@@ -204,13 +205,14 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_changed_source_order_and_partial_move_without_any_mutation() {
+    fn should_leave_manifest_unchanged_when_move_source_authority_is_inconsistent() {
         // Arrange
         let first = file(0, 1, b"a", b"b");
         let second = file(0, 2, b"x", b"z");
         let mut partial = first.clone();
         partial.level = 1;
-        // Act and Assert
+        // Act: attempt moves with changed original authority.
+        // Assert: the atomic helper checks rejection without any manifest mutation.
         rejected_unchanged(
             Manifest {
                 files: vec![partial, second.clone()],

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 #[test]
-fn should_share_one_rate_schedule_across_flush_and_compaction_output() -> MidgeResult<()> {
+fn should_share_one_rate_schedule_across_background_sst_writers() -> MidgeResult<()> {
     // Arrange: both production writer constructors use the same schedule.
     let directory = tempfile::tempdir()?;
     let fs = crate::io::real::test_root(directory.path());

@@ -307,11 +307,10 @@ mod tests {
         ];
         let _left = jobs.reserve(&plan(&files[0], 1), &files)?;
 
-        // Act / Assert
-        assert!(matches!(
-            jobs.reserve(&plan(&files[1], 1), &files),
-            Err(MidgeError::Busy(_))
-        ));
+        // Act
+        let conflicting = jobs.reserve(&plan(&files[1], 1), &files);
+        // Assert: another family remains independently admissible.
+        assert!(matches!(conflicting, Err(MidgeError::Busy(_))));
         jobs.reserve(&plan(&files[2], 1), &files)?;
         Ok(())
     }

@@ -437,7 +437,7 @@ impl CloudHeadCapability for ReceiptPublication {
 impl CloudBackend for ReceiptPublication {}
 
 #[test]
-fn should_validate_receipts_and_reconcile_retries_when_publishing_immutable_files(
+fn should_reconcile_immutable_publication_when_receipts_cover_the_exact_source_identity(
 ) -> MidgeResult<()> {
     for fault in [
         ReceiptFault::None,

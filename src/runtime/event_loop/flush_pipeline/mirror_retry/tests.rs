@@ -88,7 +88,7 @@ impl ContendedFlush {
 }
 
 #[test]
-fn should_retain_uploaded_flush_owner_and_waiters_until_shared_capture_memory_is_released(
+fn should_preserve_uploaded_flush_when_shared_capture_memory_is_temporarily_owned(
 ) -> MidgeResult<()> {
     // Arrange: real build, upload and local edit have completed; only the
     // configured common maintenance pool prevents control-cut admission.

@@ -261,7 +261,7 @@ impl ConcurrentFixture {
 }
 
 #[test]
-fn should_keep_older_overlapping_l0_sources_first_and_allow_only_one_l0_owner() -> MidgeResult<()> {
+fn should_preserve_l0_level_order_when_an_overlapping_job_is_owned() -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: hot newer overlapping L0 files cannot pass the cold oldest
@@ -480,7 +480,7 @@ impl Drop for HeldComputes {
 }
 
 #[test]
-fn should_publish_and_recover_two_disjoint_level_jobs_held_at_the_same_time() -> MidgeResult<()> {
+fn should_recover_published_disjoint_jobs_when_both_compute_workers_are_held() -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange

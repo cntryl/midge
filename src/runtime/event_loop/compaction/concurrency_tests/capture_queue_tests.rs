@@ -32,8 +32,8 @@ fn wait_for_capture_retry(fixture: &mut ConcurrentFixture) {
 }
 
 #[test]
-fn should_retain_accepted_compaction_and_original_deadline_until_capture_memory_is_released(
-) -> MidgeResult<()> {
+fn should_preserve_accepted_compaction_when_capture_memory_is_temporarily_owned() -> MidgeResult<()>
+{
     // Arrange: compute may finish, but another owner occupies the capture pool.
     let (mut fixture, memory, input) = capture_fixture()?;
     let held = memory.reserve(memory.limit(), "held metadata workspace")?;

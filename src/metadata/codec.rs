@@ -117,14 +117,15 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_corrupt_kind_length_and_payload_when_decoding_metadata() {
+    fn should_reject_metadata_frames_when_integrity_fields_are_corrupted() {
         // Arrange
         let encoded = encode(MANIFEST, &crate::metadata::Manifest::default()).expect("encode");
 
-        // Act / Assert
+        // Act
         for offset in [0, 8, 9, HEADER_BYTES, encoded.len() - 1] {
             let mut corrupt = encoded.clone();
             corrupt[offset] ^= 1;
+            // Assert: no corrupted identity field can produce a manifest.
             assert!(decode::<crate::metadata::Manifest>(MANIFEST, &corrupt).is_err());
         }
         for length in 0..encoded.len() {
@@ -134,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_announced_lengths_and_trailing_values_before_metadata_allocation() {
+    fn should_reject_malformed_metadata_payload_extents_before_allocation() {
         // Arrange: these small, correctly checksummed frames announce 4 GiB
         // strings, byte buffers, arrays or maps, or contain two root values.
         let payloads: &[&[u8]] = &[
@@ -145,7 +146,7 @@ mod tests {
             &[0xc0, 0xc0],
         ];
 
-        // Act / Assert
+        // Act
         for payload in payloads {
             let mut encoded = MAGIC.to_vec();
             encoded.push(MANIFEST);
@@ -153,6 +154,7 @@ mod tests {
             encoded.extend_from_slice(payload);
             let checksum = crc32c::crc32c(&encoded);
             encoded.extend_from_slice(&checksum.to_be_bytes());
+            // Assert: even checksum-valid malformed extents fail before decoding.
             assert!(matches!(
                 decode::<serde_json::Value>(MANIFEST, &encoded),
                 Err(MidgeError::Corruption(_))
@@ -162,9 +164,12 @@ mod tests {
 
     #[test]
     fn should_distinguish_object_checksums_when_valid_metadata_frames_have_equal_length() {
-        // Arrange / Act
-        let first = encode(MANIFEST, &[1_u64]).expect("encode first frame");
-        let second = encode(MANIFEST, &[2_u64]).expect("encode second frame");
+        // Arrange
+        let first_value = [1_u64];
+        let second_value = [2_u64];
+        // Act
+        let first = encode(MANIFEST, &first_value).expect("encode first frame");
+        let second = encode(MANIFEST, &second_value).expect("encode second frame");
 
         // Assert: the appended checksum must not make the checksum over the
         // complete encoded object a constant residue for equal-length frames.

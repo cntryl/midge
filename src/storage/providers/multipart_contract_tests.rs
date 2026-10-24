@@ -348,13 +348,15 @@ fn upload_fixture(
 #[test]
 fn should_stream_exact_bytes_with_bounded_parts_when_native_providers_publish_large_files(
 ) -> MidgeResult<()> {
-    // Arrange / Act / Assert: each provider runs the same production file protocol.
+    // Arrange: each native dialect uses the same real-file upload proof.
     for protocol in [
         Protocol::S3,
         Protocol::Azure,
         Protocol::GcsJson,
         Protocol::GcsXml,
     ] {
+        // Act: run the production upload with bounded native parts.
+        // Assert: the fixture checks exact committed bytes and peak admission.
         upload_fixture(protocol, false, false, 64 * 1024 * 1024)?;
     }
     Ok(())
@@ -363,13 +365,15 @@ fn should_stream_exact_bytes_with_bounded_parts_when_native_providers_publish_la
 #[test]
 fn should_reject_corrupted_parts_before_commit_when_native_upload_integrity_fails(
 ) -> MidgeResult<()> {
-    // Arrange / Act / Assert
+    // Arrange: exercise corrupted parts through every native provider dialect.
     for protocol in [
         Protocol::S3,
         Protocol::Azure,
         Protocol::GcsJson,
         Protocol::GcsXml,
     ] {
+        // Act: run the production upload after injecting a corrupt part.
+        // Assert: the fixture requires rejection before remote commit.
         upload_fixture(protocol, true, false, 12 * 1024 * 1024)?;
     }
     Ok(())
@@ -378,13 +382,15 @@ fn should_reject_corrupted_parts_before_commit_when_native_upload_integrity_fail
 #[test]
 fn should_reject_changed_finalized_files_before_commit_when_streaming_upload_reads_them(
 ) -> MidgeResult<()> {
-    // Arrange / Act / Assert
+    // Arrange: finalized source mutation is exercised through every dialect.
     for protocol in [
         Protocol::S3,
         Protocol::Azure,
         Protocol::GcsJson,
         Protocol::GcsXml,
     ] {
+        // Act: run the production upload against the changed source bytes.
+        // Assert: the fixture rejects committing an unproven immutable identity.
         upload_fixture(protocol, false, true, 12 * 1024 * 1024)?;
     }
     Ok(())

@@ -112,7 +112,7 @@ fn should_promote_existing_l0_identity_without_reading_or_writing_sst_bytes() ->
 }
 
 #[test]
-fn should_merge_hot_newer_l0_with_cold_older_overlap_and_keep_newest_reads_across_restart(
+fn should_preserve_newest_l0_visibility_when_hot_sources_overlap_cold_predecessors(
 ) -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
@@ -164,7 +164,8 @@ fn should_merge_hot_newer_l0_with_cold_older_overlap_and_keep_newest_reads_acros
 }
 
 #[test]
-fn should_reject_new_target_coverage_before_move_edit_and_retain_both_objects() -> MidgeResult<()> {
+fn should_retain_live_objects_when_move_publication_acquires_conflicting_target_coverage(
+) -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: hold the actual publication worker after its durable intent.

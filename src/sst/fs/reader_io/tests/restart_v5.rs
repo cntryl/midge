@@ -19,16 +19,16 @@ fn unique_reader(directory: &tempfile::TempDir) -> MidgeResult<SstFileIo> {
 }
 
 #[test]
-fn should_bound_unique_key_point_decoding_by_binary_restart_search_and_one_interval(
-) -> MidgeResult<()> {
+fn should_bound_point_decoding_to_one_restart_interval_after_binary_search() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let reader = unique_reader(&directory)?;
     assert_eq!(reader.index_entries()?.len(), 1);
-    // Act and Assert
+    // Act
     for index in [0, 15, 16, 17, 255, 500, 511] {
         let (state, metrics) = reader
             .get_raw_state_at_with_stats(format!("restart/{index:04}").as_bytes(), u64::MAX)?;
+        // Assert: the correct version is found within the bounded decode work.
         assert!(matches!(state, KeyState::Value(_, sequence, None, _) if sequence == index + 1));
         assert!(
             metrics.entries_decoded <= 16 + 7,
@@ -40,7 +40,7 @@ fn should_bound_unique_key_point_decoding_by_binary_restart_search_and_one_inter
 }
 
 #[test]
-fn should_preserve_old_snapshot_tombstone_and_ttl_versions_across_restarts_in_both_directions(
+fn should_preserve_snapshot_visibility_across_restart_intervals_in_both_directions(
 ) -> MidgeResult<()> {
     // Arrange: the target begins mid-interval and spans eight restarts.
     let directory = tempfile::tempdir()?;
@@ -74,8 +74,9 @@ fn should_preserve_old_snapshot_tombstone_and_ttl_versions_across_restarts_in_bo
     crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("versions.sst"))?;
     let reader = Arc::new(SstFileIo::open("versions.sst", fs)?);
 
-    // Act and Assert: a restart on the same user key must not skip its head.
+    // Act: a restart on the same user key must not skip its head.
     let (visible, stats) = reader.get_raw_state_at_with_stats(b"b/target", 80)?;
+    // Assert
     assert!(matches!(visible, KeyState::Value(_, 80, Some(100), _)));
     assert!(stats.entries_decoded <= 128 + 16 + 6);
     assert!(matches!(
@@ -102,7 +103,7 @@ fn should_preserve_old_snapshot_tombstone_and_ttl_versions_across_restarts_in_bo
 }
 
 #[test]
-fn should_reject_malformed_restart_counts_offsets_and_entry_boundaries() -> MidgeResult<()> {
+fn should_reject_invalid_restart_directories_before_entry_decoding() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let reader = unique_reader(&directory)?;
@@ -121,8 +122,9 @@ fn should_reject_malformed_restart_counts_offsets_and_entry_boundaries() -> Midg
         bytes[layout.data_end + 4..layout.data_end + 8].copy_from_slice(&offset.to_le_bytes());
         malformed.push(bytes);
     }
-    // Act and Assert: full decoding visits and validates every boundary.
+    // Act: full decoding visits and validates every boundary.
     for bytes in malformed {
+        // Assert: a malformed directory cannot produce decoded rows.
         assert!(reader.decode_scan_block(&Bytes::from(bytes)).is_err());
     }
     Ok(())

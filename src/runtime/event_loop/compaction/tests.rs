@@ -7,8 +7,7 @@ const LOCAL_BUDGET: u64 = 1_000;
 const STAGING_BYTES: u64 = 500;
 
 #[test]
-fn should_retain_current_intent_and_files_when_another_job_reports_publication_failure(
-) -> MidgeResult<()> {
+fn should_preserve_current_publication_when_another_job_reports_failure() -> MidgeResult<()> {
     // Arrange: the durable intent belongs to one exact operation. An unrelated
     // result must not settle it or authorize cleanup of its retained files.
     let directory = tempfile::tempdir()?;

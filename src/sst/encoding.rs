@@ -232,7 +232,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_roundtrip_compact_entries_with_optional_expiration_and_extended_keys() {
+    fn should_roundtrip_compact_entries_when_optional_fields_extend_the_header() {
         // Arrange
         for expiration in [None, Some(0), Some(u64::MAX)] {
             for key_len in [0, 3, 65_536] {
@@ -260,20 +260,21 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_overflow_noncanonical_varints_flags_and_truncated_expiration() {
+    fn should_reject_malformed_compact_entry_headers() {
         // Arrange
         let canonical = encode_v5(b"k", 0, Some(b"v"), 1, EntryType::Put, None).unwrap();
         let mut flags = canonical.clone();
         flags[11] = 0x40;
         let mut expiration = canonical.clone();
         expiration[11] = EXPIRATION_PRESENT;
-        // Act and Assert
+        // Act
         for data in [
             &[0x80, 0][..],
             &[0xff, 0xff, 0xff, 0xff, 0xff],
             &flags,
             &expiration,
         ] {
+            // Assert: every malformed header is rejected by the decoder.
             assert!(decode(data, 0).is_err());
         }
         assert!(decode(&canonical, usize::MAX).is_err());
@@ -285,8 +286,11 @@ mod tests {
 
     #[test]
     fn should_save_fourteen_header_bytes_when_small_entry_has_no_expiration() {
-        // Arrange and Act
-        let encoded = encode_v5(b"k", 0, Some(b"v"), 1, EntryType::Put, None).unwrap();
+        // Arrange
+        let key = b"k";
+        let value = b"v";
+        // Act
+        let encoded = encode_v5(key, 0, Some(value), 1, EntryType::Put, None).unwrap();
         // Assert: three lengths, sequence and flags = twelve bytes (V4:26).
         assert_eq!(encoded.len(), 12 + 2);
         assert!(validate_entry_size(usize::MAX, 1).is_err());

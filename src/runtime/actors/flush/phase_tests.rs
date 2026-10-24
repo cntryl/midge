@@ -90,7 +90,7 @@ fn publication_task(fs: Arc<dyn crate::io::Fs>, build: &FlushBuildCompletion) ->
 }
 
 #[test]
-fn should_retain_cf_owner_until_exact_physical_phase_and_epoch_complete() -> MidgeResult<()> {
+fn should_retain_cf_owner_until_its_exact_physical_completion() -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: actual worker, memtable, encoded SST and publication filesystem.
@@ -114,7 +114,7 @@ fn should_retain_cf_owner_until_exact_physical_phase_and_epoch_complete() -> Mid
     };
     let memtable = Arc::new(crate::memtable::SkipListMemtable::new());
     memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
-    // Act and Assert: only the exact completed physical phase can settle.
+    // Act: only the exact completed physical phase can settle.
     let completion = complete_build(&mut actor, &results, identity, memtable)?;
     let FlushWorkerResult::Build(output) = &completion else {
         panic!("build result");
@@ -122,6 +122,7 @@ fn should_retain_cf_owner_until_exact_physical_phase_and_epoch_complete() -> Mid
     let publish_hold = HeldStage::new("midge::flush_worker::before_publication");
     actor.submit_publish(publication_task(fs, output))?;
     publish_hold.entered();
+    // Assert: completed build proof cannot settle the executing publish phase.
     assert!(
         !actor.take_completion(&completion),
         "old phase cannot complete new physical work"

@@ -1702,7 +1702,7 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_format_nine_sst_v4_data_under_strict_and_salvage_recovery() {
+    fn should_reject_format_nine_sst_v4_data_under_every_recovery_policy() {
         for policy in [RecoveryPolicy::Strict, RecoveryPolicy::Salvage] {
             // Arrange: its database marker and metadata codec are current;
             // only the checksummed SST footer names the unsupported layout.

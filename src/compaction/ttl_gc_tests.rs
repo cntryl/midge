@@ -5,8 +5,8 @@ use crate::types::EntryType;
 use std::sync::Arc;
 
 #[test]
-fn should_use_captured_clock_and_overlap_proof_when_reclaiming_expired_versions(
-) -> crate::MidgeResult<()> {
+fn should_require_captured_expiration_authority_when_reclaiming_versions() -> crate::MidgeResult<()>
+{
     for (time, eligible, retained, horizon, reclaimed) in [
         (99, true, true, None, false),
         (100, true, true, None, true),

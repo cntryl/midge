@@ -1497,8 +1497,7 @@ impl Drop for ReleaseWalUploads {
 }
 
 #[test]
-fn should_bound_parallel_wal_uploads_and_preserve_retry_ownership_when_completions_reorder(
-) -> MidgeResult<()> {
+fn should_preserve_bounded_upload_ownership_when_completions_reorder() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let (entered, arrivals) = cb::unbounded();

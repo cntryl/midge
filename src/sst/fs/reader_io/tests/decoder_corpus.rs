@@ -113,8 +113,8 @@ fn retain_real_metadata(directory: &Path, fs: &Arc<dyn Fs>, seed: u64) -> MidgeR
 }
 
 #[test]
-fn should_match_eight_real_file_seeds_for_each_sst_and_metadata_decoder() -> MidgeResult<()> {
-    // Arrange and Act: each seed is a real sorted writer publication followed
+fn should_match_eight_real_file_seeds_per_persisted_decoder() -> MidgeResult<()> {
+    // Arrange: each seed is a real sorted writer publication followed
     // by production footer, checksum, index, filter and data decoding.
     for seed in 0..8 {
         let directory = tempfile::tempdir()?;
@@ -125,6 +125,7 @@ fn should_match_eight_real_file_seeds_for_each_sst_and_metadata_decoder() -> Mid
             ));
         let mut writer = factory.create()?;
         add_seed_entries(writer.as_mut(), seed)?;
+        // Act: publish the writer's exact bytes through the production format.
         crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("seed.sst"))?;
         let reader = SstFileIo::open("seed.sst", fs.clone())?;
         // Assert: checked-in corpora equal these exact decoded production cuts.

@@ -98,8 +98,7 @@ fn should_reserve_next_flush_block_when_eight_names_remain() -> MidgeResult<()> 
 }
 
 #[test]
-fn should_share_prefetched_names_between_flush_and_compaction_when_wal_sequence_is_high(
-) -> MidgeResult<()> {
+fn should_use_shared_prefetched_name_cursor_when_wal_sequence_is_high() -> MidgeResult<()> {
     // Arrange: allocating data sequence one million must not discard the
     // durably mirrored filename block beginning at one.
     let mut event_loop = create_test_cloud_event_loop(

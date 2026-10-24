@@ -54,8 +54,8 @@ fn assert_family_value(engine: &Engine, name: &str, value: &[u8]) -> MidgeResult
 }
 
 #[test]
-fn should_flush_two_column_families_concurrently_and_recover_both_publications() -> MidgeResult<()>
-{
+fn should_recover_both_column_family_publications_when_flush_workers_run_concurrently(
+) -> MidgeResult<()> {
     let scenario = fail::FailScenario::setup();
     // Arrange
     let directory = tempfile::tempdir()?;
