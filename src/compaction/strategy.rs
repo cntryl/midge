@@ -316,18 +316,26 @@ impl Compactor {
     }
 
     pub(crate) fn pick_available_inner_compaction(
-        &self, files: &[FileMeta], cf_id: u32,
+        &self,
+        files: &[FileMeta],
+        cf_id: u32,
         eligible: impl Fn(&FileMeta, u32) -> bool,
         admitted: impl Fn(&CompactionPlan) -> bool,
     ) -> MidgeResult<Option<CompactionPlan>> {
-        let Some(levels) = self.validated_levels(files, cf_id)? else { return Ok(None); };
+        let Some(levels) = self.validated_levels(files, cf_id)? else {
+            return Ok(None);
+        };
         for level in (1..self.config.max_levels.saturating_sub(1)).rev() {
             let level_size: u64 = levels[level].iter().map(|file| file.size_bytes).sum();
             let source_level = u32::try_from(level).expect("level index fits u32");
-            if level_size <= self.level_target_size(source_level) { continue; }
+            if level_size <= self.level_target_size(source_level) {
+                continue;
+            }
             let available = |file: &FileMeta| eligible(file, source_level + 1);
             if let Some(plan) = self.plan_inner_level_filtered(&levels, cf_id, level, &available)? {
-                if admitted(&plan) { return Ok(Some(plan)); }
+                if admitted(&plan) {
+                    return Ok(Some(plan));
+                }
             }
         }
         Ok(None)
@@ -609,7 +617,10 @@ impl Compactor {
     }
 
     fn plan_inner_level_filtered(
-        &self, levels: &[Vec<&FileMeta>], cf_id: u32, level: usize,
+        &self,
+        levels: &[Vec<&FileMeta>],
+        cf_id: u32,
+        level: usize,
         eligible: &dyn Fn(&FileMeta) -> bool,
     ) -> MidgeResult<Option<CompactionPlan>> {
         if levels[level].is_empty() {
@@ -627,10 +638,15 @@ impl Compactor {
         });
         // Keep a contiguous available component. Combining both sides of an
         // active publication range would reserve a conflicting output span.
-        source_files = source_files.into_iter().skip_while(|file| !eligible(file))
-            .take_while(|file| eligible(file)).collect();
+        source_files = source_files
+            .into_iter()
+            .skip_while(|file| !eligible(file))
+            .take_while(|file| eligible(file))
+            .collect();
         source_files.truncate(self.config.l0_file_count_threshold.max(1));
-        if source_files.is_empty() { return Ok(None); }
+        if source_files.is_empty() {
+            return Ok(None);
+        }
         let source_level = u32::try_from(level).expect("level index fits in u32");
         let target_level = u32::try_from(level + 1).expect("level index fits in u32");
         let (mut source_names, mut target_files) = self.complete_overlap_span(
@@ -649,7 +665,9 @@ impl Compactor {
                 source_level,
                 target_level,
             )?;
-            if self.exceeds_work_target(&source_files, &levels[level + 1], &target_files) {
+            if self.exceeds_work_target(&source_files, &levels[level + 1], &target_files)
+                && self.target_span_needs_fragmentation(&levels[level + 1], &target_files)
+            {
                 if let Some(split_key) = Self::fragmentation_split_key(
                     source_files[0],
                     &levels[level],
@@ -707,6 +725,29 @@ impl Compactor {
             )
             .try_fold(0_u64, |total, file| total.checked_add(file.size_bytes));
         input_bytes.is_none_or(|bytes| bytes > u64::try_from(limit).unwrap_or(u64::MAX))
+    }
+
+    /// A conforming overlap span already has the output policy's preferred
+    /// shape. Stream that complete merge even when its work exceeds the soft
+    /// scheduling target, instead of rewriting the same source once first.
+    /// Older/widened spans and an explicitly disabled overlap policy retain
+    /// fragmentation when complete bounds prove a useful interior boundary.
+    fn target_span_needs_fragmentation(
+        &self,
+        target_files: &[&FileMeta],
+        selected_targets: &[String],
+    ) -> bool {
+        let overlap_limit = self.config.max_grandparent_overlap_bytes;
+        if overlap_limit == 0 {
+            return true;
+        }
+        let selected: std::collections::HashSet<_> =
+            selected_targets.iter().map(String::as_str).collect();
+        target_files
+            .iter()
+            .filter(|file| selected.contains(file.name.as_str()))
+            .try_fold(0_u64, |bytes, file| bytes.checked_add(file.size_bytes))
+            .is_none_or(|bytes| bytes > overlap_limit)
     }
 
     fn fragmentation_split_key(

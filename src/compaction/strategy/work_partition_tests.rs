@@ -86,6 +86,54 @@ fn should_fragment_source_when_single_file_overlaps_excessive_target_bytes() {
 }
 
 #[test]
+fn should_merge_complete_conforming_span_when_only_soft_work_target_is_exceeded() {
+    // Arrange: target overlap fits the current output policy, although the
+    // source and targets together exceed the preferred scheduling work.
+    let files = broad_source_layout();
+    for overlap_limit in [768 * MIB, 1024 * MIB] {
+        let mut compactor = bounded_compactor();
+        compactor.config.max_grandparent_overlap_bytes = overlap_limit;
+
+        // Act
+        let plan = compactor
+            .pick_deepest_inner_compaction(&files, 0)
+            .expect("complete layout")
+            .expect("source debt");
+
+        // Assert: ordinary publication owns the whole selected target span.
+        // No source-only rewrite precedes its actual level promotion.
+        assert_eq!(plan.purpose, CompactionPurpose::Merge);
+        assert_eq!((plan.source_level, plan.target_level), (2, 3));
+        assert_eq!(plan.source_files, vec!["source-0".to_string()]);
+        assert_eq!(plan.target_files.len(), 6);
+        assert_eq!(plan.input_files.len(), 7);
+        assert_eq!(selected_bytes(&plan, &files), 896 * MIB);
+        assert!(selected_bytes(&plan, &files) > u64::try_from(WORK_TARGET).unwrap());
+    }
+}
+
+#[test]
+fn should_keep_legacy_fragmentation_when_grandparent_policy_is_disabled() {
+    // Arrange: disabling future overlap cuts cannot repair an existing broad
+    // source. The preferred-work fallback still owns only that source.
+    let mut compactor = bounded_compactor();
+    compactor.config.max_grandparent_overlap_bytes = 0;
+    let files = broad_source_layout();
+
+    // Act
+    let plan = compactor
+        .pick_deepest_inner_compaction(&files, 0)
+        .expect("complete layout")
+        .expect("source debt");
+
+    // Assert
+    assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));
+    assert_eq!((plan.source_level, plan.target_level), (2, 2));
+    assert_eq!(plan.input_files, vec!["source-0".to_string()]);
+    assert_eq!(plan.target_files, [] as [String; 0]);
+}
+
+#[test]
 fn should_shrink_source_batch_when_single_source_work_fits() {
     // Arrange
     let compactor = bounded_compactor();

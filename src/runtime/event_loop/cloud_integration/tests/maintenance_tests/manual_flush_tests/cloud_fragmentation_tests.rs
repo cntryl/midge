@@ -128,7 +128,7 @@ fn publish_seed(
     Ok(file)
 }
 
-fn install_cloud_actor(el: &mut EventLoop) {
+fn install_cloud_actor(el: &mut EventLoop, overlap_limit: u64) {
     let storage = Arc::clone(el.actors.cloud_coordinator.hybrid_storage.as_ref().unwrap());
     let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&el.state.fs),
@@ -145,6 +145,7 @@ fn install_cloud_actor(el: &mut EventLoop) {
             l0_file_count_threshold: 4,
             l1_target_size: 1,
             max_levels: 3,
+            max_grandparent_overlap_bytes: overlap_limit,
             ..Default::default()
         },
     );
@@ -205,6 +206,7 @@ fn recover_remote_history(
     outputs: &[String],
     source: &str,
     targets: &[crate::metadata::FileMeta],
+    target_level: u32,
 ) -> MidgeResult<SourceHistory> {
     let remote = el
         .actors
@@ -250,7 +252,7 @@ fn recover_remote_history(
             .manifest
             .files
             .iter()
-            .any(|file| file.name == *name && file.level == 1));
+            .any(|file| file.name == *name && file.level == target_level));
         assert!(!recovered
             .fs
             .exists(&crate::sst::fs::sst_key(name))
@@ -272,7 +274,9 @@ fn recover_remote_history(
 fn should_recover_raw_source_history_when_cloud_fragment_publication_commits() -> MidgeResult<()> {
     // Arrange: the source fits one ordinary output, but overlaps excessive remote targets.
     let (mut el, worker, _) = cloud_debt(0)?;
-    install_cloud_actor(&mut el);
+    // This retained broad source predates the configured output overlap
+    // budget and still requires source-only fragmentation.
+    install_cloud_actor(&mut el, u64::try_from(TARGET * 4).unwrap());
     let files = seed_fragment_layout(&mut el)?;
     let source = &files[0];
     let targets = &files[1..];
@@ -347,7 +351,7 @@ fn should_recover_raw_source_history_when_cloud_fragment_publication_commits() -
         original.ranges,
         vec![RangeTombstone::new(b"a0".to_vec(), b"f9".to_vec(), 87)]
     );
-    let recovered = recover_remote_history(el, &metadata, &outputs, &source.name, targets)?;
+    let recovered = recover_remote_history(el, &metadata, &outputs, &source.name, targets, 1)?;
     assert_eq!(recovered.versions, original.versions);
     assert_eq!(
         recovered.ranges,
@@ -356,5 +360,92 @@ fn should_recover_raw_source_history_when_cloud_fragment_publication_commits() -
             RangeTombstone::new(cut, b"f9".to_vec(), 87),
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn should_publish_complete_cloud_merge_when_conforming_overlap_exceeds_soft_work_target(
+) -> MidgeResult<()> {
+    // Arrange: the overlap is legal under the current output budget. Its
+    // input bytes exceed the preferred work target, which is not a hard cap.
+    let (mut el, worker, _) = cloud_debt(0)?;
+    install_cloud_actor(&mut el, 320 * 1024 * 1024);
+    let files = seed_fragment_layout(&mut el)?;
+    let source = files[0].name.clone();
+    let mut metadata = metadata_fixture(&mut el)?;
+    let plan = el
+        .actors
+        .compaction_actor
+        .check_manual_compaction(&el.state)?
+        .expect("real cloud debt");
+    assert_eq!(plan.purpose, CompactionPurpose::Merge);
+    assert_eq!((plan.source_level, plan.target_level), (1, 2));
+    assert_eq!(plan.input_files.len(), 7);
+    assert_eq!(plan.target_files.len(), 6);
+    assert!(
+        files.iter().map(|file| file.size_bytes).sum::<u64>() > u64::try_from(TARGET * 4).unwrap()
+    );
+
+    // Act: the real worker reads remote inputs and uploads the actual merge
+    // before publication may replace the complete input set.
+    el.launch_compaction(plan)?;
+    el.state.set_compaction_enabled(false);
+    let completion = worker.recv_timeout(TEST_WAIT).expect("real remote merge");
+    let RuntimeMsg::CompactionComplete {
+        succeeded: true,
+        ref output_ssts,
+        ..
+    } = completion
+    else {
+        panic!("remote merge failed: {completion:?}");
+    };
+    let outputs = output_ssts.clone();
+    metadata.backend.armed.store(true, Ordering::Release);
+    el.handle_runtime_msg(completion, &crossbeam::channel::never());
+    metadata
+        .reached
+        .recv_timeout(TEST_WAIT)
+        .expect("held merge publication");
+    let committed_before = read_committed_manifest(&metadata)?;
+    let retained_inputs = files.iter().all(|input| {
+        committed_before
+            .files
+            .iter()
+            .any(|file| file.same_identity(input))
+            && remote_sst_path_for_test(&el, &input.name).exists()
+    });
+    let no_partial_outputs = committed_before
+        .files
+        .iter()
+        .all(|file| !outputs.contains(&file.name));
+    metadata.release.release();
+    settle_owned_work(&mut el, &worker);
+
+    // Assert: the full merge replaces source and targets together. Cold
+    // recovery sees the latest values and no values masked by range deletion.
+    assert!(retained_inputs);
+    assert!(no_partial_outputs);
+    assert_eq!(outputs.len(), 1);
+    assert!(el
+        .state
+        .manifest
+        .files
+        .iter()
+        .all(|file| !files.iter().any(|old| file.same_identity(old))));
+    let recovered = recover_remote_history(el, &metadata, &outputs, &source, &[], 2)?;
+    let visible = recovered
+        .versions
+        .iter()
+        .map(|row| (row.key.as_slice(), row.value.as_deref()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        visible,
+        vec![
+            (b"a0".as_slice(), Some(b"left".as_slice())),
+            (b"b0", Some(b"live")),
+            (b"f9", Some(b"right"))
+        ]
+    );
+    assert_eq!(recovered.ranges, [] as [RangeTombstone; 0]);
     Ok(())
 }
