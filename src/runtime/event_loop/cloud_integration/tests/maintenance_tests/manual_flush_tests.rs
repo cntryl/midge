@@ -6,6 +6,7 @@ mod automatic_flush_tests;
 mod automatic_retry_tests;
 mod compaction_budget_tests;
 mod controlled_storage;
+mod metadata_overlap_tests;
 mod paused_compactor;
 mod publication_orders;
 mod retained_work_tests;

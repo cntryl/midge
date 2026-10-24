@@ -353,3 +353,79 @@ fn should_reject_owned_capture_when_successor_takes_writer_epoch() {
         CloudMetadataHead::Uncommitted
     );
 }
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_capture_exact_checkpoint_cut_when_snapshot_installation_is_between_rename_and_truncate() {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange: the production checkpoint owns the writer lock after its new
+    // snapshot is durable but before its covered journal prefix is removed.
+    let fixture = Arc::new(Fixture::new(CloudStorage::with_mock()));
+    let store = Arc::new(crate::metadata::store::ManifestStore::new(Arc::clone(&fixture.fs)));
+    let edit = crate::metadata::ManifestEdit::BumpNextSstSeq {
+        cf_id: 0,
+        next_seq: 10,
+    };
+    let id = store.append(&edit).unwrap();
+    let mut checkpoint = Manifest::default();
+    checkpoint.apply_edit(&edit).unwrap();
+    checkpoint.note_applied_journal_edit(id);
+    let (entered, arrived) = crossbeam::channel::bounded(1);
+    let (release, resumed) = crossbeam::channel::bounded(1);
+    fail::cfg_callback(
+        "midge::manifest::after_snapshot_rename_before_journal_truncate",
+        move || {
+            entered.send(()).unwrap();
+            resumed.recv().unwrap();
+        },
+    )
+    .unwrap();
+    let writer = Arc::clone(&store);
+    let install = std::thread::spawn(move || {
+        writer.save_captured_snapshot_for(
+            crate::metadata::accounting::Origin::CompactionBeforeGc,
+            &checkpoint,
+        )
+    });
+    arrived.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    // Act: capture must wait for the complete writer cut, rather than select
+    // its files independently while checkpoint truncation changes them.
+    let blocked = fixture.lock.capture_control_cut(
+        &fixture.fs,
+        1,
+        &OperationDeadline::from_budget(Duration::from_millis(20)),
+    );
+    release.send(()).unwrap();
+    install.join().unwrap().unwrap();
+    fail::remove("midge::manifest::after_snapshot_rename_before_journal_truncate");
+    let cut = fixture.cut();
+    store
+        .append(&crate::metadata::ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 20,
+        })
+        .unwrap();
+    fixture.mirror(&cut).unwrap();
+    let (generation, bodies) = fixture.selected_bodies();
+    let selected = decode_generation_manifest(
+        &generation,
+        &bodies,
+        &OperationDeadline::from_budget(Duration::from_secs(1)),
+    )
+    .unwrap();
+
+    // Assert: the admitted immutable cut remains exactly the checkpoint even
+    // after another live journal edit; recovery never invents a mixed image.
+    assert!(matches!(blocked, Err(MidgeError::Timeout(_))));
+    assert_eq!(selected.next_sst_seqs[&0], 10);
+    assert_eq!(selected.edit_checkpoint_id, id);
+    let current = ManifestPersistence::load_with_fs_and_policy(
+        &fixture.fs,
+        crate::config::RecoveryPolicy::Strict,
+    )
+    .unwrap();
+    assert_eq!(current.next_sst_seqs[&0], 20);
+    scenario.teardown();
+}
