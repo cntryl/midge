@@ -50,6 +50,98 @@ fn should_recover_engine_from_sqrzl_azure_after_local_cache_loss() {
 }
 
 #[test]
+fn should_replay_published_azure_wal_after_complete_local_cache_loss() {
+    use cntryl_midge::__internal::wal::catalog::{CatalogEntry, WalPublicationCatalog};
+    use cntryl_midge::__internal::wal::segment::SegmentBuilder;
+    use cntryl_midge::__internal::wal::{WalOpKind, WalRecord};
+    use cntryl_midge::CloudObjectLayout;
+
+    // Arrange: initialize real provider metadata and an SST, then use the
+    // existing native segment fixture to publish a WAL-only recovery record.
+    require_sqrzl("azure-wal-recovery");
+    let container = "midge-sqrzl-engine-azure-wal";
+    let provider = CloudProviderConfig::sqrzl_azure(container);
+    ensure_sqrzl_namespace(&provider).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let prefix = format!("engine/azure-wal/{}/", uuid::Uuid::new_v4());
+    let options = || real_cloud_engine_options(cache.clone(), provider.clone(), prefix.clone());
+    let mut engine = Engine::open(options()).unwrap();
+    let cf = default_cf(&engine);
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"sst-key".to_vec(), b"sst-value".to_vec(), None)
+        .unwrap();
+    tx.commit(WriteOptions::cloud_strict()).unwrap();
+    engine.flush_cf(&cf).unwrap();
+    let metrics = engine.metrics().get_runtime_metrics().unwrap();
+    let sequence = metrics.current_sequence + 1;
+    let next_segment = metrics.wal_current_segment_id + 1;
+    engine.shutdown(Duration::from_secs(10)).unwrap();
+    drop(engine);
+    let request = |method, key: &str, body: &[u8]| {
+        signed_azure_request(
+            method,
+            &format!("/admin/{container}/{prefix}{key}"),
+            "",
+            body,
+            vec![("x-ms-blob-type", "BlockBlob")],
+        )
+        .unwrap()
+    };
+    let mut catalog = WalPublicationCatalog::decode(&request(
+        "GET",
+        CloudObjectLayout::WAL_CATALOG_OBJECT_KEY,
+        &[],
+    ))
+    .unwrap();
+    let epoch = catalog.fencing_epoch();
+    let sequence = sequence.max(catalog.head().last_seq + 1);
+    let (wal, _) = SegmentBuilder::new(
+        catalog.next_segment_id().max(next_segment),
+        epoch,
+        catalog.head(),
+    )
+    .record(&WalRecord::new(
+        WalOpKind::Put,
+        b"wal-key".as_slice().into(),
+        Some(b"wal-value".as_slice().into()),
+        sequence,
+    ))
+    .seal();
+    let entry = CatalogEntry::from_sealed_bytes(&wal).unwrap();
+    request("PUT", &entry.object_key(), &wal);
+    assert!(catalog.append(epoch, &[entry]).unwrap());
+    let bytes = catalog.encode().unwrap();
+    request("PUT", CloudObjectLayout::WAL_CATALOG_OBJECT_KEY, &bytes);
+    request(
+        "PUT",
+        CloudObjectLayout::WAL_CATALOG_MIRROR_OBJECT_KEY,
+        &bytes,
+    );
+
+    // Act: neither the SST cache nor a local WAL can supply the values.
+    std::fs::remove_dir_all(&cache).unwrap();
+    let mut reopened = Engine::open(options()).unwrap();
+    let read = reopened
+        .begin_tx(default_cf(&reopened).id(), TransactionMode::ReadOnly)
+        .unwrap();
+
+    // Assert: remote SST recovery and native published-WAL replay both ran.
+    assert_eq!(
+        read.get(b"sst-key").unwrap().as_deref(),
+        Some(b"sst-value".as_slice())
+    );
+    assert_eq!(
+        read.get(b"wal-key").unwrap().as_deref(),
+        Some(b"wal-value".as_slice())
+    );
+    drop(read);
+    reopened.shutdown(Duration::from_secs(10)).unwrap();
+}
+
+#[test]
 fn should_recover_engine_from_sqrzl_gcs_json_after_local_cache_loss() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_gcs_json("midge-sqrzl-engine-gcs-json");

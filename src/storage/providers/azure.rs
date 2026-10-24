@@ -47,7 +47,7 @@ const ENCODE_SET: &AsciiSet = &CONTROLS
 const AZURE_PUBLIC_AUTHORITY: &str = "https://login.microsoftonline.com";
 const AZURE_GOVERNMENT_AUTHORITY: &str = "https://login.microsoftonline.us";
 const AZURE_CHINA_AUTHORITY: &str = "https://login.chinacloudapi.cn";
-const AZURE_STORAGE_SERVICE_VERSION: &str = "2025-01-05";
+const AZURE_STORAGE_SERVICE_VERSION: &str = "2026-10-06";
 
 // ---------------------------------------------------------------------------
 // Credentials
@@ -759,7 +759,7 @@ impl AzureBackend {
             account_name,
             container,
             endpoint,
-            sas_token,
+            sas_token: sas_token.map(|token| pinned_sas_protocol(&token)),
             executor,
         }
     }
@@ -816,6 +816,26 @@ impl AzureBackend {
             None => base,
         }
     }
+}
+
+/// SAS `sv` authenticates the unchanged signed token; the unsigned
+/// `api-version` selects operation behavior independently of that signature.
+fn pinned_sas_protocol(token: &str) -> String {
+    let mut query = token
+        .split('&')
+        .filter(|parameter| {
+            !url::form_urlencoded::parse(parameter.as_bytes())
+                .next()
+                .is_some_and(|(name, _)| name.eq_ignore_ascii_case("api-version"))
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    if !query.is_empty() {
+        query.push('&');
+    }
+    query.push_str("api-version=");
+    query.push_str(AZURE_STORAGE_SERVICE_VERSION);
+    query
 }
 
 struct AzureListContext {
@@ -3132,7 +3152,10 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(request.target, "/container/blob?sv=2024-11-04&sig=test");
+        assert_eq!(
+            request.target,
+            "/container/blob?sv=2024-11-04&sig=test&api-version=2026-10-06"
+        );
     }
 
     #[test]
@@ -3308,7 +3331,7 @@ mod tests {
                 "x-ms-date".to_string(),
                 "Sun, 10 Aug 2026 12:00:00 GMT".to_string(),
             ),
-            ("x-ms-version".to_string(), "2025-01-05".to_string()),
+            ("x-ms-version".to_string(), "2026-10-06".to_string()),
         ];
         let url = url::Url::parse("http://127.0.0.1:10000/devstoreaccount1/container/blob")
             .expect("emulator URL");
@@ -3318,9 +3341,9 @@ mod tests {
 
         // Assert
         assert!(string_to_sign.contains(
-            "x-ms-version:2025-01-05\n/devstoreaccount1/devstoreaccount1/container/blob"
+            "x-ms-version:2026-10-06\n/devstoreaccount1/devstoreaccount1/container/blob"
         ));
-        assert!(!string_to_sign.contains("x-ms-version:2025-01-05\n\n/"));
+        assert!(!string_to_sign.contains("x-ms-version:2026-10-06\n\n/"));
     }
 
     #[test]
@@ -3785,7 +3808,147 @@ mod tests {
             .filter(|(name, _)| name.eq_ignore_ascii_case("x-ms-version"))
             .map(|(_, value)| value.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(versions, vec!["2025-01-05"]);
+        assert_eq!(versions, vec!["2026-10-06"]);
+    }
+
+    #[test]
+    fn should_pin_service_version_when_signing_conditional_writes_with_bearer_credentials() {
+        // Arrange: cached test tokens exercise both production signers without
+        // requiring an identity endpoint or deployment credentials.
+        let cached = || {
+            Arc::new(Mutex::new(Some(CachedToken {
+                access_token: "test-token".into(),
+                expires_at: 4_102_444_800,
+            })))
+        };
+        let signers: [Box<dyn CloudSigner>; 2] = [
+            Box::new(ManagedIdentitySigner {
+                client_id: None,
+                token_cache: cached(),
+                imds_endpoint: "http://127.0.0.1:9".into(),
+                endpoint_kind: ManagedIdentityEndpointKind::VmImds,
+            }),
+            Box::new(OAuthTokenSigner {
+                provider: AzureOAuthProvider::ClientSecret {
+                    tenant_id: "test-tenant".into(),
+                    client_id: "test-client".into(),
+                    client_secret: "test-secret".into(),
+                },
+                default_authority: AZURE_PUBLIC_AUTHORITY,
+                token_cache: cached(),
+            }),
+        ];
+        for signer in signers {
+            let mut request = CloudRequest::new(
+                Method::PUT,
+                "https://account.blob.core.windows.net/container/blob".into(),
+            )
+            .with_body(b"conditional value".to_vec())
+            .with_header("If-Match", "\"current-etag\"");
+
+            // Act
+            signer.sign(&mut request).unwrap();
+
+            // Assert: signing preserves the conditional mutation and body.
+            let header = |name: &str| {
+                request
+                    .headers
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                    .map(|(_, value)| value.as_str())
+            };
+            assert_eq!(header("x-ms-version"), Some("2026-10-06"));
+            assert_eq!(header("authorization"), Some("Bearer test-token"));
+            assert_eq!(header("if-match"), Some("\"current-etag\""));
+            assert_eq!(
+                request.body.as_deref(),
+                Some(b"conditional value".as_slice())
+            );
+        }
+    }
+
+    #[test]
+    fn should_pin_sas_protocol_version_while_preserving_signed_authorization() {
+        for operation in ["GET", "PUT", "DELETE", "HEAD", "LIST"] {
+            // Arrange: the signed version and encoded signature must survive;
+            // an older unsigned protocol override must be replaced exactly once.
+            let body = if operation == "LIST" {
+                b"<EnumerationResults><Blobs></Blobs></EnumerationResults>".to_vec()
+            } else {
+                Vec::new()
+            };
+            let status = match operation {
+                "PUT" => 201,
+                "DELETE" => 202,
+                _ => 200,
+            };
+            let server = spawn_recording_http_server_with_status(
+                status,
+                vec![("ETag".into(), "\"current-etag\"".into())],
+                body,
+            );
+            let provider = AzureProvider::with_sas_token_and_endpoint(
+                "account".into(),
+                "container".into(),
+                "sv=2024-11-04&sp=rcwdl&sig=a%2Bb%2Fc%3D&api-version=2025-01-05&API-Version=2024-11-04&api%2Dversion=2021-06-08",
+                Some(server.endpoint.clone()),
+            )
+            .unwrap();
+            let (sender, receiver) = std::sync::mpsc::channel();
+
+            // Act: actual provider requests traverse the unsigned SAS executor.
+            match operation {
+                "GET" => provider.backend().submit_get("blob", sender),
+                "PUT" => provider.backend().submit_put(
+                    "blob",
+                    b"value".to_vec(),
+                    vec![("If-None-Match".into(), "*".into())],
+                    sender,
+                ),
+                "DELETE" => provider.backend().submit_delete(
+                    "blob",
+                    vec![("If-Match".into(), "\"current-etag\"".into())],
+                    sender,
+                ),
+                "HEAD" => provider.backend().submit_head("blob", sender),
+                "LIST" => provider.backend().submit_list("prefix/", sender),
+                _ => unreachable!(),
+            }
+            let event = receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            let request = server.finish();
+
+            // Assert
+            assert!(
+                matches!(
+                    event,
+                    CloudEvent::Get { result: Ok(_), .. }
+                        | CloudEvent::Put { result: Ok(()), .. }
+                        | CloudEvent::Delete { result: Ok(()), .. }
+                        | CloudEvent::Head { result: Ok(_), .. }
+                        | CloudEvent::List { result: Ok(_), .. }
+                ),
+                "{operation}: {event:?}"
+            );
+            let url = url::Url::parse(&format!("http://localhost{}", request.target)).unwrap();
+            let versions = url
+                .query_pairs()
+                .filter(|(key, _)| key.eq_ignore_ascii_case("api-version"))
+                .map(|(_, value)| value.into_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(versions, ["2026-10-06"], "{operation}");
+            assert!(request
+                .target
+                .contains("sv=2024-11-04&sp=rcwdl&sig=a%2Bb%2Fc%3D"));
+            assert_eq!(request.header("authorization"), None);
+            if operation == "PUT" {
+                assert_eq!(request.header("if-none-match"), Some("*"));
+            }
+            if operation == "DELETE" {
+                assert_eq!(request.header("if-match"), Some("\"current-etag\""));
+            }
+        }
     }
 
     // =========== Helper ===========

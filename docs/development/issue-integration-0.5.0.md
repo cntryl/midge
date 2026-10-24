@@ -51,6 +51,11 @@ The authoritative requirements are the issue bodies and
 [the WAL design](wal-pipeline-873.md). A finding refuted by a production-path
 regression is triaged explicitly rather than implemented to match its text.
 
+The user added an Azure protocol upgrade on 2026-10-24. It is tracked as #981
+and stays in this branch and the eventual single batch PR.
+Its broader qualification run also exposed the native S3 preparation-stage
+test gap tracked by #982; that issue remains open for a separate local commit.
+
 ## Progress
 
 ### #974: implemented locally
@@ -165,5 +170,62 @@ also passed on that final source. No timeout or assertion was relaxed.
 
 Next: #977's commit-outcome classification, followed by the evidence and
 pipeline prerequisites in the WAL design. The #904 sign-off gate remains.
+
+### #981: implemented locally; Azure Sqrzl checks complete
+
+The Azure signers previously pinned `2025-01-05`; SAS requests inherited their
+operation version from the token. Microsoft lists `2026-10-06` as the current
+GA SDK default with limited EUAP exceptions in its
+[versioning documentation](https://learn.microsoft.com/en-us/rest/api/storageservices/versioning-for-the-azure-storage-services).
+The new pin is shared by Shared Key, OAuth and managed identity signers. SAS
+requests select the operation protocol through `api-version`, preserving the
+raw signed fields while replacing old protocol overrides. Qualification setup
+requests use the new pin too.
+
+Red evidence: both new credential-path tests failed before the change. Bearer
+signing returned `2025-01-05`, and an actual SAS GET retained an older
+`api-version`. The SAS regression exercises GET, PUT, DELETE, HEAD and LIST,
+including encoded signatures and stale or repeated protocol parameters.
+
+Qualification uses the existing Cargo/Sqrzl facilities and existing compose
+configuration. The running Sqrzl image is
+`ghcr.io/sqrzl/sqrzl-emulator@sha256:a10c5413dba980b852cac5e718c7a92a6642c6ec60ebb6a8222f2dca7d69f7c4`.
+No workflow or release configuration is changed.
+
+Validation on the final Azure implementation:
+
+- `cargo test --locked --lib --features sqrzl-tests,failpoints azure --
+  --test-threads=1`: 81 passed, including all Azure provider/signing tests,
+  the shared-key rejection case and the Azure conditional-write contract.
+  The contract checks matching and stale ETags, same-length replacements,
+  conditional deletes, metadata-bearing reads and missing objects.
+- The Azure engine cache-loss test passed separately in 2.05 seconds.
+- The added published-WAL recovery test passed in 3.70 seconds. It uses the
+  existing native segment fixture after a quiescent owner, then deletes the
+  whole local cache and verifies both remote SST and WAL-only values through
+  a fresh engine. This is not a claim of a real Azure crash campaign.
+- The 22-case provider-engine run before adding the WAL test passed 21 tests
+  and failed the native S3
+  late-runtime-preparation deadline case (`trace.prepared`: 0, expected 1),
+  in 569.81 seconds. The focused exact case then passed in 7.48 seconds.
+  The missed qualification stage is tracked by
+  [#982](https://github.com/cntryl/midge/issues/982); the full gate is not green.
+  Optional live S3 and child-driver entries in this suite do not establish
+  separate live-provider evidence.
+- All-target/all-feature pedantic Clippy, rustfmt, cntryl-tools test and
+  documentation validation passed. No test was ignored or relaxed.
+
+The Cargo qualification commands above use `SQRZL_SECRET_ACCESS_KEY` from the
+local emulator configuration. The Azure engine commands are
+`cargo test --locked --features sqrzl-tests,failpoints --test
+cloud_provider_engine_qualification <test-name> -- --exact --nocapture`, with
+`should_recover_engine_from_sqrzl_azure_after_local_cache_loss` and
+`should_replay_published_azure_wal_after_complete_local_cache_loss` respectively.
+
+The user explicitly selected Sqrzl-only qualification. Live Azure account
+access is outside this task's scope and is not a pending acceptance gate.
+Local authentication fixtures and emulator recovery establish the tested
+contracts; they do not claim target-region acceptance or live identity
+permissions. The separate broad-suite failure remains tracked by #982.
 
 No issue is claimed merged or production-qualified by local commits.
