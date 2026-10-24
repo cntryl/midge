@@ -243,9 +243,7 @@ impl ManifestStore {
         manifest: &Manifest,
     ) -> MidgeResult<WrittenCheckpoint> {
         manifest.validate_persisted()?;
-        let bytes = serde_json::to_vec(manifest).map_err(|error| {
-            crate::common::MidgeError::Internal(format!("encode captured manifest: {error}"))
-        })?;
+        let bytes = super::codec::encode(super::codec::MANIFEST, manifest)?;
         crate::failpoints::fail_point!("midge::manifest::after_captured_checkpoint_encoded");
         let operation = self
             .accounting

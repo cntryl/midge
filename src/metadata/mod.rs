@@ -6,6 +6,7 @@ pub(crate) mod accounted_fs;
 pub(crate) mod accounting;
 #[cfg(feature = "internal-testing")]
 pub(crate) mod checkpoint_policy_probe;
+pub(crate) mod codec;
 pub mod files;
 pub mod format;
 pub mod frontiers;

@@ -4,10 +4,12 @@ This document defines the rules Midge will use to freeze and verify on-disk comp
 
 ## Shared specification target
 
-Midge targets the normative FORMAT 8 profile in
+The FORMAT 8 baseline is the normative profile in
 [`cntryl/lsm-spec`](https://github.com/cntryl/lsm-spec) at commit
 `111bccdd5fa6c9ea2d13d1131b17807016c770c` (`1.0.0-dev`). Keep this reference
 aligned with the commit recorded in Pants's Midge test-parity inventory.
+The local 0.5.0 candidate extends that baseline with FORMAT 9 below; shared
+specification parity and release qualification for that extension are pending.
 
 ## Covered Formats
 
@@ -22,7 +24,7 @@ The compatibility policy applies to:
 
 ## Current Local Format
 
-Database `FORMAT` version 8 is current. Version 5 named the WAL's history
+Database `FORMAT` version 9 is the current local candidate. Version 5 named the WAL's history
 with a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records
 which `wal/{id:020}.wal` files are history, their order, the next segment id and
 the retirement point. Segments carry their final name from creation; there is
@@ -82,12 +84,28 @@ object identity. Shared metadata publication order is a separate checked ordinal
 from the manifest journal horizon. New generations preserve every old frontier,
 never regress live families, and never revive dropped families.
 
-Version 8 is an intentional pre-1.0 break with no in-place upgrade and no
-migration: current binaries reject database FORMAT versions 1 through 7 with
+Version 9 (#953) stores manifest snapshots and manifest journal payloads in a
+shared binary codec. MessagePack maps retain explicit field names and encode
+integers and key bytes compactly. Each frame records its kind and length and
+has a CRC32C over the header and exact payload. The same decoder reads local
+checkpoints and cloud metadata bodies. Decoding checks the complete extent,
+checksum and nesting bound before applying semantic manifest validation.
+
+The intent file is an append-only sequence of binary suffix edits. Each edit
+names its predecessor checksum and next sequence, retains a prefix of the prior
+intent set and records the replacement suffix. A torn final append retains the
+prior complete intent set; an invalid complete frame or predecessor chain fails
+recovery. A subsequent append first durably repairs any torn tail. At 1 MiB or
+1,024 records the log atomically checkpoints its current intent set. Existing
+metadata filenames retain their historical `.json` suffix, but their contents
+are binary and there is no JSON fallback under FORMAT 9.
+
+Version 9 is an intentional pre-1.0 break with no in-place upgrade and no
+migration: current binaries reject database FORMAT versions 1 through 8 with
 `CompatibilityError`, and leave the marker untouched. Cloud databases are
 rejected the same way, because their hydrated metadata carries the marker,
 and a publication catalog of any other format version fails with
-`CompatibilityError` and neither catalog copy changes. FORMAT 8 requires SST
+`CompatibilityError` and neither catalog copy changes. FORMAT 9 requires SST
 V4; current binaries also reject SST versions 1 through 3 and unknown future
 versions. There is no legacy decoder or best-effort fallback in the V4
 reader.

@@ -346,6 +346,7 @@ fn should_release_wal_disk_budget_only_after_local_segment_removal(
 
 fn assertion_only_cloud_request(request_id: u64, start_sequence: u64) -> ApplyTransactionRequest {
     ApplyTransactionRequest {
+        validation: None,
         request_id,
         ops: Vec::new(),
         assertions: vec![KeyAssertion {
@@ -2608,7 +2609,8 @@ fn should_not_overwrite_remote_manifest_when_writer_lease_moved_before_newer_pub
     put_cloud_metadata_for_test(
         &metadata_storage,
         "manifest.snapshot.json",
-        serde_json::to_vec_pretty(&remote_manifest).expect("serialize remote manifest"),
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &remote_manifest)
+            .expect("serialize remote manifest"),
     );
     el.actors.cloud_coordinator.cloud_metadata_storage = Some(Arc::clone(&metadata_storage));
     el.authority.fencing.writer_epoch = 1;
@@ -2625,10 +2627,10 @@ fn should_not_overwrite_remote_manifest_when_writer_lease_moved_before_newer_pub
         matches!(error, crate::common::MidgeError::Fenced(_)),
         "expected Fenced, got {error:?}"
     );
-    let retained: crate::metadata::Manifest = serde_json::from_slice(&get_cloud_metadata_for_test(
-        &metadata_storage,
-        "manifest.snapshot.json",
-    ))
+    let retained: crate::metadata::Manifest = crate::metadata::codec::decode(
+        crate::metadata::codec::MANIFEST,
+        &get_cloud_metadata_for_test(&metadata_storage, "manifest.snapshot.json"),
+    )
     .expect("parse retained remote manifest");
     assert_eq!(
         test_flush_frontier(&retained, 0),
@@ -2776,7 +2778,8 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
         head => panic!("expected baseline committed generation, got {head:?}"),
     };
     let advanced_bytes =
-        serde_json::to_vec_pretty(&advanced_manifest).expect("serialize advanced manifest");
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &advanced_manifest)
+            .expect("serialize advanced manifest");
     let advanced_object = advanced_generation
         .objects
         .iter_mut()
@@ -2822,7 +2825,8 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
         "unexpected metadata mirror race error: {error}"
     );
     assert!(metadata_backend.advanced.load(Ordering::SeqCst));
-    let retained: crate::metadata::Manifest = serde_json::from_slice(
+    let retained: crate::metadata::Manifest = crate::metadata::codec::decode(
+        crate::metadata::codec::MANIFEST,
         &get_committed_cloud_metadata_for_test(&metadata_storage, &lease, "manifest.snapshot.json"),
     )
     .expect("parse retained committed race manifest");
@@ -6678,6 +6682,7 @@ fn should_reject_later_write_when_cloud_seal_cannot_find_leader_record(
         &mut event_loop,
         &msg_rx,
         ApplyTransactionRequest {
+            validation: None,
             request_id: 91_001,
             ops: vec![crate::runtime::TransactionOp::Put {
                 cf_id: 0,
@@ -9464,5 +9469,118 @@ fn should_wait_for_recovered_tail_when_cloud_durability_targets_a_reserved_seque
         response.recv_timeout(Duration::from_secs(1)),
         Ok(RuntimeResponse::Ok { request_id: id }) if id == request_id
     ));
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+struct ReleasePublicationWork(crossbeam::channel::Sender<()>);
+
+#[cfg(feature = "failpoints")]
+impl Drop for ReleasePublicationWork {
+    fn drop(&mut self) {
+        let _ = self.0.try_send(());
+    }
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_keep_local_progress_and_fence_stale_completions_when_cloud_publication_is_held(
+) -> crate::common::MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    for lose_authority in [false, true] {
+        // Arrange
+        let mut el = create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
+        let sequence = append_cloud_async_put(&mut el)?;
+        let (segment_id, max_sequence) = el.seal_cloud_wal_without_enqueue_for_test()?;
+        copy_local_segment_to_remote_wal_for_test(&el, segment_id);
+        el.pipeline.inline_flush_worker = false;
+        let healthy = Arc::new(AtomicBool::new(true));
+        el.authority.fencing.lease_healthy = Some(Arc::clone(&healthy));
+        let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam::channel::bounded(1);
+        let release = ReleasePublicationWork(release_tx);
+        let held = AtomicBool::new(false);
+        let boundary = if lose_authority {
+            "midge::cloud::after_wal_publication_work"
+        } else {
+            "midge::cloud::before_wal_publication_work"
+        };
+        fail::cfg_callback(boundary, move || {
+            if !held.swap(true, Ordering::AcqRel) {
+                entered_tx.send(()).expect("announce held worker");
+                release_rx.recv().expect("release held worker");
+            }
+        })
+        .expect("hold first publication operation");
+        let response = el
+            .routing
+            .router
+            .register(98_907, "best-effort while cloud work is held");
+        let (_sender, receiver) = crossbeam::channel::unbounded();
+
+        // Act: remote work is held while the same loop applies another unit.
+        el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+            segment_id,
+            max_sequence,
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker reached boundary");
+        WalCoordinator::apply_transaction(
+            &mut el,
+            &receiver,
+            ApplyTransactionRequest {
+                request_id: 98_907,
+                validation: None,
+                ops: vec![crate::runtime::TransactionOp::Put {
+                    cf_id: 0,
+                    key: Bytes::from_static(b"while-remote-held"),
+                    value: Bytes::from_static(b"visible"),
+                    ttl_seconds: None,
+                    insert_only: false,
+                }],
+                assertions: Vec::new(),
+                durability_policy: Some(DurabilityPolicy::BestEffort),
+                start_sequence: None,
+                conflict_policy: ConflictPolicy::LastWriteWins,
+            },
+            None,
+        );
+
+        // Assert: progress is observable before the remote operation is released.
+        assert!(matches!(
+            response.try_recv(),
+            Ok(RuntimeResponse::TransactionApplied { .. })
+        ));
+        let snapshot = el.create_read_snapshot(0).expect("default family snapshot");
+        assert_eq!(
+            snapshot.get(b"while-remote-held", el.state.applied_sequence)?,
+            Some(b"visible".to_vec())
+        );
+        if lose_authority {
+            healthy.store(false, Ordering::Release);
+        }
+        release.0.try_send(()).expect("release publication");
+        el.drain_cloud_publication_within(&crate::common::OperationDeadline::from_budget(
+            Duration::from_secs(5),
+        ))?;
+        fail::remove(boundary);
+        if lose_authority {
+            assert!(el.actors.wal_actor.is_fenced());
+            assert!(el.state.wal.frontiers.cloud_durable() < sequence);
+        } else {
+            assert!(el.state.wal.frontiers.cloud_durable() >= sequence);
+            let frontier = el.state.wal.frontiers.cloud_durable();
+            el.handle_storage_event(crate::storage::StorageEvent::CloudWalPublicationComplete {
+                operation_id: 1,
+                writer_epoch: el.state.writer_epoch,
+            });
+            assert_eq!(el.state.wal.frontiers.cloud_durable(), frontier);
+        }
+    }
+    scenario.teardown();
     Ok(())
 }

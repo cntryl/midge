@@ -230,7 +230,11 @@ fn should_refuse_flush_append_when_manifest_edit_ids_are_exhausted() {
             .path()
             .join(crate::metadata::files::MANIFEST_SNAPSHOT);
         let journal = directory.path().join(crate::metadata::files::JOURNAL);
-        std::fs::write(&snapshot, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        std::fs::write(
+            &snapshot,
+            crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &manifest).unwrap(),
+        )
+        .unwrap();
         std::fs::write(&journal, []).unwrap();
         let store = ManifestStore::new(fs);
         if prime_cache {
@@ -272,7 +276,11 @@ fn should_checkpoint_the_last_manifest_edit_without_reusing_its_id() {
         .path()
         .join(crate::metadata::files::MANIFEST_SNAPSHOT);
     let journal = directory.path().join(crate::metadata::files::JOURNAL);
-    std::fs::write(&snapshot, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    std::fs::write(
+        &snapshot,
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &manifest).unwrap(),
+    )
+    .unwrap();
     let store = ManifestStore::new(fs.clone());
     let edit = flush_edit(7);
 

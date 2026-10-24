@@ -393,3 +393,22 @@ qualification and latency/request targets are pending.
 #915's streaming multipart stage, bounded part reservations and removal of
 whole-file admission remain uncoded. #907 off-loop catalog publication and
 #916 parallel upload scheduling are separate following slices.
+
+### #953: FORMAT 9 codec and append-only intents implemented candidate
+
+Local and cloud metadata bodies share one MessagePack map frame with CRC32C.
+The decoder uses borrowed input plus a structural extent/depth preflight to
+reject oversized announced bodies/collections before allocation. Snapshots and
+journal edits use the codec; intent changes append predecessor-chained suffix
+edits and compact on bounded byte/edit thresholds. Database FORMAT 8 is
+explicitly rejected by the FORMAT 9 candidate, with no JSON fallback.
+
+Active property/corruption, intent replay/torn-tail and 20,000-file footprint
+regressions are included, and the existing manifest fuzz target reaches the
+new snapshot decoder. Direct JSON unit fixtures were updated. Library compile
+checks pass through this slice; execution/fuzzing and recording actual byte
+counts remain pending. The populated FORMAT 9 and future FORMAT 10 golden
+fixtures plus external compatibility/CLI assumptions still need updating
+before the compatibility gate can pass. Existing FORMAT 8 bytes stay as an
+explicit rejected fixture. #914's new committed cloud chain is not part of
+this codec commit.

@@ -1,7 +1,6 @@
 use crate::common::MidgeResult;
 use crate::io::FsError;
 use crate::metadata::manifest::FileMeta;
-use crc32fast::Hasher as Crc32;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::path::Path;
@@ -52,11 +51,11 @@ pub(crate) fn with_manifest_writer_lock_within<T>(
 }
 
 fn journal_serialize<T: ?Sized + serde::Serialize>(value: &T) -> MidgeResult<Vec<u8>> {
-    serde_json::to_vec(value).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))
+    super::codec::encode(super::codec::JOURNAL, value)
 }
 
 fn journal_deserialize<T: serde::de::DeserializeOwned>(payload: &[u8]) -> MidgeResult<T> {
-    serde_json::from_slice(payload).map_err(|e| crate::common::MidgeError::Internal(e.to_string()))
+    super::codec::decode(super::codec::JOURNAL, payload)
 }
 
 fn millis_since_epoch() -> u64 {
@@ -201,9 +200,7 @@ fn encode_journal_record<T: ?Sized + serde::Serialize>(
     value: &T,
 ) -> MidgeResult<Vec<u8>> {
     let payload = journal_serialize(value)?;
-    let mut hasher = Crc32::new();
-    hasher.update(&payload);
-    let crc = hasher.finalize();
+    let crc = crc32c::crc32c(&payload);
 
     let mut record = Vec::with_capacity(1 + 4 + payload.len() + 4);
     record.push(record_type);
@@ -241,8 +238,7 @@ pub(crate) fn checkpoint_edit_id_with_fs(
         .map_err(FsError::into_midge)?;
     let len = file.len().map_err(FsError::into_midge)?;
     let bytes = file.read_at(0, len).map_err(FsError::into_midge)?;
-    let manifest: crate::metadata::Manifest = serde_json::from_slice(&bytes)
-        .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))?;
+    let manifest: crate::metadata::Manifest = super::codec::decode(super::codec::MANIFEST, &bytes)?;
     Ok(manifest.edit_checkpoint_id)
 }
 

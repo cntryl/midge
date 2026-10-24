@@ -135,15 +135,14 @@ fn encode_test_record(
         edit: edit.clone(),
     };
     let payload =
-        serde_json::to_vec(&envelope(payload_edit)).expect("serialize test journal payload");
-    let crc_payload = serde_json::to_vec(&envelope(crc_edit)).expect("serialize test CRC payload");
+        journal_serialize(&envelope(payload_edit)).expect("serialize test journal payload");
+    let crc_payload = journal_serialize(&envelope(crc_edit)).expect("serialize test CRC payload");
     assert_eq!(
         payload.len(),
         crc_payload.len(),
         "test payloads must have equal lengths"
     );
-    let mut hasher = Crc32::new();
-    hasher.update(&crc_payload);
+    let crc = crc32c::crc32c(&crc_payload);
 
     let mut record = Vec::with_capacity(1 + 4 + payload.len() + 4);
     record.push(payload_edit.record_type());
@@ -153,7 +152,7 @@ fn encode_test_record(
             .to_le_bytes(),
     );
     record.extend_from_slice(&payload);
-    record.extend_from_slice(&hasher.finalize().to_le_bytes());
+    record.extend_from_slice(&crc.to_le_bytes());
     record
 }
 
@@ -179,7 +178,11 @@ fn should_refuse_journal_append_when_manifest_edit_ids_are_exhausted() {
         .path()
         .join(crate::metadata::files::MANIFEST_SNAPSHOT);
     let journal = directory.path().join(JOURNAL_FILE);
-    std::fs::write(&snapshot, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    std::fs::write(
+        &snapshot,
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &manifest).unwrap(),
+    )
+    .unwrap();
     std::fs::write(&journal, []).unwrap();
     let before_snapshot = std::fs::read(&snapshot).unwrap();
     let before_journal = std::fs::read(&journal).unwrap();
@@ -365,14 +368,11 @@ fn should_stop_replay_when_partial_tail() {
     let fake = ManifestEdit::RemoveSst {
         name: "missing.sst".to_string(),
     };
-    let payload = serde_json::to_vec(&JournalEditEnvelope {
+    let payload = journal_serialize(&JournalEditEnvelope {
         edit_id: 2,
         edit: fake.clone(),
     })
     .unwrap();
-    let mut hasher = Crc32::new();
-    hasher.update(&payload);
-    let _crc = hasher.finalize();
 
     let mut buf = Vec::new();
     buf.push(fake.record_type());

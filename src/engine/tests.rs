@@ -1013,7 +1013,8 @@ fn publish_test_metadata_generation(
         lease,
         manifest.edit_checkpoint_id,
         format_marker,
-        serde_json::to_vec_pretty(manifest).expect("serialize test manifest"),
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, manifest)
+            .expect("serialize test manifest"),
     )
 }
 
@@ -1105,7 +1106,8 @@ fn should_not_overwrite_newer_remote_manifest_metadata_during_engine_mirror() {
             || error.to_string().contains("stale"),
         "unexpected stale engine metadata mirror error: {error}"
     );
-    let retained: crate::metadata::Manifest = serde_json::from_slice(
+    let retained: crate::metadata::Manifest = crate::metadata::codec::decode(
+        crate::metadata::codec::MANIFEST,
         &Engine::blocking_cloud_get(&cloud, &generation.objects[1].object_key)
             .expect("download retained remote manifest"),
     )
@@ -1301,7 +1303,8 @@ fn should_ignore_stale_manifest_json_during_strict_cloud_recovery() {
     Engine::blocking_cloud_put(
         &cloud,
         "metadata/manifest.json",
-        serde_json::to_vec_pretty(&current_manifest).expect("serialize current manifest"),
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &current_manifest)
+            .expect("serialize current manifest"),
     )
     .expect("upload newer manifest");
 
@@ -1334,7 +1337,8 @@ fn should_ignore_stale_manifest_json_during_salvage_cloud_recovery() {
     Engine::blocking_cloud_put(
         &cloud,
         "metadata/manifest.json",
-        serde_json::to_vec_pretty(&current_manifest).expect("serialize current manifest"),
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &current_manifest)
+            .expect("serialize current manifest"),
     )
     .expect("upload newer manifest");
 
@@ -1422,7 +1426,8 @@ fn should_reject_missing_or_corrupt_committed_cloud_metadata_in_every_recovery_p
             Engine::blocking_cloud_put(
                 &cloud,
                 "metadata/manifest.snapshot.json",
-                serde_json::to_vec(&manifest).expect("encode mutable mirror"),
+                crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &manifest)
+                    .expect("encode mutable mirror"),
             )
             .expect("upload mutable mirror");
             if missing {

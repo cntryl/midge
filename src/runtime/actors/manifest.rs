@@ -297,7 +297,8 @@ mod tests {
     fn read_snapshot(state: &crate::runtime::state::RuntimeState) -> crate::metadata::Manifest {
         let bytes = std::fs::read(state.db_path.join("manifest.snapshot.json"))
             .expect("snapshot should exist after persist");
-        serde_json::from_slice(&bytes).expect("snapshot should parse")
+        crate::metadata::codec::decode(crate::metadata::codec::MANIFEST, &bytes)
+            .expect("snapshot should parse")
     }
 
     #[derive(Clone, Default)]

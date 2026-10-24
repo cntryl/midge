@@ -1,6 +1,6 @@
 use super::{
-    journal_deserialize, Crc32, FsError, FsyncMarker, JournalEdit, JournalEditEnvelope,
-    ManifestEdit, MidgeResult, ADVANCE_FLUSH_FRONTIER_RECORD_TYPE, BATCH_RECORD_TYPE,
+    journal_deserialize, FsError, FsyncMarker, JournalEdit, JournalEditEnvelope, ManifestEdit,
+    MidgeResult, ADVANCE_FLUSH_FRONTIER_RECORD_TYPE, BATCH_RECORD_TYPE,
     DROP_COLUMN_FAMILY_AT_RECORD_TYPE, FSYNC_MARKER_TYPE, JOURNAL_FILE,
     RECLAIM_COLUMN_FAMILY_RECORD_TYPE,
 };
@@ -324,10 +324,10 @@ fn contains_verified_fsync_marker(bytes: &[u8]) -> bool {
             continue;
         };
         let payload = &bytes[payload_start..crc_start];
-        let mut hasher = Crc32::new();
-        hasher.update(payload);
         let expected = u32::from_le_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
-        if hasher.finalize() == expected && journal_deserialize::<FsyncMarker>(payload).is_ok() {
+        if crc32c::crc32c(payload) == expected
+            && journal_deserialize::<FsyncMarker>(payload).is_ok()
+        {
             return true;
         }
     }
@@ -345,9 +345,7 @@ fn validate_journal_record_type(record_type: u8, record_start: u64) -> MidgeResu
 }
 
 fn validate_journal_record_crc(record: &JournalRecord) -> MidgeResult<()> {
-    let mut hasher = Crc32::new();
-    hasher.update(&record.payload);
-    let calc = hasher.finalize();
+    let calc = crc32c::crc32c(&record.payload);
     if calc == record.got_crc {
         return Ok(());
     }

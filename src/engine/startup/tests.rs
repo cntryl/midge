@@ -748,11 +748,14 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
         fresh_cache.path(),
         crate::config::RecoveryPolicy::Strict,
     )?;
-    let restored: crate::metadata::Manifest = serde_json::from_slice(&std::fs::read(
-        fresh_cache
-            .path()
-            .join(crate::metadata::files::MANIFEST_SNAPSHOT),
-    )?)
+    let restored: crate::metadata::Manifest = crate::metadata::codec::decode(
+        crate::metadata::codec::MANIFEST,
+        &std::fs::read(
+            fresh_cache
+                .path()
+                .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+        )?,
+    )
     .expect("decode committed manifest snapshot");
     assert_eq!(
         restored.flush_frontiers().get(0).unwrap(),
