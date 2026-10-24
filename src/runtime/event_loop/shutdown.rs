@@ -393,6 +393,7 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<()> {
         loop {
             self.reap_cloud_wal_prune_worker();
+            self.reap_metadata_mirror();
             self.drain_flush_worker_results();
             self.retry_flush_mirrors_if_due();
             let pending = self
@@ -424,6 +425,14 @@ impl EventLoop {
                         ));
                     }
                 }
+                continue;
+            }
+
+            // First-use SST names can be waiting on an admitted immutable
+            // reservation cut while no flush task or long gate is owned.
+            // Its exact completion resumes the queued flush on the next turn.
+            if self.actors.cloud_coordinator.metadata_mirror.is_running() {
+                self.drain_metadata_mirror_within(deadline)?;
                 continue;
             }
 
