@@ -2,9 +2,9 @@
 
 This reference inventory covers all 65 IDs in the [invariant catalog](invariant-catalog.md), including the groups omitted from the earlier WAL preservation selection. It indexes production symbols, active Rust regressions, actual assertion or behavior-helper call markers, fixture assumptions and explicit gaps.
 
-The refresh uses committed prerequisite `2494eff5e9b2c727e4f9656e83a6e8f54e2d9888` plus the exact [source postimages](invariant-evidence-source-sha256.json) read while sibling implementation slices were being integrated. It is a construction and reference audit. This batch has not run the linked regressions or mutation experiments, and it carries no crash-campaign, benchmark, native-provider or release qualification claim.
+The current reference checkpoint is `fb06795f5224b3431b91c5ea3b37e547d2f663b0`, with exact [source postimages](invariant-evidence-source-sha256.json) captured while sibling implementation slices were being integrated. This is a construction and reference audit. This batch has not run the linked regressions or mutation experiments, and it carries no crash-campaign, benchmark, native-provider or release qualification claim. Further sibling source changes require the final anchor/postimage refresh recorded in the integration log.
 
-The [JSON inventory](invariant-evidence.json) retains historical hosted qualification objects unchanged and scoped to their recorded revisions. Those outcomes do not qualify the current branch. Unsupported references to removed test targets were removed instead of being presented as surviving evidence. PROG-1 and PROG-2 remain named assurance gaps.
+The [JSON inventory](invariant-evidence.json) retains historical hosted qualification objects unchanged and scoped to their recorded revisions. Those outcomes do not qualify the current branch. Unsupported references to removed targets were removed instead of being presented as surviving evidence. PROG-1/2 now have ordinary Cargo regressions driven by real existing recovery fixtures; native watchdog execution and mutation qualification remain separate.
 
 Local, memory and CloudSimulated fixtures remain distinct from Sqrzl or live providers. Cloud reads require current lease authority after #923; local retained reads and still-running runtime diagnostics have separate availability contracts. Concurrent captured memtable effects under #906 become visible only at the loop-owned ordered cut.
 
@@ -892,31 +892,34 @@ Catalog review: Reviewed resource envelopes and effect ownership: queued raw/enc
 
 ## PROG-1
 
-Production: [src/telemetry/recovery_progress.rs:30](../../src/telemetry/recovery_progress.rs#L30) `WorkProgress::completed`; [src/telemetry/recovery_progress.rs:58](../../src/telemetry/recovery_progress.rs#L58) `WorkProgress::finish`; [src/telemetry/recovery_progress.rs:99](../../src/telemetry/recovery_progress.rs#L99) `RecoveryReadObserver::remote_range_completed`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:473](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L473) `reconcile_manifest_ssts`.
+Production: [src/telemetry/recovery_progress.rs:33](../../src/telemetry/recovery_progress.rs#L33) `WorkProgress::completed`; [src/telemetry/recovery_progress.rs:61](../../src/telemetry/recovery_progress.rs#L61) `WorkProgress::finish`; [src/telemetry/recovery_progress.rs:102](../../src/telemetry/recovery_progress.rs#L102) `RecoveryReadObserver::remote_range_completed`; [src/runtime/cloud_startup/cloud_recovery/mod.rs:473](../../src/runtime/cloud_startup/cloud_recovery/mod.rs#L473) `reconcile_manifest_ssts`.
 
-No active regression target is recorded for this row.
+Active regression references (not executed by this refresh):
 
-Preconditions: Completed recovery work is reported only after successful bounded I/O or parsing; source markers remain available. The removed native watchdog target is not current evidence.
+- [src/telemetry/recovery_progress/tests.rs:65](../../src/telemetry/recovery_progress/tests.rs#L65) `should_report_completed_work_when_actual_remote_wal_planner_and_replay_recover_exact_rows`: Actual remote WAL planner/replay recovers every expected value and epoch with bounded range I/O, no staged WAL, and positive completed-work notifications. Scope: Active default Cargo unit regression using existing real recovery fixtures and the same recovery scope/event visitor as the benchmark listener; not executed in this implementation batch. Assertion/helper call markers: 85, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61.
+- [src/telemetry/recovery_progress/tests.rs:90](../../src/telemetry/recovery_progress/tests.rs#L90) `should_report_completed_work_when_actual_inventory_validates_authoritative_head_sizes`: Actual authoritative SST HEAD inventory retains the exact manifest and validates every recorded size before completed-work notifications are credited. Scope: Active default Cargo unit regression using existing real recovery fixtures and the same recovery scope/event visitor as the benchmark listener; not executed in this implementation batch. Assertion/helper call markers: 109, 110, 114, 118, 122, 123, 124, 125.
+- [src/telemetry/recovery_progress/tests.rs:130](../../src/telemetry/recovery_progress/tests.rs#L130) `should_credit_no_work_when_actual_first_recovery_io_remains_held_until_timeout`: Held real first WAL range and authoritative inventory HEAD operations produce errors, zero completed I/O and zero credited progress; independent fixture observations prove the request was reached. Scope: Active default Cargo unit regression using existing real recovery fixtures and the same recovery scope/event visitor as the benchmark listener; not executed in this implementation batch. Assertion/helper call markers: 155, 163, 164, 165, 166, 167.
+- [src/telemetry/recovery_progress/tests.rs:173](../../src/telemetry/recovery_progress/tests.rs#L173) `should_report_completed_work_when_actual_journal_replay_restores_exact_edit_frontiers`: Actual journal replay restores all family edits/frontiers and its exact checkpoint identity; successful parser reads produce completed-work notifications. Scope: Active default Cargo unit regression using existing real recovery fixtures and the same recovery scope/event visitor as the benchmark listener; not executed in this implementation batch. Assertion/helper call markers: 193, 194, 195, 196, 197, 198, 199, 200, 201, 202.
 
-Uncovered boundary: No active Cargo regression currently proves delayed WAL reads, inventory HEADs or journal replay keep a native watchdog healthy, or that a held first request receives no progress credit. Historical watchdog claims are not current coverage or provider qualification.
+Preconditions: Ordinary cfg(test) compilation exposes the existing fixture modules; no feature hides these regressions. Tests run actual remote WAL planner/replay, authoritative HEAD inventory and manifest journal loading with their finite response delays. The existing production listener observes real completed-work events while formatting logs are disabled.
 
-Catalog review: Reviewed current producer/listener sources. Removed watchdog test targets are named assurance gaps, not surviving regression evidence. Current production/helper source only; no active regression currently covers the named assurance gap.
+Uncovered boundary: These active regressions have not been executed in this batch. They prove actual source work versus held/failed I/O and exact recovery state when run; they do not run a custom/native watchdog executable, establish its no_progress_timeout policy, qualify CPU-contention schedules or provide native-provider/full-hour evidence.
+
+Catalog review: Reviewed current producer/listener sources. Removed watchdog test targets are named assurance gaps, not surviving regression evidence. Active ordinary Cargo tests and real-source assertion/helper anchors resolve; execution and mutation red/green proof remain pending.
 
 ## PROG-2
 
-Production: [benches/bench_support/stress_scenarios/recovery_progress.rs:33](../../benches/bench_support/stress_scenarios/recovery_progress.rs#L33) `RecoveryScope::enter`; [benches/bench_support/stress_scenarios/recovery_progress.rs:103](../../benches/bench_support/stress_scenarios/recovery_progress.rs#L103) `RecoveryProgressLayer::on_event`.
+Production: [benches/bench_support/stress_scenarios/recovery_progress.rs:33](../../benches/bench_support/stress_scenarios/recovery_progress.rs#L33) `RecoveryScope::enter`; [benches/bench_support/stress_scenarios/recovery_progress.rs:112](../../benches/bench_support/stress_scenarios/recovery_progress.rs#L112) `RecoveryProgressLayer::on_event`; [benches/bench_support/stress_scenarios/recovery_progress.rs:42](../../benches/bench_support/stress_scenarios/recovery_progress.rs#L42) `RecoveryScope::enter_with_completion`.
 
-No active regression target is recorded for this row.
+Active regression references (not executed by this refresh):
 
-Supporting helper source:
+- [src/telemetry/recovery_progress/tests.rs:207](../../src/telemetry/recovery_progress/tests.rs#L207) `should_isolate_actual_recovery_work_from_background_threads_old_phases_and_ended_scopes`: Six independently verified real WAL recoveries distinguish an unrelated thread, active caller, nested workload phase, restored outer scope, stale phase generation and ended scope; only the current recovery caller receives credit. Scope: Active default Cargo unit regression using existing real recovery fixtures and the same recovery scope/event visitor as the benchmark listener; not executed in this implementation batch. Assertion/helper call markers: 235, 238, 246, 250, 253, 256, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61.
 
-- [benches/bench_support/stress_scenarios/recovery_progress.rs:170](../../benches/bench_support/stress_scenarios/recovery_progress.rs#L170) `assert_scope_isolation`: Real layer/phase handle exercises scope generation changes and unrelated thread emission. Scope: Unexecuted cfg(test) helper source; no active Cargo test target currently invokes this helper.
+Preconditions: The exact production recovery scope and tracing visitor are reused with an observable completion callback. The ProgressHandle adapter remains type-checked; fixture reads/parser work are real, with no scripted runner clock or synthetic progress events.
 
-Preconditions: The surviving recovery-listener helper uses constructed tracing events and a thread-bound caller scope, but no active Cargo test target invokes it.
+Uncovered boundary: The active isolation regression is unexecuted in this batch. It does not qualify the external watchdog runner, every tracing schema evolution or native-provider latency; caller scope and phase-generation isolation are distinct from startup aggregate-deadline accounting.
 
-Uncovered boundary: No active regression currently proves listener filtering of background events, failed/empty work, stale scopes or old generations. Source/helper assertions alone do not execute that contract.
-
-Catalog review: Reviewed current producer/listener sources. Removed watchdog test targets are named assurance gaps, not surviving regression evidence. Current production and unexecuted supporting helper source only; no active regression currently covers the named assurance gap.
+Catalog review: Reviewed current producer/listener sources. Removed watchdog test targets are named assurance gaps, not surviving regression evidence. Active ordinary Cargo tests and real-source assertion/helper anchors resolve; execution and mutation red/green proof remain pending.
 
 ## ACCT-1
 

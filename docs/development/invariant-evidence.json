@@ -1,6 +1,6 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "2494eff5e9b2c727e4f9656e83a6e8f54e2d9888",
+  "source_revision": "fb06795f5224b3431b91c5ea3b37e547d2f663b0",
   "source_revision_status": "Current symbol/assertion references were refreshed from the working tree based on source_revision. Source SHA256 postimages identify the exact referenced bytes, including sibling implementation slices still being integrated. This is reference/construction evidence; Rust execution and mutation experiments have not qualified this batch. Historical qualification objects retain their original SHAs and outcomes.",
   "qualification": {
     "reference_lint_only": true,
@@ -269,117 +269,191 @@
     },
     "final_fourteen_hours": "Separate acceptance at the final merged catalog source; source-bound run identities and original artifact readbacks are recorded on GitHub issue #711, independently of this reference inventory."
   },
-  "reference_refresh": {
-    "issue": 733,
-    "previous_source_revision": "0076a02cbeeb9eb4f48f4b4f698a74db098ed439",
-    "runtime_commit_before_docs": "a15bf5fc48992d476985af4bccca64e60468dac6",
-    "preserved_existing_test_references": 215,
-    "preserved_existing_assertion_markers": 948,
-    "new_test_symbols": [
-      "should_replay_when_unreadable_interval_overlaps_verified_exact_sst",
-      "should_preserve_all_linear_matches_when_intervals_overlap_across_families",
-      "should_keep_unproved_candidates_when_metadata_cannot_establish_coverage",
-      "should_stop_visiting_when_an_overlapping_candidate_rejects_proof",
-      "should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_scale",
-      "should_preserve_exact_proof_when_candidate_index_cannot_fit_read_budget",
-      "should_preserve_exact_charge_when_index_is_dropped_or_admission_fails",
-      "should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_scale",
-      "should_propagate_typed_timeout_when_candidate_visitor_fails",
-      "should_reject_cancelled_lookup_when_index_is_already_built",
-      "should_escape_timeout_when_scope_is_cancelled_during_candidate_traversal",
-      "should_release_index_charge_when_expired_construction_returns_timeout",
-      "should_bound_manifest_work_when_replay_probes_sparse_sequence_intervals",
-      "should_bound_manifest_lookup_work_when_streaming_real_transaction_batches_at_scale"
+  "current_source_reference_refresh": {
+    "issue": 979,
+    "unresolved_test_references_removed": 29,
+    "tests_executed": false,
+    "mutation_experiments_executed": false,
+    "semantic_scope": "Current symbol/assertion locations and catalog disposition only. Historical hosted qualification remains scoped to its recorded source and does not qualify this implementation batch.",
+    "base_source_revision": "fb06795f5224b3431b91c5ea3b37e547d2f663b0",
+    "source_postimages": "docs/development/invariant-evidence-source-sha256.json",
+    "catalog_ids_reviewed": [
+      "AUTH-1",
+      "AUTH-2",
+      "AUTH-3",
+      "AUTH-4",
+      "TX-1",
+      "TX-2",
+      "TX-3",
+      "TX-4",
+      "TX-5",
+      "TX-6",
+      "TX-7",
+      "TX-8",
+      "WAL-1",
+      "WAL-2",
+      "WAL-3",
+      "WAL-4",
+      "WAL-5",
+      "WAL-6",
+      "WAL-7",
+      "SST-1",
+      "SST-2",
+      "SST-3",
+      "SST-4",
+      "SST-5",
+      "SST-6",
+      "SST-7",
+      "SST-8",
+      "SST-9",
+      "SST-10",
+      "CLOUD-1",
+      "CLOUD-2",
+      "CLOUD-3",
+      "CLOUD-4",
+      "CLOUD-5",
+      "CLOUD-6",
+      "CLOUD-7",
+      "CLOUD-8",
+      "LIFE-1",
+      "LIFE-2",
+      "BACKUP-1",
+      "BACKUP-2",
+      "BACKUP-3",
+      "BACKUP-4",
+      "BACKUP-5",
+      "RES-1",
+      "RES-2",
+      "RES-3",
+      "RES-4",
+      "RES-5",
+      "RES-6",
+      "RES-7",
+      "RES-8",
+      "PROG-1",
+      "PROG-2",
+      "ACCT-1",
+      "ACCT-2",
+      "ACCT-3",
+      "ACCT-4",
+      "ACCT-5",
+      "ACCT-6",
+      "FORMAT-1",
+      "FORMAT-2",
+      "FORMAT-3",
+      "FORMAT-4",
+      "FORMAT-5"
     ],
-    "scope": "bounded candidate selection/resource/actual seeded-SST and framed streaming replay controls; one scale fixture referenced by three rows, no public ACK or new native-hour qualification"
+    "active_test_symbol_count": 239,
+    "assertion_anchor_count": 1196,
+    "progress_regression_checkpoint": "fb06795f5224b3431b91c5ea3b37e547d2f663b0",
+    "progress_regressions_are_ordinary_cargo_tests": true,
+    "unresolved_historical_test_names_removed": 13
   },
-  "mechanical_compatibility_refresh": {
-    "previous_source_revision": "a15bf5fc48992d476985af4bccca64e60468dac6",
-    "runtime_commit_before_docs": "af0dfd2ea4da587c013a2aa99a4a9bf522153fb9",
-    "source_substitutions": {
-      "Duration::from_secs(60)": "Duration::from_mins(1)",
-      "Duration::from_secs(120)": "Duration::from_mins(2)",
-      "Duration::from_secs(3600)": "Duration::from_hours(1)"
+  "historical_reference_preparation": {
+    "source_revision": "bab5b3ccdee16af9502cba4e032a41b6a0e69947",
+    "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
+    "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa",
+    "refresh_history": {
+      "reference_refresh": {
+        "issue": 733,
+        "previous_source_revision": "0076a02cbeeb9eb4f48f4b4f698a74db098ed439",
+        "runtime_commit_before_docs": "a15bf5fc48992d476985af4bccca64e60468dac6",
+        "preserved_existing_test_references": 215,
+        "preserved_existing_assertion_markers": 948,
+        "scope": "bounded candidate selection/resource/actual seeded-SST and framed streaming replay controls; one scale fixture referenced by three rows, no public ACK or new native-hour qualification",
+        "historical_new_test_symbol_reference_count": 14
+      },
+      "mechanical_compatibility_refresh": {
+        "previous_source_revision": "a15bf5fc48992d476985af4bccca64e60468dac6",
+        "runtime_commit_before_docs": "af0dfd2ea4da587c013a2aa99a4a9bf522153fb9",
+        "source_substitutions": {
+          "Duration::from_secs(60)": "Duration::from_mins(1)",
+          "Duration::from_secs(120)": "Duration::from_mins(2)",
+          "Duration::from_secs(3600)": "Duration::from_hours(1)"
+        },
+        "replacement_count": 18,
+        "before_literal_commit": "b8237117d7d14c8c0fefba49c1a09dbd798a3cd4",
+        "changed_paths": [
+          "benches/bench_support/stress_scenarios/client_progress.rs",
+          "src/runtime/actors/compaction/publication_budget_tests.rs",
+          "src/runtime/actors/wal/tests.rs",
+          "src/runtime/cloud_startup/streaming_wal_plan/tests/crashes.rs",
+          "src/runtime/event_loop/compaction/tests.rs",
+          "src/runtime/event_loop/write_batch/tests.rs",
+          "src/storage/hybrid/backend/control_io.rs",
+          "tests/checkpoint_boundary.rs",
+          "tests/checkpoint_commit.rs",
+          "tests/cloud_provider_engine_qualification/operational.rs",
+          "tests/cloud_provider_engine_qualification/operational/fixture.rs",
+          "tests/cloud_provider_engine_qualification/operational/workload.rs"
+        ],
+        "hash_bound_changed_paths": [
+          "src/runtime/event_loop/write_batch/tests.rs",
+          "tests/checkpoint_boundary.rs",
+          "tests/checkpoint_commit.rs",
+          "tests/cloud_provider_engine_qualification/operational.rs"
+        ],
+        "preserved_ids": 63,
+        "preserved_test_references": 229,
+        "preserved_assertion_markers": 1068,
+        "scope": "exact equivalent duration substitutions and one approved assertion line collapse within original named functions; source/reference lint only, no new native/full-hour qualification",
+        "historical_assertion_collapse_count": 1
+      },
+      "notification_reference_refresh": {
+        "issue": 735,
+        "previous_source_revision": "af0dfd2ea4da587c013a2aa99a4a9bf522153fb9",
+        "runtime_commit_before_docs": "862485d5bbd56863e2bef149f30afd3dd8ea2ed9",
+        "preview": false,
+        "hash_bound_changed_paths": [
+          "src/runtime/event_loop/cloud_integration/tests.rs",
+          "src/runtime/event_loop/compaction.rs"
+        ],
+        "preserved_ids": 63,
+        "preserved_test_references": 229,
+        "preserved_assertion_markers": 1068,
+        "scope": "existing named production declarations and byte-identical named test/helper bodies relocated; unchanged assertion text and all historical qualification; reference lint only"
+      },
+      "watchdog_fixture_reference_refresh": {
+        "issue": 796,
+        "fixture_path": "tests/stress_workload_watchdog.rs",
+        "fixture_after_sha256": "68ab626be4699a01f43a079d0bdac0a86d0071061f10672ed3fe4dc6b95d8b1b",
+        "native_idle_budget_seconds": 3,
+        "scope": "Refresh current watchdog fixture claims, locations and assertion markers. Historical qualification objects are unchanged; current exact-head qualification is reported in PR #809."
+      },
+      "notification_fixture_reference_refresh": {
+        "issue": 735,
+        "previous_source_revision": "862485d5bbd56863e2bef149f30afd3dd8ea2ed9",
+        "previous_documentation_head": "ee7dc29b2f739d2951f6f01f7a9f4cdbcecd95de",
+        "source_commit_before_docs": "40a32890b58a29f391b9b95c680b43c1b7514d20",
+        "preview": false,
+        "fixture_path": "src/runtime/event_loop/compaction/tests.rs",
+        "captured_fixture_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
+        "changed_hash_bound_paths": [],
+        "preserved_ids": 63,
+        "preserved_test_references": 229,
+        "preserved_assertion_markers": 1068,
+        "preserved_source_hashes": 136,
+        "scope": "current source binding after a test-only feature-fixture correction; unchanged existing reference evidence and historical qualification; source/reference lint only"
+      },
+      "notification_helper_reference_refresh": {
+        "issue": 735,
+        "previous_source_revision": "40a32890b58a29f391b9b95c680b43c1b7514d20",
+        "previous_documentation_head": "cfce2f9a68fa38e1c3201672f2d3d0aed133d5a1",
+        "source_commit_before_docs": "eab8dbd37671beb33d2beb60075056e33cd7b36e",
+        "fixture_path": "src/runtime/event_loop/compaction/tests.rs",
+        "fixture_before_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
+        "fixture_after_sha256": "0ca5d2b7d855b258923486ab4306de0866c62156d5485c078fbb1cd77b4e468d",
+        "helper": "assert_fenced_publication_response",
+        "changed_hash_bound_paths": [],
+        "preserved_ids": 63,
+        "preserved_test_references": 229,
+        "preserved_assertion_markers": 1068,
+        "preserved_source_hashes": 136,
+        "scope": "mechanical extraction of the unchanged pre-GC Fenced and settled intent-clear contextual error assertions into one called helper in an unreferenced feature fixture; source/reference lint only, no historical qualification upgrade"
+      }
     },
-    "replacement_count": 18,
-    "before_literal_commit": "b8237117d7d14c8c0fefba49c1a09dbd798a3cd4",
-    "exact_line_collapse_function": "should_apply_profile_timeout_to_long_running_engine_requests",
-    "changed_paths": [
-      "benches/bench_support/stress_scenarios/client_progress.rs",
-      "src/runtime/actors/compaction/publication_budget_tests.rs",
-      "src/runtime/actors/wal/tests.rs",
-      "src/runtime/cloud_startup/streaming_wal_plan/tests/crashes.rs",
-      "src/runtime/event_loop/compaction/tests.rs",
-      "src/runtime/event_loop/write_batch/tests.rs",
-      "src/storage/hybrid/backend/control_io.rs",
-      "tests/checkpoint_boundary.rs",
-      "tests/checkpoint_commit.rs",
-      "tests/cloud_provider_engine_qualification/operational.rs",
-      "tests/cloud_provider_engine_qualification/operational/fixture.rs",
-      "tests/cloud_provider_engine_qualification/operational/workload.rs"
-    ],
-    "hash_bound_changed_paths": [
-      "src/runtime/event_loop/write_batch/tests.rs",
-      "tests/checkpoint_boundary.rs",
-      "tests/checkpoint_commit.rs",
-      "tests/cloud_provider_engine_qualification/operational.rs"
-    ],
-    "preserved_ids": 63,
-    "preserved_test_references": 229,
-    "preserved_assertion_markers": 1068,
-    "scope": "exact equivalent duration substitutions and one approved assertion line collapse within original named functions; source/reference lint only, no new native/full-hour qualification"
-  },
-  "notification_reference_refresh": {
-    "issue": 735,
-    "previous_source_revision": "af0dfd2ea4da587c013a2aa99a4a9bf522153fb9",
-    "runtime_commit_before_docs": "862485d5bbd56863e2bef149f30afd3dd8ea2ed9",
-    "preview": false,
-    "hash_bound_changed_paths": [
-      "src/runtime/event_loop/cloud_integration/tests.rs",
-      "src/runtime/event_loop/compaction.rs"
-    ],
-    "preserved_ids": 63,
-    "preserved_test_references": 229,
-    "preserved_assertion_markers": 1068,
-    "scope": "existing named production declarations and byte-identical named test/helper bodies relocated; unchanged assertion text and all historical qualification; reference lint only"
-  },
-  "notification_fixture_reference_refresh": {
-    "issue": 735,
-    "previous_source_revision": "862485d5bbd56863e2bef149f30afd3dd8ea2ed9",
-    "previous_documentation_head": "ee7dc29b2f739d2951f6f01f7a9f4cdbcecd95de",
-    "source_commit_before_docs": "40a32890b58a29f391b9b95c680b43c1b7514d20",
-    "preview": false,
-    "fixture_path": "src/runtime/event_loop/compaction/tests.rs",
-    "captured_fixture_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
-    "changed_hash_bound_paths": [],
-    "preserved_ids": 63,
-    "preserved_test_references": 229,
-    "preserved_assertion_markers": 1068,
-    "preserved_source_hashes": 136,
-    "scope": "current source binding after a test-only feature-fixture correction; unchanged existing reference evidence and historical qualification; source/reference lint only"
-  },
-  "notification_helper_reference_refresh": {
-    "issue": 735,
-    "previous_source_revision": "40a32890b58a29f391b9b95c680b43c1b7514d20",
-    "previous_documentation_head": "cfce2f9a68fa38e1c3201672f2d3d0aed133d5a1",
-    "source_commit_before_docs": "eab8dbd37671beb33d2beb60075056e33cd7b36e",
-    "fixture_path": "src/runtime/event_loop/compaction/tests.rs",
-    "fixture_before_sha256": "245b5510aeb7d2a6b2d595744a8cadeefd496c35dc71179df004a4cbdde3ef65",
-    "fixture_after_sha256": "0ca5d2b7d855b258923486ab4306de0866c62156d5485c078fbb1cd77b4e468d",
-    "helper": "assert_fenced_publication_response",
-    "changed_hash_bound_paths": [],
-    "preserved_ids": 63,
-    "preserved_test_references": 229,
-    "preserved_assertion_markers": 1068,
-    "preserved_source_hashes": 136,
-    "scope": "mechanical extraction of the unchanged pre-GC Fenced and settled intent-clear contextual error assertions into one called helper in an unreferenced feature fixture; source/reference lint only, no historical qualification upgrade"
-  },
-  "watchdog_fixture_reference_refresh": {
-    "issue": 796,
-    "fixture_path": "tests/stress_workload_watchdog.rs",
-    "fixture_after_sha256": "68ab626be4699a01f43a079d0bdac0a86d0071061f10672ed3fe4dc6b95d8b1b",
-    "native_idle_budget_seconds": 3,
-    "scope": "Refresh current watchdog fixture claims, locations and assertion markers. Historical qualification objects are unchanged; current exact-head qualification is reported in PR #809."
+    "scope": "Historical reference-maintenance provenance only. Removed test names are recoverable from Git history, not represented as current evidence."
   },
   "rows": [
     {
@@ -7660,21 +7734,21 @@
       "production": [
         {
           "path": "src/telemetry/recovery_progress.rs",
-          "line": 30,
+          "line": 33,
           "symbol": "WorkProgress::completed",
           "kind": "function",
           "marker": "pub(crate) fn completed(&mut self, bytes: u64, frames: u64) {"
         },
         {
           "path": "src/telemetry/recovery_progress.rs",
-          "line": 58,
+          "line": 61,
           "symbol": "WorkProgress::finish",
           "kind": "function",
           "marker": "pub(crate) fn finish(&mut self) {"
         },
         {
           "path": "src/telemetry/recovery_progress.rs",
-          "line": 99,
+          "line": 102,
           "symbol": "RecoveryReadObserver::remote_range_completed",
           "kind": "function",
           "marker": "fn remote_range_completed(&self, returned_bytes: u64, _elapsed: Duration, failed: bool) {"
@@ -7687,13 +7761,205 @@
           "marker": "fn reconcile_manifest_ssts("
         }
       ],
-      "tests": [],
-      "preconditions": "Completed recovery work is reported only after successful bounded I/O or parsing; source markers remain available. The removed native watchdog target is not current evidence.",
-      "uncovered": "No active Cargo regression currently proves delayed WAL reads, inventory HEADs or journal replay keep a native watchdog healthy, or that a held first request receives no progress credit. Historical watchdog claims are not current coverage or provider qualification.",
+      "tests": [
+        {
+          "path": "src/telemetry/recovery_progress/tests.rs",
+          "line": 65,
+          "symbol": "should_report_completed_work_when_actual_remote_wal_planner_and_replay_recover_exact_rows",
+          "claim": "Actual remote WAL planner/replay recovers every expected value and epoch with bounded range I/O, no staged WAL, and positive completed-work notifications.",
+          "scope": "Active default Cargo unit regression using existing real recovery fixtures and the same recovery scope/event visitor as the benchmark listener; not executed in this implementation batch.",
+          "assertions": [
+            {
+              "line": 85,
+              "marker": "assert!(completed.load(Ordering::Acquire) > 0);"
+            },
+            {
+              "line": 51,
+              "marker": "assert_eq!(result.mismatches, 0);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 52,
+              "marker": "assert_eq!(result.verified_records, result.expected_records);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 53,
+              "marker": "assert!(result.verified_records > 0);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 54,
+              "marker": "assert!(result.max_sequence >= result.verified_records);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 55,
+              "marker": "assert_eq!(result.max_epoch, 7);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 56,
+              "marker": "assert!(result.completed_range_reads >= 16);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 57,
+              "marker": "assert!(result.replay_completed_range_reads > 0);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 58,
+              "marker": "assert!(result.completed_range_bytes >= 1024 * 1024);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 59,
+              "marker": "assert!(result.maximum_range_bytes <= 64 * 1024);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 60,
+              "marker": "assert_eq!(result.local_wal_bytes, 0);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 61,
+              "marker": "assert_eq!(result.staged_wal_count, 0);",
+              "helper": "verify_wal"
+            }
+          ]
+        },
+        {
+          "path": "src/telemetry/recovery_progress/tests.rs",
+          "line": 90,
+          "symbol": "should_report_completed_work_when_actual_inventory_validates_authoritative_head_sizes",
+          "claim": "Actual authoritative SST HEAD inventory retains the exact manifest and validates every recorded size before completed-work notifications are credited.",
+          "scope": "Active default Cargo unit regression using existing real recovery fixtures and the same recovery scope/event visitor as the benchmark listener; not executed in this implementation batch.",
+          "assertions": [
+            {
+              "line": 109,
+              "marker": "assert_eq!(result.mismatches, 0);"
+            },
+            {
+              "line": 110,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 114,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 118,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 122,
+              "marker": "assert!(result.expected_inventory_entries > 0);"
+            },
+            {
+              "line": 123,
+              "marker": "assert_eq!(result.local_wal_bytes, 0);"
+            },
+            {
+              "line": 124,
+              "marker": "assert_eq!(result.staged_wal_count, 0);"
+            },
+            {
+              "line": 125,
+              "marker": "assert!(completed.load(Ordering::Acquire) > 0);"
+            }
+          ]
+        },
+        {
+          "path": "src/telemetry/recovery_progress/tests.rs",
+          "line": 130,
+          "symbol": "should_credit_no_work_when_actual_first_recovery_io_remains_held_until_timeout",
+          "claim": "Held real first WAL range and authoritative inventory HEAD operations produce errors, zero completed I/O and zero credited progress; independent fixture observations prove the request was reached.",
+          "scope": "Active default Cargo unit regression using existing real recovery fixtures and the same recovery scope/event visitor as the benchmark listener; not executed in this implementation batch.",
+          "assertions": [
+            {
+              "line": 155,
+              "marker": "assert!("
+            },
+            {
+              "line": 163,
+              "marker": "assert_eq!(observed[\"held_requests\"], 1);"
+            },
+            {
+              "line": 164,
+              "marker": "assert_eq!(observed[\"completed_range_reads\"], 0);"
+            },
+            {
+              "line": 165,
+              "marker": "assert_eq!(observed[\"completed_inventory_heads\"], 0);"
+            },
+            {
+              "line": 166,
+              "marker": "assert_eq!(observed[\"completed_inventory_size_validations\"], 0);"
+            },
+            {
+              "line": 167,
+              "marker": "assert_eq!(completed.load(Ordering::Acquire), 0);"
+            }
+          ]
+        },
+        {
+          "path": "src/telemetry/recovery_progress/tests.rs",
+          "line": 173,
+          "symbol": "should_report_completed_work_when_actual_journal_replay_restores_exact_edit_frontiers",
+          "claim": "Actual journal replay restores all family edits/frontiers and its exact checkpoint identity; successful parser reads produce completed-work notifications.",
+          "scope": "Active default Cargo unit regression using existing real recovery fixtures and the same recovery scope/event visitor as the benchmark listener; not executed in this implementation batch.",
+          "assertions": [
+            {
+              "line": 193,
+              "marker": "assert_eq!(result.mismatches, 0);"
+            },
+            {
+              "line": 194,
+              "marker": "assert_eq!(result.verified_edits, result.expected_edits);"
+            },
+            {
+              "line": 195,
+              "marker": "assert_eq!(result.manifest_edit_checkpoint_id, result.max_edit_id);"
+            },
+            {
+              "line": 196,
+              "marker": "assert_eq!(result.restored_cf_count, result.expected_edits);"
+            },
+            {
+              "line": 197,
+              "marker": "assert_eq!(result.restored_frontier_count, result.expected_edits + 1);"
+            },
+            {
+              "line": 198,
+              "marker": "assert!(result.completed_local_reads > 0);"
+            },
+            {
+              "line": 199,
+              "marker": "assert!(result.completed_local_read_bytes >= result.journal_bytes);"
+            },
+            {
+              "line": 200,
+              "marker": "assert_eq!(result.local_wal_bytes, 0);"
+            },
+            {
+              "line": 201,
+              "marker": "assert_eq!(result.staged_wal_count, 0);"
+            },
+            {
+              "line": 202,
+              "marker": "assert!(completed.load(Ordering::Acquire) > 0);"
+            }
+          ]
+        }
+      ],
+      "preconditions": "Ordinary cfg(test) compilation exposes the existing fixture modules; no feature hides these regressions. Tests run actual remote WAL planner/replay, authoritative HEAD inventory and manifest journal loading with their finite response delays. The existing production listener observes real completed-work events while formatting logs are disabled.",
+      "uncovered": "These active regressions have not been executed in this batch. They prove actual source work versus held/failed I/O and exact recovery state when run; they do not run a custom/native watchdog executable, establish its no_progress_timeout policy, qualify CPU-contention schedules or provide native-provider/full-hour evidence.",
       "catalog_review": {
         "reviewed": true,
         "disposition": "Reviewed current producer/listener sources. Removed watchdog test targets are named assurance gaps, not surviving regression evidence.",
-        "evidence_boundary": "Current production/helper source only; no active regression currently covers the named assurance gap."
+        "evidence_boundary": "Active ordinary Cargo tests and real-source assertion/helper anchors resolve; execution and mutation red/green proof remain pending."
       }
     },
     {
@@ -7708,51 +7974,116 @@
         },
         {
           "path": "benches/bench_support/stress_scenarios/recovery_progress.rs",
-          "line": 103,
+          "line": 112,
           "symbol": "RecoveryProgressLayer::on_event",
           "kind": "function",
           "marker": "fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {"
-        }
-      ],
-      "tests": [],
-      "preconditions": "The surviving recovery-listener helper uses constructed tracing events and a thread-bound caller scope, but no active Cargo test target invokes it.",
-      "uncovered": "No active regression currently proves listener filtering of background events, failed/empty work, stale scopes or old generations. Source/helper assertions alone do not execute that contract.",
-      "catalog_review": {
-        "reviewed": true,
-        "disposition": "Reviewed current producer/listener sources. Removed watchdog test targets are named assurance gaps, not surviving regression evidence.",
-        "evidence_boundary": "Current production and unexecuted supporting helper source only; no active regression currently covers the named assurance gap."
-      },
-      "supporting_helpers": [
+        },
         {
           "path": "benches/bench_support/stress_scenarios/recovery_progress.rs",
-          "line": 170,
-          "symbol": "assert_scope_isolation",
-          "claim": "Real layer/phase handle exercises scope generation changes and unrelated thread emission.",
-          "scope": "Unexecuted cfg(test) helper source; no active Cargo test target currently invokes this helper.",
+          "line": 42,
+          "symbol": "RecoveryScope::enter_with_completion",
+          "kind": "function",
+          "marker": "pub(super) fn enter_with_completion("
+        }
+      ],
+      "tests": [
+        {
+          "path": "src/telemetry/recovery_progress/tests.rs",
+          "line": 207,
+          "symbol": "should_isolate_actual_recovery_work_from_background_threads_old_phases_and_ended_scopes",
+          "claim": "Six independently verified real WAL recoveries distinguish an unrelated thread, active caller, nested workload phase, restored outer scope, stale phase generation and ended scope; only the current recovery caller receives credit.",
+          "scope": "Active default Cargo unit regression using existing real recovery fixtures and the same recovery scope/event visitor as the benchmark listener; not executed in this implementation batch.",
           "assertions": [
             {
-              "line": 177,
-              "marker": "assert_eq!(progress.completed_units(), before);"
+              "line": 235,
+              "marker": "assert_eq!(completed.load(Ordering::Acquire), 0);"
             },
             {
-              "line": 182,
-              "marker": "assert_eq!(progress.completed_units(), before);"
+              "line": 238,
+              "marker": "assert!(credited > 0);"
             },
             {
-              "line": 188,
-              "marker": "assert_eq!(progress.completed_units(), before + 1);"
+              "line": 246,
+              "marker": "assert_eq!(completed.load(Ordering::Acquire), credited);"
             },
             {
-              "line": 196,
-              "marker": "assert_eq!(progress.completed_units(), before + 1);"
+              "line": 250,
+              "marker": "assert!(restored > credited);"
             },
             {
-              "line": 213,
-              "marker": "assert_eq!(progress.completed_units(), before + 2);"
+              "line": 253,
+              "marker": "assert_eq!(completed.load(Ordering::Acquire), restored);"
+            },
+            {
+              "line": 256,
+              "marker": "assert_eq!(completed.load(Ordering::Acquire), restored);"
+            },
+            {
+              "line": 51,
+              "marker": "assert_eq!(result.mismatches, 0);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 52,
+              "marker": "assert_eq!(result.verified_records, result.expected_records);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 53,
+              "marker": "assert!(result.verified_records > 0);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 54,
+              "marker": "assert!(result.max_sequence >= result.verified_records);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 55,
+              "marker": "assert_eq!(result.max_epoch, 7);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 56,
+              "marker": "assert!(result.completed_range_reads >= 16);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 57,
+              "marker": "assert!(result.replay_completed_range_reads > 0);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 58,
+              "marker": "assert!(result.completed_range_bytes >= 1024 * 1024);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 59,
+              "marker": "assert!(result.maximum_range_bytes <= 64 * 1024);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 60,
+              "marker": "assert_eq!(result.local_wal_bytes, 0);",
+              "helper": "verify_wal"
+            },
+            {
+              "line": 61,
+              "marker": "assert_eq!(result.staged_wal_count, 0);",
+              "helper": "verify_wal"
             }
           ]
         }
-      ]
+      ],
+      "preconditions": "The exact production recovery scope and tracing visitor are reused with an observable completion callback. The ProgressHandle adapter remains type-checked; fixture reads/parser work are real, with no scripted runner clock or synthetic progress events.",
+      "uncovered": "The active isolation regression is unexecuted in this batch. It does not qualify the external watchdog runner, every tracing schema evolution or native-provider latency; caller scope and phase-generation isolation are distinct from startup aggregate-deadline accounting.",
+      "catalog_review": {
+        "reviewed": true,
+        "disposition": "Reviewed current producer/listener sources. Removed watchdog test targets are named assurance gaps, not surviving regression evidence.",
+        "evidence_boundary": "Active ordinary Cargo tests and real-source assertion/helper anchors resolve; execution and mutation red/green proof remain pending."
+      }
     },
     {
       "id": "ACCT-1",
@@ -10157,88 +10488,5 @@
         "evidence_boundary": "Active test symbols and assertion/helper markers resolve in the current tree; behavioral execution and mutation proof remain pending."
       }
     }
-  ],
-  "current_source_reference_refresh": {
-    "issue": 979,
-    "unresolved_test_references_removed": 29,
-    "tests_executed": false,
-    "mutation_experiments_executed": false,
-    "semantic_scope": "Current symbol/assertion locations and catalog disposition only. Historical hosted qualification remains scoped to its recorded source and does not qualify this implementation batch.",
-    "base_source_revision": "2494eff5e9b2c727e4f9656e83a6e8f54e2d9888",
-    "source_postimages": "docs/development/invariant-evidence-source-sha256.json",
-    "catalog_ids_reviewed": [
-      "AUTH-1",
-      "AUTH-2",
-      "AUTH-3",
-      "AUTH-4",
-      "TX-1",
-      "TX-2",
-      "TX-3",
-      "TX-4",
-      "TX-5",
-      "TX-6",
-      "TX-7",
-      "TX-8",
-      "WAL-1",
-      "WAL-2",
-      "WAL-3",
-      "WAL-4",
-      "WAL-5",
-      "WAL-6",
-      "WAL-7",
-      "SST-1",
-      "SST-2",
-      "SST-3",
-      "SST-4",
-      "SST-5",
-      "SST-6",
-      "SST-7",
-      "SST-8",
-      "SST-9",
-      "SST-10",
-      "CLOUD-1",
-      "CLOUD-2",
-      "CLOUD-3",
-      "CLOUD-4",
-      "CLOUD-5",
-      "CLOUD-6",
-      "CLOUD-7",
-      "CLOUD-8",
-      "LIFE-1",
-      "LIFE-2",
-      "BACKUP-1",
-      "BACKUP-2",
-      "BACKUP-3",
-      "BACKUP-4",
-      "BACKUP-5",
-      "RES-1",
-      "RES-2",
-      "RES-3",
-      "RES-4",
-      "RES-5",
-      "RES-6",
-      "RES-7",
-      "RES-8",
-      "PROG-1",
-      "PROG-2",
-      "ACCT-1",
-      "ACCT-2",
-      "ACCT-3",
-      "ACCT-4",
-      "ACCT-5",
-      "ACCT-6",
-      "FORMAT-1",
-      "FORMAT-2",
-      "FORMAT-3",
-      "FORMAT-4",
-      "FORMAT-5"
-    ],
-    "active_test_symbol_count": 234,
-    "assertion_anchor_count": 1143
-  },
-  "historical_reference_preparation": {
-    "source_revision": "bab5b3ccdee16af9502cba4e032a41b6a0e69947",
-    "prepared_source_commit": "0cbfc47b568d85ae827626a2355f8f4cddf9b72f",
-    "prepared_source_subject_sha256": "3138802ab5106fc3afb0384cd2eded90d9367eb9cd52b533958fab6878a1acaa"
-  }
+  ]
 }

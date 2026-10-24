@@ -904,3 +904,10 @@ cover lost queues, late retired PUTs, replacement/epoch races and bad headers.
 Test targets compile cleanly; execution and provider/crash gates remain pending.
 Two growing metadata functions were split into focused helpers for the hard
 line-count policy; no lint suppression was added.
+
+The PROG map refresh is pinned to `fb06795f`: five real-fixture Cargo tests
+replace the old inactive listener claims, 239 active test symbols and 1196
+assertion/helper anchors are mapped, and all 241 `should_...` tokens anywhere
+in JSON resolve. `cntryl-tools validate-docs` passes (67 Markdown files).
+Historical qualification remains separate, and final source postimages must
+still be refreshed after the remaining code changes.
