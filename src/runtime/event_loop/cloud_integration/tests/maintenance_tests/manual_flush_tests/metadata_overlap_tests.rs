@@ -9,9 +9,23 @@ struct HeldPut {
     release: crossbeam::channel::Receiver<()>,
 }
 
+#[derive(Clone, Copy)]
+enum HoldKind {
+    ImmutablePut,
+    PointerDuplicate,
+    PointerLost,
+}
+
+struct HeldPointer {
+    gate: HeldPut,
+    delivery: HoldKind,
+}
+
 struct MetadataProvider {
     inner: MockCloudBackend,
     next_manifest: Mutex<Option<HeldPut>>,
+    next_pointer: Mutex<Option<HeldPointer>>,
+    held: AtomicBool,
 }
 
 impl crate::storage::cloud::CloudReadCapability for MetadataProvider {
@@ -30,10 +44,36 @@ impl crate::storage::cloud::CloudWriteCapability for MetadataProvider {
             .then(|| self.next_manifest.lock().unwrap().take())
             .flatten();
         if let Some(hold) = hold {
+            self.held.store(true, Ordering::Release);
             hold.entered.send(Instant::now()).unwrap();
             // The backend retains this actual immutable PUT and its callback;
             // unrelated writes use the same inner provider concurrently.
             let _ = hold.release.recv_timeout(Duration::from_secs(5));
+            self.held.store(false, Ordering::Release);
+        }
+        let pointer = key
+            .ends_with("metadata/committed-pointer.v1")
+            .then(|| self.next_pointer.lock().unwrap().take())
+            .flatten();
+        if let Some(pointer) = pointer {
+            let (sent, received) = std::sync::mpsc::channel();
+            self.inner.submit_put(key, bytes, headers, sent);
+            let actual = received.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(
+                actual,
+                crate::storage::cloud::CloudEvent::Put { result: Ok(()), .. }
+            ));
+            self.held.store(true, Ordering::Release);
+            pointer.gate.entered.send(Instant::now()).unwrap();
+            // The real conditional mutation has succeeded. Only its genuine
+            // callback is delayed/duplicated/lost, never its selected effect.
+            let _ = pointer.gate.release.recv_timeout(Duration::from_secs(5));
+            self.held.store(false, Ordering::Release);
+            if matches!(pointer.delivery, HoldKind::PointerDuplicate) {
+                let _ = callback.send(actual.clone());
+                let _ = callback.send(actual);
+            }
+            return;
         }
         self.inner.submit_put(key, bytes, headers, callback);
     }
@@ -98,6 +138,8 @@ impl Fixture {
         let provider = Arc::new(MetadataProvider {
             inner: MockCloudBackend::new(),
             next_manifest: Mutex::new(None),
+            next_pointer: Mutex::new(None),
+            held: AtomicBool::new(false),
         });
         let metadata = Arc::new(CloudStorage::new_with_timeout(
             provider.clone(),
@@ -238,7 +280,10 @@ impl Fixture {
         }
     }
 
-    fn hold_compaction_put(&mut self) -> MidgeResult<(PutRelease, Instant)> {
+    fn hold_compaction_publication(
+        &mut self,
+        kind: HoldKind,
+    ) -> MidgeResult<(PutRelease, Instant)> {
         let plan = self
             .el
             .actors
@@ -247,10 +292,19 @@ impl Fixture {
             .expect("genuine L0 compaction plan");
         let (entered, arrived) = crossbeam::channel::bounded(1);
         let (release, resumed) = crossbeam::channel::bounded(1);
-        *self.provider.next_manifest.lock().unwrap() = Some(HeldPut {
+        let gate = HeldPut {
             entered,
             release: resumed,
-        });
+        };
+        match kind {
+            HoldKind::ImmutablePut => *self.provider.next_manifest.lock().unwrap() = Some(gate),
+            HoldKind::PointerDuplicate | HoldKind::PointerLost => {
+                *self.provider.next_pointer.lock().unwrap() = Some(HeldPointer {
+                    gate,
+                    delivery: kind,
+                });
+            }
+        }
         self.el.launch_compaction(plan)?;
         let until = Instant::now() + Duration::from_secs(3);
         let held_at = loop {
@@ -283,7 +337,41 @@ impl Fixture {
         Ok(())
     }
 
-    fn assert_cloud_restart(&self) -> MidgeResult<()> {
+    fn held_output_names(
+        &self,
+        pending_compaction: bool,
+    ) -> MidgeResult<std::collections::BTreeSet<String>> {
+        let names = if pending_compaction {
+            crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+                &self.el.state.fs,
+                crate::config::RecoveryPolicy::Strict,
+            )?
+            .into_iter()
+            .filter_map(|intent| match intent {
+                crate::runtime::IntentLogEntry::CompactionPublish {
+                    phase: crate::runtime::PublicationPhase::OutputDurable,
+                    added,
+                    ..
+                } => Some(added),
+                _ => None,
+            })
+            .flatten()
+            .map(|file| file.name)
+            .collect::<std::collections::BTreeSet<_>>()
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        if pending_compaction {
+            assert!(
+                !names.is_empty(),
+                "held compaction outputs must have a durable intent"
+            );
+        }
+        Ok(names)
+    }
+
+    fn assert_cloud_restart(&self, pending_compaction: bool) -> MidgeResult<()> {
+        let held_outputs = self.held_output_names(pending_compaction)?;
         let cold = tempfile::tempdir()?;
         let fs = crate::io::real::test_root(cold.path());
         let store = self.lease.get_leader_store().unwrap();
@@ -299,16 +387,59 @@ impl Fixture {
             crate::config::RecoveryPolicy::Strict,
         )
         .map_err(MidgeError::Internal)?;
+        assert!(
+            manifest
+                .files
+                .iter()
+                .all(|file| !held_outputs.contains(&file.name)),
+            "unselected compaction outputs cannot become authoritative during hydration"
+        );
+        let intents = crate::runtime::IntentPersistence::load_with_fs_and_policy(
+            &fs,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .map_err(MidgeError::Internal)?;
+        assert_eq!(
+            intents.iter().any(|intent| matches!(
+                intent,
+                crate::runtime::IntentLogEntry::CompactionPublish { .. }
+            )),
+            pending_compaction
+        );
+        let mut sources = manifest
+            .files
+            .iter()
+            .map(|file| file.name.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        for intent in &intents {
+            crate::runtime::hybrid_persistence::visit_intent_sources(intent, |name| {
+                sources.insert(name.to_string());
+            });
+        }
         std::fs::create_dir_all(cold.path().join("sst"))?;
-        for file in &manifest.files {
-            let source = remote_sst_path_for_test(&self.el, &file.name);
-            std::fs::copy(source, cold.path().join("sst").join(&file.name))?;
+        for name in sources {
+            let source = remote_sst_path_for_test(&self.el, &name);
+            if source.exists() {
+                std::fs::copy(source, cold.path().join("sst").join(&name))?;
+            }
         }
         let mut reopened = crate::Engine::open(
             crate::OpenOptions::local(cold.path())
                 .background_compaction(false)
                 .build()?,
         )?;
+        let recovered = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+            &fs,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .map_err(MidgeError::Internal)?;
+        assert!(
+            recovered
+                .files
+                .iter()
+                .all(|file| !held_outputs.contains(&file.name)),
+            "restart cannot admit held compaction's unselected output names"
+        );
         let transaction = reopened.begin_tx(0, crate::TransactionMode::ReadOnly)?;
         assert_eq!(transaction.get(MANUAL_KEY)?.as_deref(), Some(MANUAL_VALUE));
         assert_eq!(
@@ -318,7 +449,17 @@ impl Fixture {
         let scan = transaction
             .scan(&crate::Query::new())?
             .collect::<MidgeResult<Vec<_>>>()?;
-        assert_eq!(scan.len(), 2);
+        let actual = scan
+            .into_iter()
+            .map(|(key, value)| (key.to_vec(), value.to_vec()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            [
+                (MANUAL_KEY.to_vec(), MANUAL_VALUE.to_vec()),
+                (b"prune-candidate".to_vec(), b"value".to_vec())
+            ]
+        );
         drop(transaction);
         reopened.shutdown(Duration::from_secs(5))?;
         Ok(())
@@ -328,14 +469,32 @@ impl Fixture {
 #[test]
 fn should_commit_later_flush_within_hundred_millis_while_compaction_provider_put_waits_two_seconds(
 ) -> MidgeResult<()> {
+    verify_held_publication(HoldKind::ImmutablePut)
+}
+
+#[test]
+fn should_preserve_later_flush_when_successful_earlier_pointer_cas_callback_is_late_and_duplicated(
+) -> MidgeResult<()> {
+    verify_held_publication(HoldKind::PointerDuplicate)
+}
+
+#[test]
+fn should_preserve_later_flush_when_successful_earlier_pointer_cas_callback_is_lost(
+) -> MidgeResult<()> {
+    verify_held_publication(HoldKind::PointerLost)
+}
+
+fn verify_held_publication(kind: HoldKind) -> MidgeResult<()> {
     // Arrange: both flush and compaction use the real Background actors and
     // one conditional metadata provider; only its actual earlier PUT is held.
     let mut fixture = Fixture::new()?;
     fixture.acknowledge_row()?;
-    let (mut release, held_at) = fixture.hold_compaction_put()?;
+    let deferred_before = fixture.el.state.flush_metrics.publication_deferred_by_gate;
+    let (mut release, held_at) = fixture.hold_compaction_publication(kind)?;
     let started = Instant::now();
     let response = submit_manual_flush(&mut fixture.el, 0, 91_951);
     let mut flush_result = None;
+    let mut recovered_before_release = false;
 
     // Act: drive the same production owner dispatch while the earlier provider
     // effect remains outstanding for a full two seconds.
@@ -345,6 +504,14 @@ fn should_commit_later_flush_within_hundred_millis_while_compaction_provider_put
             if let Ok(result) = response.try_recv() {
                 flush_result = Some((started.elapsed(), result));
             }
+        }
+        if flush_result.is_some() && !recovered_before_release {
+            fixture.assert_rows()?;
+            // Recover the selected cut and all manifest/intent SST sources
+            // into an empty cache while the earlier effect remains unresolved.
+            fixture.assert_cloud_restart(true)?;
+            assert!(fixture.provider.held.load(Ordering::Acquire));
+            recovered_before_release = true;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -374,6 +541,15 @@ fn should_commit_later_flush_within_hundred_millis_while_compaction_provider_put
     );
     assert!(matches!(result, RuntimeResponse::Ok { request_id: 91_951 }));
     assert_eq!(
+        fixture.el.state.flush_metrics.publication_deferred_by_gate - deferred_before,
+        0,
+        "independent Background publication must not defer the flush behind provider work"
+    );
+    assert!(
+        recovered_before_release,
+        "selected flush must survive cold/cache-loss recovery before earlier PUT resolves"
+    );
+    assert_eq!(
         fixture
             .el
             .publication
@@ -393,6 +569,6 @@ fn should_commit_later_flush_within_hundred_millis_while_compaction_provider_put
             | crate::runtime::IntentLogEntry::CompactionPublish { .. }
     )));
     fixture.assert_rows()?;
-    fixture.assert_cloud_restart()?;
+    fixture.assert_cloud_restart(false)?;
     Ok(())
 }

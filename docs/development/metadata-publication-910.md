@@ -23,6 +23,22 @@ truncation. Each admitted cut has an epoch and monotonically increasing cut
 ordinal, plus its applied edit/intent boundary. The runtime retains its owned
 capture and protection obligation across asynchronous completion.
 
+Capture admission uses the existing shared maintenance `ResourceBudget`.
+The runtime stats the four files under the writer lock, then reserves their
+encoded/copy/decode allowance before allocation. A separate 64-unit slot budget
+bounds owned cuts. Both admissions preserve originating-pool contention across
+error delivery; an already released competing charge still permits retry.
+Accepted publication/build ownership and its original deadline survive that
+retry. Oversized working sets retain their objects and intents and fail closed.
+
+The cut carries SHA-256 of exact file presence, lengths and bytes, plus bounded
+direct witnesses for earlier still-owned cuts in the same epoch/session.
+Normalized publication identities permit forward phase progress. Selecting an
+`OutputDurable` cut cannot discharge its operation's intent: a later clear needs
+an exact selected `ManifestPublished` receipt at a non-regressing journal cut.
+Those receipt records retain their source accounting while still needed by an
+owned cut and are pruned as ownership ends.
+
 The committed pointer and selected manifest lineage identify that cut. Two
 tasks may upload independent immutable candidate objects and attempt pointer
 CAS without holding the cache/publication mutex over provider I/O. CAS still
@@ -44,6 +60,18 @@ scalar high-water mark alone cannot authorize dropping an obligation. A
 same-epoch CAS conflict prompts coverage/rebase checks and is distinguishable
 from loss of the writer lease.
 
+Validated immutable PUTs leave a reduced staged descriptor with their owned
+capture. A fresh pointer matching that exact generation/object closure proves
+selection without allocating a second full body image. This lets lost-CAS
+readback/coalescence use the capture's already admitted workspace in a small
+shared pool. A cold external predecessor instead requires proportional shared
+read/decode admission. Transient contention retries within the original budget;
+an unavailable combined working set retains the obligation and reports expiry
+or resource exhaustion. It does not grow the pool or infer a successful effect.
+Immutable PUT and full-GET request callbacks retain their reservations until
+the actual physical request ends, including after caller timeout or later-cut
+coalescence.
+
 The event-loop gate protects local edit/capture turns, rather than provider
 round trips. Flush build/upload work keeps its owned identity and completed
 build while publication is pending. An unrelated compaction cannot reset it
@@ -59,7 +87,13 @@ old image being uploaded are insufficient grounds to delete captured sources.
 The deterministic regression holds compaction provider work for two seconds
 while a later flush commits within 100 ms through the same real publication
 path. It then releases the earlier effect and verifies no rollback, exact
-intent settlement, point/scan agreement and restart. Further regressions crash
-with both edits admitted, deliver stale/duplicate completions, delay a successful
-CAS receipt, lose the epoch, and capture during checkpoint installation.
+intent settlement, point/scan agreement and restart. The background fixture
+also hydrates the selected later cut into an empty cache before releasing the
+earlier effect: exact unselected compaction output names must remain absent
+from both hydrated and reopened authority. Variants delay/duplicate or lose an
+actual successful pointer-CAS callback while the later flush selects.
+This is cold/cache-loss recovery evidence, not a process-kill campaign.
+Other active cases cover lost epochs, checkpoint installation, exact staged
+readback with no second allocation, slot/byte contention and physical callback
+charge release. These new behaviors remain unexecuted in the code-first pass.
 Performance and crash/provider qualification follow the implementation pass.

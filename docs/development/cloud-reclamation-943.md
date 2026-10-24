@@ -44,8 +44,12 @@ The periodic mirror continuation captures current manifest names, durable
 retired proofs, live snapshot sources, all publication intents, concurrent
 compaction inputs/prepared names/output generations and pending mirror
 compaction/flush work. Snapshot acquisition exclusion closes the source-capture
-to pin-registration gap. The manifest publication gate stays owned through the
-worker. Before deletion, the worker also reads and verifies the current selected
+to pin-registration gap. Capture admission and physical reclamation share the
+local publication mutex. Each physical turn defers while any unresolved control
+cut remains admitted, and keeps that mutex through its final checks and effects.
+Known-retired local SST/WAL deletion and cloud SST workers apply the same rule.
+The worker's own mirror settles before collection, avoiding self-blocking.
+Before deletion, the worker also reads and verifies the current selected
 metadata closure and intent bytes, and freshly validates both lease and pointer.
 Uncertain reference reads retain the candidate. Maintenance memory bounds the
 captured set and decoded shared references.
