@@ -118,6 +118,15 @@ impl EventLoop {
         &self,
         cf_ids: &[crate::types::ColumnFamilyId],
     ) -> Result<(), MidgeError> {
+        if !cf_ids.is_empty() && self.state.write_pressure.admission.hard_pending_limit() {
+            self.state
+                .diagnostics
+                .record(crate::telemetry::metrics::Metrics::record_write_stall_compaction);
+            return Err(MidgeError::WriteStall(format!(
+                "pending compaction debt reached its configured hard limit ({} bytes)",
+                self.state.write_pressure.admission.pending_bytes()
+            )));
+        }
         for cf_id in cf_ids {
             if self.state.l0_write_slot_unavailable(*cf_id) {
                 self.state.diagnostics.record_write_admission_rejection(

@@ -83,7 +83,8 @@ fn should_reject_at_hard_l0_ceiling_when_slowdown_is_enabled() -> MidgeResult<()
         matches!(rejected, MidgeError::WriteStall(_)),
         "{rejected:?}"
     );
-    assert!(engine.metrics().get_runtime_metrics()?.write_stalled);
+    let metrics = engine.metrics().get_runtime_metrics()?;
+    assert!(metrics.write_stalls_compaction_total > 0, "{metrics:?}");
     engine.shutdown(Duration::from_secs(10))
 }
 
@@ -133,14 +134,34 @@ fn should_enforce_pending_byte_limit_before_the_l0_hard_ceiling() -> MidgeResult
         write(&engine, ordinal)?;
         engine.flush_cf(&family)?;
     }
+    let before = engine.metrics().get_runtime_metrics()?.current_sequence;
 
     // Act
     let rejected = write(&engine, 5);
     let metrics = engine.metrics().get_runtime_metrics()?;
 
     // Assert
-    assert!(matches!(rejected, Err(MidgeError::WriteStall(_))));
+    assert!(
+        matches!(&rejected, Err(MidgeError::WriteStall(message))
+            if message.contains("pending compaction")),
+        "{rejected:?}"
+    );
     assert_eq!(metrics.sst_count, 4);
     assert!(metrics.estimated_pending_compaction_bytes >= 2);
-    engine.shutdown(Duration::from_secs(10))
+    assert_eq!(
+        metrics.current_sequence, before,
+        "rejection precedes WAL allocation"
+    );
+    let read = engine.begin_tx(family.id(), TransactionMode::ReadOnly)?;
+    assert!(read.get(&5_u32.to_be_bytes())?.is_none());
+    drop(read);
+    engine.compact_all()?;
+    write(&engine, 5)?;
+    engine.shutdown(Duration::from_secs(10))?;
+    drop(engine);
+    let mut reopened = Engine::open(OpenOptions::local(directory.path()).build()?)?;
+    let read = reopened.begin_tx(family.id(), TransactionMode::ReadOnly)?;
+    assert_eq!(read.get(&5_u32.to_be_bytes())?.unwrap().as_ref(), b"value");
+    drop(read);
+    reopened.shutdown(Duration::from_secs(10))
 }
