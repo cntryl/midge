@@ -364,7 +364,15 @@ impl EventLoop {
             if self.routing.pending_msg.is_some() {
                 break;
             }
-            match msg_rx.try_recv() {
+            let next = if self.has_deferred_wal_messages() {
+                let Some(message) = self.take_deferred_transaction_for_wal_group() else {
+                    break;
+                };
+                Ok(message)
+            } else {
+                msg_rx.try_recv()
+            };
+            match next {
                 Ok(msg) => {
                     if !self.collect_coalesced_transaction_msg(msg, batch) {
                         break;

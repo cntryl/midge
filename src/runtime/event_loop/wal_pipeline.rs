@@ -135,6 +135,42 @@ impl EventLoop {
         self.pipeline.wal_commits.pending.is_some() || self.pipeline.memtable_apply.is_pending()
     }
 
+    pub(super) fn pending_message_waits_for_wal(&self) -> bool {
+        self.wal_group_in_flight()
+            && self
+                .routing
+                .pending_msg
+                .as_ref()
+                .is_some_and(requires_applied_prefix)
+    }
+
+    pub(super) fn has_deferred_wal_messages(&self) -> bool {
+        !self.pipeline.wal_commits.deferred.is_empty()
+    }
+
+    /// Take only leading resident transactions. A spill or layout/control
+    /// barrier stays in place and prevents collection from the newer inbox.
+    pub(super) fn take_deferred_transaction_for_wal_group(&mut self) -> Option<RuntimeMsg> {
+        if !self
+            .pipeline
+            .wal_commits
+            .deferred
+            .front()
+            .is_some_and(|pending| matches!(pending.message, RuntimeMsg::ApplyTransaction { .. }))
+        {
+            return None;
+        }
+        self.take_deferred_wal_message()
+    }
+
+    fn take_deferred_wal_message(&mut self) -> Option<RuntimeMsg> {
+        let pending = self.pipeline.wal_commits.deferred.pop_front()?;
+        if let Some(reservation) = pending._reservation {
+            self.pipeline.wal_commits.admitting.push(reservation);
+        }
+        Some(pending.message)
+    }
+
     pub(super) fn defer_transaction_behind_wal(
         &mut self,
         request: super::wal::ApplyTransactionRequest,
@@ -469,12 +505,7 @@ impl EventLoop {
             return;
         }
         self.pipeline.wal_commits.admitting.clear();
-        if let Some(pending) = self.pipeline.wal_commits.deferred.pop_front() {
-            self.routing.pending_msg = Some(pending.message);
-            if let Some(reservation) = pending._reservation {
-                self.pipeline.wal_commits.admitting.push(reservation);
-            }
-        }
+        self.routing.pending_msg = self.take_deferred_wal_message();
     }
 }
 

@@ -10,7 +10,7 @@ impl EventLoop {
         if self.wal_group_in_flight() {
             return self.pipeline.wal_commits.has_ready_work()
                 || self.pipeline.memtable_apply.is_ready()
-                || self.routing.pending_msg.is_some();
+                || (self.routing.pending_msg.is_some() && !self.pending_message_waits_for_wal());
         }
         if CompactionCoordinator::manual_compaction_wait_timeout(self) == Some(Duration::ZERO) {
             return true;
@@ -318,6 +318,17 @@ impl EventLoop {
             self.run_request_fairness_slot();
         }
         outcome
+    }
+
+    pub(super) fn process_pending_message(
+        &mut self,
+        msg_rx: &Receiver<RuntimeMsg>,
+    ) -> Option<HandleOutcome> {
+        if self.pending_message_waits_for_wal() {
+            return None;
+        }
+        let message = self.routing.pending_msg.take()?;
+        Some(self.process_restored_one(message, msg_rx))
     }
 
     pub(super) fn run_request_fairness_slot(&mut self) {

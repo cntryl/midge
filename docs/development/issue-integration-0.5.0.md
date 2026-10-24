@@ -885,3 +885,11 @@ non-recovery scope restoration; uninvoked synthetic event helpers are removed.
 `cargo check --locked --all-targets --features failpoints,stress-soak` passes
 cleanly (latest 3.13s). Behavioral execution and mutation red evidence remain
 pending; the PROG rows will be refreshed at this test checkpoint.
+
+#940/#905's next group consumes only the leading deferred resident writes.
+An older layout/spill/rotation lookahead remains ahead of newer writes, while
+eligible queued units share one physical sync after the earlier group settles.
+Active regressions count the real writer's fsyncs and require a rotation to
+precede the newer write. The same all-target failpoint/stress-soak compile
+passes cleanly; execution is pending. This improves ordered queued coalescing
+without claiming simultaneous physical append during the held fsync.

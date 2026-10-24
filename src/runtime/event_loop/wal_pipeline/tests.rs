@@ -77,9 +77,7 @@ pub(in crate::runtime::event_loop) fn settle(
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         event_loop.progress_wal_pipeline();
-        if let Some(message) = event_loop.routing.pending_msg.take() {
-            event_loop.process_restored_one(message, &crossbeam::channel::never());
-        }
+        event_loop.process_pending_message(&crossbeam::channel::never());
         if let Ok(response) = response.try_recv() {
             return response;
         }
@@ -303,5 +301,111 @@ fn should_keep_wal_frontiers_and_visibility_unchanged_until_runtime_owner_drains
     assert!(event_loop.state.wal.frontiers.local_durable() > durable_before);
     assert!(event_loop.state.applied_sequence > applied_before);
     assert!(event_loop.state.total_memtable_bytes > 0);
+    Ok(())
+}
+
+#[test]
+fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group() -> MidgeResult<()>
+{
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let before = event_loop.state.diagnostics.counters().wal_fsync_count;
+    let first = event_loop
+        .routing
+        .router
+        .register(94_020, "first strict group");
+    let second = event_loop
+        .routing
+        .router
+        .register(94_021, "queued second unit");
+    let third = event_loop
+        .routing
+        .router
+        .register(94_022, "queued third unit");
+    event_loop.process_one(
+        write(94_020, &[b"first-group"], true),
+        &crossbeam::channel::never(),
+    );
+    wait_for_hold(&mut event_loop, &held);
+
+    // Act: both later writers enter the bounded deferred queue before the
+    // first receipt is released. They must be collected into the next group.
+    event_loop.process_one(
+        write(94_021, &[b"next-a"], true),
+        &crossbeam::channel::never(),
+    );
+    event_loop.process_one(
+        write(94_022, &[b"next-b"], true),
+        &crossbeam::channel::never(),
+    );
+    assert!(second.try_recv().is_err());
+    assert!(third.try_recv().is_err());
+    held.release.send(()).expect("release first sync");
+    let first_cut = applied_cut(&mut event_loop, &first);
+    let second_cut = applied_cut(&mut event_loop, &second);
+    let third_cut = applied_cut(&mut event_loop, &third);
+
+    // Assert: one physical writer sync per group; exact ledger durability is
+    // separate and is deliberately not counted by this writer-only metric.
+    assert_eq!(
+        event_loop.state.diagnostics.counters().wal_fsync_count - before,
+        2
+    );
+    assert!(first_cut < second_cut && second_cut < third_cut);
+    assert_eq!(event_loop.state.applied_sequence, third_cut);
+    let snapshot = event_loop.create_read_snapshot(0).unwrap();
+    for key in [b"first-group".as_slice(), b"next-a", b"next-b"] {
+        assert_eq!(snapshot.get(key, third_cut)?, Some(b"value".to_vec()));
+    }
+    Ok(())
+}
+
+#[test]
+fn should_preserve_lookahead_rotation_before_newer_deferred_writers() -> MidgeResult<()> {
+    // Arrange: coalescing observes the rotation before either later write.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let first = event_loop
+        .routing
+        .router
+        .register(94_030, "strict before rotation");
+    let rotate = event_loop
+        .routing
+        .router
+        .register(94_031, "older rotation barrier");
+    let second = event_loop
+        .routing
+        .router
+        .register(94_032, "newer queued write");
+    let (queued, incoming) = crossbeam::channel::unbounded();
+    queued
+        .send(RuntimeMsg::Test(TestRuntimeMsg::WalRotate {
+            request_id: 94_031,
+        }))
+        .unwrap();
+    let initial_segment = event_loop.state.wal.open_segment();
+    event_loop.process_one(write(94_030, &[b"before-rotate"], true), &incoming);
+    wait_for_hold(&mut event_loop, &held);
+    event_loop.process_one(write(94_032, &[b"after-rotate"], true), &incoming);
+
+    // Act: the real run-loop handoff leaves an older layout barrier parked.
+    assert!(event_loop.process_pending_message(&incoming).is_none());
+    assert!(rotate.try_recv().is_err());
+    assert_eq!(event_loop.state.wal.open_segment(), initial_segment);
+    held.release.send(()).expect("release earlier WAL group");
+    let first_cut = applied_cut(&mut event_loop, &first);
+
+    // Assert: the rotation is acknowledged before a newer deferred writer is
+    // even sequenced, and the later write belongs to the replacement segment.
+    assert!(matches!(rotate.try_recv(), Ok(RuntimeResponse::Ok { .. })));
+    assert!(event_loop.state.wal.open_segment() > initial_segment);
+    assert_eq!(event_loop.state.applied_sequence, first_cut);
+    assert!(second.try_recv().is_err());
+    assert!(applied_cut(&mut event_loop, &second) > first_cut);
     Ok(())
 }
