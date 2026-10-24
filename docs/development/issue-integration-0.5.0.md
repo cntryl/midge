@@ -826,3 +826,13 @@ local reads from lease-dependent cloud reads and records admitted concurrent
 memtable effects above the visible cut. Test targets compile; execution and
 required mutation-based red evidence remain pending. The evidence-map audit
 is a separate follow-up and will retain unresolved assurance gaps explicitly.
+
+#937 registers an opt-in Tier 5 Sqrzl diagnostic target beside the shared Tier
+2 simulator workload and local Strict floor. Continuous lag samples exclude
+the final drain and require tick/gap health; native costs count existing HTTP
+attempt completion events through shutdown join, including retries and all
+engine request bodies. Missing/incomplete observations fail as inconclusive.
+The simulator's resident-WAL byte scope remains explicitly distinct. Both
+benchmark targets compile; no performance/provider execution or exact-SHA
+result artifact is claimed. The latest failpoint test-target check also passes,
+with only the concurrent #909 work's temporary unused-method warnings.

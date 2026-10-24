@@ -119,6 +119,10 @@ Hybrid:
   uploaded per committed byte, with the local `sync()` row as the floor. Rows
   are `gate` trust; the simulator is not a provider, so Sqrzl and live-provider
   lag are qualified separately.
+- `tier5_hybrid_durability_lag` contains the Sqrzl diagnostic counterparts and
+  local floor. The [provider qualification guide](hybrid-lag-provider-qualification.md)
+  defines sampler health and observed native HTTP cost scope; execution and
+  committed provider evidence remain pending.
 - `tier4_system_strict_group_commit` owns fixed-work complete-system strict
   throughput through flush, compaction, clean shutdown, reopen digest
   verification, and final SST footprint. The current window selection and

@@ -441,6 +441,12 @@ harness = false
 required-features = ["stress-soak"]
 
 [[bench]]
+name = "tier5_hybrid_durability_lag"
+path = "benches/tier5_hybrid_durability_lag.rs"
+harness = false
+required-features = ["stress-soak"]
+
+[[bench]]
 name = "tier6_mixed_workload_soak"
 path = "benches/tier6_mixed_workload_soak.rs"
 harness = false

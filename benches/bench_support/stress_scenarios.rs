@@ -2417,7 +2417,7 @@ fn workload_value(key: &str) -> Vec<u8> {
     value
 }
 
-fn unique_namespace(scenario: &str) -> String {
+pub(super) fn unique_namespace(scenario: &str) -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time after Unix epoch")
@@ -2430,7 +2430,7 @@ fn unique_namespace(scenario: &str) -> String {
     format!("midge-{simple}-{}-{timestamp}", std::process::id())
 }
 
-fn ensure_namespace(protocol: &str, namespace: &str) -> Result<(), String> {
+pub(super) fn ensure_namespace(protocol: &str, namespace: &str) -> Result<(), String> {
     match protocol {
         "s3" => signed_s3_namespace(namespace),
         "azure" => signed_azure_namespace(namespace),
