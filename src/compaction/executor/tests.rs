@@ -600,6 +600,7 @@ fn should_carry_live_ranges_after_retiring_obsolete_ranges_between_partitions() 
         snapshot_horizon: Some(10),
         point_eligible: true,
         range_eligible: true,
+        retained_snapshot_sources: false,
     };
 
     // Act: the obsolete range covers GC decisions but never reaches an
@@ -656,6 +657,7 @@ fn should_roll_only_after_a_written_partition_reaches_its_boundary() -> MidgeRes
         snapshot_horizon: None,
         point_eligible: false,
         range_eligible: false,
+        retained_snapshot_sources: false,
     };
 
     // Act
@@ -738,6 +740,7 @@ mod key_group_reduction {
             snapshot_horizon: horizon,
             point_eligible: point,
             range_eligible: range,
+            retained_snapshot_sources: false,
         }
     }
 

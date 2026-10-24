@@ -61,6 +61,10 @@ impl EventLoop {
         let memory_limit = self.available_compaction_memory()?;
         let mut plan = self.assign_compaction_output_sequence_within(plan, manual_deadline)?;
         plan.snapshot_horizon = self.state.oldest_active_snapshot_sequence();
+        // Read snapshots pin their original SST names through GC's exclusive
+        // capture/registration sampling boundary. Rewriting cannot remove the
+        // source of a pre-delete read until its final snapshot unpins.
+        plan.retained_snapshot_sources = true;
         plan.target_sst_size = self.actors.compaction_actor.target_sst_size();
         plan.compaction_memory_limit = memory_limit;
 
@@ -372,6 +376,7 @@ impl CompactionCoordinator {
             snapshot_horizon: None,
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
+            retained_snapshot_sources: false,
         };
 
         let schedule_res = event_loop.launch_compaction(cplan);

@@ -494,7 +494,9 @@ impl RangeTombstoneTracker {
 }
 
 fn range_tombstone_is_obsolete(tombstone: &RangeTombstone, policy: TombstoneGcPolicy) -> bool {
-    policy.range_eligible && tombstone_is_obsolete(tombstone.seq, policy.snapshot_horizon)
+    policy.range_eligible
+        && (policy.retained_snapshot_sources
+            || tombstone_is_obsolete(tombstone.seq, policy.snapshot_horizon))
 }
 
 /// Whether the partition being built should be closed at this key group
@@ -949,6 +951,7 @@ fn write_fragment_key_events(
         snapshot_horizon: None,
         point_eligible: false,
         range_eligible: false,
+        retained_snapshot_sources: false,
     };
     let key = events[0].event.key();
     // Splitting off an outer endpoint already retained by a range would add

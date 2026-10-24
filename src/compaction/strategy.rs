@@ -15,6 +15,67 @@ use crate::metadata::FileMeta;
 #[path = "strategy/work_partition_tests.rs"]
 mod work_partition_tests;
 
+#[cfg(test)]
+mod range_gc_tests {
+    use super::*;
+
+    #[test]
+    fn should_prove_range_gc_with_complete_bounds_when_disjoint_files_are_unselected() {
+        // Arrange
+        let selected = FileMeta {
+            name: "selected.sst".into(),
+            key_bounds_complete: true,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"m".to_vec()),
+            ..Default::default()
+        };
+        let outside = FileMeta {
+            name: "outside.sst".into(),
+            key_bounds_complete: true,
+            smallest_key: Some(b"x".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            ..Default::default()
+        };
+        let levels = vec![vec![&selected], vec![&outside]];
+
+        // Act
+        let proof = Compactor::tombstone_gc_eligibility(&levels, &[selected.name.clone()]).unwrap();
+
+        // Assert
+        assert_eq!(proof, (true, true));
+    }
+
+    #[test]
+    fn should_retain_ranges_when_unselected_bounds_are_incomplete() {
+        // Arrange
+        let selected = FileMeta {
+            name: "selected.sst".into(),
+            key_bounds_complete: true,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"m".to_vec()),
+            ..Default::default()
+        };
+        let legacy = FileMeta {
+            name: "legacy.sst".into(),
+            key_bounds_complete: false,
+            smallest_key: Some(b"x".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            ..Default::default()
+        };
+
+        // Act
+        let proof = Compactor::tombstone_gc_eligibility(
+            &[vec![&selected], vec![&legacy]],
+            &[selected.name.clone()],
+        )
+        .unwrap();
+
+        // Assert
+        assert!(proof.0);
+        assert!(!proof.1);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactionPurpose {
     Merge,
@@ -60,6 +121,9 @@ pub struct CompactionPlan {
     /// persisted legacy bounds are advisory and cannot prove a range delete
     /// does not reach an otherwise unselected file.
     pub range_tombstone_gc_eligible: bool,
+    /// Production snapshots retain their original immutable sources until
+    /// unpin, so rewritten outputs need not retain ranges for those readers.
+    pub retained_snapshot_sources: bool,
 }
 
 impl CompactionPlan {
@@ -84,6 +148,7 @@ impl CompactionPlan {
             snapshot_horizon: None,
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
+            retained_snapshot_sources: false,
         }
     }
 
@@ -271,6 +336,7 @@ impl Compactor {
                 snapshot_horizon: None,
                 point_tombstone_gc_eligible: false,
                 range_tombstone_gc_eligible: false,
+                retained_snapshot_sources: false,
             }));
         }
         Ok(None)
@@ -417,6 +483,7 @@ impl Compactor {
             snapshot_horizon: None,
             point_tombstone_gc_eligible,
             range_tombstone_gc_eligible,
+            retained_snapshot_sources: false,
         }))
     }
 
@@ -491,6 +558,7 @@ impl Compactor {
             snapshot_horizon: None,
             point_tombstone_gc_eligible,
             range_tombstone_gc_eligible,
+            retained_snapshot_sources: false,
         }))
     }
 
@@ -563,6 +631,7 @@ impl Compactor {
             snapshot_horizon: None,
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
+            retained_snapshot_sources: false,
         }
     }
 
@@ -589,20 +658,19 @@ impl Compactor {
                     .smallest_key
                     .as_ref()
                     .zip(file.largest_key.as_ref())
-                    .is_some_and(|(smallest, largest)| {
+                    .is_none_or(|(smallest, largest)| {
                         smallest.as_slice() <= max_key.as_slice()
                             && largest.as_slice() >= min_key.as_slice()
                     })
         });
         let point_tombstone_gc_eligible = !unselected_point_overlap;
 
-        // Legacy file bounds can omit range-tombstone endpoints. Only a plan
-        // containing every file in the column family proves that dropping a
-        // range marker cannot expose a covered value outside the selected
-        // metadata range.
+        // Complete bounds include both range endpoints. Legacy/incomplete
+        // bounds cannot establish disjointness, even outside their point span.
         let total_files = levels.iter().map(Vec::len).sum::<usize>();
+        let complete_bounds = levels.iter().flatten().all(|file| file.key_bounds_complete);
         let range_tombstone_gc_eligible =
-            point_tombstone_gc_eligible && selected_names.len() == total_files;
+            point_tombstone_gc_eligible && (selected_names.len() == total_files || complete_bounds);
         Ok((point_tombstone_gc_eligible, range_tombstone_gc_eligible))
     }
 

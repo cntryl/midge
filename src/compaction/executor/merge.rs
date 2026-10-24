@@ -20,6 +20,7 @@ pub(crate) struct TombstoneGcPolicy {
     pub(crate) snapshot_horizon: Option<u64>,
     pub(crate) point_eligible: bool,
     pub(crate) range_eligible: bool,
+    pub(crate) retained_snapshot_sources: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

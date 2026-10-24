@@ -249,3 +249,20 @@ contracts; they do not claim target-region acceptance or live identity
 permissions. The separate broad-suite failure remains tracked by #982.
 
 No issue is claimed merged or production-qualified by local commits.
+
+## Implementation-first candidates
+
+### #942: range tombstone collection
+
+Complete persisted range endpoints now permit the bottommost overlap proof
+without selecting every file in the family. Missing bounds conservatively
+block the point/span proof, and any incomplete file blocks the narrower range
+proof unless the whole family is selected. Runtime plans explicitly use the
+existing original-source snapshot retention: old readers keep their pinned
+SSTs and memtable Arcs, while GC remains excluded from the capture/register
+window. Standalone compaction plans retain the existing sequence-horizon
+behavior unless that source-retention proof is explicitly supplied.
+
+Added complete/disjoint and legacy/incomplete proof regressions. Compile
+check with failpoints passed; test execution, public snapshot/retirement
+qualification and performance evidence remain in the review pass.
