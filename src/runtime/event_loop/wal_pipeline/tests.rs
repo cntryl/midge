@@ -253,3 +253,55 @@ fn should_preserve_unchanged_append_failure_when_writer_proves_durable_rollback(
     );
     Ok(())
 }
+
+#[test]
+fn should_keep_wal_frontiers_and_visibility_unchanged_until_runtime_owner_drains_completion(
+) -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let diagnostics = Arc::clone(&event_loop.state.diagnostics);
+    let physical_before = diagnostics.counters().wal_fsync_count;
+    let durable_before = event_loop.state.wal.frontiers.local_durable();
+    let applied_before = event_loop.state.applied_sequence;
+    let response = event_loop
+        .routing
+        .router
+        .register(97_900, "WAL owner publication");
+    event_loop.process_one(
+        write(97_900, &[b"owner-only"], true),
+        &crossbeam::channel::never(),
+    );
+    wait_for_hold(&mut event_loop, &held);
+
+    // Act: allow the actual writer fsync, deliberately without running a
+    // single runtime completion or bookkeeping turn afterwards.
+    held.release.send(()).expect("release physical writer");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while diagnostics.counters().wal_fsync_count == physical_before {
+        assert!(
+            Instant::now() < deadline,
+            "physical writer did not complete"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    // Assert: worker completion is evidence for the owner, not publication.
+    assert_eq!(
+        event_loop.state.wal.frontiers.local_durable(),
+        durable_before
+    );
+    assert_eq!(event_loop.state.applied_sequence, applied_before);
+    assert_eq!(event_loop.state.total_memtable_bytes, 0);
+    assert!(response.try_recv().is_err());
+    assert!(matches!(
+        settle(&mut event_loop, &response),
+        RuntimeResponse::TransactionApplied { .. }
+    ));
+    assert!(event_loop.state.wal.frontiers.local_durable() > durable_before);
+    assert!(event_loop.state.applied_sequence > applied_before);
+    assert!(event_loop.state.total_memtable_bytes > 0);
+    Ok(())
+}

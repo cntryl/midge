@@ -84,6 +84,71 @@ fn should_invalidate_cloud_reads_when_monotonic_lease_expires_before_notificatio
                 Some(b"one".as_slice())
             );
         }
+        // Diagnostic requests retain their control path in either mode, even
+        // when cloud data reads correctly reject the predecessor's authority.
+        let diagnostics = engine.metrics().get_runtime_metrics()?;
+        assert!(diagnostics.current_sequence > 0);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_keep_retained_reads_and_diagnostics_available_after_wal_io_fence_with_live_lease(
+) -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    for cloud in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let options = if cloud {
+            OpenOptions::cloud_simulated(directory.path(), "read-wal-fence", "db").build()?
+        } else {
+            OpenOptions::local(directory.path()).build()?
+        };
+        let engine = Engine::open(options)?;
+        let family = engine.get_column_family("default").unwrap();
+        let policy = if cloud {
+            WriteOptions::cloud_strict()
+        } else {
+            WriteOptions::sync()
+        };
+        let mut seed = engine.begin_tx(family.id(), TransactionMode::ReadWrite)?;
+        seed.put(b"retained".to_vec(), b"value".to_vec(), None)?;
+        seed.commit(policy)?;
+        engine.flush_cf(&family)?;
+        let frozen = engine.begin_tx(family.id(), TransactionMode::ReadOnly)?;
+        let mut failing = engine.begin_tx(family.id(), TransactionMode::ReadWrite)?;
+        failing.put(b"failed".to_vec(), b"unconfirmed".to_vec(), None)?;
+        fail::cfg("midge::wal::inject_no_space_on_sync", "return").expect("WAL sync failure");
+
+        // Act
+        let result = failing.commit(policy);
+        fail::remove("midge::wal::inject_no_space_on_sync");
+
+        // Assert: storage failure does not revoke a live read lease or its
+        // retained source, while new durable writes remain fenced.
+        assert!(
+            matches!(result, Err(MidgeError::OutcomeUnknown(_))),
+            "{result:?}"
+        );
+        assert_eq!(
+            frozen.get(b"retained")?.as_deref(),
+            Some(b"value".as_slice())
+        );
+        assert_eq!(frozen.get(b"absent")?, None);
+        let mut scan = frozen.scan(&Query::new())?;
+        assert_eq!(scan.next().unwrap()?.0.as_ref(), b"retained");
+        assert!(scan.next().is_none());
+        assert_eq!(
+            engine
+                .begin_tx(family.id(), TransactionMode::ReadOnly)?
+                .get(b"retained")?
+                .as_deref(),
+            Some(b"value".as_slice())
+        );
+        let diagnostics = engine.metrics().get_runtime_metrics()?;
+        assert_eq!(diagnostics.health, crate::EngineHealth::Degraded);
+        assert!(diagnostics.current_sequence > 0);
     }
     Ok(())
 }

@@ -817,3 +817,12 @@ Active HTTP regressions count requests across continuation/503 responses and
 reject repeated tokens; a 25-orphan ordinal regression preserves current
 recovery while draining bounded batches. Test targets compile (only #909 WIP
 warnings); behavioral/provider execution remains pending.
+
+#979 adds active wrong segment/record version regressions with otherwise valid
+framing CRCs, a physical-fsync versus loop-owned frontier/accounting handoff
+regression, and retained read/scan/diagnostic coverage after WAL I/O fencing
+while the read lease remains live. The catalog now distinguishes retained
+local reads from lease-dependent cloud reads and records admitted concurrent
+memtable effects above the visible cut. Test targets compile; execution and
+required mutation-based red evidence remain pending. The evidence-map audit
+is a separate follow-up and will retain unresolved assurance gaps explicitly.
