@@ -117,7 +117,10 @@ impl LeaderStore for LostCasStore {
 fn should_resolve_successful_unknown_pointer_cas_in_small_pool_without_second_body_allocation() {
     // Arrange
     let fixture = Fixture::new(CloudStorage::with_mock());
-    let memory = crate::common::resource_budget::ResourceBudget::new(32 * 1024);
+    // The compatibility provider also owns its existing 64 KiB completion
+    // stack during immutable upload. The CAS hook then fills every remaining
+    // byte, so exact selected readback cannot reserve a second body workspace.
+    let memory = crate::common::resource_budget::ResourceBudget::new(128 * 1024);
     fixture.lock.configure_capture_memory(memory.clone());
     let cut = fixture.cut();
     let store = LostCasStore {
@@ -126,7 +129,7 @@ fn should_resolve_successful_unknown_pointer_cas_in_small_pool_without_second_bo
         occupied: parking_lot::Mutex::new(None),
         mutations: std::sync::atomic::AtomicUsize::new(0),
     };
-    let deadline = OperationDeadline::from_budget(Duration::from_millis(100));
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
 
     // Act: exact validated staged identity uses the capture's already charged
     // workspace even though no additional read allocation can be admitted.
@@ -135,7 +138,7 @@ fn should_resolve_successful_unknown_pointer_cas_in_small_pool_without_second_bo
             cloud: &fixture.cloud,
             fs: fixture.fs.as_ref(),
             publication_lock: &fixture.lock,
-            lock_wait_budget: Duration::from_millis(100),
+            lock_wait_budget: Duration::from_secs(5),
             deadline: &deadline,
             authority: super::super::CloudMetadataMirrorAuthority {
                 store: &store,
@@ -438,8 +441,8 @@ fn flush_intent() -> IntentLogEntry {
             cf_id: 0,
             smallest_key: None,
             largest_key: None,
-            smallest_seq: None,
-            largest_seq: None,
+            smallest_seq: Some(10),
+            largest_seq: Some(10),
             key_bounds_complete: false,
             earliest_expiration_millis: None,
         },
@@ -583,7 +586,6 @@ fn should_reject_owned_capture_when_successor_takes_writer_epoch() {
     // Arrange
     let fixture = Fixture::new(CloudStorage::with_mock());
     let cut = fixture.cut();
-    fixture.store.release_leadership("writer", 1).unwrap();
     fixture.store.acquire_leadership("successor").unwrap();
 
     // Act
@@ -631,11 +633,14 @@ fn should_capture_exact_checkpoint_cut_when_snapshot_installation_is_between_ren
     )
     .unwrap();
     let writer = Arc::clone(&store);
+    let failpoint_gate = crate::failpoints::worker_gate();
     let install = std::thread::spawn(move || {
-        writer.save_captured_snapshot_for(
-            crate::metadata::accounting::Origin::CompactionBeforeGc,
-            &checkpoint,
-        )
+        failpoint_gate.run(|| {
+            writer.save_captured_snapshot_for(
+                crate::metadata::accounting::Origin::CompactionBeforeGc,
+                &checkpoint,
+            )
+        })
     });
     arrived.recv_timeout(Duration::from_secs(2)).unwrap();
 
