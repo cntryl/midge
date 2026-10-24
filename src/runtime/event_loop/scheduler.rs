@@ -37,6 +37,9 @@ impl EventLoop {
         if self.has_ready_reserved_compaction() {
             return true;
         }
+        if CompactionCoordinator::capture_retry_timeout(self) == Some(Duration::ZERO) {
+            return true;
+        }
 
         if self
             .actors
@@ -203,6 +206,7 @@ impl EventLoop {
                 .backlog()
                 .retry_timeout(),
             self.state.flush_retry_deadline_timeout(),
+            CompactionCoordinator::capture_retry_timeout(self),
             Some(self.background_maintenance_timeout()),
         ]
         .into_iter()

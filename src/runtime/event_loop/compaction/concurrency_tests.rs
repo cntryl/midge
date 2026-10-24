@@ -6,6 +6,7 @@ use crate::sst::{FsSstFactoryIo, SstFactory as _};
 use crate::types::EntryType;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
+mod capture_queue_tests;
 mod moves_tests;
 mod publication_queue_tests;
 

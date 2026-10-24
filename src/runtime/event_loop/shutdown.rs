@@ -325,12 +325,18 @@ impl EventLoop {
     }
 
     fn drain_shutdown_compaction_publication(&mut self) -> crate::common::MidgeResult<()> {
-        while self.actors.compaction_publish_actor.is_inflight() {
+        while self.actors.compaction_publish_actor.is_inflight()
+            || crate::runtime::event_loop::compaction::CompactionCoordinator::has_pending_capture(
+                self,
+            )
+        {
             self.reap_cloud_wal_prune_worker();
             crate::runtime::event_loop::compaction::CompactionCoordinator::drain_publish_results(
                 self,
             );
-            if !self.actors.compaction_publish_actor.is_inflight() {
+            if !self.actors.compaction_publish_actor.is_inflight()
+                && !crate::runtime::event_loop::compaction::CompactionCoordinator::has_pending_capture(self)
+            {
                 break;
             }
             match self

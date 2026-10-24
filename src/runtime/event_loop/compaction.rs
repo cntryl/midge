@@ -14,7 +14,9 @@ mod moves;
 use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
+mod capture;
 mod compute;
+use capture::{CaptureAdmission, CaptureRetry};
 #[cfg(all(test, feature = "failpoints"))]
 mod concurrency_tests;
 
@@ -454,6 +456,7 @@ pub(super) struct CompactionCompleteRequest {
 /// serialized here.
 #[derive(Clone)]
 pub(crate) struct PendingCompactionPublication {
+    capture_retry: Option<CaptureRetry>,
     move_sources: Vec<crate::metadata::FileMeta>,
     manual_deadline: Option<OperationDeadline>,
     token: CompactionPublicationToken,
@@ -806,6 +809,7 @@ impl CompactionCoordinator {
                 }
             };
         let pending = PendingCompactionPublication {
+            capture_retry: None,
             move_sources,
             manual_deadline,
             token,
@@ -1504,6 +1508,11 @@ impl CompactionCoordinator {
         event_loop: &mut EventLoop,
         phase: CompactionPublishPhase,
     ) -> crate::common::MidgeResult<()> {
+        let CaptureAdmission::Ready { cut, deadline } =
+            Self::admit_publication_capture(event_loop, phase)?
+        else {
+            return Ok(());
+        };
         let pending = event_loop
             .publication
             .compaction_publication
@@ -1528,31 +1537,9 @@ impl CompactionCoordinator {
             )
         });
         let task = CompactionPublishTask {
-            metadata_cut: if !event_loop.pipeline.inline_flush_worker
-                && event_loop
-                    .actors
-                    .cloud_coordinator
-                    .cloud_metadata_storage
-                    .is_some()
-            {
-                let deadline = pending.manual_deadline.unwrap_or_else(|| {
-                    OperationDeadline::from_budget(event_loop.routing.runtime_response_timeout)
-                });
-                Some(
-                    event_loop
-                        .publication
-                        .metadata_publication_lock
-                        .capture_control_cut(
-                            &event_loop.state.fs,
-                            pending.token.writer_epoch,
-                            &deadline,
-                        )?,
-                )
-            } else {
-                None
-            },
+            metadata_cut: cut,
             checkpoint,
-            manual_deadline: pending.manual_deadline,
+            manual_deadline: Some(deadline),
             token: pending.token.clone(),
             phase,
             outputs: if phase == CompactionPublishPhase::OutputDurable {
@@ -2130,6 +2117,7 @@ impl CompactionCoordinator {
     }
 
     pub(super) fn drain_publish_results(event_loop: &mut EventLoop) {
+        Self::retry_publication_capture(event_loop);
         if !event_loop.publication.publication_gate.is_active() {
             if let Some(completion) = event_loop.publication.deferred_compaction_result.take() {
                 Self::handle_publication_completion(event_loop, completion);
