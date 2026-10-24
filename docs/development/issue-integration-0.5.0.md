@@ -21,12 +21,18 @@ The implementation-first batch now contains the approved runtime candidates
 for the 0.5.0 issues. The chronological notes below retain earlier partial
 checkpoints; their older "pending implementation" descriptions are superseded
 by the later slices and the final invariant-evidence map. No issue is closed
-by a local commit. The batch is now under review in
+by a local commit. The batch is tracked in
 [PR #983](https://github.com/cntryl/midge/pull/983), targeting `develop`.
+That PR is the canonical final verification record: it records the final
+aggregate and serial fault results, renewed production-source Sqrzl campaign,
+exact-head hosted checks and merge/issue disposition. The checkpoints below
+preserve earlier failed and partial results rather than replacing their source
+boundaries with the final outcome.
 
 The implementation-pass runtime/test source checkpoint was
-`0bb7f09df6eaadd92ebba6870434acc30ba3a69d`. The initial evidence map describes
-that checkpoint; review fixes require a refreshed map before merge.
+`0bb7f09df6eaadd92ebba6870434acc30ba3a69d`. Its initial evidence map and checks
+are historical; the final reference map is pinned to `d771b179`, after the
+review fixes recorded below.
 Validation at that historical source checkpoint:
 
 - `cargo fmt --check`: passed.
@@ -76,6 +82,206 @@ Native qualification uses only a dedicated local Sqrzl container, pinned to
 No live Azure qualification or production rollout is included. A green HEAD
 request does not qualify authentication, conditional writes or recovery.
 
+### Jev design review
+
+The user requested Jev evaluation for complex decisions. Narrow review requests
+resolved to `jev-1.14.0` and evaluated the selected-proof handoff, memory
+ownership, spill-pressure assertions and startup scheduling separately. These
+judgments prioritize investigation; source evidence and executed regressions
+remain the acceptance gates.
+
+- Selected terminal proof: retain compact evidence from the exact selected
+  control cut, preserving lineage, horizon and already-owned guard checks.
+  A local terminal phase alone cannot authorize clearing an intent.
+- Compact representation: use a fixed UUID and an exact sorted digest slice.
+  Review found that the earlier tree/string estimate did not derive the
+  first-node allocation bound. Actual retained payload, private decoder space,
+  partial clears and real callback tails require independent verification.
+- Deferred receipt pruning: source Drop can encounter a held registry lock.
+  Its receipt storage must retain its own adequate charge through pruning.
+  Jev preferred adding a derived receipt allowance (confidence 0.89); that
+  preference did not establish a bound for private standard-library nodes.
+  Once review verified that stable Rust is not pinned to one implementation,
+  Jev favored exact sorted receipt storage (confidence 0.98). The implementation
+  charges its retained and replacement payload through the final prune.
+- Typed decode admission: dense small intent variants invalidate a universal
+  `8E + 4096` private-workspace argument. That observation does not establish
+  that the old full `16E - credit - compact` charge overflowed on the same
+  input. Jev favored narrow allocation-free shape preflight and admission in
+  the existing pool. Actual decoder payload, nested fields, phase overlap,
+  original deadlines and ordinary small-pool progress remain required proof.
+- Spill pressure: assert the actual shared disk-capacity rejection, all ledger
+  classes and released physical spill files. Accepted WAL occupies the same
+  fixed pool, so a constant spill-file-size floor cannot represent total
+  pressure. Retry staging only after the measured blocking WAL retires.
+- Startup preparation: preserve real 600 ms aggregate timeout coverage and
+  qualify the exact late-preparation race with the existing controlled shared
+  scope. Reaching preparation before a real deadline cannot be guaranteed by
+  an observer barrier. Controlled phase scheduling is separate evidence from
+  elapsed-time qualification.
+- Takeover: check healthy arrangement before the actual expiry wait, then
+  check expired monotonic authority and real successor/restart outcomes.
+  Runtime fencing also owns the health flag; stopping heartbeat workers does
+  not freeze that shared flag. The confirmed fixture finding is #984.
+- Fault-free timed fixtures: hold the existing read gate before constructing
+  deadlines and through owned cleanup, excluding unrelated global fault
+  configuration. Keep numeric latency/deadline assertions unchanged. Jev
+  favored this scope; focused and full parallel execution determine whether
+  the observed timing failures are resolved.
+- Publication latency: Jev favored separating the active 100 ms scheduling
+  probe, using existing controlled storage, from real-filesystem ownership and
+  recovery schedules. Actual receiver timestamps disproved observer delay as
+  the cause; physical build, upload and checkpoint stages slowed under shared
+  host contention. No durable sync, checkpoint cadence or numeric deadline was
+  changed to meet the timing assertion. Hardware latency remains a separate
+  open #910 gate.
+- Scoped tracing: retain a second ordinary non-global recorder so an unrelated
+  callsite registration cannot cache the sole scoped recorder's thread-local
+  absence. The controlled regression first performs an actual unscoped flush,
+  then requires the original scoped API spans. Production tracing and
+  dependencies are unchanged; #985 records the reproduced failure and fix.
+
+One hypothetical GET-gate review lead was dropped. Fresh lease validation still
+performs a GET before publication; source inspection instead found that the
+fragment fixture had never published its starting manifest remotely. The fixture
+now proves that real baseline before holding the original provider operation.
+No extra production GET, cache defeat or phase framework was introduced.
+
+### Executed Sqrzl qualification
+
+Production source `1d1a2403ef3ef06ed90eaedca88d75a7b8f6b782` passed the
+following commands against the dedicated pinned Sqrzl container. Later changes
+are test-fixture and documentation refinements; exact-head CI remains a
+separate merge gate. The configured local emulator credential is omitted here.
+
+| Command | Result |
+| --- | --- |
+| `cargo test --locked --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1` | 8 passed, 4.08 s. Optional live S3 configuration was absent; no live-provider claim. |
+| `cargo test --locked --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints -- --test-threads=1` | 23 passed, 502.95 s. |
+| `cargo test --locked --test fault_injection --features sqrzl-tests,failpoints wal_authority_regressions::should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache -- --exact` | 1 passed, 18.72 s. |
+| `MIDGE_DISCOVERY_PROFILE=sqrzl cargo test --locked --test discovery_model --features sqrzl-tests` | 6 passed, 177.09 s; 128 resident/spilled histories across the configured protocol front doors. |
+
+The engine campaign retained original memory/disk limits and verified all
+762 and 1,523 records in its two complete-local-disk-loss profiles. Its actual
+receipt files identify the production revision and `verification_complete`.
+The image remains
+`ghcr.io/sqrzl/sqrzl-emulator@sha256:a10c5413dba980b852cac5e718c7a92a6642c6ec60ebb6a8222f2dca7d69f7c4`.
+Local command/context logs are `/tmp/midge-050-native-final-context.md` and
+`/tmp/midge-050-native-final-*.log`; engine receipt artifacts are retained under
+`/tmp/midge-050-native-final-artifacts`.
+
+The broad local run at this checkpoint passed 3,632 library tests and failed
+five; it also exposed one scoped-span fixture failure. Those are failed
+aggregate results. Accepted-worker settlement, fault-free deadline isolation
+and the scoped-dispatch correction passed their focused regressions; the full
+observability target then passed 59/59. The remaining publication-latency
+fixture separates its active controlled-storage 100 ms scheduling probe from
+real-filesystem held-owner and recovery checks. Shared-host physical disk
+latency is an open performance gate; neither a quiet serial control nor the
+reference inventory qualifies it. Final aggregate and exact-head CI results
+must be recorded before merge.
+
+The publication fixture correction is code checkpoint
+`d55a621776d9c6c9478a9d63e502703660076115`. Its default-parallel group passed
+7/7 in 18.00 s. The three controlled-storage acknowledgment measurements were
+7.96, 8.19 and 8.76 ms. The three real-filesystem schedules took 176.61, 182.65
+and 184.44 ms, with exact ownership, pre-release cold recovery and post-release
+authority assertions intact. These results qualify separate scheduling and
+recovery claims; they do not satisfy #910's real-hardware 100 ms acceptance.
+The evidence map is refreshed against this code checkpoint; historical
+qualification objects retain their original source and execution boundaries.
+
+The existing #953 footprint regression was executed unchanged at `d55a6217`:
+
+```sh
+cargo test --locked --lib --features failpoints \
+  metadata::codec::tests::should_reduce_manifest_bytes_when_encoding_twenty_thousand_bounded_files \
+  -- --exact --nocapture
+```
+
+It passed (1/1, 0.31 s), encoding the same 20,000-file manifest as 6,377,947
+JSON bytes and 4,479,374 binary bytes, then decoding all 20,000 entries. The
+stdout artifact is `/tmp/midge-050-manifest-20000-footprint.log`. This records
+format footprint, not runtime performance or #952's fuzz compute budget.
+
+The subsequent full local command,
+`cargo test --locked --workspace --features failpoints --no-fail-fast`, finished
+at code checkpoint `d55a6217`. Every binary, integration and doc-test target
+passed. The library passed 3,637 and failed three assertions that original
+compaction inputs had already been physically deleted. The operation's phase,
+caller outcome, intent and authority checks had passed. This remains failed
+aggregate evidence, recorded in `/tmp/midge-050-workspace-final-candidate.log`.
+These fixtures use background captured publication. An expired final mirror
+can retain an unresolved cut that correctly protects physical objects; joining
+existing workers does not retry a retained delete obligation. Seed mirror/name
+continuations must also finish under their original authority before the
+fixture rebinds its provider. The correction observes actual deferred work
+without extending the original caller deadline, changing its outcome or
+permitting another publication after expiry.
+
+Commit `c5226995` passes the full phase/deadline group 13/13 (21.72 s). Success
+cases observe real GC retries and joins. The final-clear timeout case first
+receives a genuine successful `ManifestPublished` result and proves the selected
+retired identities. A scoped observer holds the existing manifest writer lock
+only until actual local and remote inputs disappear under the original 5 s
+caller clock; this establishes its stated live-GC prerequisite before admitting
+the deliberately unresolved clear cut. It adds no global callback, backend or
+new publication. Existing caller/phase, earlier-authority retention, exact row,
+resource-release and no-new-upload assertions remain active. Jev evaluated
+this ordering using the corrected captured-cut source facts.
+
+The explicit serial fault command then passed 181 and failed 16; that is
+failed evidence in `/tmp/midge-050-final-serial-faults.log`. It exposed stale
+physical-compaction and acquisition-format fixtures, missing integration of
+the existing before-enqueue timeout seam into sequenced submission, and two
+implementation defects requiring another production checkpoint:
+
+- #986: startup intent repair installed validated SST authority while its
+  applied visibility cut remained at the old base. Commit `63c9d9d3` raises
+  visibility only to the installed manifest proof after complete repair;
+  it does not change the allocation-floor helper. The original public salvage
+  and strict checkpoint-failure regressions pass 2/2 (0.42 s).
+- #943: failed compaction handed unpublished output names to ordinary GC,
+  which correctly requires a durable retired-object identity. The active
+  partial-upload regression requires retaining every input while reclaiming
+  the exact non-authoritative output. Its repair must retain the original
+  prepared proof and use conditional owned deletion, preserving uncertainty
+  and replacement protection.
+
+Jev evaluated the installed-cut boundary and real before-enqueue seam
+independently, favoring those narrow repairs. The full `commit_timeout` target
+passes 3/3 (2.95 s): both resident/spilled unchanged failures preserve `Timeout`
+and restart absence, while an admitted late response remains `OutcomeUnknown`.
+The prior Sqrzl runs still describe production revision `1d1a2403`; renewed
+native qualification is required after these additional production fixes.
+
+Commit `e86f2c6f` performs failed-output cleanup on the existing joined compute
+task using its exact prepared provider proofs. A separate bounded cleanup
+obligation retains uncertain residue and checks current write authority;
+it does not renew the caller's publication deadline or weaken ordinary GC's
+durable-original requirement. The real replacement-race regression passes,
+and the held-cleanup case verifies caller expiry, retained writer ownership,
+shutdown and exact restart. Physical-compaction fault qualification passes
+28/28 (35.34 s); the L0 pressure case passes 1/1 (1.37 s). Overlapping anchors
+force physical rewrites and all original acknowledged rows remain checked.
+
+The existing checkpoint no-space seam is also preserved at the captured
+snapshot's actual pre-rename staging boundary (`6de9598f`, #911). Its regression
+proves a real checkpoint is due, retains the old snapshot and durable journal
+on failure, and verifies all original rows plus the latest anchor on restart.
+Both acquisition-lock crash cases use the actual V4/Pending acquisition prefix
+and pass 2/2 (0.34 s); production acquisition creates the separate pointer.
+
+Production source is frozen at
+`f27419f92d5c1cf06524e6aac882cfb6b7ee12b7`; later commits are test-only. The final
+code/reference checkpoint is `d771b1791022db15138a402e759ad145b6cfea45`.
+Strict all-target/all-feature pedantic Clippy passes with zero warnings
+(20.84 s); all-target/all-feature check and build pass (22.91 s and 59.83 s).
+Formatting passes, 4,542 test declarations are structurally compliant and all
+72 Markdown documents validate. These static results do not establish runtime
+qualification. Final aggregate, serial fault and renewed Sqrzl execution, and
+the separate exact-head hosted merge gates, are recorded on PR #983.
+
 The implementation retains Midge's ordered whole-unit applied prefix, exact
 WAL durable floors, storage-enforced epoch fencing and conservative physical
 reclamation. Provider-duration metadata serialization is replaced by exact
@@ -89,7 +295,9 @@ gated decisions. #904 has accounting preparation while its weaker floor cadence
 remains unapproved and unimplemented. #939 consumes the commit-path measurements
 before its design decision; it has no speculative production sharding change.
 The absolute #929 matrix, #937 provider runs, relative A/B targets, runtime/crash
-regressions, assurance compute budgets and Sqrzl requalification remain due.
+campaigns, assurance compute budgets and qualification of the eventual release
+SHA remain due. The executed Sqrzl results above qualify their recorded runtime
+source; they do not replace continuous-lag benchmark or release evidence.
 Conditional #916 interval and #918 hash-index choices require measurements.
 Deferred #922/#925/#928/#958 retain their existing gates.
 

@@ -5,10 +5,10 @@ alone permits an older full control-file image to overwrite a newer flush,
 and permits checkpoint truncation to race a control-file capture. The current
 protocol below is now wired into background runtime publishers, with active
 regressions for independent flush publication, immutable capture during a
-checkpoint, pointer contention and retained GC obligations. This is a local
-implementation candidate; behavioral execution, crash campaigns and provider
-latency qualification remain pending. Inline startup/compatibility publishers
-retain their serialized path.
+checkpoint, pointer contention and retained GC obligations. Local behavioral
+tests and Sqrzl provider/recovery qualification have run; the owning hardware
+latency, crash-campaign and performance acceptance gates remain open in #910.
+Inline startup/compatibility publishers retain their serialized path.
 
 The event loop applies worker-returned version edits in arrival order. Each
 edit validates live input identity, source/L0 order, complete key bounds and
@@ -136,16 +136,30 @@ SST deletion, general orphan discovery and metadata-body retention each need
 that edge or an equivalent explicit lineage proof. A fresh pointer and an
 old image being uploaded are insufficient grounds to delete captured sources.
 
-The deterministic regression holds compaction provider work for two seconds
-while a later flush commits within 100 ms through the same real publication
-path. It then releases the earlier effect and verifies no rollback, exact
-intent settlement, point/scan agreement and restart. The background fixture
-also hydrates the selected later cut into an empty cache before releasing the
-earlier effect: exact unselected compaction output names must remain absent
-from both hydrated and reopened authority. Variants delay/duplicate or lose an
-actual successful pointer-CAS callback while the later flush selects.
-This is cold/cache-loss recovery evidence, not a process-kill campaign.
-Other active cases cover lost epochs, checkpoint installation, exact staged
-readback with no second allocation, slot/byte contention and physical callback
-charge release. Focused behavioral tests have now run; full provider and
-performance qualification retain their separate evidence requirements.
+Three controlled-storage regressions hold compaction provider work for two
+seconds while a later flush acknowledges within 100 ms. They use the existing
+MockFs and mock object-storage adapter in persistent mode, retaining the real
+journal, intent, codec, background actor and conditional-pointer paths. Actual
+durable name coverage is established before the held compaction effect and
+latency clock. The response is measured by its prearmed receiver, independently
+of the progress observer. The default-parallel focused group passed; controlled
+acknowledgments took 7.96–8.76 ms at code checkpoint `d55a6217`.
+
+Each schedule also runs separately against the real filesystem, preserving
+exact response identity, immutable/pipeline release while the provider remains
+held, zero gate deferral, point/scan agreement and restart. Before releasing
+the earlier effect, the fixture hydrates the selected later cut into an empty
+cache: exact unselected compaction output names must remain absent from both
+hydrated and reopened authority. Variants delay/duplicate or lose an actual
+successful pointer-CAS callback while the later flush selects. These real-file
+schedules passed with acknowledgments of 176.61–184.44 ms on the shared host;
+they establish ownership and recovery, not a hardware 100 ms result. #910
+remains open for that performance acceptance.
+
+After release, every schedule verifies no rollback and exact intent settlement.
+This is cold/cache-loss recovery evidence, not a process-kill campaign. Other
+active cases cover lost epochs, checkpoint installation, exact staged readback
+with no second allocation, slot/byte contention and physical callback charge
+release. The dedicated Sqrzl provider and engine campaigns are recorded in
+`issue-integration-0.5.0.md`; separate performance and crash-campaign criteria
+remain attached to their owning issues.

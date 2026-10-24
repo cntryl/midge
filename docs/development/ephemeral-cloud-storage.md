@@ -182,8 +182,10 @@ validation. Local retirement similarly advances durable `log_start` before
 removing files. See [the WAL authority design](wal-redesign-808.md).
 
 A process-local cleanup queue can lose physical delete work on crash while
-the catalog still durably excludes the retired prefix. The planned sweeper
-in #943 addresses that storage leak; it is not implemented by this document.
+the catalog still durably excludes the retired prefix. PR #983 implements
+#943's bounded anchor-based WAL rediscovery and protected SST orphan discovery.
+Focused request-budget and protection tests cover those candidates; #943 remains
+open for its sweep-enabled crash campaign and complete snapshot/reclaim evidence.
 Any general SST orphan sweep must additionally protect live snapshot sources,
 compaction inputs, publication intents and admitted work. An age window and
 absence from the current manifest do not authorize deleting a pinned SST.
