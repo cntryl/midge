@@ -618,7 +618,7 @@ impl EventLoop {
             self.publish_family_snapshot(cache, cf_id);
         }
         cache.retain_families(|cf_id| self.state.column_families.contains_key(&cf_id));
-        cache.finish_publication(self.state.sequence);
+        cache.finish_publication(self.state.applied_sequence);
 
         if let Some(read_resources) = &self.authority.read_resources {
             // Live names change only when the manifest is rebuilt into the
@@ -639,7 +639,7 @@ impl EventLoop {
         for &cf_id in cf_ids {
             self.publish_family_snapshot(cache, cf_id);
         }
-        cache.finish_publication(self.state.sequence);
+        cache.finish_publication(self.state.applied_sequence);
     }
 
     fn publish_family_snapshot(&self, cache: &SnapshotCache, cf_id: u32) {
@@ -666,7 +666,7 @@ impl EventLoop {
                     self.authority.read_resources.clone(),
                 ))
             });
-        cache.publish_family(cf_id, self.state.sequence, snapshot);
+        cache.publish_family(cf_id, self.state.applied_sequence, snapshot);
     }
 
     #[cfg(test)]

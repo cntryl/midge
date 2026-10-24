@@ -56,7 +56,7 @@ impl WalActor {
 
         if source.is_empty() {
             self.validate_assertion_only_spill(state, &assertions, start_sequence)?;
-            return Ok((state.sequence, 0, false));
+            return Ok((state.applied_sequence, 0, false));
         }
         let cf_id = Self::validate_spilled_transaction(
             state,
@@ -190,6 +190,7 @@ impl WalActor {
                 error,
             ));
         }
+        state.applied_sequence = sequence_plan.commit_seq;
         Ok(())
     }
 

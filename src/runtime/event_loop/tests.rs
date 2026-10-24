@@ -3424,3 +3424,53 @@ fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::co
     assert_eq!(accounted, event_loop.state.total_memtable_bytes);
     Ok(())
 }
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_publish_applied_sequence_given_failed_group_when_snapshot_published(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = create_test_local_event_loop()?;
+    let cache = Arc::new(crate::runtime::snapshot_cache::SnapshotCache::new());
+    event_loop.set_snapshot_cache(Arc::clone(&cache));
+    let params = |request_id, key| crate::runtime::actors::wal::TransactionAppendParams {
+        request_id,
+        ops: vec![crate::runtime::TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(key),
+            value: bytes::Bytes::from_static(b"value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+        start_sequence: None,
+        conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+    };
+    let (applied, _, _) = event_loop
+        .actors
+        .wal_actor
+        .append_transaction(&mut event_loop.state, params(98_978, b"applied"))?;
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return").expect("inject sync failure");
+
+    // Act
+    let result = event_loop
+        .actors
+        .wal_actor
+        .append_transaction(&mut event_loop.state, params(98_979, b"unapplied"));
+    fail::remove("midge::wal::inject_no_space_on_sync");
+    event_loop.publish_snapshot();
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::OutcomeUnknown(_))
+    ));
+    assert!(event_loop.state.sequence > applied);
+    let (visible, snapshot) = cache.load_family(0).expect("published family");
+    assert_eq!(visible, applied);
+    assert_eq!(snapshot.get(b"applied", visible)?, Some(b"value".to_vec()));
+    assert_eq!(snapshot.get(b"unapplied", visible)?, None);
+    Ok(())
+}

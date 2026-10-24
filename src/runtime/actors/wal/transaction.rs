@@ -59,7 +59,7 @@ impl WalActor {
                     start_sequence,
                 )?;
             }
-            return Ok((state.sequence, 0, false));
+            return Ok((state.applied_sequence, 0, false));
         }
 
         let prepared = self.prepare_transaction_append(state, params)?;
@@ -259,6 +259,7 @@ impl WalActor {
                 last_sequence,
                 apply_op_count,
             );
+            state.applied_sequence = last_sequence;
 
             tracing::trace!(
                 txn_id = sequence_plan.txn_id,

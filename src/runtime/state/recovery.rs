@@ -227,6 +227,7 @@ impl RuntimeState {
             #[cfg(test)]
             db_path: db_path.to_path_buf(),
             sequence: wal_recovery.recovered_sequence,
+            applied_sequence: wal_recovery.recovered_sequence,
             compaction_output_generation: recovered_compaction_output_generation,
             transaction: TransactionCoordination {
                 next_id: 0,

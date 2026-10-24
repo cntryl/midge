@@ -521,8 +521,11 @@ pub struct RuntimeState {
     pub db_path: PathBuf,
 
     // === Sequence Numbers ===
-    /// Global monotonic sequence number
+    /// Highest allocated sequence, including prepared but unapplied units.
     pub sequence: u64,
+    /// Highest completely applied transaction cut. Snapshot visibility never
+    /// follows allocation ahead of this boundary.
+    pub(crate) applied_sequence: u64,
     /// Highest compaction output generation observed or allocated. This is
     /// recovered from canonical output names without advancing WAL authority.
     pub(crate) compaction_output_generation: u64,

@@ -284,3 +284,18 @@ uses 100 families, verifies source Arc retention and visible data at the
 published cut, and reconciles incremental memory accounting against a full sum.
 The code compiles with failpoint test targets; the regression, lifecycle
 interleavings and A/B targets remain for qualification.
+
+### #978: applied-cut prerequisite implemented; pipeline remainder pending
+
+Runtime state now separates allocated and completely applied sequences.
+Resident groups advance the applied cut only after each whole unit applies;
+spilled units advance it only after their final operation succeeds. Recovery
+initializes the cut from replay. Both snapshot publication and fallback
+BeginTransaction use this boundary; assertion-only requests return it too.
+An active regression injects a strict group sync failure after a successful
+unit and requires the published cut and reads to remain at the applied unit.
+Compile checks pass; execution is deferred.
+
+Strict ticket unification, loop-owned parked roots and transition drains are
+still required with #940/#946. No append/fsync concurrency has been enabled
+by this prerequisite commit.
