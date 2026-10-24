@@ -16,11 +16,24 @@ use std::sync::mpsc::RecvTimeoutError;
 pub(crate) struct BlockingCloud<'a> {
     cloud: &'a CloudStorage,
     deadline: &'a OperationDeadline,
+    reservation: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
 }
 
 impl<'a> BlockingCloud<'a> {
     pub(crate) fn new(cloud: &'a CloudStorage, deadline: &'a OperationDeadline) -> Self {
-        Self { cloud, deadline }
+        Self {
+            cloud,
+            deadline,
+            reservation: None,
+        }
+    }
+
+    pub(crate) fn with_reservation(
+        mut self,
+        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+    ) -> Self {
+        self.reservation = Some(reservation);
+        self
     }
 
     fn timeout(&self, operation: &str, key: &str) -> MidgeResult<std::time::Duration> {
@@ -93,7 +106,16 @@ impl<'a> BlockingCloud<'a> {
         let read_deadline = self.begin("get", key)?;
         let (tx, rx) = std::sync::mpsc::channel();
         let request_timeout = self.remaining(&read_deadline, "get", key)?;
-        self.cloud.submit_get_within(key, request_timeout, tx);
+        if let Some(reservation) = &self.reservation {
+            self.cloud.submit_get_within_reserved(
+                key,
+                request_timeout,
+                Some(std::sync::Arc::clone(reservation)),
+                tx,
+            );
+        } else {
+            self.cloud.submit_get_within(key, request_timeout, tx);
+        }
         self.wait(&rx, &read_deadline, "get", key, |event| match event {
             CloudEvent::Get { result, .. } => Some(result),
             _ => None,
@@ -147,12 +169,13 @@ impl<'a> BlockingCloud<'a> {
                 )
             })?
             .map(|result| {
-                expected.accept(
-                    &self.cloud.full_path(prefix),
-                    result.keys,
-                    result.continuation,
-                )
-                .map_err(|error| MidgeError::Corruption(error.to_string()))
+                expected
+                    .accept(
+                        &self.cloud.full_path(prefix),
+                        result.keys,
+                        result.continuation,
+                    )
+                    .map_err(|error| MidgeError::Corruption(error.to_string()))
             })
             .transpose()
     }

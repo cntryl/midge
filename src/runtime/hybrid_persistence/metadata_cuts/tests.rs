@@ -1,3 +1,4 @@
+use super::super::read_committed_metadata_bodies_within;
 use super::*;
 use crate::io::{Fs, FsPath};
 use crate::lease::fs_leader_store::FsLeaderStore;
@@ -66,6 +67,102 @@ struct Fixture {
     cloud: Arc<CloudStorage>,
     store: Arc<FsLeaderStore>,
     lock: MetadataPublicationLock,
+}
+
+struct LostCasStore {
+    inner: Arc<FsLeaderStore>,
+    memory: crate::common::resource_budget::ResourceBudget,
+    occupied: parking_lot::Mutex<Option<crate::common::resource_budget::ResourceReservation>>,
+    mutations: std::sync::atomic::AtomicUsize,
+}
+
+impl LeaderStore for LostCasStore {
+    fn acquire_leadership(&self, holder: &str) -> Result<crate::lease::LeaderRecord, LeaseError> {
+        self.inner.acquire_leadership(holder)
+    }
+    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, LeaseError> {
+        self.inner.read_current()
+    }
+    fn read_committed_metadata(&self, timeout: Duration) -> Result<CloudMetadataHead, LeaseError> {
+        self.inner.read_committed_metadata(timeout)
+    }
+    fn publish_committed_metadata(
+        &self,
+        holder: &str,
+        epoch: u64,
+        previous: Option<&CloudMetadataGeneration>,
+        generation: CloudMetadataGeneration,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.inner
+            .publish_committed_metadata(holder, epoch, previous, generation, timeout)?;
+        self.mutations.fetch_add(1, Ordering::AcqRel);
+        // This is the genuine durable pointer mutation; its response alone is
+        // lost. Occupy all remaining shared room before exact readback.
+        *self.occupied.lock() = Some(
+            self.memory
+                .reserve(
+                    self.memory.limit() - self.memory.used(),
+                    "other maintenance before lost receipt readback",
+                )
+                .unwrap(),
+        );
+        Err(LeaseError::Indeterminate(
+            "lost successful conditional pointer response".into(),
+        ))
+    }
+}
+
+#[test]
+fn should_resolve_successful_unknown_pointer_cas_in_small_pool_without_second_body_allocation() {
+    // Arrange
+    let fixture = Fixture::new(CloudStorage::with_mock());
+    let memory = crate::common::resource_budget::ResourceBudget::new(32 * 1024);
+    fixture.lock.configure_capture_memory(memory.clone());
+    let cut = fixture.cut();
+    let store = LostCasStore {
+        inner: Arc::clone(&fixture.store),
+        memory: memory.clone(),
+        occupied: parking_lot::Mutex::new(None),
+        mutations: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let deadline = OperationDeadline::from_budget(Duration::from_millis(100));
+
+    // Act: exact validated staged identity uses the capture's already charged
+    // workspace even though no additional read allocation can be admitted.
+    mirror_captured_control_metadata_within(
+        CloudMetadataMirrorContext {
+            cloud: &fixture.cloud,
+            fs: fixture.fs.as_ref(),
+            publication_lock: &fixture.lock,
+            lock_wait_budget: Duration::from_millis(100),
+            deadline: &deadline,
+            authority: super::super::CloudMetadataMirrorAuthority {
+                store: &store,
+                holder_id: "writer",
+                writer_epoch: 1,
+            },
+        },
+        &cut,
+        |_| Ok(()),
+    )
+    .unwrap();
+
+    // Assert: one real pointer effect, no blind CAS retry, and owned charge
+    // remains until both the foreign owner and actual source are released.
+    assert_eq!(store.mutations.load(Ordering::Acquire), 1);
+    assert_eq!(fixture.lock.pending_captures(), 0);
+    assert_eq!(memory.used(), memory.limit());
+    assert!(matches!(
+        fixture
+            .store
+            .read_committed_metadata(Duration::from_secs(1))
+            .unwrap(),
+        CloudMetadataHead::Committed(_)
+    ));
+    drop(store.occupied.lock().take());
+    drop(cut);
+    assert_eq!(memory.used(), 0);
 }
 
 impl Fixture {

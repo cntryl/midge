@@ -81,6 +81,7 @@ pub(crate) struct CapturedMetadataCut {
     registry: Weak<parking_lot::Mutex<CutRegistry>>,
     memory: Arc<ResourceReservation>,
     _slot: ResourceReservation,
+    staged: parking_lot::Mutex<Option<crate::runtime::hybrid_persistence::MetadataMirrorCache>>,
 }
 
 impl CapturedMetadataCut {
@@ -95,6 +96,12 @@ impl CapturedMetadataCut {
     }
     pub(crate) fn memory_reservation(&self) -> Arc<ResourceReservation> {
         Arc::clone(&self.memory)
+    }
+    pub(crate) fn remember_staged(
+        &self,
+        cache: crate::runtime::hybrid_persistence::MetadataMirrorCache,
+    ) {
+        *self.staged.lock() = Some(cache);
     }
     pub(crate) fn mark_committed(&self) {
         if let Some(registry) = self.registry.upgrade() {
@@ -111,7 +118,9 @@ impl CapturedMetadataCut {
                         _memory: Arc::clone(&self.memory),
                     });
             }
-            registry.pending.retain(|_, cut| !self.proof.covers(&cut.proof));
+            registry
+                .pending
+                .retain(|_, cut| !self.proof.covers(&cut.proof));
             prune_intent_receipts(&mut registry, &self.publication_intents);
         }
     }
@@ -241,6 +250,7 @@ impl MetadataPublicationLock {
             registry: Arc::downgrade(&self.cuts),
             memory,
             _slot: slot,
+            staged: parking_lot::Mutex::new(None),
         });
         registry.owned.push(Arc::downgrade(&cut));
         registry.pending.insert(cut.cut_ordinal(), Arc::clone(&cut));
@@ -251,6 +261,30 @@ impl MetadataPublicationLock {
     /// physical reclamation, excluding admission of a conflicting capture.
     pub(crate) fn pending_captures(&self) -> usize {
         self.cuts.lock().pending.len()
+    }
+
+    /// A validated immutable PUT plus the exact fresh selected pointer is a
+    /// complete readback proof. Reuse its owned workspace rather than require
+    /// another full allocation to resolve a lost pointer-CAS callback.
+    pub(crate) fn staged_metadata_cache(
+        &self,
+        generation: &crate::lease::CloudMetadataGeneration,
+        epoch: u64,
+    ) -> Option<(
+        crate::runtime::hybrid_persistence::MetadataMirrorCache,
+        Arc<ResourceReservation>,
+    )> {
+        let registry = self.cuts.lock();
+        for cut in registry.owned.iter().filter_map(Weak::upgrade) {
+            let staged = cut.staged.lock();
+            if let Some(cache) = staged
+                .as_ref()
+                .filter(|cache| cache.matches(generation, epoch))
+            {
+                return Some((cache.clone(), cut.memory_reservation()));
+            }
+        }
+        None
     }
 
     fn reserve_capture_memory(
@@ -275,11 +309,21 @@ impl MetadataPublicationLock {
                     )
                 })?;
         }
-        if encoded as u64 > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
+        self.reserve_metadata_body_memory(u64::try_from(encoded).unwrap_or(u64::MAX))
+    }
+
+    pub(crate) fn reserve_metadata_body_memory(
+        &self,
+        encoded: u64,
+    ) -> MidgeResult<Arc<ResourceReservation>> {
+        if encoded > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
             return Err(MidgeError::ResourceLimit(
                 "metadata capture exceeds cloud body bound".into(),
             ));
         }
+        let encoded = usize::try_from(encoded).map_err(|_| {
+            MidgeError::ResourceLimit("metadata body length exceeds address space".into())
+        })?;
         let admitted = encoded
             .checked_mul(16)
             .and_then(|bytes| bytes.checked_add(4096))

@@ -80,6 +80,15 @@ pub(super) fn read_with_cut(
     generation: &CloudMetadataGeneration,
     deadline: &OperationDeadline,
 ) -> MidgeResult<DecodedChain> {
+    read_with_cut_reserved(cloud, generation, deadline, None)
+}
+
+pub(super) fn read_with_cut_reserved(
+    cloud: &CloudStorage,
+    generation: &CloudMetadataGeneration,
+    deadline: &OperationDeadline,
+    reservation: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
+) -> MidgeResult<DecodedChain> {
     if generation.objects.is_empty() || generation.objects.len() > MAX_CHAIN_OBJECTS {
         return Err(MidgeError::Corruption(
             "cloud manifest chain length is invalid".into(),
@@ -94,7 +103,10 @@ pub(super) fn read_with_cut(
             MidgeError::ResourceLimit("cloud manifest chain exceeds read bound".into())
         })?;
     let _ = total;
-    let io = BlockingCloud::new(cloud, deadline);
+    let mut io = BlockingCloud::new(cloud, deadline);
+    if let Some(reservation) = reservation {
+        io = io.with_reservation(reservation);
+    }
     let mut versions = Vec::with_capacity(generation.objects.len());
     let mut successor_epoch = u64::MAX;
     for (index, object) in generation.objects.iter().enumerate() {

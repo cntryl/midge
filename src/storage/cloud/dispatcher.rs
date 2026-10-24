@@ -178,6 +178,16 @@ impl CloudStorage {
         timeout: std::time::Duration,
         callback: CloudCallback,
     ) {
+        self.submit_get_within_reserved(key, timeout, None, callback);
+    }
+
+    pub(crate) fn submit_get_within_reserved(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
         let timeout = self.scoped_timeout(timeout);
         if timeout.is_zero() {
             let _ = callback.send(super::CloudEvent::Get {
@@ -188,8 +198,9 @@ impl CloudStorage {
             });
             return;
         }
-        let request = CloudRequestOptions::default()
+        let mut request = CloudRequestOptions::default()
             .with_deadline(crate::common::OperationDeadline::from_budget(timeout));
+        request.reservation = reservation;
         self.reads.read(
             &self.full_path(key),
             CloudReadOptions::default().with_request_options(request),

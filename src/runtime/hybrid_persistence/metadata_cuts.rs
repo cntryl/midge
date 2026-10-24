@@ -3,9 +3,7 @@
 use super::metadata_snapshot::{
     capture_local_metadata, validate_manifest_successor, MetadataMirrorCache,
 };
-use super::{
-    decode_generation_manifest, read_committed_metadata_bodies_within, CloudMetadataMirrorContext,
-};
+use super::{decode_generation_manifest, CloudMetadataMirrorContext};
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::lease::{CloudMetadataGeneration, CloudMetadataHead, LeaseError, SharedGenerationId};
 use crate::runtime::CapturedMetadataCut;
@@ -18,6 +16,7 @@ struct SelectedCut {
     generation: Option<CloudMetadataGeneration>,
     cache: Option<MetadataMirrorCache>,
     bodies: Option<BTreeMap<String, Vec<u8>>>,
+    _memory: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
 }
 
 /// Upload and CAS run without the local publication mutex. A rejected CAS is
@@ -43,7 +42,7 @@ pub(crate) fn mirror_captured_control_metadata_within(
     let mut fresh = false;
     loop {
         validate_publication_authority(&context, &mut validate_lease)?;
-        let selected = selected_cut(&context, fresh)?;
+        let selected = selected_with_admission(&context, fresh)?;
         if covered(&selected, cut)? {
             cut.mark_committed();
             collect_if_idle(&context, selected.generation.as_ref());
@@ -53,6 +52,14 @@ pub(crate) fn mirror_captured_control_metadata_within(
             validate_manifest_successor(&candidate, &cache.manifest)?;
         }
         let generation = stage_cut(&context, &local, &candidate, &selected, cut)?;
+        let mut staged = MetadataMirrorCache::new(
+            generation.clone(),
+            context.authority.writer_epoch,
+            candidate.clone(),
+            &local,
+        );
+        staged.cut = Some(cut.proof.clone());
+        cut.remember_staged(staged.clone());
         validate_publication_authority(&context, &mut validate_lease)?;
         match context.authority.store.publish_committed_metadata(
             context.authority.holder_id,
@@ -65,14 +72,7 @@ pub(crate) fn mirror_captured_control_metadata_within(
                 // A native validated checksum receipt, or the store's exact
                 // pinned readback, proves this cut selected even when a later
                 // cut has already advanced the pointer before this returns.
-                let mut cache = MetadataMirrorCache::new(
-                    generation.clone(),
-                    context.authority.writer_epoch,
-                    candidate.clone(),
-                    &local,
-                );
-                cache.cut = Some(cut.proof.clone());
-                install_cache(&context, cache)?;
+                install_cache(&context, staged)?;
                 cut.mark_committed();
                 collect_if_idle(&context, Some(&generation));
                 return Ok(());
@@ -115,6 +115,30 @@ fn validate_publication_authority(
         .map_err(|error| error.into_validation_error("captured metadata publication lease"))
 }
 
+fn selected_with_admission(
+    context: &CloudMetadataMirrorContext<'_>,
+    fresh: bool,
+) -> MidgeResult<SelectedCut> {
+    loop {
+        if context.deadline.is_expired() {
+            return Err(MidgeError::Timeout(
+                "selected metadata admission exhausted its original budget".into(),
+            ));
+        }
+        match selected_cut(context, fresh) {
+            Err(error) if context.publication_lock.capture_admission_retryable(&error) => {
+                std::thread::sleep(
+                    context
+                        .deadline
+                        .remaining()
+                        .min(std::time::Duration::from_millis(1)),
+                );
+            }
+            result => return result,
+        }
+    }
+}
+
 fn selected_cut(context: &CloudMetadataMirrorContext<'_>, fresh: bool) -> MidgeResult<SelectedCut> {
     let head = if fresh {
         context
@@ -145,6 +169,7 @@ fn selected_cut(context: &CloudMetadataMirrorContext<'_>, fresh: bool) -> MidgeR
                 generation: None,
                 cache: None,
                 bodies: None,
+                _memory: None,
             })
         }
         CloudMetadataHead::MissingLease => {
@@ -166,13 +191,52 @@ fn selected_cut(context: &CloudMetadataMirrorContext<'_>, fresh: bool) -> MidgeR
             generation: Some(generation),
             cache: Some(cache),
             bodies: None,
+            _memory: None,
         });
     }
+    if let Some((cache, memory)) = context
+        .publication_lock
+        .staged_metadata_cache(&generation, context.authority.writer_epoch)
+    {
+        install_cache(context, cache.clone())?;
+        return Ok(SelectedCut {
+            generation: Some(generation),
+            cache: Some(cache),
+            bodies: None,
+            _memory: Some(memory),
+        });
+    }
+    let encoded = generation
+        .objects
+        .iter()
+        .try_fold(0_u64, |total, object| total.checked_add(object.len))
+        .ok_or_else(|| MidgeError::ResourceLimit("selected metadata length overflow".into()))?;
+    let memory = context
+        .publication_lock
+        .reserve_metadata_body_memory(encoded)?;
+    load_selected_cut(context, generation, memory)
+}
+
+fn load_selected_cut(
+    context: &CloudMetadataMirrorContext<'_>,
+    generation: CloudMetadataGeneration,
+    memory: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+) -> MidgeResult<SelectedCut> {
     let (bodies, cut) = if super::metadata_chain::is_chain(&generation) {
-        super::metadata_chain::read_with_cut(context.cloud, &generation, context.deadline)?
+        super::metadata_chain::read_with_cut_reserved(
+            context.cloud,
+            &generation,
+            context.deadline,
+            Some(std::sync::Arc::clone(&memory)),
+        )?
     } else {
         (
-            read_committed_metadata_bodies_within(context.cloud, &generation, context.deadline)?,
+            super::metadata_snapshot::read_committed_metadata_bodies_reserved_within(
+                context.cloud,
+                &generation,
+                context.deadline,
+                Some(std::sync::Arc::clone(&memory)),
+            )?,
             None,
         )
     };
@@ -189,6 +253,7 @@ fn selected_cut(context: &CloudMetadataMirrorContext<'_>, fresh: bool) -> MidgeR
         generation: Some(generation),
         cache: Some(cache),
         bodies: Some(bodies),
+        _memory: Some(memory),
     })
 }
 
@@ -271,7 +336,7 @@ fn resolve_uncertain(
     validate: &mut impl FnMut(&OperationDeadline) -> MidgeResult<()>,
 ) -> MidgeResult<()> {
     validate_publication_authority(context, validate)?;
-    let selected = selected_cut(context, true)?;
+    let selected = selected_with_admission(context, true)?;
     if covered(&selected, cut)? {
         cut.mark_committed();
         return Ok(());

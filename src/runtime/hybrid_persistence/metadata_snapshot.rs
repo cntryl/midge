@@ -77,7 +77,7 @@ impl MetadataMirrorCache {
         }
     }
 
-    pub(super) fn matches(&self, generation: &CloudMetadataGeneration, epoch: u64) -> bool {
+    pub(crate) fn matches(&self, generation: &CloudMetadataGeneration, epoch: u64) -> bool {
         self.writer_epoch == epoch
             && &self.generation == generation
             && self
@@ -239,13 +239,32 @@ pub(crate) fn read_committed_metadata_bodies_within(
     generation: &CloudMetadataGeneration,
     deadline: &OperationDeadline,
 ) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
+    read_committed_metadata_bodies_reserved_within(cloud, generation, deadline, None)
+}
+
+pub(super) fn read_committed_metadata_bodies_reserved_within(
+    cloud: &CloudStorage,
+    generation: &CloudMetadataGeneration,
+    deadline: &OperationDeadline,
+    reservation: Option<Arc<ResourceReservation>>,
+) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
     if generation.id == SharedGenerationId::NONE {
         return Err(MidgeError::Corruption(
             "committed metadata has zero generation ordinal".into(),
         ));
     }
     if super::metadata_chain::is_chain(generation) {
-        let bodies = super::metadata_chain::read(cloud, generation, deadline)?;
+        let bodies = if let Some(reservation) = reservation {
+            super::metadata_chain::read_with_cut_reserved(
+                cloud,
+                generation,
+                deadline,
+                Some(reservation),
+            )?
+            .0
+        } else {
+            super::metadata_chain::read(cloud, generation, deadline)?
+        };
         for required in [files::FORMAT, files::MANIFEST_SNAPSHOT] {
             if !bodies.contains_key(required) {
                 return Err(MidgeError::Corruption(format!(
@@ -260,7 +279,10 @@ pub(crate) fn read_committed_metadata_bodies_within(
         }
         return Ok(bodies);
     }
-    let io = BlockingCloud::new(cloud, deadline);
+    let mut io = BlockingCloud::new(cloud, deadline);
+    if let Some(reservation) = reservation {
+        io = io.with_reservation(reservation);
+    }
     let mut bodies = BTreeMap::new();
     for object in &generation.objects {
         if !files::CLOUD_MIRRORED.contains(&object.file_name.as_str())
