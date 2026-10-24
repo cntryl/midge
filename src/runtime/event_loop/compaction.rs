@@ -1320,19 +1320,11 @@ impl CompactionCoordinator {
             tracing::warn!(?completion.phase, "ignored mismatched compaction publication completion");
             return;
         }
-        if pending.expected_phase != CompactionPublishPhase::IntentCleared
-            && event_loop.actors.compaction_actor.active_count() > 0
-            && !event_loop
-                .actors
-                .compaction_actor
-                .select_job(pending.token.request_id)
-        {
-            event_loop.authority.compaction_fence.degrade();
-            event_loop.state.mark_persistence_anomaly();
-            tracing::error!(
-                job_id = pending.token.request_id,
-                "retaining publication whose compute owner cannot be selected"
-            );
+        if !Self::select_publication_compute_owner(
+            event_loop,
+            pending.expected_phase,
+            pending.token.request_id,
+        ) {
             return;
         }
         let owner = Self::publication_owner(&pending.token);

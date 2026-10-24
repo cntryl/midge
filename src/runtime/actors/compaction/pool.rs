@@ -10,6 +10,7 @@ type Completion = std::thread::Result<Vec<String>>;
 struct Work {
     compute: Compute,
     completed: Sender<Completion>,
+    gate: crate::failpoints::WorkerGate,
 }
 
 pub(super) struct CompactionPool {
@@ -35,8 +36,9 @@ impl CompactionPool {
                 .name(format!("midge-compaction-worker-{index}"))
                 .spawn(move || {
                     while let Ok(work) = incoming.recv() {
-                        let result =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(work.compute));
+                        let result = work.gate.run(|| {
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(work.compute))
+                        });
                         let _ = work.completed.send(result);
                     }
                 })
@@ -56,6 +58,7 @@ impl CompactionPool {
         let work = Work {
             compute: Box::new(compute),
             completed,
+            gate: crate::failpoints::worker_gate(),
         };
         self.requests
             .as_ref()
@@ -111,6 +114,36 @@ impl Drop for CompactionPool {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_inherit_current_callers_failpoint_gate_when_reusing_compute_worker() -> MidgeResult<()>
+    {
+        // Arrange: the reusable thread predates the caller's isolated scope.
+        let pool = CompactionPool::new(1)?;
+        let guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        let (observed, reached) = crossbeam::channel::bounded(1);
+        fail::cfg_callback("midge::compaction_pool::caller_gate", move || {
+            observed.send(()).unwrap();
+        })
+        .unwrap();
+
+        // Act: actual submitted work evaluates a configured failpoint.
+        let ticket = pool.submit(|| {
+            crate::failpoints::fail_point!("midge::compaction_pool::caller_gate");
+            Vec::new()
+        })?;
+        let inherited = reached.recv_timeout(Duration::from_secs(5));
+        // Release before joining even on failure so the regression terminates.
+        scenario.teardown();
+        drop(guard);
+        ticket.join().expect("submitted compute completed");
+
+        // Assert: the callback ran while the caller still owned its gate.
+        assert!(inherited.is_ok(), "worker blocked on its caller's gate");
+        Ok(())
+    }
 
     #[test]
     fn should_reuse_compute_thread_for_sequential_compaction_jobs() -> MidgeResult<()> {

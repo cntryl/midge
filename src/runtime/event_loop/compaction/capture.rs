@@ -121,12 +121,38 @@ impl CompactionCoordinator {
             return;
         };
         let phase = pending.expected_phase;
+        let request_id = pending.token.request_id;
         let owner = Self::publication_owner(&pending.token);
+        if !Self::select_publication_compute_owner(event_loop, phase, request_id) {
+            return;
+        }
         if !event_loop.publication.publication_gate.try_acquire(owner) {
             return;
         }
         if let Err(error) = Self::submit_publication_phase(event_loop, phase) {
             Self::finish_failed_publication(event_loop, &error);
         }
+    }
+
+    pub(super) fn select_publication_compute_owner(
+        event_loop: &mut EventLoop,
+        phase: CompactionPublishPhase,
+        request_id: u64,
+    ) -> bool {
+        // IntentCleared has already settled its core, which can now belong to
+        // a sibling. All earlier continuations still require the exact owner.
+        if phase == CompactionPublishPhase::IntentCleared
+            || event_loop.actors.compaction_actor.active_count() == 0
+            || event_loop.actors.compaction_actor.select_job(request_id)
+        {
+            return true;
+        }
+        event_loop.authority.compaction_fence.degrade();
+        event_loop.state.mark_persistence_anomaly();
+        tracing::error!(
+            job_id = request_id,
+            "retaining publication whose compute owner cannot be selected"
+        );
+        false
     }
 }

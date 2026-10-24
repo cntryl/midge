@@ -71,7 +71,7 @@ pub(crate) struct CompactionPublishCompletion {
 }
 
 enum CompactionPublishWorkerTask {
-    Publish(Box<CompactionPublishTask>),
+    Publish(Box<CompactionPublishTask>, crate::failpoints::WorkerGate),
     Shutdown,
 }
 
@@ -144,7 +144,10 @@ impl CompactionPublishActor {
             .ok_or_else(|| {
                 MidgeError::Internal("compaction publication worker is unavailable".to_string())
             })?
-            .try_send(CompactionPublishWorkerTask::Publish(Box::new(task)))
+            .try_send(CompactionPublishWorkerTask::Publish(
+                Box::new(task),
+                crate::failpoints::worker_gate(),
+            ))
             .map_err(|error| {
                 MidgeError::Busy(format!(
                     "compaction publication worker queue is full: {error}"
@@ -181,8 +184,8 @@ impl CompactionPublishActor {
     ) {
         while let Ok(task) = task_rx.recv() {
             match task {
-                CompactionPublishWorkerTask::Publish(task) => {
-                    Self::send_completion(completion_tx, &task);
+                CompactionPublishWorkerTask::Publish(task, gate) => {
+                    gate.run(|| Self::send_completion(completion_tx, &task));
                 }
                 CompactionPublishWorkerTask::Shutdown => break,
             }

@@ -263,6 +263,7 @@ enum FlushPhase {
 struct SubmittedFlushTask {
     task: FlushWorkerTask,
     finished: Arc<AtomicBool>,
+    gate: crate::failpoints::WorkerGate,
 }
 
 struct FlushOwner {
@@ -456,6 +457,7 @@ impl FlushActor {
             .try_send(SubmittedFlushTask {
                 task,
                 finished: Arc::clone(&finished),
+                gate: crate::failpoints::worker_gate(),
             })
             .map_err(|error| MidgeError::Busy(format!("flush worker queue is full: {error}")))?;
         self.owners.insert(
@@ -611,6 +613,7 @@ impl FlushActor {
                 let _ = task_tx.send(SubmittedFlushTask {
                     task: FlushWorkerTask::Shutdown,
                     finished: Arc::new(AtomicBool::new(false)),
+                    gate: crate::failpoints::worker_gate(),
                 });
             }
         }
@@ -633,90 +636,107 @@ impl FlushActor {
         sst_factory: &Arc<crate::sst::FsSstFactoryIo>,
         budget: &crate::common::resource_budget::ResourceBudget,
     ) {
-        while let Ok(SubmittedFlushTask { task, finished }) = task_rx.recv() {
-            match task {
-                FlushWorkerTask::Build(mut task) => {
-                    let started = Instant::now();
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        crate::failpoints::fail_point!("midge::flush_worker::before_build");
-                        build::write(sst_factory, &mut task, budget)
-                    }));
-                    let build_ns = elapsed_ns(started);
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(panic) => {
-                            tracing::error!(?panic, "flush build task panicked");
-                            Err(MidgeError::Internal(
-                                "flush build task panicked".to_string(),
-                            ))
-                        }
-                    };
-                    if !sst_factory.compaction_scratch_cleanup_verified() {
-                        // A failed scratch unlink must not return disk capacity.
-                        // The hybrid ledger retains this token until startup
-                        // reconciles physical residue; block later builds too.
-                        task.reservation = None;
-                    }
-                    finished.store(true, Ordering::Release);
-                    let _ = completion_tx.send(FlushWorkerResult::Build(FlushBuildCompletion {
-                        identity: task.identity,
-                        memtable: task.memtable,
-                        staging_path: task.staging_path,
-                        reservation: task.reservation,
-                        build_ns,
-                        result,
-                    }));
-                }
-                FlushWorkerTask::Publish(task) => {
-                    let task = *task;
-                    let fallback = task.clone();
-                    let started = Instant::now();
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        crate::failpoints::fail_point!("midge::flush_worker::before_publication");
-                        Self::publish_with_budget(&task, budget)
-                    }));
-                    let publish_ns = elapsed_ns(started);
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(panic) => {
-                            tracing::error!(?panic, "flush publication task panicked");
-                            Err(MidgeError::Internal(
-                                "flush publication task panicked".to_string(),
-                            ))
-                        }
-                    };
-                    finished.store(true, Ordering::Release);
-                    let _ =
-                        completion_tx.send(FlushWorkerResult::Publish(FlushPublishCompletion {
-                            identity: fallback.build.identity,
-                            reservation: fallback.build.reservation,
-                            publish_ns,
-                            result,
-                        }));
-                }
-                FlushWorkerTask::Mirror(task) => {
-                    let task = *task;
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        mirror_after_local_commit(&task)
-                    }));
-                    let result = match result {
-                        Ok(result) => result,
-                        Err(panic) => {
-                            tracing::error!(?panic, "flush mirror task panicked");
-                            Err(MidgeError::Internal(
-                                "flush mirror task panicked".to_string(),
-                            ))
-                        }
-                    };
-                    finished.store(true, Ordering::Release);
-                    let _ = completion_tx.send(FlushWorkerResult::Mirror(FlushMirrorCompletion {
-                        delta: task.delta,
-                        reservation: task.reservation,
-                        result,
-                    }));
-                }
-                FlushWorkerTask::Shutdown => break,
+        while let Ok(SubmittedFlushTask {
+            task,
+            finished,
+            gate,
+        }) = task_rx.recv()
+        {
+            if matches!(task, FlushWorkerTask::Shutdown) {
+                break;
             }
+            gate.run(|| Self::run_worker_task(task, &finished, completion_tx, sst_factory, budget));
+        }
+    }
+
+    fn run_worker_task(
+        task: FlushWorkerTask,
+        finished: &AtomicBool,
+        completion_tx: &crossbeam::channel::Sender<FlushWorkerResult>,
+        sst_factory: &Arc<crate::sst::FsSstFactoryIo>,
+        budget: &crate::common::resource_budget::ResourceBudget,
+    ) {
+        match task {
+            FlushWorkerTask::Build(mut task) => {
+                let started = Instant::now();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::failpoints::fail_point!("midge::flush_worker::before_build");
+                    build::write(sst_factory, &mut task, budget)
+                }));
+                let build_ns = elapsed_ns(started);
+                let result = match result {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        tracing::error!(?panic, "flush build task panicked");
+                        Err(MidgeError::Internal(
+                            "flush build task panicked".to_string(),
+                        ))
+                    }
+                };
+                if !sst_factory.compaction_scratch_cleanup_verified() {
+                    // A failed scratch unlink must not return disk capacity.
+                    // The hybrid ledger retains this token until startup
+                    // reconciles physical residue; block later builds too.
+                    task.reservation = None;
+                }
+                finished.store(true, Ordering::Release);
+                let _ = completion_tx.send(FlushWorkerResult::Build(FlushBuildCompletion {
+                    identity: task.identity,
+                    memtable: task.memtable,
+                    staging_path: task.staging_path,
+                    reservation: task.reservation,
+                    build_ns,
+                    result,
+                }));
+            }
+            FlushWorkerTask::Publish(task) => {
+                let task = *task;
+                let fallback = task.clone();
+                let started = Instant::now();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::failpoints::fail_point!("midge::flush_worker::before_publication");
+                    Self::publish_with_budget(&task, budget)
+                }));
+                let publish_ns = elapsed_ns(started);
+                let result = match result {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        tracing::error!(?panic, "flush publication task panicked");
+                        Err(MidgeError::Internal(
+                            "flush publication task panicked".to_string(),
+                        ))
+                    }
+                };
+                finished.store(true, Ordering::Release);
+                let _ = completion_tx.send(FlushWorkerResult::Publish(FlushPublishCompletion {
+                    identity: fallback.build.identity,
+                    reservation: fallback.build.reservation,
+                    publish_ns,
+                    result,
+                }));
+            }
+            FlushWorkerTask::Mirror(task) => {
+                let task = *task;
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mirror_after_local_commit(&task)
+                }));
+                let result = match result {
+                    Ok(result) => result,
+                    Err(panic) => {
+                        tracing::error!(?panic, "flush mirror task panicked");
+                        Err(MidgeError::Internal(
+                            "flush mirror task panicked".to_string(),
+                        ))
+                    }
+                };
+                finished.store(true, Ordering::Release);
+                let _ = completion_tx.send(FlushWorkerResult::Mirror(FlushMirrorCompletion {
+                    delta: task.delta,
+                    reservation: task.reservation,
+                    result,
+                }));
+            }
+            FlushWorkerTask::Shutdown => {}
         }
     }
 
@@ -1331,6 +1351,7 @@ mod tests {
             tx.send(SubmittedFlushTask {
                 task,
                 finished: Arc::new(AtomicBool::new(false)),
+                gate: crate::failpoints::worker_gate(),
             })
             .unwrap();
         }

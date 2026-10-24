@@ -128,3 +128,78 @@ fn should_fail_expired_capture_admission_without_deleting_accepted_input() -> Mi
     drop(held);
     fixture.restart(&[(b"a", b"accepted")])
 }
+
+#[test]
+fn should_retain_sibling_compute_owner_when_another_capture_retry_expires() -> MidgeResult<()> {
+    // Arrange: A waits for capture memory; B owns a disjoint native worker.
+    let guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let (mut fixture, memory, first) = capture_fixture()?;
+    let second = fixture.file(3, 2, b"z", b"sibling", 2)?;
+    fixture.persist()?;
+    fixture.event_loop.routing.runtime_response_timeout = Duration::from_secs(2);
+    let held_memory = memory.reserve(memory.limit(), "held metadata workspace")?;
+    let first_plan = fixture.plan(&first, 1, 2);
+    fixture.event_loop.launch_compaction(first_plan)?;
+    wait_for_capture_retry(&mut fixture);
+    let deadline = fixture
+        .event_loop
+        .publication
+        .compaction_publication
+        .get()
+        .unwrap()
+        .capture_retry
+        .unwrap()
+        .deadline;
+    let held_compute = HeldComputes::new();
+    let second_plan = fixture.plan(&second, 3, 4);
+    fixture.event_loop.launch_compaction(second_plan)?;
+    held_compute.enter();
+    assert_eq!(fixture.event_loop.actors.compaction_actor.active_count(), 2);
+
+    // Act: expire A's original allowance while the facade still selects B.
+    while !deadline.is_expired() {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    CompactionCoordinator::retry_publication_capture(&mut fixture.event_loop);
+
+    // Assert: only A settles; B's exact registry/input ownership survives.
+    assert!(!fixture
+        .event_loop
+        .publication
+        .compaction_publication
+        .is_active());
+    assert_eq!(fixture.event_loop.actors.compaction_actor.active_count(), 1);
+    let protected = fixture
+        .event_loop
+        .actors
+        .compaction_actor
+        .protected_sst_names();
+    assert!(
+        protected.contains(&second),
+        "held sibling lost its input guard"
+    );
+    assert!(!protected.contains(&first), "expired owner was not settled");
+    assert!(fixture
+        .event_loop
+        .state
+        .compaction
+        .compacting_ssts
+        .contains(&second));
+    assert!(!fixture
+        .event_loop
+        .state
+        .compaction
+        .compacting_ssts
+        .contains(&first));
+    assert!(fixture.event_loop.state.manifest_has_file(&first));
+    assert!(fixture.event_loop.state.manifest_has_file(&second));
+    drop(held_memory);
+    held_compute.release.send(()).unwrap();
+    fixture.drain();
+    assert!(!fixture.event_loop.state.manifest_has_file(&second));
+    drop(held_compute);
+    scenario.teardown();
+    drop(guard);
+    fixture.restart(&[(b"a", b"accepted"), (b"z", b"sibling")])
+}
