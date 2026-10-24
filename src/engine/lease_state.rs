@@ -57,9 +57,10 @@ where
 }
 
 fn spawn_thread(name: &str, task: ReaperTask) -> std::io::Result<JoinHandle<()>> {
+    let gate = crate::failpoints::worker_gate();
     std::thread::Builder::new()
         .name(name.to_string())
-        .spawn(task)
+        .spawn(move || gate.run(task))
 }
 
 pub(super) struct FencingResources {
