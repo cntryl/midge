@@ -70,6 +70,38 @@ pub(in crate::runtime::event_loop) fn write(
     }
 }
 
+fn spill_write(
+    event_loop: &EventLoop,
+    request_id: u64,
+    keys: &[&'static [u8]],
+) -> MidgeResult<RuntimeMsg> {
+    let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
+    let mut intents = crate::runtime::transaction_spill::TransactionWriteSet::new(
+        pool,
+        &crate::io::real::test_root(&event_loop.state.db_path),
+        false,
+        request_id,
+    );
+    for key in keys {
+        intents.push(TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::from_static(key),
+            value: Bytes::from_static(b"spilled-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        })?;
+    }
+    Ok(RuntimeMsg::ApplySpilledTransaction {
+        request_id,
+        source: intents.take_source(),
+        assertions: Vec::new(),
+        durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+        start_sequence: 0,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+        response_tx: None,
+    })
+}
+
 pub(in crate::runtime::event_loop) fn settle(
     event_loop: &mut EventLoop,
     response: &Receiver<RuntimeResponse>,
@@ -407,5 +439,194 @@ fn should_preserve_lookahead_rotation_before_newer_deferred_writers() -> MidgeRe
     assert_eq!(event_loop.state.applied_sequence, first_cut);
     assert!(second.try_recv().is_err());
     assert!(applied_cut(&mut event_loop, &second) > first_cut);
+    Ok(())
+}
+
+#[test]
+fn should_drain_earlier_group_before_streaming_spill_and_newer_resident_write() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let first = event_loop
+        .routing
+        .router
+        .register(94_040, "resident before spill");
+    let spilled = event_loop
+        .routing
+        .router
+        .register(94_041, "streaming spill barrier");
+    let later = event_loop
+        .routing
+        .router
+        .register(94_042, "resident after spill");
+    let spill = spill_write(&event_loop, 94_041, &[b"spill-a", b"spill-b"])?;
+    event_loop.process_one(
+        write(94_040, &[b"before-spill"], true),
+        &crossbeam::channel::never(),
+    );
+    wait_for_hold(&mut event_loop, &held);
+    let allocated_before_spill = event_loop.state.sequence;
+
+    // Act
+    event_loop.process_one(spill, &crossbeam::channel::never());
+    event_loop.process_one(
+        write(94_042, &[b"after-spill"], true),
+        &crossbeam::channel::never(),
+    );
+
+    // Assert: neither barrier nor following write may allocate over a parked
+    // earlier group. Streaming remains the bounded compatibility path.
+    assert_eq!(event_loop.state.sequence, allocated_before_spill);
+    assert_eq!(event_loop.state.applied_sequence, 0);
+    assert!(spilled.try_recv().is_err());
+    assert!(later.try_recv().is_err());
+    held.release.send(()).expect("release resident prefix");
+    let first_cut = applied_cut(&mut event_loop, &first);
+    let spill_cut = applied_cut(&mut event_loop, &spilled);
+    let later_cut = applied_cut(&mut event_loop, &later);
+    assert!(first_cut < spill_cut && spill_cut < later_cut);
+    let snapshot = event_loop.create_read_snapshot(0).unwrap();
+    for key in [b"spill-a".as_slice(), b"spill-b"] {
+        assert_eq!(
+            snapshot.get(key, later_cut)?,
+            Some(b"spilled-value".to_vec())
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn should_fence_every_family_after_partial_spill_without_advancing_global_visible_cut(
+) -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.state.column_families.insert(
+        1,
+        crate::runtime::state::ColumnFamilyState::new(1, "other".into()),
+    );
+    let path = event_loop.state.db_path.clone();
+    let spill = spill_write(&event_loop, 94_050, &[b"partial-first", b"partial-second"])?;
+    let failed = event_loop
+        .routing
+        .router
+        .register(94_050, "partial streaming apply");
+    fail::cfg("midge::wal::spilled_apply_op", "1*off->return").expect("fail second spilled effect");
+
+    // Act: complete the strict WAL unit, then fail its second memtable effect.
+    event_loop.process_one(spill, &crossbeam::channel::never());
+    fail::remove("midge::wal::spilled_apply_op");
+    assert!(matches!(
+        failed.try_recv(),
+        Ok(RuntimeResponse::Error {
+            error: MidgeError::OutcomeUnknown(_),
+            ..
+        })
+    ));
+    let family = event_loop.state.get_cf(0).unwrap();
+    assert_eq!(
+        family.memtable.get(b"partial-first")?,
+        Some(b"spilled-value".to_vec())
+    );
+    assert_eq!(family.memtable.get(b"partial-second")?, None);
+    let allocated = event_loop.state.sequence;
+    let rejected = event_loop
+        .routing
+        .router
+        .register(94_051, "cross-family cut jump");
+    let mut next = write(94_051, &[b"unrelated-family"], false);
+    if let RuntimeMsg::ApplyTransaction { ops, .. } = &mut next {
+        if let TransactionOp::Put { cf_id, .. } = &mut ops[0] {
+            *cf_id = 1;
+        }
+    }
+    event_loop.process_one(next, &crossbeam::channel::never());
+
+    // Assert: a different family cannot make the first partial key visible.
+    assert!(matches!(
+        rejected.try_recv(),
+        Ok(RuntimeResponse::Error {
+            error: MidgeError::Fenced(_),
+            ..
+        })
+    ));
+    assert_eq!(event_loop.state.sequence, allocated);
+    assert_eq!(event_loop.state.applied_sequence, 0);
+    let old = event_loop.create_read_snapshot(0).unwrap();
+    assert_eq!(old.get(b"partial-first", 0)?, None);
+    assert_eq!(old.get(b"partial-second", 0)?, None);
+    assert_eq!(
+        event_loop
+            .state
+            .get_cf(1)
+            .unwrap()
+            .memtable
+            .get(b"unrelated-family")?,
+        None
+    );
+    drop(event_loop);
+    let recovered = crate::runtime::state::RuntimeState::try_new(
+        path,
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )?;
+    for key in [b"partial-first".as_slice(), b"partial-second"] {
+        assert_eq!(
+            recovered.get_cf(0).unwrap().memtable.get(key)?,
+            Some(b"spilled-value".to_vec())
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn should_drain_earlier_group_before_applying_oversized_resident_transaction() -> MidgeResult<()> {
+    // Arrange: raw+encoded retention exceeds the asynchronous group budget,
+    // while the existing resident WAL/replay envelope still accepts the unit.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let first = event_loop
+        .routing
+        .router
+        .register(94_060, "strict before large resident");
+    let large = event_loop
+        .routing
+        .router
+        .register(94_061, "large compatibility transaction");
+    let value_len = MAX_INFLIGHT_GROUP_BYTES / 4;
+    let mut message = write(94_061, &[b"large-resident"], true);
+    if let RuntimeMsg::ApplyTransaction { ops, .. } = &mut message {
+        if let TransactionOp::Put { value, .. } = &mut ops[0] {
+            *value = Bytes::from(vec![b'X'; value_len]);
+        }
+    }
+    event_loop.process_one(
+        write(94_060, &[b"before-large"], true),
+        &crossbeam::channel::never(),
+    );
+    wait_for_hold(&mut event_loop, &held);
+    let allocated = event_loop.state.sequence;
+
+    // Act
+    event_loop.process_one(message, &crossbeam::channel::never());
+
+    // Assert: the compatibility barrier cannot cross the parked prefix.
+    assert_eq!(event_loop.state.sequence, allocated);
+    assert_eq!(event_loop.state.applied_sequence, 0);
+    assert!(large.try_recv().is_err());
+    held.release.send(()).expect("release predecessor");
+    let first_cut = applied_cut(&mut event_loop, &first);
+    let large_cut = applied_cut(&mut event_loop, &large);
+    assert!(large_cut > first_cut);
+    let snapshot = event_loop.create_read_snapshot(0).unwrap();
+    let value = snapshot
+        .get(b"large-resident", large_cut)?
+        .expect("large value");
+    assert_eq!(value.len(), value_len);
+    assert!(value.iter().all(|byte| *byte == b'X'));
     Ok(())
 }

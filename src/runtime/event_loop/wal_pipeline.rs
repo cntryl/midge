@@ -208,7 +208,8 @@ impl EventLoop {
             .pending
             .as_ref()
             .is_some_and(|group| group.failed)
-            || self.pipeline.memtable_apply.terminal_prefix())
+            || self.pipeline.memtable_apply.terminal_prefix()
+            || self.state.partial_apply_prefix)
             && message.is_mutation()
         {
             self.reject_pipeline_message(

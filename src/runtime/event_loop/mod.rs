@@ -595,7 +595,7 @@ impl EventLoop {
 
     /// Returns an error if the lease has been lost (heartbeat detected failure).
     fn check_lease_health(&self) -> crate::common::MidgeResult<()> {
-        if self.pipeline.memtable_apply.terminal_prefix() {
+        if self.state.partial_apply_prefix || self.pipeline.memtable_apply.terminal_prefix() {
             return Err(crate::common::MidgeError::Fenced(
                 "a memtable group has an unknown applied prefix; restart before admitting writes"
                     .into(),

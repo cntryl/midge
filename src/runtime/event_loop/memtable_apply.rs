@@ -154,12 +154,12 @@ impl EventLoop {
         if group.failure.is_none() {
             self.submit_memtable_apply_jobs(&mut group);
         }
-        if group.failure.is_some() {
+        if let Some(error) = &group.failure {
             group.cancelled.store(true, Ordering::Release);
             group.plan.jobs.clear();
             if !group.responses_failed {
                 self.pipeline.memtable_apply.terminal_prefix = true;
-                self.fence_wal_transition(group.failure.as_ref().unwrap(), None);
+                self.fence_wal_transition(error, None);
                 self.fail_coalesced_transaction_responses(&group.batch, &MidgeError::OutcomeUnknown("a synced memtable group failed before ordered publication; restart recovers the complete WAL unit".into()));
                 group.responses_failed = true;
             }

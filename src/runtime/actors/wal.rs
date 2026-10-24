@@ -926,6 +926,11 @@ impl WalActor {
         state: &RuntimeState,
         cf_id: crate::types::ColumnFamilyId,
     ) -> MidgeResult<()> {
+        if state.partial_apply_prefix {
+            return Err(MidgeError::RecoveryFailed(
+                "a transaction holds a partial global applied prefix; restart before writing to any family".into(),
+            ));
+        }
         match state
             .get_cf(cf_id)
             .and_then(crate::runtime::state::ColumnFamilyState::partially_applied_commit)
@@ -961,6 +966,7 @@ impl WalActor {
         error: MidgeError,
     ) -> MidgeError {
         if outcome.partly_applied {
+            state.partial_apply_prefix = true;
             for plan in plans {
                 if let Some(cf) = state.get_cf_mut(plan.cf_id) {
                     cf.mark_partially_applied(plan.commit_seq);

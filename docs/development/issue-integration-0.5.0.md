@@ -922,3 +922,13 @@ public Strict commit/reopen. Exact floors, encoding and recovery semantics stay
 unchanged. All-target compilation passes; behavior and measurements remain
 pending. The metric builder uses conservative empty defaults while always
 installing actual runtime health; focused helpers keep hard function limits.
+
+#978/#906 now fence the global applied prefix after partial legacy/spilled
+apply as well as concurrent apply. The aggregate loop-owned bit makes admission
+constant-time across every family, including direct actor preparation. A
+cross-family BestEffort cannot advance the cut past hidden partial entries.
+Active coverage fails a real spill after its first effect, requires rejection
+without visibility advance, and reopens to the whole durable unit. Additional
+held-group spill and oversized-resident regressions pin drained compatibility
+barriers. All-target failpoint/stress-soak compilation passes cleanly (7.47s);
+execution remains pending. These paths remain synchronous after the drain.

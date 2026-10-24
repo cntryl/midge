@@ -541,6 +541,9 @@ pub struct RuntimeState {
     /// Highest completely applied transaction cut. Snapshot visibility never
     /// follows allocation ahead of this boundary.
     pub(crate) applied_sequence: u64,
+    /// A failed effect left entries above the published cut. No family may
+    /// advance that global cut until restart reconstructs whole WAL units.
+    pub(crate) partial_apply_prefix: bool,
     /// Highest compaction output generation observed or allocated. This is
     /// recovered from canonical output names without advancing WAL authority.
     pub(crate) compaction_output_generation: u64,
