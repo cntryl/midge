@@ -932,3 +932,78 @@ without visibility advance, and reopens to the whole durable unit. Additional
 held-group spill and oversized-resident regressions pin drained compatibility
 barriers. All-target failpoint/stress-soak compilation passes cleanly (7.47s);
 execution remains pending. These paths remain synchronous after the drain.
+
+The partial-spill public child-process regressions now require same- and
+cross-family Strict/BestEffort writes to be fenced and retained snapshots to
+stay at the complete prior cut. Restart still proves the whole durable unit.
+Delayed resident validation now covers point conflicts, insert-only, assertions
+and range deletes across a real intervening flush, plus an earlier held Strict
+group. These are active regressions; execution remains pending.
+
+#910's generic captured-cut protocol now compiles with the cloud features:
+opaque epoch/ordinal captures, exact body digests, retained intent obligations,
+same-epoch CAS reconciliation and monotonic pointer/cache observations.
+Unknown effects retain their capture after the task handle drops. Provider
+PUT/CAS work runs outside the coarse cache mutex. Runtime flush, compaction
+and auxiliary mirror tasks now receive captured cuts. Flush ownership also
+binds completion to the exact physical phase, epoch, family and identity;
+duplicate or early results cannot settle a retained pipeline.
+
+GC's local SST/WAL effects and known-retired cloud workers use the same local
+capture mutex for the final protection check and physical effect. They defer
+while captures remain unresolved and retain the original durable obligation.
+General SST/WAL discovery and metadata-generation retention have the same
+protection edge. Active generic overlap/CAS/epoch/unknown-effect and physical
+GC regressions are coded, not executed. Short local edit/capture gate turns
+and real background overlap/recovery regressions are the current integration
+slice; an independent-flush latency qualification is not yet claimed.
+
+#909 now has active real-loop two-worker publication/restart, independent job
+re-pick, overlapping reservation rejection, oldest-prefix L0 ownership and
+shared memory failure/isolation regressions, plus a public per-family held
+flush build/restart test. Compilation passes; behavioral execution and A/B
+qualification remain pending.
+
+#948 narrows the legacy source-fragmentation fallback: exceeding a soft work
+target alone does not force a source rewrite when selected target overlap
+fits the configured overlap budget. Exact/under-budget and disabled-policy
+picker cases accompany a real whole-merge cloud publication/cold-recovery
+regression. Unsafe/incomplete layouts retain conservative handling.
+
+The latest all-target failpoint/stress-soak compilation passes cleanly
+(12.57s shared snapshot). The pedantic check still finds three hard function
+length errors in the active trivial-move slice plus warnings; it is not a
+zero-warning validation result. No behavioral, crash, provider or A/B pass is
+inferred from compilation. #904's live issue now records its accounting
+candidate and the still-unapproved cadence change explicitly.
+
+#910's short local turns are now committed: background provider work retains
+its admitted cut while the gate reopens. Completion reacquires the exact local
+owner before applying its edit; a bounded retained result waits behind a
+legacy retirement turn, and duplicates cannot add new ownership. Active
+regressions hold a real compaction manifest PUT for two seconds, require a
+later flush within 100ms, verify point/scan/cold recovery after both settle,
+and pause a real checkpoint between rename and journal truncation. These are
+coded assertions, not measured or executed results. Inline compatibility
+publication and legacy WAL-retirement serialization remain explicit.
+
+#926 now performs eligible disjoint moves through atomic logical-level edits
+and a distinct move intent. It preserves names, bytes and checksums without
+opening SST readers/writers or creating physical replacement/retirement
+obligations. Exact live sources, L0 order and target conflicts are revalidated
+before the edit. Failure/uncertain publication retains the original objects.
+Eight active transition/zero-work/failure/restart/target-conflict regressions
+compile; execution and provider/performance qualification remain pending.
+
+Live issues #909/#910/#926/#948 now record these implementation candidates and
+their unexecuted gates, and all five updated issue bodies (#904 included) were
+read back with the candidate section present and state still OPEN.
+
+The final coding gaps under active implementation are bounded streamed-spill
+validation (#946) and a shared ahead-of-use flush/compaction name cursor
+(#911). Spill append/apply stays a drained compatibility barrier under #978;
+moving its SST validation off-loop first requires proportional decoder-memory
+ownership. No fixed large budget increase or per-key proof cache is accepted.
+The compaction cursor must consume a name once, retain it across provider wait,
+and restart beyond the durable exclusive bound without changing WAL epoch
+semantics. Neither gap is represented as completed or qualified here.

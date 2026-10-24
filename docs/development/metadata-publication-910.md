@@ -3,9 +3,12 @@
 Issue #910 needs a publication protocol change. Releasing the existing gate
 alone permits an older full control-file image to overwrite a newer flush,
 and permits checkpoint truncation to race a control-file capture. The current
-gate remains in place until the protocol below and its active regressions are
-wired. This document records the implementation design, not a delivered latency
-or independent-flush guarantee.
+protocol below is now wired into background runtime publishers, with active
+regressions for independent flush publication, immutable capture during a
+checkpoint, pointer contention and retained GC obligations. This is a local
+implementation candidate; behavioral execution, crash campaigns and provider
+latency qualification remain pending. Inline startup/compatibility publishers
+retain their serialized path.
 
 The event loop applies worker-returned version edits in arrival order. Each
 edit validates live input identity, source/L0 order, complete key bounds and
