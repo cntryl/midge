@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "fault_injection/maintenance_concurrency.rs"]
+mod maintenance_concurrency;
+
 #[path = "fault_injection/wal_authority_regressions.rs"]
 mod wal_authority_regressions;
 

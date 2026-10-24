@@ -14,6 +14,8 @@ use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
 mod compute;
+#[cfg(all(test, feature = "failpoints"))]
+mod concurrency_tests;
 
 pub(super) enum CompactionLaunch {
     Started,
@@ -241,6 +243,11 @@ impl EventLoop {
         operation: &str,
         manual: bool,
     ) -> crate::common::MidgeResult<bool> {
+        if self.publication.publication_gate.is_active()
+            || !self.actors.compaction_actor.has_capacity()
+        {
+            return Ok(false);
+        }
         CompactionCoordinator::expire_manual_compaction_waiters(self);
         let manual = manual && CompactionCoordinator::has_manual_compaction_waiters(self);
         // Disabling ordinary background work must not permanently wedge L0

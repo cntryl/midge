@@ -1317,6 +1317,7 @@ impl CompactionJobActor {
             )
             .entered();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::failpoints::fail_point!("midge::compaction::before_compute");
                 let abort_check = || worker_cancel.load(Ordering::Acquire);
                 let result = Self::execute_with_storage(
                     &plan_clone,
