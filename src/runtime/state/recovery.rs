@@ -1370,6 +1370,14 @@ impl RuntimeState {
         self.check_startup_scope("intent replay completion")?;
         self.intent_log.clear();
 
+        // Intent replay may install authority absent from the base manifest
+        // used to construct the initial read cut. Publish only that installed
+        // manifest proof after the whole repair succeeds, never an allocation
+        // or an incomplete replay unit.
+        self.applied_sequence = self
+            .applied_sequence
+            .max(Self::manifest_visible_sequence_floor(&self.manifest));
+
         tracing::info!("intent log replay complete and cleared");
         Ok(())
     }
