@@ -46,21 +46,24 @@ pub(super) fn open(opts: OpenOptions, budget: Duration) -> MidgeResult<Engine> {
     let worker_scope = scope.clone();
     let caller_dispatch = tracing::dispatcher::get_default(Clone::clone);
     let caller_span = tracing::Span::current();
+    let failpoint_gate = crate::failpoints::worker_gate();
     std::thread::Builder::new()
         .name("midge-startup".into())
         .spawn(move || {
-            #[cfg(test)]
-            let _observation = super::test_control::enter_worker(test_control);
-            tracing::dispatcher::with_default(&caller_dispatch, || {
-                caller_span.in_scope(|| {
-                    run_worker(
-                        &opts,
-                        &worker_scope,
-                        start,
-                        &worker_slot,
-                        &ready_tx,
-                        &decision_rx,
-                    );
+            failpoint_gate.run(|| {
+                #[cfg(test)]
+                let _observation = super::test_control::enter_worker(test_control);
+                tracing::dispatcher::with_default(&caller_dispatch, || {
+                    caller_span.in_scope(|| {
+                        run_worker(
+                            &opts,
+                            &worker_scope,
+                            start,
+                            &worker_slot,
+                            &ready_tx,
+                            &decision_rx,
+                        );
+                    });
                 });
             });
         })

@@ -163,9 +163,10 @@ impl Runtime {
             init_tx,
             admission: admission.clone(),
         };
+        let failpoint_gate = crate::failpoints::worker_gate();
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
-            .spawn(move || startup.run())
+            .spawn(move || failpoint_gate.run(|| startup.run()))
             .map_err(|e| MidgeError::Internal(format!("Failed to spawn runtime thread: {e}")))?;
 
         self.event_loop_handle = Some(event_loop_handle);
