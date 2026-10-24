@@ -141,6 +141,12 @@ completed-prefix acknowledgement. These targets are hypotheses for qualification
 not measured gains. Before concurrent apply starts, also pin the completed
 #941/#947 prerequisite SHA to isolate apply's contribution.
 
+The pinned isolated #906 baseline is
+`c1e6e9423fdd55f7f2766c3d83220c8eadc96f7e`, after those resident Strict
+encoding and raw-value copy candidates. Within-group concurrent effects must
+settle before one ordered visibility publication; partial or unknown apply
+fences subsequent mutation until recovery.
+
 | Change | Primary target | Guardrails |
 | --- | --- | --- |
 | #941 writer encoding | At least 20% lower event-loop CPU/service nanoseconds per committed 4 KiB unit on `tier2_durability_commit_sync_local_4k_rotation` | Writer encode/compression/CRC/XXH3/append service per unit at most 10% worse; 16/64-writer Strict throughput at least 10% higher in each row, commit p99 at most 5% worse |
