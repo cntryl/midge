@@ -45,10 +45,11 @@ impl HybridStorage {
             ));
         };
         let scope = DeadlineScope::new(*deadline);
+        let expected = page.clone();
         source
-            .keys_page(prefix, page.clone(), Some(&scope))?
+            .keys_page(prefix, page, Some(&scope))?
             .map(|result| {
-                page.accept(prefix, result.keys, result.continuation)
+                expected.accept(prefix, result.keys, result.continuation)
                     .map_err(|error| MidgeError::Corruption(error.to_string()))
             })
             .transpose()

@@ -340,17 +340,17 @@ impl HybridStorage {
         let (upload_worker_handles, upload_worker_failed) = Self::spawn_wal_upload_worker(
             &counters,
             wal_upload_rx,
-            Arc::clone(&wal_cloud),
-            event_queue.clone(),
-            external_event_tx.clone(),
-            uploads::WalUploadWorkerConfig {
+            &wal_cloud,
+            &event_queue,
+            external_event_tx.as_ref(),
+            &uploads::WalUploadWorkerConfig {
                 timeout: limits.callback_timeout,
                 concurrency: limits.worker_concurrency.clamp(1, 64),
                 memory: crate::common::resource_budget::ResourceBudget::new(
                     limits.upload_memory_bytes,
                 ),
             },
-            Arc::clone(&verified_uploads),
+            &verified_uploads,
         );
 
         Self {

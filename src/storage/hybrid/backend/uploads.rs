@@ -403,21 +403,21 @@ impl HybridStorage {
     pub(super) fn spawn_wal_upload_worker(
         counters: &crate::telemetry::CounterSink,
         wal_upload_rx: mpsc::Receiver<UploadState>,
-        cloud: Arc<dyn StorageBackend>,
-        event_queue: Arc<Mutex<BoundedEventQueue>>,
-        external_event_tx: Option<cb::Sender<StorageEvent>>,
-        config: WalUploadWorkerConfig,
-        verified_uploads: VerifiedUploads,
+        cloud: &Arc<dyn StorageBackend>,
+        event_queue: &Arc<Mutex<BoundedEventQueue>>,
+        external_event_tx: Option<&cb::Sender<StorageEvent>>,
+        config: &WalUploadWorkerConfig,
+        verified_uploads: &VerifiedUploads,
     ) -> (Vec<JoinHandle<()>>, bool) {
         let receiver = Arc::new(Mutex::new(wal_upload_rx));
         let mut handles = Vec::with_capacity(config.concurrency);
         for ordinal in 0..config.concurrency {
             let worker_counters = counters.clone();
             let receiver = Arc::clone(&receiver);
-            let cloud = Arc::clone(&cloud);
-            let event_queue = Arc::clone(&event_queue);
-            let external_event_tx = external_event_tx.clone();
-            let verified_uploads = Arc::clone(&verified_uploads);
+            let cloud = Arc::clone(cloud);
+            let event_queue = Arc::clone(event_queue);
+            let external_event_tx = external_event_tx.cloned();
+            let verified_uploads = Arc::clone(verified_uploads);
             let config = config.clone();
             let spawn_result = thread::Builder::new()
                 .name(format!("midge-wal-uploader-{ordinal}"))
@@ -425,10 +425,7 @@ impl HybridStorage {
                     loop {
                         // Release the receive lock before any filesystem/provider
                         // work, allowing the other fixed workers to make progress.
-                        let upload = match receiver.lock().recv() {
-                            Ok(upload) => upload,
-                            Err(_) => break,
-                        };
+                        let Ok(upload) = receiver.lock().recv() else { break; };
                         let memory =
                             match reserve_upload_memory(&upload, cloud.as_ref(), &config.memory) {
                                 Ok(memory) => memory,
@@ -449,7 +446,7 @@ impl HybridStorage {
                             &cloud,
                             &event_queue,
                             external_event_tx.as_ref(),
-                            UploadAttemptAdmission {
+                            &UploadAttemptAdmission {
                                 timeout: config.timeout,
                                 memory: Some(memory),
                             },
@@ -478,11 +475,11 @@ impl HybridStorage {
         cloud: &Arc<dyn StorageBackend>,
         event_queue: &Arc<Mutex<BoundedEventQueue>>,
         external_event_tx: Option<&cb::Sender<StorageEvent>>,
-        admission: UploadAttemptAdmission,
+        admission: &UploadAttemptAdmission,
         verified_uploads: &VerifiedUploads,
     ) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::process_wal_upload(counters, upload, cloud, &admission, verified_uploads)
+            Self::process_wal_upload(counters, upload, cloud, admission, verified_uploads)
         }));
         let terminal_event = if let Ok(event) = result {
             event
@@ -784,8 +781,7 @@ fn verify_upload_ranges(
     use crate::storage::{StorageError, StorageErrorKind, StoragePrecondition, StorageRequest};
     let deadline = crate::common::OperationDeadline::from_budget(admission.timeout);
     let metadata =
-        HybridStorage::head_object_from_backend_blocking(cloud, key, deadline.remaining())
-            .map_err(StorageError::from)?;
+        HybridStorage::head_object_from_backend_blocking(cloud, key, deadline.remaining())?;
     if metadata.size != expected.len() as u64 || !metadata.same_version(&metadata) {
         return Err(StorageError::new(
             StorageErrorKind::Corruption,
@@ -817,8 +813,7 @@ fn verify_upload_ranges(
         }
     }
     let current =
-        HybridStorage::head_object_from_backend_blocking(cloud, key, deadline.remaining())
-            .map_err(StorageError::from)?;
+        HybridStorage::head_object_from_backend_blocking(cloud, key, deadline.remaining())?;
     if deadline.is_expired() {
         return Err(crate::storage::storage_timeout_error(
             "WAL upload verification deadline exhausted",

@@ -960,7 +960,7 @@ fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
         &storage.stores.wal,
         &storage.event_queue,
         Some(&external_event_tx),
-        super::uploads::UploadAttemptAdmission {
+        &super::uploads::UploadAttemptAdmission {
             timeout: storage.callback_timeout,
             memory: None,
         },

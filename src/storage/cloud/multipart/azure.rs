@@ -39,7 +39,9 @@ pub(super) async fn upload(
     let _completion_memory = http.retain_metadata(blocks.len().saturating_mul(256) + 64)?;
     let mut body = String::from("<BlockList>");
     for (block, _) in &blocks {
-        body.push_str(&format!("<Uncommitted>{block}</Uncommitted>"));
+        body.push_str("<Uncommitted>");
+        body.push_str(block);
+        body.push_str("</Uncommitted>");
     }
     body.push_str("</BlockList>");
     let list_md5 =

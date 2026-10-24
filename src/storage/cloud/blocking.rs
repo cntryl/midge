@@ -131,8 +131,9 @@ impl<'a> BlockingCloud<'a> {
         let deadline = self.begin("LIST page", prefix)?;
         let timeout = self.remaining(&deadline, "LIST page", prefix)?;
         let (tx, rx) = std::sync::mpsc::channel();
+        let expected = page.clone();
         self.cloud
-            .submit_list_page_within(prefix, page.clone(), deadline, tx);
+            .submit_list_page_within(prefix, page, deadline, tx);
         let result = rx.recv_timeout(timeout).map_err(|error| {
             MidgeError::Timeout(format!("bounded cloud LIST page callback: {error}"))
         })?;
@@ -146,7 +147,7 @@ impl<'a> BlockingCloud<'a> {
                 )
             })?
             .map(|result| {
-                page.accept(
+                expected.accept(
                     &self.cloud.full_path(prefix),
                     result.keys,
                     result.continuation,
