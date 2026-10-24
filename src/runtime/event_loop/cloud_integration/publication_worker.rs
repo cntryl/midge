@@ -313,6 +313,7 @@ impl EventLoop {
         &mut self,
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
+        self.drain_metadata_mirror_within(deadline)?;
         loop {
             self.reap_cloud_publication();
             self.start_next_cloud_verification();

@@ -14,6 +14,11 @@ use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub(super) enum CompactionLaunch {
+    Started,
+    WaitingForMetadata,
+}
+
 impl EventLoop {
     #[cfg(test)]
     pub(super) fn assign_compaction_output_sequence(
@@ -106,6 +111,13 @@ impl EventLoop {
         &mut self,
         plan: crate::compaction::CompactionPlan,
     ) -> crate::common::MidgeResult<()> {
+        self.launch_compaction_disposition(plan).map(|_| ())
+    }
+
+    fn launch_compaction_disposition(
+        &mut self,
+        plan: crate::compaction::CompactionPlan,
+    ) -> crate::common::MidgeResult<CompactionLaunch> {
         let had_manual_waiters = !self.state.pending_compaction_waits.is_empty();
         CompactionCoordinator::expire_manual_compaction_waiters(self);
         if self.publication.publication_gate.is_active() {
@@ -122,9 +134,36 @@ impl EventLoop {
                 "manual compaction caller no longer waiting".into(),
             ));
         }
+        self.launch_compaction_with_original_deadline(plan, manual_deadline)
+    }
+
+    fn launch_compaction_with_original_deadline(
+        &mut self,
+        mut plan: crate::compaction::CompactionPlan,
+        manual_deadline: Option<OperationDeadline>,
+    ) -> crate::common::MidgeResult<CompactionLaunch> {
         CompactionCoordinator::check_manual_deadline(manual_deadline)?;
         self.state.retry_metadata_reload()?;
         CompactionCoordinator::check_manual_deadline(manual_deadline)?;
+        if plan.output_seq == 0 {
+            plan.output_seq = self.state.next_compaction_output_generation()?;
+        }
+        if self.actors.cloud_coordinator.hybrid_storage.is_some()
+            && self.begin_sst_name_reservation(
+                plan.cf_id,
+                plan.output_seq,
+                manual_deadline.as_ref(),
+                crate::metadata::accounting::Origin::CompactionBeforeGc,
+            )?
+        {
+            // This accepted plan and its initial caller allowance survive the
+            // provider round trip. It has no worker/output ownership yet.
+            self.actors
+                .cloud_coordinator
+                .metadata_mirror
+                .pending_compaction = Some((plan, manual_deadline));
+            return Ok(CompactionLaunch::WaitingForMetadata);
+        }
         let plan = self.prepare_compaction_plan_for_launch_within(plan, manual_deadline)?;
         CompactionCoordinator::check_manual_deadline(manual_deadline)?;
 
@@ -146,7 +185,24 @@ impl EventLoop {
                 self.pipeline.worker_msg_tx.clone(),
                 manual_deadline,
             )
-            .map(|_| ())
+            .map(|_| CompactionLaunch::Started)
+    }
+
+    pub(super) fn resume_compaction_after_metadata_mirror(
+        &mut self,
+        plan: crate::compaction::CompactionPlan,
+        deadline: Option<OperationDeadline>,
+        result: MidgeResult<()>,
+    ) {
+        let result = result.and_then(|()| {
+            self.authority.compaction_fence.admit_compaction()?;
+            self.launch_compaction_with_original_deadline(plan, deadline)
+        });
+        if let Err(error) = result {
+            CompactionCoordinator::fail_pending_compaction_waits(self, &error);
+            self.state.mark_persistence_anomaly();
+            tracing::warn!(%error, "compaction reservation completion retained its inputs");
+        }
     }
 
     pub(super) fn schedule_one_background_compaction_if_needed(
@@ -420,7 +476,7 @@ impl CompactionCoordinator {
 
         let schedule_res = event_loop.launch_compaction(cplan);
         let resp = match schedule_res {
-            Ok(()) => RuntimeResponse::Ok { request_id },
+            Ok(_) => RuntimeResponse::Ok { request_id },
             Err(error) => RuntimeResponse::Error { request_id, error },
         };
 
@@ -481,8 +537,12 @@ impl CompactionCoordinator {
                     return HandleOutcome::Continue;
                 }
             };
-            match event_loop.launch_compaction(plan) {
-                Ok(()) => scheduled += 1,
+            match event_loop.launch_compaction_disposition(plan) {
+                Ok(CompactionLaunch::Started) => scheduled += 1,
+                Ok(CompactionLaunch::WaitingForMetadata) => {
+                    scheduled += 1;
+                    break;
+                }
                 Err(error) => {
                     event_loop
                         .state
@@ -1740,6 +1800,15 @@ impl CompactionCoordinator {
         if active != 0 {
             return;
         }
+        if event_loop
+            .actors
+            .cloud_coordinator
+            .metadata_mirror
+            .pending_compaction
+            .is_some()
+        {
+            return;
+        }
 
         if let Some(error) = completion_error {
             Self::fail_pending_compaction_waits(event_loop, error);
@@ -1780,10 +1849,11 @@ impl CompactionCoordinator {
                         return;
                     }
                 };
-                match event_loop.launch_compaction(plan) {
-                    Ok(()) => {
+                match event_loop.launch_compaction_disposition(plan) {
+                    Ok(CompactionLaunch::Started) => {
                         emergent_scheduled = true;
                     }
+                    Ok(CompactionLaunch::WaitingForMetadata) => return,
                     Err(error) => {
                         Self::fail_pending_compaction_waits(event_loop, &error);
                         return;
@@ -1871,7 +1941,14 @@ impl CompactionCoordinator {
 
     pub(super) fn complete_idle_compaction_waits(event_loop: &mut EventLoop, include_manual: bool) {
         Self::expire_manual_compaction_waiters(event_loop);
-        if !include_manual {
+        if !include_manual
+            || event_loop
+                .actors
+                .cloud_coordinator
+                .metadata_mirror
+                .pending_compaction
+                .is_some()
+        {
             return;
         }
         for request_id in std::mem::take(&mut event_loop.state.pending_compaction_waits).into_keys()

@@ -303,6 +303,7 @@ impl BoundedEventQueue {
             },
             StorageEvent::CloudAck { .. }
             | StorageEvent::CloudWalPublicationComplete { .. }
+            | StorageEvent::CloudMetadataMirrorComplete { .. }
             | StorageEvent::BackpressureOn
             | StorageEvent::BackpressureOff => 0,
         };

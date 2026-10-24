@@ -336,6 +336,12 @@ pub enum StorageEvent {
         operation_id: u64,
         writer_epoch: u64,
     },
+    /// A loop-owned metadata mirror has a terminal result. The typed result
+    /// stays with its operation owner until the matching completion is applied.
+    CloudMetadataMirrorComplete {
+        operation_id: u64,
+        writer_epoch: u64,
+    },
     /// Cloud upload attempt failed - segment NOT durable.
     ///
     /// `HybridStorage` keeps a failed WAL upload queued and retries it with

@@ -57,7 +57,7 @@ impl EventLoop {
         }
     }
 
-    pub(super) fn fail_flush_pipeline(
+    pub(in crate::runtime::event_loop) fn fail_flush_pipeline(
         &mut self,
         flush_id: u64,
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,

@@ -25,6 +25,7 @@ impl EventLoop {
 
     fn tick_hybrid_storage_with_deadline(&mut self, deadline: Option<&OperationDeadline>) {
         self.reap_cloud_publication();
+        self.reap_metadata_mirror();
         self.reap_cloud_wal_prune_worker();
         let Some(storage) = &self.actors.cloud_coordinator.hybrid_storage else {
             return;
@@ -75,6 +76,7 @@ impl EventLoop {
             event,
             crate::storage::StorageEvent::CloudAck { .. }
                 | crate::storage::StorageEvent::CloudWalPublicationComplete { .. }
+                | crate::storage::StorageEvent::CloudMetadataMirrorComplete { .. }
                 | crate::storage::StorageEvent::CloudFail { .. }
                 | crate::storage::StorageEvent::CloudWalPruneAttemptFailed { .. }
                 | crate::storage::StorageEvent::BackpressureOn
@@ -95,6 +97,12 @@ impl EventLoop {
             return;
         }
         match event {
+            crate::storage::StorageEvent::CloudMetadataMirrorComplete {
+                operation_id,
+                writer_epoch,
+            } => {
+                self.complete_metadata_mirror(operation_id, writer_epoch);
+            }
             crate::storage::StorageEvent::CloudWalPublicationComplete {
                 operation_id,
                 writer_epoch,

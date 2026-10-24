@@ -55,6 +55,22 @@ impl EventLoop {
         deadline: Option<&crate::common::OperationDeadline>,
         origin: Origin,
     ) -> crate::common::MidgeResult<()> {
+        if self.begin_sst_name_reservation(cf_id, sst_seq, deadline, origin)? {
+            return Err(crate::common::MidgeError::Busy(
+                "SST filename reservation publication pending".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Retains a pending mirror before any output is admitted remotely.
+    pub(super) fn begin_sst_name_reservation(
+        &mut self,
+        cf_id: crate::types::ColumnFamilyId,
+        sst_seq: u64,
+        deadline: Option<&crate::common::OperationDeadline>,
+        origin: Origin,
+    ) -> crate::common::MidgeResult<bool> {
         check_reservation_deadline(deadline)?;
         let reserved_through = self
             .state
@@ -64,7 +80,7 @@ impl EventLoop {
             .copied()
             .unwrap_or(0);
         if sst_seq < reserved_through {
-            return Ok(());
+            return Ok(false);
         }
         // The mirror below publishes local metadata files; never publish
         // them while memory is known to be behind disk (#500). Reload first,
@@ -92,17 +108,21 @@ impl EventLoop {
         )?;
         self.state.manifest.set_next_sst_seq(cf_id, next_seq);
         self.state.manifest.note_applied_journal_edit(edit_id);
-        if let Some(deadline) = deadline {
-            self.mirror_metadata_to_authoritative_cloud_within(deadline)?;
-        } else {
-            self.mirror_metadata_to_authoritative_cloud()?;
+        let mirror_deadline = deadline
+            .copied()
+            .unwrap_or_else(|| self.event_loop_cloud_deadline());
+        if self.start_metadata_mirror(
+            super::metadata_mirror::MirrorContinuation::SstReservation { cf_id, next_seq },
+            mirror_deadline,
+        )? {
+            return Ok(true);
         }
         check_reservation_deadline(deadline)?;
         self.state
             .sst_names
             .reserved_through
             .insert(cf_id, next_seq);
-        Ok(())
+        Ok(false)
     }
 }
 

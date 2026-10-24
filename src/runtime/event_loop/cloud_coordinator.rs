@@ -13,6 +13,7 @@ pub(in crate::runtime) struct CloudCoordinator {
     pub(super) cloud_wal: CloudWalUploadTracker,
     pub(super) cloud_publication:
         super::cloud_integration::publication_worker::CloudPublicationPipeline,
+    pub(super) metadata_mirror: super::metadata_mirror::MetadataMirrorPipeline,
     pub(super) cloud_wal_prune_worker: Option<std::thread::JoinHandle<()>>,
     pub(super) cloud_maintenance: CloudMaintenance,
 }
@@ -38,6 +39,7 @@ impl CloudCoordinator {
             ),
             cloud_wal_prune_worker: None,
             cloud_publication: Default::default(),
+            metadata_mirror: Default::default(),
             cloud_maintenance: CloudMaintenance::default(),
         }
     }

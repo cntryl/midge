@@ -41,17 +41,17 @@ impl EventLoop {
             // Names come from a cursor inside a durably reserved block, so
             // most flushes reserve nothing (#491). A restart resumes at the
             // durable reservation, past every name this session handed out.
-            let cursor = self
+            let sst_seq = *self
                 .state
                 .sst_names
                 .cursor
                 .entry(cf_id)
                 .or_insert(durable_next);
-            let sst_seq = *cursor;
-            *cursor = sst_seq.checked_add(1).ok_or_else(|| {
+            let next_cursor = sst_seq.checked_add(1).ok_or_else(|| {
                 crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
             })?;
             self.reserve_sst_name_durably_for(cf_id, sst_seq, origin)?;
+            self.state.sst_names.cursor.insert(cf_id, next_cursor);
             return Ok(sst_seq);
         }
         let sst_seq = durable_next;

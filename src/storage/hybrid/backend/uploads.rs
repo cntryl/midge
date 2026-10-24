@@ -29,6 +29,21 @@ pub(super) struct UploadAttemptAdmission {
 }
 
 impl HybridStorage {
+    pub(crate) fn queue_cloud_metadata_mirror_complete(
+        &self,
+        operation_id: u64,
+        writer_epoch: u64,
+    ) {
+        Self::queue_storage_event(
+            &self.event_queue,
+            self.external_event_tx.as_ref(),
+            StorageEvent::CloudMetadataMirrorComplete {
+                operation_id,
+                writer_epoch,
+            },
+        );
+    }
+
     pub(crate) fn queue_cloud_wal_publication_complete(
         &self,
         operation_id: u64,

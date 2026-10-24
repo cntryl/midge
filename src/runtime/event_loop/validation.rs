@@ -314,7 +314,10 @@ impl EventLoop {
     }
 
     pub(super) fn drain_validation_results(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
-        if self.publication.publication_gate.is_active()
+        if self
+            .publication
+            .publication_gate
+            .blocks_validation_completion()
             || self.publication.verification_barrier.is_active()
         {
             return;

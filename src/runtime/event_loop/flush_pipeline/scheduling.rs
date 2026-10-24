@@ -164,6 +164,17 @@ impl EventLoop {
         };
         let (sst_name, sst_seq) = match self.ensure_flush_sst_identity(identity) {
             Ok(identity) => identity,
+            Err(crate::common::MidgeError::Busy(_))
+                if self.actors.cloud_coordinator.metadata_mirror.is_running() =>
+            {
+                // Reservation owns its own completion. Retain the immutable
+                // and original flush waiters until its exact name is covered.
+                if let Some((_, current)) = self.state.immutable_flush_by_id_mut(flush.flush_id) {
+                    current.phase = ImmutableFlushPhase::Queued;
+                }
+                self.actors.cloud_coordinator.metadata_mirror.pending_flush = Some(flush.flush_id);
+                return;
+            }
             Err(error) => {
                 self.fail_flush_pipeline(flush.flush_id, None, &error);
                 return;

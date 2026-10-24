@@ -643,3 +643,19 @@ before a deliberately one-hour timer, without another flush. The shared check
 currently stops in concurrent metadata-cache and !Send fixture updates; no test
 execution is claimed. Configurable multi-job scheduling, shared memory admission
 and per-family flush concurrency remain pending.
+
+The remaining #907 metadata mirror now captures an immutable local control-file
+cut and submits provider work to an owned worker. Operation/epoch completion
+retains the caller's original deadline and continuation. DDL response, flush
+cursor/backoff, GC deletion and SST-name coverage change only after matching
+successful unfenced completion. Manual compaction plans/waiters remain pending
+through name reservation rather than being rejected or falsely completed.
+Read and resident validation progress is permitted under the mirror owner.
+Shutdown retains and drains admitted work.
+
+Five active regressions cover held-provider local progress, stale names,
+original flush ownership, abandoned callers and failure backoff. Shared failpoint
+test targets compile after the related fixture/interface updates. Behavioral,
+crash, latency and provider qualification remain pending. Sealing itself keeps
+its required local append/fsync/rotation barrier; remote upload/publication is
+off loop. Publication independence between flush and compaction remains #910.

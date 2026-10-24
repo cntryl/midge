@@ -42,7 +42,18 @@ impl EventLoop {
         if !self.pipeline.flush_worker_result_rx.is_empty() {
             return true;
         }
-        if !self.publication.publication_gate.is_active()
+        if self
+            .actors
+            .cloud_coordinator
+            .metadata_mirror
+            .has_ready_result()
+        {
+            return true;
+        }
+        if !self
+            .publication
+            .publication_gate
+            .blocks_validation_completion()
             && self.pipeline.validation.has_ready_result()
         {
             return true;
@@ -122,6 +133,11 @@ impl EventLoop {
             self.actors
                 .flush_actor
                 .is_inflight()
+                .then_some(Duration::from_millis(1)),
+            self.actors
+                .cloud_coordinator
+                .metadata_mirror
+                .is_running()
                 .then_some(Duration::from_millis(1)),
             self.pipeline
                 .validation
