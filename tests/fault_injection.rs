@@ -1693,6 +1693,10 @@ mod failure_injection {
         );
         shutdown_engine(reopened);
 
+        assert_partitioned_compaction_restart(db_path);
+    }
+
+    fn assert_partitioned_compaction_restart(db_path: &Path) {
         let final_reopen = open_local_engine_with_target(db_path, 128);
         let final_cf = default_cf(&final_reopen);
         assert_compaction_batches_visible(&final_reopen, &final_cf, "cmp-recover", 4, 25);
@@ -3704,9 +3708,10 @@ mod chaos_real {
         expire_crashed_process_lease(db_path);
         let committed = read_committed_records(db_path);
         assert_eq!(committed.len(), 16);
-        assert!(!fs::read(db_path.join("manifest.journal"))
-            .unwrap()
-            .is_empty());
+        assert_ne!(
+            fs::read(db_path.join("manifest.journal")).unwrap(),
+            Vec::<u8>::new()
+        );
         // Every tracked write was already flushed. Removing WAL in this
         // private fixture prevents WAL replay from masking missing SST authority.
         fs::remove_dir_all(db_path.join("wal")).expect("remove flushed fixture WAL");
@@ -3743,9 +3748,10 @@ mod chaos_real {
                 .flush_cf(&cf)
                 .expect("acknowledged flush publication");
         }
-        assert!(!fs::read(db_path.join("manifest.journal"))
-            .unwrap()
-            .is_empty());
+        assert_ne!(
+            fs::read(db_path.join("manifest.journal")).unwrap(),
+            Vec::<u8>::new()
+        );
         crash::abort_at_trigger(
             "local_deferred_checkpoint",
             "manual::after_deferred_flush_ack",
@@ -3768,7 +3774,7 @@ mod chaos_real {
 
         // Assert: WAL replay cannot mask missing SST or frontier authority.
         assert_eq!(committed.len(), 2);
-        assert!(!journal.is_empty());
+        assert_ne!(journal, Vec::<u8>::new());
         assert!(journal.len() < 20 * 1024);
         assert_committed_records_visible(&engine, &committed);
         let layout = engine.metrics().get_storage_layout().unwrap();
@@ -3795,7 +3801,7 @@ mod chaos_real {
         // that checkpointing stays below the declared five-percent gate.
         let mut value = vec![0_u8; 128 * 1024];
         let mut generator = 0x1234_5678_u32;
-        for chunk in value.chunks_exact_mut(4) {
+        for chunk in value.as_chunks_mut::<4>().0 {
             generator ^= generator << 13;
             generator ^= generator >> 17;
             generator ^= generator << 5;
@@ -3815,9 +3821,10 @@ mod chaos_real {
             }
             engine.flush_cf(&cf).expect("acknowledged cheap flush");
             if round == 0 {
-                assert!(fs::read(db_path.join("manifest.journal"))
-                    .unwrap()
-                    .is_empty());
+                assert_eq!(
+                    fs::read(db_path.join("manifest.journal")).unwrap(),
+                    Vec::<u8>::new()
+                );
                 let snapshot_bytes = fs::metadata(db_path.join("manifest.snapshot.json"))
                     .unwrap()
                     .len();
@@ -3834,9 +3841,10 @@ mod chaos_real {
                 );
             }
         }
-        assert!(!fs::read(db_path.join("manifest.journal"))
-            .unwrap()
-            .is_empty());
+        assert_ne!(
+            fs::read(db_path.join("manifest.journal")).unwrap(),
+            Vec::<u8>::new()
+        );
         crash::abort_at_trigger(
             "local_forced_checkpoint_failure",
             "manual::after_forced_flush_ack",
@@ -5669,7 +5677,15 @@ mod shutdown_orchestration {
         fail::remove(BLOCKED_UPLOAD_FAILPOINT);
         fail::remove(CLOUD_DRAIN_TIMEOUT_FAILPOINT);
         scenario.teardown();
-        let mut reopened = Engine::open(reopen_options(&db_path, Arc::clone(&lease_loss_calls)))
+
+        assert_released_shutdown_recovers_acknowledged_value(&db_path, &lease_loss_calls);
+    }
+
+    fn assert_released_shutdown_recovers_acknowledged_value(
+        db_path: &Path,
+        lease_loss_calls: &Arc<AtomicUsize>,
+    ) {
+        let mut reopened = Engine::open(reopen_options(db_path, Arc::clone(lease_loss_calls)))
             .expect("reopen only after blocked runtime has exited");
         let default_cf = reopened
             .get_column_family("default")
@@ -7809,7 +7825,7 @@ mod cloud_persistence_hardening {
             let mirror = WalPublicationCatalog::decode(&mirror).unwrap();
             assert_eq!(primary.fencing_epoch(), before.fencing_epoch());
             assert_eq!(mirror.fencing_epoch(), before.fencing_epoch());
-            assert!(primary.entries().is_empty());
+            assert_eq!(primary.entries(), []);
             assert_eq!(mirror.entries(), before.entries());
         });
         fail::remove("midge::cloud::after_catalog_primary_before_mirror");
@@ -8063,7 +8079,10 @@ mod cloud_persistence_hardening {
             .collect::<Vec<_>>();
         let default_cf = default_cf(&engine);
         engine.flush_cf(&default_cf).expect("flush covered value");
-        assert!(wait_for_remote_wal_count(&remote_wal_dir, 0).is_empty());
+        assert_eq!(
+            wait_for_remote_wal_count(&remote_wal_dir, 0),
+            Vec::<PathBuf>::new()
+        );
         engine
             .shutdown(Duration::from_secs(5))
             .expect("shutdown before restoring interrupted prune residue");
@@ -10502,7 +10521,7 @@ mod observability_api {
             serde_json::from_slice(&output.stdout).expect("parse healthy report");
         assert_eq!(report["schema_version"], 1);
         assert_eq!(report["health"], "Healthy");
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, Vec::<u8>::new());
     }
 
     #[test]
@@ -10532,7 +10551,7 @@ mod observability_api {
                 .is_some_and(|message| message.contains("does not exist")),
             "unexpected structured error: {error}"
         );
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, Vec::<u8>::new());
     }
 
     #[cfg(unix)]
@@ -10571,7 +10590,7 @@ mod observability_api {
                 .is_some_and(|message| message.contains("Is a directory")),
             "unexpected inaccessible-storage error: {error}"
         );
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, Vec::<u8>::new());
     }
 
     #[test]
@@ -10592,7 +10611,7 @@ mod observability_api {
         assert_eq!(error["schema_version"], 1);
         assert_eq!(error["status"], "error");
         assert_eq!(error["error_kind"], "usage");
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, Vec::<u8>::new());
     }
 
     #[test]
@@ -10608,7 +10627,7 @@ mod observability_api {
 
         // Assert
         assert_eq!(output.status.code(), Some(2));
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, Vec::<u8>::new());
         let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
         assert!(
             stderr.contains("unknown flag '--Json'"),
@@ -10666,7 +10685,7 @@ mod observability_api {
         assert_eq!(error["schema_version"], 1);
         assert_eq!(error["status"], "error");
         assert_eq!(error["error_kind"], "corruption");
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, Vec::<u8>::new());
     }
 
     #[test]
