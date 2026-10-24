@@ -33,6 +33,10 @@ commits are documentation only. Validation at that source checkpoint:
   violations. This is source validation, not 4,495 executed tests.
 - `cargo check --locked --manifest-path fuzz/Cargo.toml --bins`: passed;
   the two metadata replay targets report an unused shared fixture helper.
+- `cntryl-tools validate-docs`: 71 Markdown documents passed. The final
+  invariant inventory resolves all 65 IDs, 320 active test symbols, 356 row
+  references and 2,144 assertion/helper anchors. All 204 source/supporting-doc
+  SHA256 postimages verify; historical qualification objects are unchanged.
 - Active behavioral regressions and measurements added during the
   implementation-first pass remain unexecuted.
 
