@@ -219,6 +219,7 @@ impl PublicationFixture {
             publication_memory_limit: 2 * 1024 * 1024,
             runtime_response_timeout: IO_CAP,
             manual_deadline,
+            checkpoint: None,
         })?;
         let completion = rx.recv_timeout(IO_CAP + IO_CAP);
         // Join the actual owner before asserting success/error/retained bytes.

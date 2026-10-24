@@ -270,6 +270,7 @@ pub(crate) use recovery::{
     highest_edit_id_with_fs, highest_edit_id_with_fs_unlocked,
     highest_edit_id_with_repair_with_fs_unlocked, next_edit_id_after,
     preserve_corrupt_journal_with_fs_unlocked, replay_edits_after_with_fs_unlocked,
+    replay_identified_edits_after_with_fs_unlocked,
     replay_identified_edits_after_with_fs_unlocked_within,
     salvage_edits_after_with_fs_unlocked_within,
 };
@@ -339,6 +340,38 @@ pub(crate) fn truncate_journal_with_fs_unlocked(
         .map_err(FsError::into_midge)?;
 
     Ok(())
+}
+
+/// Retain the durable tail newer than a captured checkpoint. The caller holds
+/// the manifest writer lock, so appends cannot race the replacement.
+pub(crate) fn retain_edits_after_with_fs_unlocked(
+    fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+    edits: &[(u64, ManifestEdit)],
+) -> MidgeResult<()> {
+    let mut bytes = Vec::new();
+    for (edit_id, edit) in edits {
+        bytes.extend_from_slice(&encode_journal_record(
+            edit.record_type(),
+            &JournalEditEnvelope {
+                edit_id: *edit_id,
+                edit: edit.clone(),
+            },
+        )?);
+        bytes.extend_from_slice(&encode_journal_record(
+            FSYNC_MARKER_TYPE,
+            &FsyncMarker {
+                last_persisted_sequence: *edit_id,
+                ts_millis: millis_since_epoch(),
+            },
+        )?);
+    }
+    crate::io::staging::stage_bytes_typed(
+        fs,
+        &crate::io::FsPath::new(JOURNAL_REPAIR_TEMP_FILE),
+        &crate::io::FsPath::new(JOURNAL_FILE),
+        &bytes,
+        || Ok(()),
+    )
 }
 
 #[cfg(test)]

@@ -54,6 +54,11 @@ pub(crate) struct CompactionPublishTask {
     pub publication_memory_limit: usize,
     pub runtime_response_timeout: std::time::Duration,
     pub manual_deadline: Option<OperationDeadline>,
+    /// Immutable contents and exact applied edit cut captured by the loop.
+    pub checkpoint: Option<(
+        Arc<crate::metadata::store::ManifestStore>,
+        crate::metadata::Manifest,
+    )>,
 }
 
 pub(crate) struct CompactionPublishCompletion {
@@ -218,6 +223,13 @@ fn run_task(task: &CompactionPublishTask) -> MidgeResult<()> {
         }
         CompactionPublishPhase::ManifestPublished => {
             validate_task_lease(task, &deadline)?;
+            if let Some((store, captured)) = &task.checkpoint {
+                store.save_captured_snapshot_for(
+                    crate::metadata::accounting::Origin::CompactionBeforeGc,
+                    captured,
+                )?;
+                validate_task_lease(task, &deadline)?;
+            }
             mirror_control_metadata(task, &deadline)?;
             // This is the last provider-authority observation before the
             // event loop may retire inputs. The loop checks only the shared
@@ -424,6 +436,7 @@ mod tests {
             publication_memory_limit: 4096,
             runtime_response_timeout: std::time::Duration::from_secs(5),
             manual_deadline: None,
+            checkpoint: None,
         };
         validity.expire_for_test();
         // Act

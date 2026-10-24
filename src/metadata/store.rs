@@ -235,6 +235,86 @@ impl ManifestStore {
         result
     }
 
+    /// Encode an immutable, already applied view off the runtime thread, then
+    /// install exactly its cut while retaining every later durable edit.
+    pub(crate) fn save_captured_snapshot_for(
+        &self,
+        origin: Origin,
+        manifest: &Manifest,
+    ) -> MidgeResult<WrittenCheckpoint> {
+        manifest.validate_persisted()?;
+        let bytes = serde_json::to_vec(manifest).map_err(|error| {
+            crate::common::MidgeError::Internal(format!("encode captured manifest: {error}"))
+        })?;
+        crate::failpoints::fail_point!("midge::manifest::after_captured_checkpoint_encoded");
+        let operation = self
+            .accounting
+            .begin(OperationKind::Checkpoint, origin, self.medium);
+        let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
+        let result = journal::with_manifest_writer_lock(&fs, || {
+            self.install_captured_snapshot(&fs, manifest.edit_checkpoint_id, &bytes, &operation)
+        });
+        self.checkpoint_retry_required
+            .store(result.is_err(), Ordering::Release);
+        operation.finish(result.is_ok());
+        result
+    }
+
+    fn install_captured_snapshot(
+        &self,
+        fs: &Arc<dyn Fs>,
+        cut: u64,
+        bytes: &[u8],
+        operation: &crate::metadata::accounting::Operation,
+    ) -> MidgeResult<WrittenCheckpoint> {
+        let mut known = self.known.lock();
+        let position = Self::position_with_fs(fs, &mut known)?;
+        if position.checkpoint_edit_id > cut {
+            return Ok(WrittenCheckpoint {
+                edit_checkpoint_id: position.checkpoint_edit_id,
+                caller_was_current: false,
+            });
+        }
+        if cut > position.highest_edit_id {
+            return Err(crate::common::MidgeError::Corruption(
+                "captured manifest cut exceeds durable journal authority".into(),
+            ));
+        }
+        let tail = journal::replay_identified_edits_after_with_fs_unlocked(fs, cut)?;
+        let result = (|| {
+            crate::io::staging::stage_bytes_typed(
+                fs,
+                &FsPath::new("manifest.snapshot.json.tmp"),
+                &FsPath::new(crate::metadata::files::MANIFEST_SNAPSHOT),
+                bytes,
+                || Ok(()),
+            )?;
+            operation.snapshot_durable(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            crate::failpoints::fail_point!(
+                "midge::manifest::after_snapshot_rename_before_journal_truncate",
+                |_| Err(crate::common::MidgeError::Internal(
+                    "failpoint: crash after manifest snapshot rename".into()
+                ))
+            );
+            journal::retain_edits_after_with_fs_unlocked(fs, &tail)?;
+            operation.checkpoint_complete();
+            Ok(WrittenCheckpoint {
+                edit_checkpoint_id: cut,
+                caller_was_current: true,
+            })
+        })();
+        *known = result.as_ref().ok().and_then(|_| {
+            Self::remember_with_fs(
+                fs,
+                JournalPosition {
+                    checkpoint_edit_id: cut,
+                    ..position
+                },
+            )
+        });
+        result
+    }
+
     fn write_next_with_fs(
         &self,
         fs: &Arc<dyn Fs>,

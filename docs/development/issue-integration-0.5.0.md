@@ -326,3 +326,15 @@ output reads during finalization, and reject failed directory synchronization.
 `cargo check --locked --tests --features failpoints` passes for the combined
 working tree. Behavioral execution and write-to-upload mutation qualification
 remain pending.
+
+### #911: compaction checkpoint slice implemented; remaining cadence pending
+
+Compaction publication now captures immutable manifest contents and the exact
+applied edit cut only when the existing byte/edit threshold requests a
+checkpoint. The existing publication worker encodes and installs it under the
+manifest writer lock; journal edits newer than the captured cut survive.
+Active recovery regressions cover a concurrent newer tail and a crash after
+snapshot rename before journal truncation. Test targets compile in the shared
+working tree; behavioral execution remains pending. Ahead-of-use name
+reservation and the remaining publication cadence paths still need review and
+implementation before the issue can be considered complete.

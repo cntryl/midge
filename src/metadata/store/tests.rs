@@ -141,6 +141,83 @@ fn flush_edit(sequence: u64) -> ManifestEdit {
 }
 
 #[test]
+fn should_retain_later_journal_edits_when_installing_captured_checkpoint() -> MidgeResult<()> {
+    // Arrange: the worker captured edit 1 before the loop appended edit 2.
+    let directory = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+    let store = ManifestStore::new(Arc::clone(&fs));
+    let first = flush_edit(1);
+    let id = store.append(&first)?;
+    let mut captured = Manifest::default();
+    captured.apply_edit(&first)?;
+    assert!(captured.note_applied_journal_edit(id));
+    let second = flush_edit(2);
+    let second_id = store.append(&second)?;
+
+    // Act
+    let written = store.save_captured_snapshot_for(Origin::CompactionBeforeGc, &captured)?;
+    let recovered =
+        ManifestPersistence::load_with_fs_and_policy(&fs, crate::config::RecoveryPolicy::Strict)
+            .map_err(MidgeError::RecoveryFailed)?;
+
+    // Assert: checkpoint is the captured cut; the newer edit replays once.
+    assert_eq!(written.edit_checkpoint_id, id);
+    assert_eq!(recovered.edit_checkpoint_id, second_id);
+    assert_eq!(recovered.files.len(), 2);
+    assert!(recovered
+        .files
+        .iter()
+        .any(|file| file.name == crate::cloud_layout::file_name(0, 0, 1)));
+    assert!(recovered
+        .files
+        .iter()
+        .any(|file| file.name == crate::cloud_layout::file_name(0, 0, 2)));
+    let tail = journal::replay_identified_edits_after_with_fs_unlocked(&fs, 0)?;
+    assert_eq!(
+        tail.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![second_id]
+    );
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_recover_both_edits_when_captured_checkpoint_crashes_before_tail_rewrite(
+) -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let directory = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+    let store = ManifestStore::new(Arc::clone(&fs));
+    let first = flush_edit(1);
+    let first_id = store.append(&first)?;
+    let mut captured = Manifest::default();
+    captured.apply_edit(&first)?;
+    assert!(captured.note_applied_journal_edit(first_id));
+    let last_id = store.append(&flush_edit(2))?;
+    fail::cfg(
+        "midge::manifest::after_snapshot_rename_before_journal_truncate",
+        "return",
+    )
+    .expect("inject checkpoint crash");
+
+    // Act
+    let result = store.save_captured_snapshot_for(Origin::CompactionBeforeGc, &captured);
+    fail::remove("midge::manifest::after_snapshot_rename_before_journal_truncate");
+    let recovered =
+        ManifestPersistence::load_with_fs_and_policy(&fs, crate::config::RecoveryPolicy::Strict)
+            .map_err(MidgeError::RecoveryFailed)?;
+
+    // Assert
+    assert!(result.is_err());
+    assert_eq!(recovered.edit_checkpoint_id, last_id);
+    assert_eq!(recovered.files.len(), 2);
+    Ok(())
+}
+
+#[test]
 fn should_refuse_flush_append_when_manifest_edit_ids_are_exhausted() {
     for prime_cache in [false, true] {
         // Arrange: both cold positioning and the known-position path see a

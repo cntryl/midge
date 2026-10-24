@@ -1241,10 +1241,6 @@ impl CompactionCoordinator {
         crate::failpoints::fail_point!("slice6::after_compaction_update_before_manifest_persist");
         event_loop.check_lease_health()?;
         Self::check_manual_deadline(pending.manual_deadline)?;
-        crate::runtime::actors::ManifestActor::persist_for(
-            &mut event_loop.state,
-            crate::metadata::accounting::Origin::CompactionBeforeGc,
-        )?;
         Self::submit_publication_phase(event_loop, CompactionPublishPhase::ManifestPublished)
     }
 
@@ -1304,7 +1300,20 @@ impl CompactionCoordinator {
             })?;
         Self::check_manual_deadline(pending.manual_deadline)?;
         pending.expected_phase = phase;
+        let checkpoint = (phase == CompactionPublishPhase::ManifestPublished
+            && !event_loop.state.is_memory_mode()
+            && event_loop
+                .state
+                .manifest_store
+                .local_checkpoint_due(event_loop.state.manifest.edit_checkpoint_id))
+        .then(|| {
+            (
+                std::sync::Arc::clone(&event_loop.state.manifest_store),
+                (*event_loop.state.manifest).clone(),
+            )
+        });
         let task = CompactionPublishTask {
+            checkpoint,
             manual_deadline: pending.manual_deadline,
             token: pending.token.clone(),
             phase,
