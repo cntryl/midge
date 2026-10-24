@@ -299,3 +299,13 @@ Compile checks pass; execution is deferred.
 Strict ticket unification, loop-owned parked roots and transition drains are
 still required with #940/#946. No append/fsync concurrency has been enabled
 by this prerequisite commit.
+
+### #949: merge-heap slice implemented; writer identity pending
+
+The merge heap owns each retained event and compares its existing key rather
+than allocating a second key. Advancing a nonempty input replaces the top via
+PeekMut and repairs the heap once. Sequence, event-kind and input tie ordering
+are preserved. Reservation accounting drops the eliminated duplicate key.
+The failpoint test targets compile. Existing compaction order/coverage tests
+remain active; execution and CPU A/B measurements are deferred. Finalized
+writer identity and the #915 upload handoff remain required for the issue.
