@@ -266,3 +266,21 @@ behavior unless that source-retention proof is explicitly supplied.
 Added complete/disjoint and legacy/incomplete proof regressions. Compile
 check with failpoints passed; test execution, public snapshot/retirement
 qualification and performance evidence remain in the review pass.
+
+### #924: implemented candidate; qualification deferred
+
+The read cache now has a slot per family and a release/acquire applied cut.
+Ordinary commits publish only their touched families. Unchanged source views
+retain their original Arc, including across another family's manifest edits.
+Capturing a transaction TTL time clones one shared source bundle instead of
+copying immutable-memtable vectors and path storage. Capture-to-pin exclusion
+and family lifecycle dispatch remain in place. The explicit applied cut is
+introduced separately by #978 before any asynchronous WAL pipeline is enabled.
+
+Memtable mutation updates total bytes by the observed size delta, avoiding a
+full family scan after every operation. Delete-range tracking and generation
+start mutation still run exclusively on the event loop. An active regression
+uses 100 families, verifies source Arc retention and visible data at the
+published cut, and reconciles incremental memory accounting against a full sum.
+The code compiles with failpoint test targets; the regression, lifecycle
+interleavings and A/B targets remain for qualification.

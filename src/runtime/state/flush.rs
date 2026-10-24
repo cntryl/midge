@@ -271,6 +271,7 @@ impl RuntimeState {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn recompute_total_memtable_bytes(&mut self) {
         self.total_memtable_bytes = self
             .column_families

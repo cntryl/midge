@@ -484,7 +484,15 @@ impl EventLoop {
         // fences the WAL, and no later sync will run, so its durability is
         // unknown and its caller gets `Timeout`, not an acknowledgement.
         if !applied.is_empty() {
-            self.publish_snapshot();
+            let families = applied
+                .iter()
+                .filter_map(|result| touched_cfs.get(&result.request_id))
+                .flatten()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            self.publish_snapshots_for(&families);
         }
         let applied_ids = applied
             .iter()
@@ -652,8 +660,8 @@ impl EventLoop {
         request_id: u64,
         result: Result<WriteResult, crate::common::MidgeError>,
     ) {
-        if result.is_ok() {
-            self.publish_snapshot();
+        if let Ok(result) = &result {
+            self.publish_snapshots_for(&result.touched_cfs);
         }
         self.finish_drained_write_after_publish(request_id, result);
     }

@@ -84,7 +84,7 @@ impl WalCoordinator {
             },
         ) {
             Ok((last_sequence, op_count, deferred)) => {
-                event_loop.publish_snapshot();
+                event_loop.publish_snapshots_for(&touched_cfs);
                 event_loop.ack_applied_transaction(
                     request_id,
                     &AppliedTransaction {
@@ -175,7 +175,7 @@ impl WalCoordinator {
                 },
             ) {
                 Ok((last_sequence, op_count, deferred)) => {
-                    event_loop.publish_snapshot();
+                    event_loop.publish_snapshots_for(&touched_cfs);
 
                     event_loop.ack_applied_transaction(
                         request_id,

@@ -26,6 +26,15 @@ use std::sync::Arc;
 /// without holding references to mutable runtime state.
 #[derive(Clone)]
 pub struct ReadSnapshot {
+    sources: Arc<ReadSnapshotSources>,
+    /// Wall-clock captured when this snapshot was created. TTL visibility is
+    /// evaluated against this value for the whole snapshot.
+    pub read_time_millis: u64,
+}
+
+/// Shared immutable sources. Capturing a new TTL read time only clones an Arc.
+#[doc(hidden)]
+pub struct ReadSnapshotSources {
     /// CF ID
     pub cf_id: crate::types::ColumnFamilyId,
     /// Active memtable snapshot
@@ -41,11 +50,16 @@ pub struct ReadSnapshot {
     pub sst_path_prefix: std::path::PathBuf,
     /// In-memory mode flag (skip SST reads when true)
     pub memory_mode: bool,
-    /// Wall-clock captured when this snapshot was created. TTL visibility is
-    /// evaluated against this value for the whole snapshot.
-    pub read_time_millis: u64,
     read_resources: Option<Arc<ReadResources>>,
     diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
+}
+
+impl std::ops::Deref for ReadSnapshot {
+    type Target = ReadSnapshotSources;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sources
+    }
 }
 
 mod merge;

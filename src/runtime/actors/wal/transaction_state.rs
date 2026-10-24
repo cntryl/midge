@@ -356,17 +356,19 @@ impl WalActor {
         // Read through the event loop's reader and block caches when given,
         // so validating many ops opens each SST once (#492). Without them
         // (tests only) the snapshot opens readers directly.
-        let mut snapshot = crate::runtime::ReadSnapshot::new_with_resources(
+        let snapshot = crate::runtime::ReadSnapshot::new_with_view_resources(
+            cf_id,
             cf_state.memtable.clone(),
             cf_state.immutable_memtables.clone(),
-            sst_files,
+            Arc::new(crate::runtime::sst_read_view::SstReadView::new(
+                cf_id, sst_files,
+            )),
             Arc::clone(state.recovery_sst_fs.as_ref().unwrap_or(&state.fs)),
             sst_path_prefix,
             state.is_memory_mode(),
             state.observed_time_millis(),
             resources.cloned(),
         );
-        snapshot.cf_id = cf_id;
         #[cfg(test)]
         ASSERTION_SNAPSHOT_BUILD_COUNT.with(|count| count.set(count.get().saturating_add(1)));
         Some(snapshot)
@@ -499,7 +501,10 @@ impl WalActor {
             cf_state.active_memtable_started_in_segment = open_segment;
             cf_state.active_memtable_started_at_wal_bytes = appended_bytes;
         }
-        state.recompute_total_memtable_bytes();
+        state.total_memtable_bytes = state
+            .total_memtable_bytes
+            .saturating_sub(prev)
+            .saturating_add(new);
         Ok(())
     }
 
@@ -528,7 +533,10 @@ impl WalActor {
             cf_state.active_memtable_started_in_segment = open_segment;
             cf_state.active_memtable_started_at_wal_bytes = appended_bytes;
         }
-        state.recompute_total_memtable_bytes();
+        state.total_memtable_bytes = state
+            .total_memtable_bytes
+            .saturating_sub(prev)
+            .saturating_add(new);
         state.record_delete_range(cf_id, start_key, end_key, sequence);
         Ok(())
     }

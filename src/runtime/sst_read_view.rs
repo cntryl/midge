@@ -368,6 +368,7 @@ impl SstReadView {
 pub(crate) struct SstReadViewCache {
     dirty: bool,
     views: HashMap<crate::types::ColumnFamilyId, Arc<SstReadView>>,
+    files: HashMap<crate::types::ColumnFamilyId, Vec<Arc<FileMeta>>>,
     live_names: Arc<HashSet<String>>,
     /// Set by every rebuild and cleared when the caller takes the new live
     /// names, so pruning of dead readers happens only after a manifest change.
@@ -387,6 +388,7 @@ impl SstReadViewCache {
         Self {
             dirty: true,
             views: HashMap::new(),
+            files: HashMap::new(),
             live_names: Arc::new(HashSet::new()),
             prune_pending: false,
             #[cfg(test)]
@@ -413,10 +415,28 @@ impl SstReadViewCache {
                     .or_default()
                     .push(Arc::new(file.clone()));
             }
-            self.views = grouped
-                .into_iter()
-                .map(|(id, files)| (id, Arc::new(SstReadView::from_shared(files))))
-                .collect();
+            // A manifest edit in one family must not invalidate every other
+            // family's source Arc, including families with no SSTs yet.
+            for &id in self.views.keys() {
+                grouped.entry(id).or_default();
+            }
+            for (&id, files) in &grouped {
+                let unchanged = self.files.get(&id).is_some_and(|previous| {
+                    previous.len() == files.len()
+                        && previous.iter().zip(files).all(|(left, right)| {
+                            left.same_identity(right)
+                                && left.sst_seq == right.sst_seq
+                                && left.sublevel == right.sublevel
+                        })
+                });
+                if !unchanged {
+                    self.views.insert(
+                        id,
+                        Arc::new(SstReadView::from_shared(files.iter().cloned())),
+                    );
+                }
+            }
+            self.files = grouped;
             self.live_names = Arc::new(live_names);
             self.dirty = false;
             self.prune_pending = true;
@@ -432,7 +452,10 @@ impl SstReadViewCache {
 
         self.views
             .entry(cf_id)
-            .or_insert_with(|| Arc::new(SstReadView::new(cf_id, Vec::new())))
+            .or_insert_with(|| {
+                self.files.entry(cf_id).or_default();
+                Arc::new(SstReadView::new(cf_id, Vec::new()))
+            })
             .clone()
     }
 

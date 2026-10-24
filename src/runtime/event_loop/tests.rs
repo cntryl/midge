@@ -3372,3 +3372,55 @@ fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
     assert_eq!(after_writes, baseline, "plain writes must not prune");
     assert_eq!(after_manifest_change, baseline + 1);
 }
+
+#[test]
+fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let mut event_loop = create_test_event_loop()?;
+    for index in 1..100 {
+        event_loop.state.create_cf(format!("family-{index}"))?;
+    }
+    let cache = Arc::new(crate::runtime::snapshot_cache::SnapshotCache::new());
+    event_loop.set_snapshot_cache(Arc::clone(&cache));
+    let before = event_loop
+        .state
+        .column_families
+        .keys()
+        .map(|&id| (id, cache.load_family(id).expect("published family").1))
+        .collect::<std::collections::HashMap<_, _>>();
+    let (_sender, receiver) = crossbeam::channel::unbounded();
+
+    // Act
+    event_loop.process_wake_msg(
+        RuntimeMsg::ApplyTransaction {
+            request_id: 98_924,
+            ops: vec![crate::runtime::TransactionOp::Put {
+                cf_id: 0,
+                key: bytes::Bytes::from_static(b"snapshot-cut"),
+                value: bytes::Bytes::from_static(b"visible"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::BestEffort),
+            start_sequence: None,
+            conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
+            response_tx: None,
+        },
+        &receiver,
+        16,
+    );
+
+    // Assert: source-stable families allocate no replacement ReadSnapshot.
+    for (&id, previous) in &before {
+        let (sequence, current) = cache.load_family(id).expect("published family");
+        assert!(Arc::ptr_eq(previous, &current), "source changed for {id}");
+        let expected = (id == 0).then(|| b"visible".to_vec());
+        assert_eq!(current.get(b"snapshot-cut", sequence)?, expected);
+    }
+    let accounted = event_loop.state.total_memtable_bytes;
+    event_loop.state.recompute_total_memtable_bytes();
+    assert_eq!(accounted, event_loop.state.total_memtable_bytes);
+    Ok(())
+}

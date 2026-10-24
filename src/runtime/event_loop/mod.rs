@@ -94,7 +94,7 @@ use super::actors::{CompactionActor, FlushActor, GcActor, ManifestActor, WalActo
 use super::durability::DurabilityCoordinator;
 use super::read_resources::ReadResources;
 use super::read_snapshot::ReadSnapshot;
-use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
+use super::snapshot_cache::SnapshotCache;
 use super::state::RuntimeState;
 use super::{MetadataPublicationLock, ResponseRouter, RuntimeMsg, RuntimeResponse};
 use crate::runtime::actors::compaction::publication::{
@@ -614,32 +614,11 @@ impl EventLoop {
             return;
         };
 
-        let mut cf_snapshots = std::collections::HashMap::new();
-        for (&cf_id, cf_state) in &self.state.column_families {
-            let sst_view = self.state.manifest.read_view_for(cf_id);
-            let sst_path_prefix = std::path::PathBuf::from(crate::sst::fs::SST_DIR);
-            cf_snapshots.insert(
-                cf_id,
-                CfSnapshotData {
-                    snapshot: Arc::new(ReadSnapshot::new_with_view_resources(
-                        cf_id,
-                        cf_state.memtable.clone(),
-                        cf_state.immutable_memtables.clone(),
-                        sst_view,
-                        Arc::clone(&self.state.fs),
-                        sst_path_prefix,
-                        self.state.is_memory_mode(),
-                        self.state.observed_time_millis(),
-                        self.authority.read_resources.clone(),
-                    )),
-                },
-            );
+        for &cf_id in self.state.column_families.keys() {
+            self.publish_family_snapshot(cache, cf_id);
         }
-
-        cache.publish(PublishedSnapshot {
-            sequence: self.state.sequence,
-            cf_snapshots,
-        });
+        cache.retain_families(|cf_id| self.state.column_families.contains_key(&cf_id));
+        cache.finish_publication(self.state.sequence);
 
         if let Some(read_resources) = &self.authority.read_resources {
             // Live names change only when the manifest is rebuilt into the
@@ -649,6 +628,45 @@ impl EventLoop {
                 read_resources.prune_to_live_ssts(&live_names);
             }
         }
+    }
+
+    /// Ordinary commits update only their families. Lifecycle and manifest
+    /// publication use the full pass above, retaining unchanged source Arcs.
+    pub(super) fn publish_snapshots_for(&self, cf_ids: &[crate::types::ColumnFamilyId]) {
+        let Some(cache) = &self.authority.snapshot_cache else {
+            return;
+        };
+        for &cf_id in cf_ids {
+            self.publish_family_snapshot(cache, cf_id);
+        }
+        cache.finish_publication(self.state.sequence);
+    }
+
+    fn publish_family_snapshot(&self, cache: &SnapshotCache, cf_id: u32) {
+        let Some(cf_state) = self.state.column_families.get(&cf_id) else {
+            return;
+        };
+        let sst_view = self.state.manifest.read_view_for(cf_id);
+        let snapshot = cache
+            .load_family(cf_id)
+            .map(|(_, snapshot)| snapshot)
+            .filter(|snapshot| {
+                snapshot.has_sources(&cf_state.memtable, &cf_state.immutable_memtables, &sst_view)
+            })
+            .unwrap_or_else(|| {
+                Arc::new(ReadSnapshot::new_with_view_resources(
+                    cf_id,
+                    cf_state.memtable.clone(),
+                    cf_state.immutable_memtables.clone(),
+                    sst_view,
+                    Arc::clone(&self.state.fs),
+                    std::path::PathBuf::from(crate::sst::fs::SST_DIR),
+                    self.state.is_memory_mode(),
+                    self.state.observed_time_millis(),
+                    self.authority.read_resources.clone(),
+                ))
+            });
+        cache.publish_family(cf_id, self.state.sequence, snapshot);
     }
 
     #[cfg(test)]

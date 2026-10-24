@@ -427,16 +427,12 @@ impl Engine {
         is_read_only: bool,
     ) -> MidgeResult<(u64, Arc<crate::runtime::ReadSnapshot>)> {
         let committed_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
-        let cache_guard = self.runtime_handle.snapshot_cache.load();
-        let cached_snapshot = cache_guard
-            .cf_snapshots
-            .get(&cf_id)
-            .map(|data| Arc::clone(&data.snapshot));
-        let cached_sequence = cache_guard.sequence;
-        let cached_snapshot = cached_snapshot.filter(|_| cached_sequence >= committed_sequence);
-        drop(cache_guard);
-
-        if let Some(snapshot) = cached_snapshot {
+        if let Some((cached_sequence, snapshot)) = self
+            .runtime_handle
+            .snapshot_cache
+            .load_family(cf_id)
+            .filter(|(sequence, _)| *sequence >= committed_sequence)
+        {
             if is_read_only {
                 self.runtime_handle
                     .diagnostics
