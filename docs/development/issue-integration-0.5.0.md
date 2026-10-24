@@ -516,3 +516,11 @@ fsync and acknowledgement, truncates it, and requires strict recovery of the
 earlier prefix. A rejection matrix covers wrong generation/epoch/segment.
 Failpoint test targets compile without warnings; behavioral execution remains
 pending. This remains synchronous groundwork for the ordered pipeline.
+
+The #923 fast path also covers `LeaseValidity::remaining`, which the actual
+before/after read-authority wrapper calls. A valid published deadline returns
+without the renewal mutex. Expiry takes the writer lock to recheck the current
+deadline before fencing, so a timely concurrent renewal is preserved. The
+held-renewal regression now exercises both the tuple snapshot and remaining
+validity. The current combined check is blocked by concurrent multipart
+provider interface edits; this follow-up has not executed its tests.

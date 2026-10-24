@@ -175,29 +175,31 @@ impl LeaseValidity {
                 hook();
             }
         });
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match *state {
-            LeaseValidityState::Active {
-                epoch: active_epoch,
-                valid_until,
-            } if active_epoch == epoch => {
-                let remaining = valid_until.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    *state = LeaseValidityState::Fenced { epoch };
-                    self.publish_state(*state);
-                    Err(LeaseError::RenewalFailed(
-                        "lease renewal crossed monotonic expiry".to_string(),
+        loop {
+            match self.snapshot() {
+                LeaseValidityState::Active {
+                    epoch: active_epoch,
+                    valid_until,
+                } if active_epoch == epoch => {
+                    let remaining = valid_until.saturating_duration_since(Instant::now());
+                    if !remaining.is_zero() {
+                        return Ok(remaining);
+                    }
+                    // Renewal may have published a later deadline since this
+                    // capture. Only the locked current state may fence expiry;
+                    // otherwise acquire another coherent publication and retry.
+                    if self.fence_if_expired(epoch) {
+                        return Err(LeaseError::RenewalFailed(
+                            "lease renewal crossed monotonic expiry".into(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(LeaseError::RenewalFailed(
+                        "lease is no longer valid for renewal".into(),
                     ))
-                } else {
-                    Ok(remaining)
                 }
             }
-            _ => Err(LeaseError::RenewalFailed(
-                "lease is no longer valid for renewal".to_string(),
-            )),
         }
     }
 
@@ -1209,7 +1211,9 @@ mod lease_validity_tests {
 
         // Act
         let worker = std::thread::spawn(move || {
-            completed.send(reader.snapshot()).expect("report authority");
+            let snapshot = reader.snapshot();
+            let valid = reader.remaining(7).is_ok();
+            completed.send((snapshot, valid)).expect("report authority");
         });
         let captured = receiver.recv_timeout(Duration::from_secs(1));
         drop(writer_guard);
@@ -1218,10 +1222,13 @@ mod lease_validity_tests {
         // Assert
         assert_eq!(
             captured.expect("read authority must not lock renewal"),
-            LeaseValidityState::Active {
-                epoch: 7,
-                valid_until: deadline
-            }
+            (
+                LeaseValidityState::Active {
+                    epoch: 7,
+                    valid_until: deadline
+                },
+                true
+            )
         );
         validity.fence(7);
         assert_eq!(validity.snapshot(), LeaseValidityState::Fenced { epoch: 7 });
