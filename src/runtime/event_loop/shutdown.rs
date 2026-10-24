@@ -546,21 +546,21 @@ mod tests {
     struct CountingSyncWriter(Arc<AtomicUsize>);
 
     impl crate::wal::WalWriter for CountingSyncWriter {
-        fn append_record(
+        fn append_record_accounted(
             &self,
             _record: &crate::wal::WalRecord,
-        ) -> crate::common::MidgeResult<u64> {
+        ) -> Result<u64, crate::wal::traits::WalAppendError> {
             Ok(0)
         }
 
-        fn append_batch(
+        fn append_batch_accounted(
             &self,
             _records: &[crate::wal::WalRecord],
-        ) -> crate::common::MidgeResult<u64> {
+        ) -> Result<u64, crate::wal::traits::WalAppendError> {
             Ok(0)
         }
 
-        fn sync(&self) -> crate::common::MidgeResult<()> {
+        fn sync_with_timeout(&self, _timeout: Duration) -> crate::common::MidgeResult<()> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }

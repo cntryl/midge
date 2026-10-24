@@ -111,5 +111,27 @@ another unresolved broad-run observation, not a diagnosed baseline defect.
 Workspace/all-target/all-feature pedantic Clippy, rustfmt and cntryl-tools
 test validation passed.
 
-Next: #975's writer contract. No issue is claimed merged or production-qualified
-by local commits.
+### #975: implemented locally
+
+Removed the test-only `append_record`, `append_batch` and `sync` surface from
+`WalWriter`. Accounted appends and timeout-aware sync are now required methods,
+with explicit physical unchanged-proof and empty-batch semantics. All four
+test doubles implement those methods; the delegating fsync-failure writer
+preserves the inner append proof. Existing tests use the production methods
+and retain their configured sync budgets.
+
+The trait contract regression compares complete physical segment bytes after
+the worker joins, covering single and batch append rollback through both the
+real writer and the delegating double. Empty batches keep the nonzero append
+position and bytes. A deliberately defective double that wrote a record and
+then returned `unchanged: true` failed the byte comparison. That negative
+control is removed. The timed-out queued-append test also asserts absence of
+an unchanged proof.
+
+Validation: the WAL-filtered unit run passed 393 tests. The final two-record
+batch contract case passed, along with 14 durability coordinator, 3 shutdown
+and 19 runtime recovery tests. Workspace build, all-target/all-feature pedantic
+Clippy, rustfmt, cntryl-tools test validation and documentation validation passed.
+
+Next: #976's admission parity and bound regressions. No issue is claimed merged
+or production-qualified by local commits.

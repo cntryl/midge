@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::DEFAULT_STORAGE_IO_TIMEOUT;
 use crate::io::traits::{DirEntry, Metadata};
 use crate::io::{Durability, File, FsError, FsPath, FsResult, OpenMode, ReadFs};
 use crate::lease::LeaderStore;
@@ -161,8 +162,10 @@ fn should_leave_wal_history_unchanged_when_salvage_lacks_family_authority() {
         Some(bytes::Bytes::from_static(b"value")),
         1,
     );
-    writer.append_record(&record).unwrap();
-    writer.sync().unwrap();
+    writer.append_record_accounted(&record).unwrap();
+    writer
+        .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+        .unwrap();
 
     // Act
     let result = RuntimeState::replay_wal_storage_within(
@@ -189,13 +192,15 @@ fn write_torn_recovery_segment(wal: &Arc<dyn Fs>, segment_name: &str) -> MidgeRe
         std::time::Duration::from_secs(2),
         crate::telemetry::CounterSink::default(),
     )?;
-    writer.append_record(&crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
-        Bytes::from_static(b"recovery-key"),
-        Some(Bytes::from_static(b"recovery-value")),
-        1,
-    ))?;
-    writer.sync()?;
+    writer
+        .append_record_accounted(&crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            Bytes::from_static(b"recovery-key"),
+            Some(Bytes::from_static(b"recovery-value")),
+            1,
+        ))
+        .map_err(|failure| failure.error)?;
+    writer.sync_with_timeout(std::time::Duration::from_secs(2))?;
     drop(writer);
     let segment_path = FsPath::new(segment_name);
     let mut segment = wal

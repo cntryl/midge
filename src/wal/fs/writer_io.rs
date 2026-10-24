@@ -467,11 +467,6 @@ impl WalWriter for FsWalWriterIo {
             .map(|_| self as &dyn GroupedWalWriter)
     }
 
-    fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos> {
-        self.append_record_accounted(record)
-            .map_err(|failure| failure.error)
-    }
-
     fn append_record_accounted(&self, record: &WalRecord) -> Result<WalPos, WalAppendError> {
         self.admit_records([record])?;
         let mut buf = self.take_buffer();
@@ -483,17 +478,8 @@ impl WalWriter for FsWalWriterIo {
         Ok(position)
     }
 
-    fn append_batch(&self, records: &[WalRecord]) -> MidgeResult<WalPos> {
-        self.append_batch_accounted(records)
-            .map_err(|failure| failure.error)
-    }
-
     fn append_batch_accounted(&self, records: &[WalRecord]) -> Result<WalPos, WalAppendError> {
         self.append_batch_with_group(records, None)
-    }
-
-    fn sync(&self) -> MidgeResult<()> {
-        self.sync_with_timeout(self.io_timeout)
     }
 
     fn sync_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
@@ -1032,7 +1018,9 @@ mod tests {
             Some(Bytes::from_static(b"value")),
             1,
         );
-        writer.append_record(&record)?;
+        writer
+            .append_record_accounted(&record)
+            .map_err(|failure| failure.error)?;
         drop(writer);
         let written_len = fs.get_file("wal.log").expect("wal file should exist").len() as u64;
         assert!(written_len > HEADER_LEN as u64);
@@ -1100,10 +1088,17 @@ mod tests {
 
         // Act
         let started = std::time::Instant::now();
-        let result = writer.append_record(&record);
+        let failure = writer.append_record_accounted(&record).unwrap_err();
 
         // Assert
-        assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
+        assert!(matches!(
+            failure.error,
+            crate::common::MidgeError::Timeout(_)
+        ));
+        assert!(
+            !failure.unchanged,
+            "the queued append can still take effect"
+        );
         assert!(
             started.elapsed() < Duration::from_millis(250),
             "append ignored configured storage I/O timeout"
@@ -1119,7 +1114,7 @@ mod tests {
         let writer = FsWalWriterIo::new("wal.log", fs)?;
 
         // Act
-        writer.sync()?;
+        writer.sync_with_timeout(writer.io_timeout)?;
 
         // Assert
         assert_eq!(sync_count.load(Ordering::SeqCst), 1);
@@ -1137,7 +1132,9 @@ mod tests {
             Some(Bytes::from_static(b"close-value")),
             1,
         );
-        writer.append_record(&record)?;
+        writer
+            .append_record_accounted(&record)
+            .map_err(|failure| failure.error)?;
         let appended_pos = writer.current_pos();
 
         // Act
@@ -1167,7 +1164,9 @@ mod tests {
         );
 
         // Act
-        let pos = writer.append_record(&record)?;
+        let pos = writer
+            .append_record_accounted(&record)
+            .map_err(|failure| failure.error)?;
 
         // Assert: the first record follows the segment header.
         assert_eq!(pos, HEADER_LEN as u64);
@@ -1224,7 +1223,7 @@ mod tests {
         )?;
         validity.expire_for_test();
         // Act
-        let result = writer.sync();
+        let result = writer.sync_with_timeout(writer.io_timeout);
         // Assert
         assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
         assert_eq!(fs.durable_sync_count.load(Ordering::SeqCst), 0);
@@ -1278,7 +1277,7 @@ mod tests {
         // Act: pause inside the actual background write while its epoch guard
         // is held, then try takeover from a second store handle.
         let append = std::thread::spawn(move || {
-            append_writer.append_record(&WalRecord::new(
+            append_writer.append_record_accounted(&WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"fenced-key"),
                 Some(Bytes::from_static(b"value")),
@@ -1291,7 +1290,10 @@ mod tests {
             std::thread::spawn(move || store.acquire_leadership("successor"))
         };
         resume.wait();
-        append.join().expect("append thread completed")?;
+        append
+            .join()
+            .expect("append thread completed")
+            .map_err(|failure| failure.error)?;
         let successor = successor_attempt
             .join()
             .expect("successor attempt completed")
@@ -1358,7 +1360,7 @@ mod tests {
         let writer = Arc::new(writer);
         let append_writer = Arc::clone(&writer);
         let append = std::thread::spawn(move || {
-            append_writer.append_record(&WalRecord::new(
+            append_writer.append_record_accounted(&WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"concurrent-key"),
                 Some(Bytes::from_static(b"value")),
@@ -1383,7 +1385,10 @@ mod tests {
         // Reservation finishes before the background append is resumed.
         let early_result = result_rx.recv_timeout(Duration::from_secs(1));
         resume.wait();
-        append.join().expect("background append thread completed")?;
+        append
+            .join()
+            .expect("background append thread completed")
+            .map_err(|failure| failure.error)?;
         reserve.join().expect("reservation thread completed");
 
         // Assert
@@ -1477,7 +1482,7 @@ mod tests {
         let appender = {
             let writer = Arc::clone(&writer);
             std::thread::spawn(move || {
-                writer.append_record(&WalRecord::new(
+                writer.append_record_accounted(&WalRecord::new(
                     WalOpKind::Put,
                     Bytes::from_static(b"key"),
                     Some(Bytes::from_static(b"value")),

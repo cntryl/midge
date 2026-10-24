@@ -651,15 +651,21 @@ struct FsyncFailingWriter {
 }
 
 impl crate::wal::WalWriter for FsyncFailingWriter {
-    fn append_record(&self, record: &crate::wal::WalRecord) -> MidgeResult<u64> {
-        self.inner.append_record(record)
+    fn append_record_accounted(
+        &self,
+        record: &crate::wal::WalRecord,
+    ) -> Result<u64, crate::wal::traits::WalAppendError> {
+        self.inner.append_record_accounted(record)
     }
 
-    fn append_batch(&self, records: &[crate::wal::WalRecord]) -> MidgeResult<u64> {
-        self.inner.append_batch(records)
+    fn append_batch_accounted(
+        &self,
+        records: &[crate::wal::WalRecord],
+    ) -> Result<u64, crate::wal::traits::WalAppendError> {
+        self.inner.append_batch_accounted(records)
     }
 
-    fn sync(&self) -> MidgeResult<()> {
+    fn sync_with_timeout(&self, _timeout: std::time::Duration) -> MidgeResult<()> {
         Err(MidgeError::Io(std::io::Error::other(
             "injected fsync failure",
         )))

@@ -79,64 +79,36 @@ pub trait WalWriter: Send + Sync {
         None
     }
 
-    /// Append a pre-encoded record to the log and return the position where
-    /// the record was written.
+    /// Append one record, returning its starting position.
     ///
     /// # Errors
     ///
-    /// Returns an error when the record cannot be appended to the WAL.
-    fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos>;
-
-    /// Append one record, retaining disk admission unless failure proves no growth.
-    ///
-    /// # Errors
-    ///
-    /// Returns the append error and whether its physical effects were rolled back.
+    /// `unchanged` may be true only if this operation left no physical bytes
+    /// behind and cannot still write them later. Pre-enqueue rejection or a
+    /// completed, durably synced rollback can provide that proof; an unchanged
+    /// logical position or an acknowledgement timeout cannot.
     #[doc(hidden)]
-    fn append_record_accounted(&self, record: &WalRecord) -> Result<WalPos, WalAppendError> {
-        self.append_record(record).map_err(WalAppendError::unknown)
-    }
+    fn append_record_accounted(&self, record: &WalRecord) -> Result<WalPos, WalAppendError>;
 
-    /// Batch append multiple records in a single write.
-    /// This allows the WAL implementation to optimize encoding and I/O.
+    /// Append a batch in one submitted write, returning its last record's
+    /// starting position. An empty batch returns `current_pos()` without I/O.
     ///
     /// # Errors
     ///
-    /// Returns an error when any record in the batch cannot be appended.
-    fn append_batch(&self, records: &[WalRecord]) -> MidgeResult<WalPos> {
-        // Default implementation: fall back to individual appends
-        let mut last_pos = 0;
-        for record in records {
-            last_pos = self.append_record(record)?;
-        }
-        Ok(last_pos)
-    }
-
-    /// Append a batch, retaining disk admission unless failure proves no growth.
-    ///
-    /// # Errors
-    ///
-    /// Returns the append error and whether its physical effects were rolled back.
+    /// The same physical unchanged-proof contract as `append_record_accounted`
+    /// applies to the entire batch, including partial writes.
     #[doc(hidden)]
-    fn append_batch_accounted(&self, records: &[WalRecord]) -> Result<WalPos, WalAppendError> {
-        self.append_batch(records).map_err(WalAppendError::unknown)
-    }
-
-    /// Ensure durability to permanent storage (fsync or equivalent).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the WAL cannot be durably synced.
-    fn sync(&self) -> MidgeResult<()>;
+    fn append_batch_accounted(&self, records: &[WalRecord]) -> Result<WalPos, WalAppendError>;
 
     /// Ensure durability, returning when the configured wait deadline elapses.
     ///
     /// Implementations with asynchronous writers should wait on their
     /// completion condition rather than blocking the caller indefinitely.
-    fn sync_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
-        let _ = timeout;
-        self.sync()
-    }
+    ///
+    /// # Errors
+    /// Returns the sync failure or a timeout when completion is not known
+    /// within `timeout`. A timeout does not prove that no I/O occurred.
+    fn sync_with_timeout(&self, timeout: Duration) -> MidgeResult<()>;
 
     /// Current append position in the WAL.
     fn current_pos(&self) -> WalPos;

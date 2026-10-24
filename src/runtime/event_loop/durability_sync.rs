@@ -523,21 +523,24 @@ mod tests {
     }
 
     impl crate::wal::WalWriter for PanickingSyncWriter {
-        fn append_record(
+        fn append_record_accounted(
             &self,
             _record: &crate::wal::WalRecord,
-        ) -> crate::common::MidgeResult<u64> {
+        ) -> Result<u64, crate::wal::traits::WalAppendError> {
             Ok(0)
         }
 
-        fn append_batch(
+        fn append_batch_accounted(
             &self,
             _records: &[crate::wal::WalRecord],
-        ) -> crate::common::MidgeResult<u64> {
+        ) -> Result<u64, crate::wal::traits::WalAppendError> {
             Ok(0)
         }
 
-        fn sync(&self) -> crate::common::MidgeResult<()> {
+        fn sync_with_timeout(
+            &self,
+            _timeout: std::time::Duration,
+        ) -> crate::common::MidgeResult<()> {
             assert!(
                 !self.0.swap(false, std::sync::atomic::Ordering::SeqCst),
                 "injected sync panic"

@@ -148,7 +148,7 @@ mod tests {
         factory
             .open_segment(4)
             .expect("open the empty segment")
-            .append_record(&crate::wal::WalRecord::new(
+            .append_record_accounted(&crate::wal::WalRecord::new(
                 crate::wal::WalOpKind::Put,
                 bytes::Bytes::from_static(b"key"),
                 Some(bytes::Bytes::from_static(b"value")),
@@ -175,12 +175,14 @@ mod tests {
         crate::wal::fs::writer_io::create_test_segment(mock.as_ref(), &name)?;
         let writer = FsWalFactoryIo::new(mock).open_segment(4)?;
         for sequence in [5, 9] {
-            writer.append_record(&crate::wal::WalRecord::new(
-                crate::wal::WalOpKind::Put,
-                bytes::Bytes::from_static(b"key"),
-                Some(bytes::Bytes::from_static(b"value")),
-                sequence,
-            ))?;
+            writer
+                .append_record_accounted(&crate::wal::WalRecord::new(
+                    crate::wal::WalOpKind::Put,
+                    bytes::Bytes::from_static(b"key"),
+                    Some(bytes::Bytes::from_static(b"value")),
+                    sequence,
+                ))
+                .map_err(|failure| failure.error)?;
         }
 
         // Act

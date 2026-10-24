@@ -489,7 +489,7 @@ fn should_keep_successful_prefix_when_later_queued_authority_rejects_its_partiti
     wait_until(|| writer.queue.lock().len() == 2);
     let sync = {
         let writer = writer.clone();
-        std::thread::spawn(move || writer.sync())
+        std::thread::spawn(move || writer.sync_with_timeout(writer.io_timeout))
     };
     wait_until(|| writer.sync_state.lock().pending_fsyncs != 0);
     let syncs_before = fs.durable_sync_count.load(Ordering::SeqCst);
@@ -571,7 +571,7 @@ fn assert_terminal_ticket_drain(panic: bool) -> MidgeResult<()> {
     wait_until(|| !writer.queue.lock().is_empty());
     let sync = {
         let writer = writer.clone();
-        std::thread::spawn(move || writer.sync())
+        std::thread::spawn(move || writer.sync_with_timeout(writer.io_timeout))
     };
     wait_until(|| !writer.sync_state.lock().requests.is_empty());
 

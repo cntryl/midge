@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::DEFAULT_STORAGE_IO_TIMEOUT;
 use crate::io::{Fs, FsPath, OpenMode, OpenOptions, RealFs};
 use crate::wal::fs::FsWalWriterIo;
 use crate::wal::types::WalOpKind;
@@ -233,8 +234,10 @@ fn should_recover_put_record_key_value_when_replaying_wal() {
             Some(Bytes::from_static(b"test_value")),
             1,
         );
-        writer.append_record(&record).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&record).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -274,8 +277,10 @@ fn should_increment_record_count_when_replaying_put() {
             Some(Bytes::from_static(b"test_value")),
             1,
         );
-        writer.append_record(&record).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&record).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -313,8 +318,10 @@ fn should_track_max_sequence_from_put_record() {
             Some(Bytes::from_static(b"test_value")),
             1,
         );
-        writer.append_record(&record).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&record).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -352,12 +359,14 @@ fn should_recover_delete_operation_when_replaying_wal() {
             Some(Bytes::from_static(b"test_value")),
             1,
         );
-        writer.append_record(&put_record).unwrap();
+        writer.append_record_accounted(&put_record).unwrap();
 
         let delete_record =
             WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
-        writer.append_record(&delete_record).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&delete_record).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -397,12 +406,14 @@ fn should_count_put_records() {
             Some(Bytes::from_static(b"test_value")),
             1,
         );
-        writer.append_record(&put_record).unwrap();
+        writer.append_record_accounted(&put_record).unwrap();
 
         let delete_record =
             WalRecord::new(WalOpKind::Delete, Bytes::from_static(b"test_key"), None, 2);
-        writer.append_record(&delete_record).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&delete_record).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -442,7 +453,7 @@ fn should_separate_records_by_column_family_when_recovering() {
             Some(Bytes::from_static(b"value0")),
             1,
         );
-        writer.append_record(&record_cf0).unwrap();
+        writer.append_record_accounted(&record_cf0).unwrap();
 
         let record_cf1 = WalRecord::new_cf(
             1,
@@ -451,8 +462,10 @@ fn should_separate_records_by_column_family_when_recovering() {
             Some(Bytes::from_static(b"value1")),
             2,
         );
-        writer.append_record(&record_cf1).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&record_cf1).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -492,7 +505,7 @@ fn should_recover_both_column_families_with_correct_data() {
             Some(Bytes::from_static(b"value0")),
             1,
         );
-        writer.append_record(&record_cf0).unwrap();
+        writer.append_record_accounted(&record_cf0).unwrap();
 
         let record_cf1 = WalRecord::new_cf(
             1,
@@ -501,8 +514,10 @@ fn should_recover_both_column_families_with_correct_data() {
             Some(Bytes::from_static(b"value1")),
             2,
         );
-        writer.append_record(&record_cf1).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&record_cf1).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -543,7 +558,7 @@ fn should_count_records_across_multiple_column_families() {
             Some(Bytes::from_static(b"value0")),
             1,
         );
-        writer.append_record(&record_cf0).unwrap();
+        writer.append_record_accounted(&record_cf0).unwrap();
 
         let record_cf1 = WalRecord::new_cf(
             1,
@@ -552,8 +567,10 @@ fn should_count_records_across_multiple_column_families() {
             Some(Bytes::from_static(b"value1")),
             2,
         );
-        writer.append_record(&record_cf1).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&record_cf1).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -603,7 +620,7 @@ fn should_restore_sequence_frontier_given_recovered_wal_with_sequence_gaps() {
             Some(Bytes::from_static(b"value1")),
             5,
         );
-        writer.append_record(&record1).unwrap();
+        writer.append_record_accounted(&record1).unwrap();
 
         // Sequences strictly increase within a segment (#843); gaps are
         // allowed.
@@ -613,7 +630,7 @@ fn should_restore_sequence_frontier_given_recovered_wal_with_sequence_gaps() {
             Some(Bytes::from_static(b"value2")),
             7,
         );
-        writer.append_record(&record2).unwrap();
+        writer.append_record_accounted(&record2).unwrap();
 
         let record3 = WalRecord::new(
             WalOpKind::Put,
@@ -621,8 +638,10 @@ fn should_restore_sequence_frontier_given_recovered_wal_with_sequence_gaps() {
             Some(Bytes::from_static(b"value3")),
             10,
         );
-        writer.append_record(&record3).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&record3).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -700,7 +719,7 @@ fn should_mask_preserved_expired_record_at_read_time_when_recovering() {
         );
         // Set expiration to the past (1 millisecond after epoch)
         expired_record.expiration = Some(1);
-        writer.append_record(&expired_record).unwrap();
+        writer.append_record_accounted(&expired_record).unwrap();
 
         let mut future_record = WalRecord::new(
             WalOpKind::Put,
@@ -710,9 +729,11 @@ fn should_mask_preserved_expired_record_at_read_time_when_recovering() {
         );
         // Set expiration to far future
         future_record.expiration = Some(u64::MAX);
-        writer.append_record(&future_record).unwrap();
+        writer.append_record_accounted(&future_record).unwrap();
 
-        writer.sync().unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -766,8 +787,10 @@ fn should_track_bytes_accounting_correctly() {
             Some(Bytes::from_static(b"value456")), // 8 bytes
             1,
         );
-        writer.append_record(&record).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&record).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -809,7 +832,7 @@ fn should_handle_delete_range_operations() {
             Some(Bytes::from_static(b"value")),
             1,
         );
-        writer.append_record(&put_record).unwrap();
+        writer.append_record_accounted(&put_record).unwrap();
 
         // DeleteRange is currently a no-op, but should not cause errors
         let mut delete_range_record = WalRecord::new(
@@ -819,9 +842,13 @@ fn should_handle_delete_range_operations() {
             2,
         );
         delete_range_record.range_end = Some(Bytes::from_static(b"end"));
-        writer.append_record(&delete_range_record).unwrap();
+        writer
+            .append_record_accounted(&delete_range_record)
+            .unwrap();
 
-        writer.sync().unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -856,7 +883,7 @@ fn should_handle_transaction_markers() {
 
         let begin_record =
             WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn_key"), None, 1);
-        writer.append_record(&begin_record).unwrap();
+        writer.append_record_accounted(&begin_record).unwrap();
 
         let put_record = WalRecord::new(
             WalOpKind::Put,
@@ -864,7 +891,7 @@ fn should_handle_transaction_markers() {
             Some(Bytes::from_static(b"value")),
             2,
         );
-        writer.append_record(&put_record).unwrap();
+        writer.append_record_accounted(&put_record).unwrap();
 
         let commit_record = WalRecord::new(
             WalOpKind::TxnCommit,
@@ -872,9 +899,11 @@ fn should_handle_transaction_markers() {
             None,
             3,
         );
-        writer.append_record(&commit_record).unwrap();
+        writer.append_record_accounted(&commit_record).unwrap();
 
-        writer.sync().unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -933,8 +962,10 @@ fn should_apply_txn_batch_atomically_during_recovery() {
         );
         batch_record.txn_id = Some(11);
 
-        writer.append_record(&batch_record).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&batch_record).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     let mut memtables = HashMap::new();
@@ -986,8 +1017,10 @@ fn should_replay_complete_retained_txn_batch_when_commit_exceeds_frontier() {
             4,
         );
         batch.txn_id = Some(11);
-        writer.append_record(&batch).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&batch).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
     let frontiers =
         serde_json::from_value(serde_json::json!([{"cf_id": 0, "through_sequence": 2}])).unwrap();
@@ -1040,7 +1073,7 @@ fn should_recover_only_committed_transaction_given_split_wal_records_when_commit
         let mut begin_record =
             WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1);
         begin_record.txn_id = Some(42);
-        writer.append_record(&begin_record).unwrap();
+        writer.append_record_accounted(&begin_record).unwrap();
 
         let mut put_record = WalRecord::new(
             WalOpKind::Put,
@@ -1049,9 +1082,11 @@ fn should_recover_only_committed_transaction_given_split_wal_records_when_commit
             2,
         );
         put_record.txn_id = Some(42);
-        writer.append_record(&put_record).unwrap();
+        writer.append_record_accounted(&put_record).unwrap();
 
-        writer.sync().unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -1149,7 +1184,7 @@ fn should_replay_committed_split_transaction_from_spool() {
         .unwrap();
         let mut begin = WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1);
         begin.txn_id = Some(txn_id);
-        writer.append_record(&begin).unwrap();
+        writer.append_record_accounted(&begin).unwrap();
         for index in 0..operation_count {
             let mut put = WalRecord::new(
                 WalOpKind::Put,
@@ -1158,7 +1193,7 @@ fn should_replay_committed_split_transaction_from_spool() {
                 index + 2,
             );
             put.txn_id = Some(txn_id);
-            writer.append_record(&put).unwrap();
+            writer.append_record_accounted(&put).unwrap();
         }
         let mut commit = WalRecord::new(
             WalOpKind::TxnCommit,
@@ -1167,8 +1202,10 @@ fn should_replay_committed_split_transaction_from_spool() {
             operation_count + 2,
         );
         commit.txn_id = Some(txn_id);
-        writer.append_record(&commit).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&commit).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     // Act
@@ -1216,7 +1253,7 @@ fn should_salvage_valid_prefix_when_txn_batch_frame_is_truncated() {
             Some(Bytes::from_static(b"value")),
             1,
         );
-        writer.append_record(&prefix).unwrap();
+        writer.append_record_accounted(&prefix).unwrap();
 
         let mut batched_put = WalRecord::new_cf(
             0,
@@ -1236,8 +1273,10 @@ fn should_salvage_valid_prefix_when_txn_batch_frame_is_truncated() {
             4,
         );
         batch_record.txn_id = Some(90);
-        writer.append_record(&batch_record).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&batch_record).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     let bytes = std::fs::read(&wal_path).unwrap();
@@ -1326,8 +1365,10 @@ fn should_return_degraded_verified_prefix_when_salvaging_truncated_sealed_wal() 
             Some(Bytes::from_static(b"value")),
             1,
         );
-        writer.append_record(&record).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&record).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     let bad_record = WalRecord::new(
@@ -1383,8 +1424,10 @@ fn should_salvage_valid_prefix_on_truncated_tail_frame() {
             Some(Bytes::from_static(b"value")),
             1,
         );
-        writer.append_record(&record).unwrap();
-        writer.sync().unwrap();
+        writer.append_record_accounted(&record).unwrap();
+        writer
+            .sync_with_timeout(DEFAULT_STORAGE_IO_TIMEOUT)
+            .unwrap();
     }
 
     let tail_record = WalRecord::new(
