@@ -88,7 +88,7 @@ impl<'a> DataBlockLayout<'a> {
     }
 
     /// Seek to the first possible interval of the user-key group. Equal keys
-    /// may span arbitrarily many restarts: lower_bound finds the first equal
+    /// may span arbitrarily many restarts: `lower_bound` finds the first equal
     /// restart, and its continuation bit decides whether the prior interval
     /// holds the beginning. Unique keys start at their exact restart.
     pub(crate) fn seek_interval(&self, key: &[u8]) -> MidgeResult<(usize, usize)> {

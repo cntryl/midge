@@ -89,7 +89,7 @@ impl WriteAdmission {
 
     pub(crate) fn retain_families(&self, mut exists: impl FnMut(u32) -> bool) {
         self.l0_slots.retain(|cf, _| exists(*cf));
-        self.hard_families.retain(|cf, _| exists(*cf));
+        self.hard_families.retain(|cf, ()| exists(*cf));
         if !self.draining.load(Ordering::Acquire) {
             self.urgent
                 .store(!self.hard_families.is_empty(), Ordering::Release);

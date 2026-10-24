@@ -29,7 +29,7 @@ std::thread_local! {
 pub(crate) struct LeaseValidity {
     state: Mutex<LeaseValidityState>,
     /// Immutable coherent publication for read authority. Mutations are still
-    /// serialized by state; the ArcSwap release precedes condition notification.
+    /// serialized by state; the `ArcSwap` release precedes condition notification.
     /// Readers acquire one complete epoch/deadline/terminal tuple.
     published: arc_swap::ArcSwap<LeaseValidityState>,
     changed: Condvar,

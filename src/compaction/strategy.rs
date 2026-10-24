@@ -379,7 +379,7 @@ impl Compactor {
                 range_tombstone_gc_eligible: false,
                 retained_snapshot_sources: false,
                 compaction_time_millis: None,
-                grandparent_overlap: Default::default(),
+                grandparent_overlap: super::GrandparentOverlap::default(),
             }));
         }
         Ok(None)
@@ -505,7 +505,7 @@ impl Compactor {
             range_tombstone_gc_eligible,
             retained_snapshot_sources: false,
             compaction_time_millis: None,
-            grandparent_overlap: Default::default(),
+            grandparent_overlap: super::GrandparentOverlap::default(),
         }))
     }
 
@@ -602,7 +602,7 @@ impl Compactor {
             range_tombstone_gc_eligible,
             retained_snapshot_sources: false,
             compaction_time_millis: None,
-            grandparent_overlap: Default::default(),
+            grandparent_overlap: super::GrandparentOverlap::default(),
         }))
     }
 
@@ -701,7 +701,7 @@ impl Compactor {
             range_tombstone_gc_eligible,
             retained_snapshot_sources: false,
             compaction_time_millis: None,
-            grandparent_overlap: Default::default(),
+            grandparent_overlap: super::GrandparentOverlap::default(),
         }))
     }
 
@@ -799,7 +799,7 @@ impl Compactor {
             range_tombstone_gc_eligible: false,
             retained_snapshot_sources: false,
             compaction_time_millis: None,
-            grandparent_overlap: Default::default(),
+            grandparent_overlap: super::GrandparentOverlap::default(),
         }
     }
 
