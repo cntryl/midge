@@ -17,7 +17,7 @@ fn reopen_after_reaper(path: &std::path::Path, cloud: bool) -> MidgeResult<Engin
         match Engine::open(reaper_options(path, cloud)?) {
             Ok(engine) => return Ok(engine),
             Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(5))
+                std::thread::sleep(Duration::from_millis(5));
             }
             Err(error) => return Err(error),
         }

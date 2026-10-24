@@ -506,12 +506,12 @@ impl CompactionCoordinator {
             range_tombstone_gc_eligible: false,
             retained_snapshot_sources: false,
             compaction_time_millis: None,
-            grandparent_overlap: Default::default(),
+            grandparent_overlap: crate::compaction::GrandparentOverlap::default(),
         };
 
         let schedule_res = event_loop.launch_compaction(cplan);
         let resp = match schedule_res {
-            Ok(_) => RuntimeResponse::Ok { request_id },
+            Ok(()) => RuntimeResponse::Ok { request_id },
             Err(error) => RuntimeResponse::Error { request_id, error },
         };
 

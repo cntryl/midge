@@ -1776,7 +1776,8 @@ mod compatibility_fixtures {
 
         for wrong_key_bounds in [true, false] {
             let temp = copy_fixture_dir("v9_populated_v5_sst_db");
-            for name in ["manifest.snapshot.json"] {
+            {
+                let name = "manifest.snapshot.json";
                 let path = temp.path().join(name);
                 if wrong_key_bounds {
                     alter_binary_manifest_fixture(&path, "smallest_key", None);
@@ -1805,7 +1806,8 @@ mod compatibility_fixtures {
             // Arrange: complete bounds agree with the SST; older advisory bounds
             // may disagree without hiding a point key from readers.
             let temp = copy_fixture_dir("v9_populated_v5_sst_db");
-            for name in ["manifest.snapshot.json"] {
+            {
+                let name = "manifest.snapshot.json";
                 let path = temp.path().join(name);
                 alter_binary_manifest_fixture(
                     &path,

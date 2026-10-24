@@ -66,7 +66,7 @@ fn should_share_one_rate_schedule_across_flush_and_compaction_output() -> MidgeR
         assert_eq!(crc32c::crc32c(&bytes), finalized.content_crc32c);
         let reader = factory.open(Path::new(&format!("rate-{ordinal}.sst")))?;
         assert!(
-            matches!(reader.get_state(&63_u32.to_be_bytes())?, KeyState::Value(value, _, _, _) if value.as_ref() == &[b'x'; 1024])
+            matches!(reader.get_state(&63_u32.to_be_bytes())?, KeyState::Value(value, _, _, _) if value.as_ref() == [b'x'; 1024])
         );
     }
     Ok(())

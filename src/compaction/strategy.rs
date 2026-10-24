@@ -41,7 +41,9 @@ mod range_gc_tests {
         let levels = vec![vec![&selected], vec![&outside]];
 
         // Act
-        let proof = Compactor::tombstone_gc_eligibility(&levels, &[selected.name.clone()]).unwrap();
+        let proof =
+            Compactor::tombstone_gc_eligibility(&levels, std::slice::from_ref(&selected.name))
+                .unwrap();
 
         // Assert
         assert_eq!(proof, (true, true));
@@ -70,7 +72,7 @@ mod range_gc_tests {
         // Act
         let proof = Compactor::tombstone_gc_eligibility(
             &[vec![&selected], vec![&legacy]],
-            &[selected.name.clone()],
+            std::slice::from_ref(&selected.name),
         )
         .unwrap();
 
@@ -159,7 +161,7 @@ impl CompactionPlan {
             range_tombstone_gc_eligible: false,
             retained_snapshot_sources: false,
             compaction_time_millis: None,
-            grandparent_overlap: Default::default(),
+            grandparent_overlap: crate::compaction::GrandparentOverlap::default(),
         }
     }
 
