@@ -61,11 +61,30 @@ impl crate::storage::cloud::CloudHeadCapability for HeldManifestBackend {
 }
 impl CloudBackend for HeldManifestBackend {}
 
-struct HeldReadbackBackend {
+pub(in crate::runtime::hybrid_persistence) struct HeldReadbackBackend {
     inner: Arc<MockCloudBackend>,
     hold: AtomicBool,
     entered: mpsc::Sender<()>,
     released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+impl HeldReadbackBackend {
+    pub(in crate::runtime::hybrid_persistence) fn new(
+        inner: Arc<MockCloudBackend>,
+        entered: mpsc::Sender<()>,
+        released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    ) -> Self {
+        Self {
+            inner,
+            hold: AtomicBool::new(false),
+            entered,
+            released,
+        }
+    }
+
+    pub(in crate::runtime::hybrid_persistence) fn hold_next_read(&self) {
+        self.hold.store(true, Ordering::Release);
+    }
 }
 
 impl CloudReadCapability for HeldReadbackBackend {

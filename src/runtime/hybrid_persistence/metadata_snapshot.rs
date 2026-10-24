@@ -101,8 +101,8 @@ impl MetadataMirrorCache {
 
 pub(crate) fn reduce_to_authority(manifest: &mut Manifest) {
     manifest.files = Vec::new();
-    manifest.retired_ssts = Default::default();
-    manifest.next_sst_seqs = Default::default();
+    manifest.retired_ssts = std::collections::HashMap::default();
+    manifest.next_sst_seqs = std::collections::HashMap::default();
     for family in &mut manifest.column_families {
         family.dropped_sst_names = Vec::new();
     }
@@ -116,7 +116,8 @@ pub(crate) struct SharedRetirementAuthority {
     store: Arc<dyn LeaderStore>,
     holder_id: String,
     writer_epoch: u64,
-    _memory: ResourceReservation,
+    _memory: Arc<ResourceReservation>,
+    _decode_memory: Option<ResourceReservation>,
 }
 
 impl SharedRetirementAuthority {
@@ -219,10 +220,19 @@ impl SharedMetadataSnapshot {
             .ok_or_else(|| {
                 MidgeError::ResourceLimit("shared metadata decoding admission overflow".into())
             })?;
-        let memory = self
-            .budget
-            .reserve(admitted, "shared metadata manifest decoding")?;
-        let bodies = read_committed_metadata_bodies_within(&self.cloud, &generation, deadline)?;
+        let memory = Arc::new(
+            self.budget
+                .reserve(admitted, "shared metadata manifest decoding")?,
+        );
+        let bodies = read_committed_metadata_bodies_reserved_within(
+            &self.cloud,
+            &generation,
+            deadline,
+            Some(Arc::clone(&memory)),
+        )?;
+        let decode_memory = self
+            .publication_lock
+            .reserve_selected_decode_workspace(&memory, &bodies, deadline)?;
         let manifest = decode_generation_manifest(&generation, &bodies, deadline)?;
         let authority = SharedRetirementAuthority {
             generation,
@@ -231,6 +241,7 @@ impl SharedMetadataSnapshot {
             holder_id: self.holder_id.clone(),
             writer_epoch: self.writer_epoch,
             _memory: memory,
+            _decode_memory: decode_memory,
         };
         authority.verify_current(deadline)?;
         Ok(authority)
@@ -704,6 +715,8 @@ mod tests {
     use crate::io::Fs;
     use crate::lease::fs_leader_store::FsLeaderStore;
 
+    mod retirement_admission;
+
     #[test]
     fn should_release_discarded_inventory_storage_when_reducing_to_authority() {
         // Arrange
@@ -768,6 +781,10 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            Self::with_cloud(Arc::new(CloudStorage::with_mock()))
+        }
+
+        fn with_cloud(cloud: Arc<CloudStorage>) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let fs = crate::io::real::test_root(directory.path());
             crate::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
@@ -780,7 +797,7 @@ mod tests {
             Self {
                 _directory: directory,
                 fs,
-                cloud: Arc::new(CloudStorage::with_mock()),
+                cloud,
                 store,
                 lock: crate::runtime::MetadataPublicationLock::default(),
             }
