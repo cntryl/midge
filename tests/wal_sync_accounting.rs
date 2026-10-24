@@ -2,8 +2,7 @@ use cntryl_midge::{Engine, MidgeResult, OpenOptions, TransactionMode, WriteOptio
 use std::time::Duration;
 
 #[test]
-fn should_report_writer_and_exact_ledger_floor_syncs_separately_and_recover_both_commits(
-) -> MidgeResult<()> {
+fn should_account_strict_sync_boundaries_through_restart() -> MidgeResult<()> {
     // Arrange: warm the sequence reservation before measuring one Strict group.
     let directory = tempfile::tempdir().unwrap();
     let options = OpenOptions::local(directory.path())

@@ -25,8 +25,7 @@ fn reopen_after_reaper(path: &std::path::Path, cloud: bool) -> MidgeResult<Engin
 }
 
 #[test]
-fn should_fence_outliving_reads_scans_and_commit_when_drop_transaction_wait_expires(
-) -> MidgeResult<()> {
+fn should_fence_outliving_transactions_when_drop_transaction_wait_expires() -> MidgeResult<()> {
     for cloud in [false, true] {
         // Arrange
         let directory = tempfile::tempdir()?;

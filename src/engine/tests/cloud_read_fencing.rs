@@ -94,8 +94,7 @@ fn should_invalidate_cloud_reads_when_monotonic_lease_expires_before_notificatio
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_keep_retained_reads_and_diagnostics_available_after_wal_io_fence_with_live_lease(
-) -> MidgeResult<()> {
+fn should_preserve_read_authority_after_wal_io_fence_with_live_lease() -> MidgeResult<()> {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
     for cloud in [false, true] {
