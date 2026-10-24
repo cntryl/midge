@@ -523,16 +523,6 @@ impl Compactor {
         }))
     }
 
-    /// Build a compaction plan for level N → N+1.
-    fn plan_inner_level(
-        &self,
-        levels: &[Vec<&FileMeta>],
-        cf_id: u32,
-        level: usize,
-    ) -> MidgeResult<Option<CompactionPlan>> {
-        self.plan_inner_level_filtered(levels, cf_id, level, &|_| true)
-    }
-
     fn plan_inner_level_filtered(
         &self,
         levels: &[Vec<&FileMeta>],

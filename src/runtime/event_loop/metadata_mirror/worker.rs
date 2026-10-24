@@ -170,7 +170,7 @@ impl EventLoop {
                     if let Some(storage) = storage {
                         storage.queue_cloud_metadata_mirror_complete(id, epoch);
                     }
-                })
+                });
             })
             .map_err(|error| {
                 MidgeError::Internal(format!("metadata mirror worker could not start: {error}"))
