@@ -115,6 +115,7 @@ pub struct Engine {
     /// Shared bounded pool for resident transaction intents.
     transaction_memory_pool: Arc<crate::runtime::transaction_spill::TransactionMemoryPool>,
     ttl_clock: Arc<crate::common::time::ObservedClock>,
+    drop_transaction_wait_timeout: Duration,
 }
 
 impl Drop for Engine {
@@ -126,8 +127,10 @@ impl Drop for Engine {
         // Runtime teardown can legitimately wait for a transaction owned by
         // the dropping thread or for a blocked storage worker. Hand that wait
         // to a detached reaper and move all fencing resources with it. The
-        // lease remains renewed and owned until every runtime worker exits.
-        self.lease_state.detach_reaper(self.runtime.take());
+        // Client retention is bounded; the lease remains renewed and owned
+        // until every admitted runtime worker exits.
+        self.lease_state
+            .detach_reaper(self.runtime.take(), self.drop_transaction_wait_timeout);
     }
 }
 
@@ -604,6 +607,10 @@ impl Engine {
     /// is the runtime's terminal durability result and is replayed on later
     /// calls. The caller timeout does not cancel in-flight durability I/O.
     /// Writer fencing remains held until every runtime worker has exited.
+    /// Dropping the Engine instead uses the configured transaction wait window
+    /// (30 seconds by default), then fences outliving transactions and drains
+    /// admitted effects before releasing writer authority. A blocked physical
+    /// effect can therefore retain the lease beyond that transaction window.
     ///
     /// # Errors
     ///

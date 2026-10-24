@@ -3,6 +3,7 @@ use crate::lease::PrimaryLease;
 use crate::types::EntryType;
 
 mod cloud_read_fencing;
+mod drop_reaper;
 
 #[cfg(feature = "internal-testing")]
 mod checkpoint_origins;

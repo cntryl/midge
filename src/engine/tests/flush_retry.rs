@@ -382,6 +382,7 @@ fn fixture_engine(
             ),
         ),
         ttl_clock: options.ttl_clock(),
+        drop_transaction_wait_timeout: options.drop_transaction_wait_timeout(),
     }
 }
 

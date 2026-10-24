@@ -535,3 +535,26 @@ map or reordered linearization is outside this batch. GitHub #940 R3/R4/AC1
 were updated and read back: deterministic held-fsync progress replaces the
 contradictory five-millisecond later-write completion requirement. The WAL
 design and public contract agree; issue implementation is still in progress.
+
+### #933: bounded transaction-retention candidate implemented
+
+OpenOptionsBuilder exposes a Drop transaction-wait window (default30seconds).
+The owned reaper closes admission, waits that window, then terminally fences
+outliving transactions. Runtime read wrappers enforce that state before/after
+reads and iterator rows, and commits reject new admission with Fenced.
+The terminal state survives runtime closure. Explicit Engine::shutdown(timeout)
+keeps its graceful Busy/retry behavior.
+
+The runtime and every admitted worker still drain before fencing resources
+release. A blocked unfenceable physical effect can therefore retain the lease
+beyond the client wait window; the timeout does not abandon ownership. Logging
+records the live count and this terminal disposition.
+
+Active local/simulated-cloud regressions retain reads, cached scans and an
+uncommitted writer across Engine drop, then require successor recovery plus
+Fenced old operations. Another holds an admitted Strict WAL unit at its sync
+boundary: the client becomes fenced but successor acquisition remains excluded
+until the unit drains, after which the acknowledged value recovers. Existing
+graceful/retry and outliving-transaction tests remain active. Combined failpoint
+test targets compile; execution and broader blocked-provider campaigns remain
+pending.

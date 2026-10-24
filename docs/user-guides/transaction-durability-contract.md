@@ -36,6 +36,24 @@ queuing a later write does not make it visible ahead of an earlier unapplied
 transaction. A later `best_effort()` commit can wait behind a Strict group;
 that wait does not give the BestEffort write a WAL durability guarantee.
 
+## Shutdown and outliving transactions
+
+Use `Engine::shutdown(timeout)` for explicit graceful shutdown. It returns
+`Busy` while transactions remain live, and cleanup can be retried after those
+transactions finish. A caller timeout does not cancel admitted storage work.
+
+Dropping an Engine delegates cleanup to an owned reaper. Its transaction wait
+defaults to 30 seconds and is configured with
+`OpenOptionsBuilder::drop_transaction_wait_timeout`. When that window expires,
+outliving transactions return `Fenced` from reads, iterator rows and commits,
+including cached reads. This policy applies to memory, local and cloud modes.
+
+The reaper drains admitted WAL/runtime/storage effects before releasing writer
+authority. A physical effect that cannot be storage-fenced must finish first,
+so blocked device or provider I/O can retain the lease beyond the transaction
+wait window. The window bounds retention caused by a leaked transaction; it
+does not promise a hard takeover deadline for unfenceable I/O.
+
 ## Read Semantics
 
 ### Read-only transactions

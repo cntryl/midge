@@ -169,6 +169,7 @@ impl std::fmt::Debug for InjectedObjectStore {
 /// ```
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
+    drop_transaction_wait_timeout: Duration,
     storage: Storage,
     goal: Goal,
     memory_budget: MemoryBudget,
@@ -198,6 +199,7 @@ pub struct OpenOptions {
 /// once, in [`Self::build`], so setter order cannot stale a derived value.
 #[derive(Debug, Clone)]
 pub struct OpenOptionsBuilder {
+    drop_transaction_wait_timeout: Duration,
     storage: Storage,
     goal: Goal,
     memory_budget: MemoryBudget,
@@ -229,6 +231,11 @@ struct DerivedMemoryPools {
 }
 
 impl OpenOptions {
+    /// Maximum Drop-reaper wait for client-owned transactions (default 30s).
+    #[must_use]
+    pub fn drop_transaction_wait_timeout(&self) -> Duration {
+        self.drop_transaction_wait_timeout
+    }
     /// Create an in-memory database builder.
     #[must_use]
     pub fn in_memory() -> OpenOptionsBuilder {
@@ -539,8 +546,18 @@ impl OpenOptions {
 }
 
 impl OpenOptionsBuilder {
+    /// Bound how long dropping an Engine retains client-owned transactions.
+    /// After this window they return Fenced. Admitted workers still drain
+    /// before lease release, which can take longer for blocked storage I/O.
+    #[must_use]
+    pub fn drop_transaction_wait_timeout(mut self, timeout: Duration) -> Self {
+        self.drop_transaction_wait_timeout = timeout;
+        self
+    }
+
     fn new(storage: Storage) -> Self {
         Self {
+            drop_transaction_wait_timeout: Duration::from_secs(30),
             storage,
             goal: Goal::default(),
             memory_budget: MemoryBudget::default(),
@@ -985,6 +1002,7 @@ impl OpenOptionsBuilder {
             wal: crate::wal::WalBatchingConfig::new(wal_buffer_size, self.wal.batch),
             lease: self.lease,
             ttl_clock: self.ttl_clock,
+            drop_transaction_wait_timeout: self.drop_transaction_wait_timeout,
         })
     }
 

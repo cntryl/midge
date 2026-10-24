@@ -147,6 +147,7 @@ impl RuntimeHandle {
     }
 
     pub(crate) fn ensure_read_authority(&self) -> MidgeResult<()> {
+        self.lifecycle.ensure_readable()?;
         self.read_authority
             .as_ref()
             .map_or(Ok(()), CloudReadAuthority::check)

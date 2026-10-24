@@ -57,6 +57,7 @@ pub(crate) enum RuntimeLifecycleState {
     Open = 0,
     Closing = 1,
     Closed = 2,
+    Fenced = 3,
 }
 
 impl RuntimeLifecycleState {
@@ -64,7 +65,8 @@ impl RuntimeLifecycleState {
         match state.load(Ordering::Acquire) {
             0 => Self::Open,
             1 => Self::Closing,
-            _ => Self::Closed,
+            2 => Self::Closed,
+            _ => Self::Fenced,
         }
     }
 }
@@ -93,13 +95,11 @@ impl RuntimeLifecycle {
     }
 
     pub(crate) fn acquire(self: &Arc<Self>) -> MidgeResult<RuntimeTransactionGuard> {
-        if self.state() != RuntimeLifecycleState::Open {
-            return Err(MidgeError::Busy("engine is shutting down".to_string()));
-        }
+        self.ensure_open()?;
         self.active_transactions.fetch_add(1, Ordering::AcqRel);
-        if self.state() != RuntimeLifecycleState::Open {
+        if let Err(error) = self.ensure_open() {
             self.release();
-            return Err(MidgeError::Busy("engine is shutting down".to_string()));
+            return Err(error);
         }
         Ok(RuntimeTransactionGuard {
             lifecycle: Arc::clone(self),
@@ -125,11 +125,34 @@ impl RuntimeLifecycle {
     }
 
     pub(crate) fn ensure_open(&self) -> MidgeResult<()> {
-        if self.state() == RuntimeLifecycleState::Open {
-            Ok(())
-        } else {
-            Err(MidgeError::Busy("engine is shutting down".to_string()))
+        match self.state() {
+            RuntimeLifecycleState::Open => Ok(()),
+            RuntimeLifecycleState::Fenced => Err(MidgeError::Fenced(
+                "engine was dropped after its transaction wait expired".into(),
+            )),
+            RuntimeLifecycleState::Closing | RuntimeLifecycleState::Closed => {
+                Err(MidgeError::Busy("engine is shutting down".into()))
+            }
         }
+    }
+
+    pub(crate) fn ensure_readable(&self) -> MidgeResult<()> {
+        if matches!(
+            self.state(),
+            RuntimeLifecycleState::Fenced | RuntimeLifecycleState::Closed
+        ) {
+            Err(MidgeError::Fenced(
+                "transaction outlived its runtime".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn fence_transactions(&self) {
+        self.state
+            .store(RuntimeLifecycleState::Fenced as u8, Ordering::Release);
+        self.wait_cv.notify_all();
     }
 
     pub(crate) fn begin_submission(&self) -> MidgeResult<std::sync::RwLockReadGuard<'_, ()>> {
@@ -169,8 +192,10 @@ impl RuntimeLifecycle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.running.store(false, Ordering::Release);
-        self.state
-            .store(RuntimeLifecycleState::Closed as u8, Ordering::Release);
+        if self.state() != RuntimeLifecycleState::Fenced {
+            self.state
+                .store(RuntimeLifecycleState::Closed as u8, Ordering::Release);
+        }
         self.wait_cv.notify_all();
     }
 
@@ -189,6 +214,25 @@ impl RuntimeLifecycle {
                 .wait(guard)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+    }
+
+    pub(crate) fn wait_for_transactions_within(&self, timeout: Duration) -> bool {
+        let started = std::time::Instant::now();
+        let mut guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while self.active_transaction_count() != 0 {
+            let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                return false;
+            };
+            let (next, _) = self
+                .wait_cv
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = next;
+        }
+        true
     }
 
     pub(crate) fn wait_until_stopped(&self, timeout: Duration) -> bool {

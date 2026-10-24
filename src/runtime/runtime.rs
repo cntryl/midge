@@ -208,7 +208,9 @@ impl Runtime {
             admission.cancel();
         }
         self.lifecycle.begin_shutdown();
-        self.lifecycle.wait_for_transactions();
+        if self.lifecycle.state() != super::lifecycle::RuntimeLifecycleState::Fenced {
+            self.lifecycle.wait_for_transactions();
+        }
         if self.event_loop_handle.is_some()
             && self.lifecycle.running.load(Ordering::Acquire)
             && self.msg_tx.send(RuntimeMsg::Shutdown).is_err()
@@ -216,6 +218,24 @@ impl Runtime {
             tracing::debug!("Runtime {}: shutdown message send failed", context);
         }
         let _ = self.join_until(Duration::MAX, context);
+    }
+
+    /// Bound client-owned transaction retention, then preserve ownership until
+    /// every admitted runtime/storage effect drains. This is not an I/O timeout.
+    pub(crate) fn shutdown_for_reaper(&mut self, transaction_wait: Duration) {
+        self.lifecycle.begin_shutdown();
+        if !self
+            .lifecycle
+            .wait_for_transactions_within(transaction_wait)
+        {
+            self.lifecycle.fence_transactions();
+            tracing::warn!(
+                active_transactions = self.lifecycle.active_transaction_count(),
+                wait_millis = transaction_wait.as_millis(),
+                "Engine drop wait expired; transactions fenced, draining admitted effects before lease release"
+            );
+        }
+        self.shutdown_inner("bounded drop reaper");
     }
 
     /// Shutdown the runtime and wait for completion.
