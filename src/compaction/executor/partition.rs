@@ -509,9 +509,7 @@ impl RangeTombstoneTracker {
 }
 
 fn range_tombstone_is_obsolete(tombstone: &RangeTombstone, policy: TombstoneGcPolicy) -> bool {
-    policy.range_eligible
-        && (policy.retained_snapshot_sources
-            || tombstone_is_obsolete(tombstone.seq, policy.snapshot_horizon))
+    policy.range_eligible && tombstone_is_obsolete(tombstone.seq, policy.snapshot_horizon)
 }
 
 /// Whether the partition being built should be closed at this key group
@@ -618,6 +616,9 @@ fn survives_tombstone_gc<'a>(
     // by any older TTL read time merely from a sequence horizon.
     let expired = gc.point_eligible
         && (gc.retained_snapshot_sources || gc.snapshot_horizon.is_none())
+        // Original read sources cannot contain writes made after that read's
+        // start. Keep their sequence evidence for commit conflict validation.
+        && tombstone_is_obsolete(version.seq, gc.snapshot_horizon)
         && gc.compaction_time_millis.is_some_and(|time| {
             version
                 .expiration

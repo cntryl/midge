@@ -1403,6 +1403,9 @@ mod tests {
             .with_output_seq(49)
             .with_snapshot_horizon(Some(10))
             .with_tombstone_gc_eligibility(true, true);
+        // Original read sources contain no post-start writes. Retaining those
+        // sources cannot replace the conflict history in these new tombstones.
+        plan.retained_snapshot_sources = true;
         plan.add_test_source("input.sst".to_string());
 
         // Act

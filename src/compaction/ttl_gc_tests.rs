@@ -12,6 +12,8 @@ fn should_require_captured_expiration_authority_when_reclaiming_versions() -> cr
         (100, true, true, None, true),
         (100, false, true, None, false),
         (100, true, false, Some(50), false),
+        (100, true, true, Some(1), false),
+        (100, true, true, Some(2), true),
     ] {
         // Arrange
         let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
