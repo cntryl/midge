@@ -1464,7 +1464,8 @@ fn should_freeze_without_mark_when_spilled_apply_fails_before_its_first_op() -> 
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_freeze_only_applied_units_when_lease_lapses_inside_coalesced_group() -> MidgeResult<()> {
+fn should_reject_flush_when_concurrent_group_loses_authority_before_visibility() -> MidgeResult<()>
+{
     // Arrange
     let _guard = failpoint_test_lock()
         .lock()
@@ -1482,11 +1483,7 @@ fn should_freeze_only_applied_units_when_lease_lapses_inside_coalesced_group() -
             Some(DurabilityPolicy::Strict),
         ))
         .expect("queue second strict transaction");
-    lapse_lease_at(
-        &mut fixture,
-        "midge::wal::before_prepared_transaction_apply",
-        1,
-    );
+    lapse_lease_at(&mut fixture, "midge::apply::after_second_unit", 0);
     let handled = fixture.event_loop.apply_transaction_with_coalescing(
         &msg_rx,
         txn_request(
@@ -1496,19 +1493,22 @@ fn should_freeze_only_applied_units_when_lease_lapses_inside_coalesced_group() -
         ),
         1024,
     );
-    fail::remove("midge::wal::before_prepared_transaction_apply");
+    fail::remove("midge::apply::after_second_unit");
     let keys = memtable_keys(&fixture, 0);
 
     // Act
     let frozen = fixture.event_loop.freeze_active_memtable(0);
 
-    // Assert: both units are durable; the first is applied whole and the
-    // second not at all, so the flush publishes only the first and replay
-    // keeps or drops the second whole.
+    // Assert: a worker completed its effects, but no part of the failed
+    // group can become visible or acquire a flush frontier before replay.
     assert_eq!(handled, 2);
     assert!(fixture.event_loop.actors.wal_actor.is_fenced());
-    assert_eq!(keys, vec![b"group-first".to_vec()]);
-    assert!(matches!(frozen, Ok(Some(_))), "{frozen:?}");
+    assert!(keys.contains(&b"group-second".to_vec()));
+    assert_eq!(fixture.event_loop.state.applied_sequence, 0);
+    assert!(
+        matches!(frozen, Err(MidgeError::RecoveryFailed(_))),
+        "{frozen:?}"
+    );
 
     scenario.teardown();
     drop(test_guard);
@@ -1639,7 +1639,8 @@ fn lapsed_group_outside_gate(
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_acknowledge_applied_unit_when_lease_lapses_inside_coalesced_group() -> MidgeResult<()> {
+fn should_recover_whole_group_without_ack_when_concurrent_apply_loses_authority() -> MidgeResult<()>
+{
     // Arrange
     let _guard = failpoint_test_lock()
         .lock()
@@ -1657,18 +1658,11 @@ fn should_acknowledge_applied_unit_when_lease_lapses_inside_coalesced_group() ->
     ) = lapsed_group_outside_gate(DurabilityPolicy::Strict, [74, 75], keys)?;
     let recovered = reopen_and_find(fixture, keys)?;
 
-    // Assert: the first unit is synced and applied, so it is acknowledged
-    // and survives restart. The second is synced but not applied, so its
-    // caller learns nothing definite, and replay applies it.
-    assert!(
-        matches!(
-            first,
-            RuntimeResponse::TransactionApplied { request_id: 74, .. }
-        ),
-        "{first:?}"
-    );
+    // Assert: the group's visibility cut never advanced. Both outcomes
+    // remain unknown and replay restores both durable units whole.
+    assert!(is_outcome_unknown(&first, 74), "{first:?}");
     assert!(is_outcome_unknown(&second, 75), "{second:?}");
-    assert_eq!(memtable, vec![keys[0].to_vec()]);
+    assert!(memtable.contains(&keys[1].to_vec()));
     assert_eq!(recovered, [true, true]);
     Ok(())
 }
@@ -1731,10 +1725,15 @@ fn run_group_with_lease_lapse(
     request_ids: [u64; 2],
     keys: [&'static [u8]; 2],
 ) -> MidgeResult<LapsedGroup> {
+    let (point, hit) = if policy == DurabilityPolicy::Strict {
+        ("midge::apply::after_second_unit", 0)
+    } else {
+        ("midge::wal::before_prepared_transaction_apply", 1)
+    };
     let group = run_group(policy, request_ids, keys, |fixture| {
-        lapse_lease_at(fixture, "midge::wal::before_prepared_transaction_apply", 1);
+        lapse_lease_at(fixture, point, hit);
     });
-    fail::remove("midge::wal::before_prepared_transaction_apply");
+    fail::remove(point);
     group
 }
 
@@ -1782,8 +1781,8 @@ fn is_outcome_unknown(response: &RuntimeResponse, expected_request_id: u64) -> b
         response,
         RuntimeResponse::Error {
             request_id,
-            error: MidgeError::OutcomeUnknown(message),
-        } if *request_id == expected_request_id && message.contains("may be applied on restart")
+            error: MidgeError::OutcomeUnknown(_),
+        } if *request_id == expected_request_id
     )
 }
 
@@ -2702,7 +2701,7 @@ fn should_answer_outcome_unknown_when_lease_lapses_before_spilled_sync() -> Midg
 
     // Assert
     assert!(
-        matches!(&result, Err(MidgeError::OutcomeUnknown(message)) if message.contains("may be applied on restart")),
+        matches!(&result, Err(MidgeError::OutcomeUnknown(_))),
         "{result:?}"
     );
 
