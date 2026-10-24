@@ -1132,6 +1132,40 @@ pub(crate) fn write_fragmented_compaction_outputs(
 /// Merge, normalize, deduplicate, and write target-sized compaction partitions
 /// without materializing a second deduplicated result vector.
 #[allow(clippy::too_many_arguments)]
+fn collect_same_key_events(
+    merged: &mut EventMergeIterator<'_>,
+    first: CompactionEvent,
+    key: &[u8],
+    budget: &crate::common::resource_budget::ResourceBudget,
+    seen: &mut usize,
+    abort_check: Option<&dyn Fn() -> bool>,
+) -> MidgeResult<Vec<BudgetedEvent>> {
+    let mut events = vec![BudgetedEvent::new(first, budget)?];
+    while merged
+        .peek_event()
+        .is_some_and(|candidate| candidate.key() == key)
+    {
+        let event = merged
+            .next_event()?
+            .expect("peeked compaction event exists");
+        events.push(BudgetedEvent::new(event, budget)?);
+        *seen = seen.saturating_add(1);
+        if seen.is_multiple_of(1024) {
+            ensure_compaction_not_aborted(abort_check)?;
+        }
+    }
+    Ok(events)
+}
+
+fn range_starts(events: &[BudgetedEvent]) -> impl Iterator<Item = &RangeTombstone> + Clone {
+    events.iter().filter_map(|event| match &event.event {
+        CompactionEvent::RangeStart(tombstone) => Some(tombstone),
+        CompactionEvent::RangeEnd(_)
+        | CompactionEvent::Version(_)
+        | CompactionEvent::Boundary(_) => None,
+    })
+}
+
 pub(crate) fn write_partitioned_compaction_outputs(
     sst_factory: &dyn SstFactory,
     output_dir: &Path,
@@ -1186,31 +1220,20 @@ pub(crate) fn write_partitioned_compaction_outputs(
         }
         seen = seen.saturating_add(1);
         let event_key = first_event.key().to_vec();
-        let mut key_events = vec![BudgetedEvent::new(first_event, budget)?];
-        while merged
-            .peek_event()
-            .is_some_and(|candidate| candidate.key() == event_key)
-        {
-            let event = merged
-                .next_event()?
-                .expect("peeked compaction event exists");
-            key_events.push(BudgetedEvent::new(event, budget)?);
-            seen = seen.saturating_add(1);
-            if seen.is_multiple_of(1024) {
-                ensure_compaction_not_aborted(abort_check)?;
-            }
-        }
+        let key_events = collect_same_key_events(
+            &mut merged,
+            first_event,
+            &event_key,
+            budget,
+            &mut seen,
+            abort_check,
+        )?;
 
         tombstones.advance_to_key(key_events.iter().map(|event| &event.event));
 
         let selected_version = select_newest_version(key_events.iter().map(|event| &event.event))?;
 
-        let starts = key_events.iter().filter_map(|event| match &event.event {
-            CompactionEvent::RangeStart(tombstone) => Some(tombstone),
-            CompactionEvent::RangeEnd(_)
-            | CompactionEvent::Version(_)
-            | CompactionEvent::Boundary(_) => None,
-        });
+        let starts = range_starts(&key_events);
         let selected_version = selected_version.filter(|version| {
             survives_tombstone_gc(
                 version,
