@@ -32,6 +32,7 @@ mod flush_pipeline;
 mod gc;
 mod groups;
 mod manifest;
+mod memtable_apply;
 mod metadata_mirror;
 mod read_path;
 mod resources;
@@ -199,6 +200,7 @@ struct PublicationCoordination {
 
 struct PipelineCoordination {
     wal_commits: wal_pipeline::WalCommitPipeline,
+    memtable_apply: memtable_apply::MemtableApplyCoordinator,
     validation: validation::ValidationCoordinator,
     durability: DurabilityCoordinator,
     wal_transition: crate::runtime::wal_transition::WalTransitionProtocol,
@@ -345,6 +347,7 @@ impl EventLoop {
             },
             pipeline: PipelineCoordination {
                 wal_commits: wal_pipeline::WalCommitPipeline::default(),
+                memtable_apply: memtable_apply::MemtableApplyCoordinator::default(),
                 validation: validation::ValidationCoordinator::default(),
                 durability,
                 wal_transition: crate::runtime::wal_transition::WalTransitionProtocol::new(),
@@ -586,6 +589,12 @@ impl EventLoop {
 
     /// Returns an error if the lease has been lost (heartbeat detected failure).
     fn check_lease_health(&self) -> crate::common::MidgeResult<()> {
+        if self.pipeline.memtable_apply.terminal_prefix() {
+            return Err(crate::common::MidgeError::Fenced(
+                "a memtable group has an unknown applied prefix; restart before admitting writes"
+                    .into(),
+            ));
+        }
         self.authority.fencing.check_health()
     }
 

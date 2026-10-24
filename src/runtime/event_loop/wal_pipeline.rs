@@ -132,7 +132,7 @@ fn requires_applied_prefix(message: &RuntimeMsg) -> bool {
 
 impl EventLoop {
     pub(super) fn wal_group_in_flight(&self) -> bool {
-        self.pipeline.wal_commits.pending.is_some()
+        self.pipeline.wal_commits.pending.is_some() || self.pipeline.memtable_apply.is_pending()
     }
 
     pub(super) fn defer_transaction_behind_wal(
@@ -166,12 +166,13 @@ impl EventLoop {
     }
 
     fn defer_wal_pipeline_message(&mut self, message: RuntimeMsg) {
-        if self
+        if (self
             .pipeline
             .wal_commits
             .pending
             .as_ref()
             .is_some_and(|group| group.failed)
+            || self.pipeline.memtable_apply.terminal_prefix())
             && message.is_mutation()
         {
             self.reject_pipeline_message(
@@ -353,6 +354,10 @@ impl EventLoop {
     }
 
     pub(super) fn progress_wal_pipeline(&mut self) {
+        self.progress_memtable_apply_group();
+        if self.pipeline.memtable_apply.is_pending() {
+            return;
+        }
         let Some(mut group) = self.pipeline.wal_commits.pending.take() else {
             self.restore_wal_pipeline_message();
             return;
@@ -440,38 +445,22 @@ impl EventLoop {
                 group.ticket,
                 receipt,
             )
+            .map_err(|error| crate::common::error::classify_commit_error(error, false))
         });
-        let mut batch = group.batch;
+        let batch = group.batch;
         drop(group.io); // release lexical native root before apply/transitions
-        let outcome = match completed {
-            Ok(()) => self.actors.wal_actor.apply_prepared_group(
-                &mut self.state,
-                std::mem::take(&mut batch.prepared),
-                true,
-            ),
-            Err(error) => {
-                self.fence_wal_transition(&error, None);
-                self.actors
-                    .wal_actor
-                    .release_fenced_writer_after_completion();
-                Err(crate::common::error::classify_commit_error(error, false))
+        let error = match completed {
+            Ok(()) => {
+                self.begin_memtable_apply_group(batch, group._reservation);
+                return;
             }
+            Err(error) => error,
         };
-        if self.actors.wal_actor.is_fenced() {
-            let failure = outcome.as_ref().err().or_else(|| {
-                outcome
-                    .as_ref()
-                    .ok()
-                    .and_then(|outcome| outcome.failure.as_ref())
-            });
-            if let Some(error) = failure {
-                self.fence_wal_transition(error, None);
-            }
-            self.actors
-                .wal_actor
-                .release_fenced_writer_after_completion();
-        }
-        self.finish_coalesced_transaction_outcome(batch, outcome, Some(group._reservation));
+        self.fence_wal_transition(&error, None);
+        self.actors
+            .wal_actor
+            .release_fenced_writer_after_completion();
+        self.finish_coalesced_transaction_outcome(batch, Err(error), Some(group._reservation));
         self.restore_wal_pipeline_message();
     }
 
@@ -490,4 +479,4 @@ impl EventLoop {
 }
 
 #[cfg(all(test, feature = "failpoints"))]
-mod tests;
+pub(super) mod tests;

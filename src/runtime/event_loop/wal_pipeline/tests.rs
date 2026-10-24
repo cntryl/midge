@@ -41,7 +41,11 @@ impl Drop for HeldSync {
     }
 }
 
-fn write(request_id: u64, keys: &[&'static [u8]], strict: bool) -> RuntimeMsg {
+pub(in crate::runtime::event_loop) fn write(
+    request_id: u64,
+    keys: &[&'static [u8]],
+    strict: bool,
+) -> RuntimeMsg {
     RuntimeMsg::ApplyTransaction {
         request_id,
         ops: keys
@@ -66,7 +70,10 @@ fn write(request_id: u64, keys: &[&'static [u8]], strict: bool) -> RuntimeMsg {
     }
 }
 
-fn settle(event_loop: &mut EventLoop, response: &Receiver<RuntimeResponse>) -> RuntimeResponse {
+pub(in crate::runtime::event_loop) fn settle(
+    event_loop: &mut EventLoop,
+    response: &Receiver<RuntimeResponse>,
+) -> RuntimeResponse {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         event_loop.progress_wal_pipeline();
@@ -88,7 +95,7 @@ fn applied_cut(event_loop: &mut EventLoop, response: &Receiver<RuntimeResponse>)
     }
 }
 
-fn begin_snapshot(
+pub(in crate::runtime::event_loop) fn begin_snapshot(
     response: &Receiver<RuntimeResponse>,
 ) -> (u64, Arc<crate::runtime::read_snapshot::ReadSnapshot>) {
     match response.recv_timeout(Duration::from_secs(1)) {
@@ -198,5 +205,51 @@ fn assert_ordered_progress_when_held(hook: &'static str) -> MidgeResult<()> {
         assert_eq!(old.get(key, start_sequence)?, None);
     }
     assert!(event_loop.state.wal.open_segment() > previous_segment);
+    Ok(())
+}
+
+#[test]
+fn should_preserve_unchanged_append_failure_when_writer_proves_durable_rollback() -> MidgeResult<()>
+{
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let path = event_loop.state.db_path.clone();
+    let response = event_loop
+        .routing
+        .router
+        .register(94_010, "rolled back raw append");
+    fail::cfg("midge::wal::partial_write_then_no_space", "return")
+        .expect("partial append injection");
+
+    // Act
+    event_loop.process_one(
+        write(94_010, &[b"not-appended"], true),
+        &crossbeam::channel::never(),
+    );
+    let outcome = settle(&mut event_loop, &response);
+    fail::remove("midge::wal::partial_write_then_no_space");
+
+    // Assert: the exact append callback carries the writer's durable rollback
+    // proof. A later generic sync error wrapper must not erase that proof.
+    assert!(matches!(
+        outcome,
+        RuntimeResponse::Error {
+            error: MidgeError::NoSpace(_),
+            ..
+        }
+    ));
+    assert_eq!(event_loop.state.applied_sequence, 0);
+    drop(event_loop);
+    let recovered = crate::runtime::state::RuntimeState::try_new(
+        path,
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )?;
+    assert_eq!(
+        recovered.get_cf(0).unwrap().memtable.get(b"not-appended")?,
+        None
+    );
     Ok(())
 }

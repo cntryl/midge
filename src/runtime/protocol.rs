@@ -483,6 +483,8 @@ pub enum RuntimeMsg {
     CancelWaitForWriteStallClear { wait_request_id: u64 },
     /// Retry obsolete SST deletion after a snapshot pin is released.
     RetryGc,
+    /// Wake loop-owned settlement after an admitted memtable effect finishes.
+    MemtableApplyProgress,
 
     /// Test-only actor entry point; see [`TestRuntimeMsg`].
     ///
@@ -749,6 +751,7 @@ impl RuntimeMsg {
             RuntimeMsg::CompactionComplete { .. }
             | RuntimeMsg::CancelWaitForWriteStallClear { .. }
             | RuntimeMsg::Shutdown
+            | RuntimeMsg::MemtableApplyProgress
             | RuntimeMsg::RetryGc => None,
 
             RuntimeMsg::Test(msg) => msg.request_id(),
@@ -757,6 +760,7 @@ impl RuntimeMsg {
 
     pub fn kind_name(&self) -> &'static str {
         match self {
+            RuntimeMsg::MemtableApplyProgress => "MemtableApplyProgress",
             RuntimeMsg::FlushMemtable { .. } => "FlushMemtable",
             RuntimeMsg::CompactionComplete { .. } => "CompactionComplete",
             RuntimeMsg::ApplyTransaction { .. } => "ApplyTransaction",

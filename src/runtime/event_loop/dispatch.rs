@@ -38,6 +38,10 @@ impl RuntimeDispatcher {
         };
 
         match msg {
+            RuntimeMsg::MemtableApplyProgress => {
+                event_loop.progress_wal_pipeline();
+                HandleOutcome::Continue
+            }
             RuntimeMsg::CheckWriteStall { request_id, cf_id } => {
                 event_loop.handle_check_write_stall(request_id, cf_id);
                 HandleOutcome::Continue

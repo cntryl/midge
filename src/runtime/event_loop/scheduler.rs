@@ -9,6 +9,7 @@ impl EventLoop {
     pub(super) fn has_actionable_work(&self) -> bool {
         if self.wal_group_in_flight() {
             return self.pipeline.wal_commits.has_ready_work()
+                || self.pipeline.memtable_apply.is_ready()
                 || self.routing.pending_msg.is_some();
         }
         if CompactionCoordinator::manual_compaction_wait_timeout(self) == Some(Duration::ZERO) {

@@ -793,3 +793,16 @@ hard L0 rejection, pending-byte rejection and unchanged defaults; internal
 regressions cover pre-admission expiry and shared real-writer rate/identity.
 The latest shared check is in concurrent #909/#906 declarations; execution and
 sustainable-load A/B qualification remain pending.
+
+#906 uses a bounded two-worker pool for captured memtable effects within one
+synced resident group. Runtime bookkeeping, source-size accounting, range
+tracking and one whole-group applied cut remain loop-owned. Reads/control stay
+at the prior cut while effects finish out of order. Failure, panic, cancellation
+or authority loss fences subsequent mutation globally and retains ownership
+until every admitted worker settles; restart replays the durable group whole.
+Active regressions hold the first unit while a later unit applies, verify old
+and new snapshots plus exact memory accounting, and lose authority before a
+cross-family BestEffort attempt and restart. The shared compile reaches only
+concurrent #909 test renames; behavioral, loom/differential/crash and A/B
+qualification remain pending. A related #941 regression preserves NotAttempted
+for an append whose physical rollback proves unchanged NoSpace.

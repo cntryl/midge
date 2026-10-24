@@ -370,6 +370,8 @@ mod append_pipeline;
 mod apply_op;
 mod authority;
 mod durability;
+mod memtable_apply;
+pub(crate) use memtable_apply::{MemtableApplyAuthority, MemtableApplyJob, MemtableApplyPlan};
 mod rotation;
 mod spill;
 mod staged_writes;
