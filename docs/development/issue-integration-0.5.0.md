@@ -3,8 +3,9 @@
 The user requested this workflow on 2026-10-24: one local branch,
 `work/0.5.0-issue-integration`, with small commits for the issues and one PR
 after the batch is complete. This supersedes the earlier per-issue PR train
-for this batch. Keep implementation commits local; do not create individual
-PRs or close issues as though local work had merged.
+for this batch. The user's subsequent instruction authorizes pushing the
+combined batch, reviewing it and merging one PR. Do not create individual
+PRs or close issues whose acceptance evidence remains incomplete.
 
 The branch starts at `b4d08ebe6a01d2a66eae1b4d4c155e081032f485`, including
 the documentation changes already proposed by PR #980. That pre-existing PR
@@ -20,11 +21,13 @@ The implementation-first batch now contains the approved runtime candidates
 for the 0.5.0 issues. The chronological notes below retain earlier partial
 checkpoints; their older "pending implementation" descriptions are superseded
 by the later slices and the final invariant-evidence map. No issue is closed
-by a local commit, and the batch has not been pushed or opened as a PR.
+by a local commit. The batch is now under review in
+[PR #983](https://github.com/cntryl/midge/pull/983), targeting `develop`.
 
-The final runtime/test source checkpoint is
-`0bb7f09df6eaadd92ebba6870434acc30ba3a69d`. Following evidence-map and tracking
-commits are documentation only. Validation at that source checkpoint:
+The implementation-pass runtime/test source checkpoint was
+`0bb7f09df6eaadd92ebba6870434acc30ba3a69d`. The initial evidence map describes
+that checkpoint; review fixes require a refreshed map before merge.
+Validation at that historical source checkpoint:
 
 - `cargo fmt --check`: passed.
 - `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic`:
@@ -37,8 +40,41 @@ commits are documentation only. Validation at that source checkpoint:
   invariant inventory resolves all 65 IDs, 320 active test symbols, 356 row
   references and 2,144 assertion/helper anchors. All 204 source/supporting-doc
   SHA256 postimages verify; historical qualification objects are unchanged.
-- Active behavioral regressions and measurements added during the
-  implementation-first pass remain unexecuted.
+- Behavioral regressions added during the implementation-first pass were
+  unexecuted at that checkpoint. Current PR qualification is recorded below.
+
+### PR review and qualification in progress
+
+The first aggregate behavioral run was stopped after confirmed worker-gate
+deadlocks; it is failed/aborted evidence, not a passing suite. Initial native
+Sqrzl CI also failed. Review is resolving the failures with active regressions:
+
+- WAL upload fallback verification must use range identity for both HEADs
+  and conditional range reads. Filesystem content-checksum HEAD identity is
+  distinct. The regression proves initial ACK, immutable retry ACK, exact
+  bytes and unchanged range identity.
+- Compaction capture retries must select their exact pending compute owner
+  before settling errors. The regression first lost a held sibling's input
+  guard, then passed with that sibling's publication and cold recovery intact.
+- Detached validation must retain the registered caller deadline. Its
+  existing spill-deadline regression failed before the routing fix and passed
+  with the original deadline preserved.
+- Successful cloud replay must publish the installed applied-sequence cut.
+  Real recovered point reads failed before this fix; recovery cancellation,
+  checkpoint and cache-loss qualification continue against the corrected cut.
+- Startup, publication, GC, flush and reusable compaction workers must
+  inherit the existing test failpoint gate. A real timed-open/runtime request
+  regression failed at lease acquisition before propagation and passed after
+  it, without changing any deadline or default-build behavior.
+- Fixtures are being updated for the separate binary committed pointer,
+  owned manifest chains, whole-group concurrent visibility, bounded parallel
+  inventory and metadata-only disjoint SST moves. Runtime contracts and
+  restart assertions remain the basis of acceptance.
+
+Native qualification uses only a dedicated local Sqrzl container, pinned to
+`sha256:a10c5413dba980b852cac5e718c7a92a6642c6ec60ebb6a8222f2dca7d69f7c4`.
+No live Azure qualification or production rollout is included. A green HEAD
+request does not qualify authentication, conditional writes or recovery.
 
 The implementation retains Midge's ordered whole-unit applied prefix, exact
 WAL durable floors, storage-enforced epoch fencing and conservative physical
