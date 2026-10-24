@@ -162,7 +162,8 @@ fn should_cleanup_unpublished_fragments_when_staging_fails() -> MidgeResult<()> 
         let calls = std::cell::Cell::new(0);
         let sink = |_name: &str,
                     _path: &Path,
-                    _budget: &crate::common::resource_budget::ResourceBudget| {
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
             calls.set(calls.get() + 1);
             if calls.get() == fail_on {
                 Err(MidgeError::Aborted(

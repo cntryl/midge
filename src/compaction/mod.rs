@@ -43,8 +43,13 @@ pub fn execute_compaction(
     execute_compaction_with_output_sink(plan, sst_factory, output_dir, abort_check, None, None)
 }
 
-pub(crate) type CompactionOutputSink<'a> =
-    dyn Fn(&str, &Path, &crate::common::resource_budget::ResourceBudget) -> MidgeResult<()> + 'a;
+pub(crate) type CompactionOutputSink<'a> = dyn Fn(
+        &str,
+        &Path,
+        &crate::common::resource_budget::ResourceBudget,
+        Option<&crate::sst::traits::FinalizedSst>,
+    ) -> MidgeResult<()>
+    + 'a;
 
 #[cfg(test)]
 pub(crate) fn execute_compaction_with_output_sink(
@@ -525,15 +530,17 @@ mod tests {
         plan.add_test_source("ranges.sst");
         plan.target_sst_size = 128 * 1024;
         let observed = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                let reader = factory.open(Path::new(name))?;
-                observed
-                    .borrow_mut()
-                    .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
-                std::fs::remove_file(path)?;
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            let reader = factory.open(Path::new(name))?;
+            observed
+                .borrow_mut()
+                .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
+            std::fs::remove_file(path)?;
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(
@@ -574,15 +581,17 @@ mod tests {
         plan.add_test_source("ranges.sst");
         plan.target_sst_size = 16 * 1024;
         let observed = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                let reader = factory.open(Path::new(name))?;
-                observed
-                    .borrow_mut()
-                    .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
-                std::fs::remove_file(path)?;
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            let reader = factory.open(Path::new(name))?;
+            observed
+                .borrow_mut()
+                .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
+            std::fs::remove_file(path)?;
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(
@@ -629,17 +638,19 @@ mod tests {
             plan.add_test_source(name);
         }
         let observed = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                assert!(std::fs::metadata(path)?.len() <= 256 * 1024);
-                let reader = factory.open(Path::new(name))?;
-                let entries = reader.scan_range_raw_state(None, None)?;
-                observed
-                    .borrow_mut()
-                    .extend(entries.into_iter().map(|(key, _)| key[0]));
-                std::fs::remove_file(path)?;
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            assert!(std::fs::metadata(path)?.len() <= 256 * 1024);
+            let reader = factory.open(Path::new(name))?;
+            let entries = reader.scan_range_raw_state(None, None)?;
+            observed
+                .borrow_mut()
+                .extend(entries.into_iter().map(|(key, _)| key[0]));
+            std::fs::remove_file(path)?;
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(
@@ -727,18 +738,20 @@ mod tests {
         plan.target_sst_size = 32 * 1024;
         plan.compaction_memory_limit = 128 * 1024;
         let drained = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                for previous in drained.borrow().iter() {
-                    assert!(
-                        !dir.path().join(previous).exists(),
-                        "previous partitions must be gone before advancing"
-                    );
-                }
-                std::fs::remove_file(path)?;
-                drained.borrow_mut().push(name.to_string());
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            for previous in drained.borrow().iter() {
+                assert!(
+                    !dir.path().join(previous).exists(),
+                    "previous partitions must be gone before advancing"
+                );
+            }
+            std::fs::remove_file(path)?;
+            drained.borrow_mut().push(name.to_string());
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(

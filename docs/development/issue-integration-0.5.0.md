@@ -309,3 +309,20 @@ are preserved. Reservation accounting drops the eliminated duplicate key.
 The failpoint test targets compile. Existing compaction order/coverage tests
 remain active; execution and CPU A/B measurements are deferred. Finalized
 writer identity and the #915 upload handoff remain required for the issue.
+
+The following #949 slice now returns finalized logical bounds, point/range
+counts, length and CRC32C from the filesystem SST writer. Streaming CRC is
+computed while atomic staging consumes the exact encoded bytes, including
+footer; no summary is returned before sync/rename/directory sync and scratch
+cleanup succeed. Compaction carries that summary into its publication sink,
+removing production post-write summary and checksum passes. Writers without
+the capability retain the conservative verification fallback. Upload still
+checks the exact source against the recorded identity; #915 owns streaming
+transfer and provider receipts.
+
+Active regressions cover buffered/streaming empty, range-only and multiblock
+files, compare finalized metadata and CRC with independent reads, require no
+output reads during finalization, and reject failed directory synchronization.
+`cargo check --locked --tests --features failpoints` passes for the combined
+working tree. Behavioral execution and write-to-upload mutation qualification
+remain pending.

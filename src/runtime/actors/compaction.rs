@@ -58,6 +58,7 @@ type PreparedCompactionOutputs =
 pub(crate) struct CompactionOutputAdmission<'a> {
     budget: &'a crate::common::resource_budget::ResourceBudget,
     manual_deadline: Option<OperationDeadline>,
+    finalized: Option<&'a crate::sst::traits::FinalizedSst>,
 }
 
 #[derive(Clone, Copy)]
@@ -229,13 +230,21 @@ fn summarize_output_partition(
 ) -> MidgeResult<(crate::runtime::FileMeta, u64, u32)> {
     check_manual_deadline(admission.manual_deadline, "before output summary")?;
     let fs_path = crate::sst::fs::fs_relative_sst_path(fs, path)?;
-    let summary = crate::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
-        &fs_path.0,
-        Arc::clone(fs),
-        admission.budget.clone(),
-    )?;
+    let (summary, size, crc) = if let Some(finalized) = admission.finalized {
+        let summary = finalized.summary.clone().ok_or_else(|| {
+            MidgeError::Corruption("compaction finalized an empty partition".into())
+        })?;
+        (summary, finalized.size_bytes, finalized.content_crc32c)
+    } else {
+        let summary = crate::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
+            &fs_path.0,
+            Arc::clone(fs),
+            admission.budget.clone(),
+        )?;
+        let (size, crc) = crate::sst::fs::file_identity_with_fs(fs, path)?;
+        (summary, size, crc)
+    };
     check_manual_deadline(admission.manual_deadline, "after output summary")?;
-    let (size, crc) = crate::sst::fs::file_identity_with_fs(fs, path)?;
     check_manual_deadline(admission.manual_deadline, "after output checksum")?;
     if size != summary.size_bytes {
         return Err(MidgeError::Corruption(
@@ -1125,7 +1134,8 @@ impl CompactionActor {
         let output_fs = factory.output_fs();
         let sink = |name: &str,
                     path: &std::path::Path,
-                    budget: &crate::common::resource_budget::ResourceBudget| {
+                    budget: &crate::common::resource_budget::ResourceBudget,
+                    finalized: Option<&crate::sst::traits::FinalizedSst>| {
             record_staged_output_partition(
                 storage.map(Arc::as_ref),
                 &output_fs,
@@ -1137,6 +1147,7 @@ impl CompactionActor {
                 CompactionOutputAdmission {
                     budget,
                     manual_deadline: work.manual_deadline,
+                    finalized,
                 },
             )
         };
@@ -1388,6 +1399,7 @@ impl CompactionActor {
                 CompactionOutputAdmission {
                     budget: &budget,
                     manual_deadline: None,
+                    finalized: None,
                 },
             )?;
             prepared.insert(name.clone(), output);

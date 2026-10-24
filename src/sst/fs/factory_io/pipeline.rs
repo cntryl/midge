@@ -74,6 +74,9 @@ pub(super) struct BlockPipeline {
     last_sequence: u64,
     pub(super) smallest_key: Option<Vec<u8>>,
     pub(super) largest_key: Option<Vec<u8>>,
+    pub(super) smallest_sequence: Option<u64>,
+    pub(super) largest_sequence: u64,
+    pub(super) point_count: u64,
 }
 
 impl BlockPipeline {
@@ -90,6 +93,9 @@ impl BlockPipeline {
             last_sequence: 0,
             smallest_key: None,
             largest_key: None,
+            smallest_sequence: None,
+            largest_sequence: 0,
+            point_count: 0,
         }
     }
 
@@ -238,6 +244,12 @@ impl BlockPipeline {
         self.current_block.extend_from_slice(&encoded);
         self.current_block_keys.push(entry.key.clone());
         self.previous_key.clone_from(&entry.key);
+        self.smallest_sequence = Some(
+            self.smallest_sequence
+                .map_or(entry.sequence, |sequence| sequence.min(entry.sequence)),
+        );
+        self.largest_sequence = self.largest_sequence.max(entry.sequence);
+        self.point_count = self.point_count.saturating_add(1);
         self.last_sequence = entry.sequence;
         self.last_key = Some(entry.key);
         sink.retain_entry(entry_reservation);

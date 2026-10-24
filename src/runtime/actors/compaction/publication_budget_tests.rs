@@ -157,6 +157,7 @@ impl PublicationFixture {
                 &name,
                 &path,
                 CompactionOutputAdmission {
+                    finalized: None,
                     budget: &budget,
                     manual_deadline: None,
                 },
@@ -271,6 +272,7 @@ fn should_stop_early_output_upload_when_original_deadline_expires_in_head() -> M
                 &output.metadata.name,
                 &fixture.directory.join(&output.metadata.name),
                 CompactionOutputAdmission {
+                    finalized: None,
                     budget: &budget,
                     manual_deadline: Some(deadline),
                 },

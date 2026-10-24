@@ -21,6 +21,12 @@ struct OutputSetCleanup {
     armed: bool,
 }
 
+struct FinishedPartition {
+    name: String,
+    path: std::path::PathBuf,
+    summary: Option<crate::sst::traits::FinalizedSst>,
+}
+
 impl OutputSetCleanup {
     fn new(fs: std::sync::Arc<dyn crate::io::Fs>) -> Self {
         Self {
@@ -36,17 +42,22 @@ impl OutputSetCleanup {
 
     fn record_finished_partition(
         &mut self,
-        finished: Option<(String, std::path::PathBuf)>,
+        finished: Option<FinishedPartition>,
         names: &mut Vec<String>,
         budget: &crate::common::resource_budget::ResourceBudget,
         sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
     ) -> MidgeResult<()> {
-        if let Some((name, path)) = finished {
+        if let Some(FinishedPartition {
+            name,
+            path,
+            summary,
+        }) = finished
+        {
             // Record cleanup ownership before a fallible sink can publish or
             // reject this finalized non-authoritative partition.
             self.record(path.clone());
             if let Some(sink) = sink {
-                sink(&name, &path, budget)?;
+                sink(&name, &path, budget, summary.as_ref())?;
             }
             names.push(name);
         }
@@ -125,7 +136,7 @@ fn finish_partition(
     abort_check: Option<&dyn Fn() -> bool>,
     output_size_limit: Option<usize>,
     output_fs: &std::sync::Arc<dyn crate::io::Fs>,
-) -> MidgeResult<Option<(String, std::path::PathBuf)>> {
+) -> MidgeResult<Option<FinishedPartition>> {
     ensure_compaction_not_aborted(abort_check)?;
     let tombstone_count = add_partition_range_tombstones(
         writer.as_mut(),
@@ -146,7 +157,7 @@ fn finish_partition(
         identity.ordinal,
     );
     let path = output_dir.join(&name);
-    writer.finish_to_path(&path)?;
+    let summary = writer.finish_to_path_with_summary(&path)?;
     let fs_path = crate::sst::fs::fs_relative_sst_path(output_fs, &path)?;
     let size = match output_fs.metadata(&fs_path) {
         Ok(metadata) => metadata.len,
@@ -165,7 +176,11 @@ fn finish_partition(
             "encoded compaction partition exceeds its local staging limit".into(),
         ));
     }
-    Ok(Some((name, path)))
+    Ok(Some(FinishedPartition {
+        name,
+        path,
+        summary,
+    }))
 }
 
 struct BudgetedEvent {
@@ -833,7 +848,7 @@ impl<'a> PartitionRoller<'a> {
         tombstones: &RangeTombstoneTracker,
         upper_bound: Option<&[u8]>,
         abort_check: Option<&dyn Fn() -> bool>,
-    ) -> MidgeResult<Option<(String, std::path::PathBuf)>> {
+    ) -> MidgeResult<Option<FinishedPartition>> {
         let writer = self
             .writer
             .take()
@@ -864,7 +879,7 @@ impl<'a> PartitionRoller<'a> {
         tombstones: &RangeTombstoneTracker,
         abort_check: Option<&dyn Fn() -> bool>,
     ) -> MidgeResult<(
-        Option<(String, std::path::PathBuf)>,
+        Option<FinishedPartition>,
         crate::common::resource_budget::ResourceReservation,
     )> {
         let boundary_reservation = self
@@ -906,7 +921,7 @@ impl<'a> PartitionRoller<'a> {
         mut self,
         tombstones: &RangeTombstoneTracker,
         abort_check: Option<&dyn Fn() -> bool>,
-    ) -> MidgeResult<Option<(String, std::path::PathBuf)>> {
+    ) -> MidgeResult<Option<FinishedPartition>> {
         self.finish_current(tombstones, None, abort_check)
     }
 }

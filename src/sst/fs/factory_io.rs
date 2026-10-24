@@ -457,32 +457,14 @@ impl DynSstWriter for FsSstWriter {
     }
 
     fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
-        if self.streaming.is_none() {
-            let fs = Arc::clone(&self.fs);
-            let bytes = self.finish_bytes()?;
-            return crate::sst::fs::persist_sst_bytes_to_path(&fs, &bytes, path);
-        }
+        self.finalize_to_path(path).map(|_| ())
+    }
 
-        let FsSstWriter {
-            fs,
-            entries,
-            range_tombstones,
-            block_size: _,
-            compression_policy,
-            streaming,
-            budget: _,
-            range_tombstone_reservations: _range_tombstone_reservations,
-            preserve_legacy_entries: _,
-        } = *self;
-        debug_assert!(entries.is_empty());
-        let scratch = Self::finish_streaming(
-            streaming.expect("streaming writer checked above"),
-            &range_tombstones,
-            &compression_policy,
-        )?;
-        let result = crate::sst::fs::persist_sst_stream_to_path(&fs, &mut scratch.reader(), path);
-        let cleanup = scratch.close();
-        result.and(cleanup)
+    fn finish_to_path_with_summary(
+        self: Box<Self>,
+        path: &Path,
+    ) -> MidgeResult<Option<crate::sst::traits::FinalizedSst>> {
+        self.finalize_to_path(path).map(Some)
     }
 
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
@@ -508,6 +490,98 @@ impl DynSstWriter for FsSstWriter {
         }
 
         Self::finish_buffered(entries, &range_tombstones, block_size, &compression_policy)
+    }
+}
+
+impl FsSstWriter {
+    fn logical_summary(&self) -> crate::sst::traits::FinalizedSst {
+        let mut smallest_key = None;
+        let mut largest_key = None;
+        let mut smallest_seq = None;
+        let mut largest_seq = 0;
+        let point_count = if let Some(streaming) = &self.streaming {
+            smallest_key.clone_from(&streaming.pipeline.smallest_key);
+            largest_key.clone_from(&streaming.pipeline.largest_key);
+            smallest_seq = streaming.pipeline.smallest_sequence;
+            largest_seq = streaming.pipeline.largest_sequence;
+            streaming.pipeline.point_count
+        } else {
+            for entry in &self.entries {
+                Self::update_key_bounds(&mut smallest_key, &mut largest_key, &entry.key);
+                smallest_seq =
+                    Some(smallest_seq.map_or(entry.sequence, |seq: u64| seq.min(entry.sequence)));
+                largest_seq = largest_seq.max(entry.sequence);
+            }
+            self.entries.len() as u64
+        };
+        for tombstone in self.range_tombstones.iter() {
+            Self::update_key_bounds(&mut smallest_key, &mut largest_key, &tombstone.start);
+            Self::update_key_bounds(&mut smallest_key, &mut largest_key, &tombstone.end);
+            smallest_seq = Some(smallest_seq.map_or(tombstone.seq, |seq| seq.min(tombstone.seq)));
+            largest_seq = largest_seq.max(tombstone.seq);
+        }
+        crate::sst::traits::FinalizedSst {
+            summary: smallest_key
+                .zip(largest_key)
+                .map(|(smallest_key, largest_key)| super::SstFileSummary {
+                    size_bytes: 0,
+                    smallest_key,
+                    largest_key,
+                    smallest_seq: smallest_seq.expect("nonempty SST has a sequence"),
+                    largest_seq,
+                }),
+            size_bytes: 0,
+            content_crc32c: 0,
+            point_count,
+            range_count: self.range_tombstones.len() as u64,
+        }
+    }
+
+    fn finalize_to_path(
+        self: Box<Self>,
+        path: &Path,
+    ) -> MidgeResult<crate::sst::traits::FinalizedSst> {
+        let mut finalized = self.logical_summary();
+        if self.streaming.is_none() {
+            let fs = Arc::clone(&self.fs);
+            let bytes = self.finish_bytes()?;
+            crate::sst::fs::persist_sst_bytes_to_path(&fs, &bytes, path)?;
+            finalized.size_bytes = bytes.len() as u64;
+            finalized.content_crc32c = crc32c::crc32c(&bytes);
+            if let Some(summary) = &mut finalized.summary {
+                summary.size_bytes = finalized.size_bytes;
+            }
+            return Ok(finalized);
+        }
+
+        let FsSstWriter {
+            fs,
+            entries,
+            range_tombstones,
+            block_size: _,
+            compression_policy,
+            streaming,
+            budget: _,
+            range_tombstone_reservations: _range_tombstone_reservations,
+            preserve_legacy_entries: _,
+        } = *self;
+        debug_assert!(entries.is_empty());
+        let scratch = Self::finish_streaming(
+            streaming.expect("streaming writer checked above"),
+            &range_tombstones,
+            &compression_policy,
+        )?;
+        let result =
+            crate::sst::fs::persist_sst_stream_with_identity(&fs, &mut scratch.reader(), path);
+        let cleanup = scratch.close();
+        let (size, crc) = result?;
+        cleanup?;
+        finalized.size_bytes = size;
+        finalized.content_crc32c = crc;
+        if let Some(summary) = &mut finalized.summary {
+            summary.size_bytes = size;
+        }
+        Ok(finalized)
     }
 }
 

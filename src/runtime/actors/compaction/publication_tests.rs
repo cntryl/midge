@@ -240,6 +240,7 @@ fn should_summarize_compaction_output_through_injected_mock_fs() -> MidgeResult<
         name,
         path,
         CompactionOutputAdmission {
+            finalized: None,
             budget: &ResourceBudget::new(1024 * 1024),
             manual_deadline: None,
         },
@@ -303,6 +304,7 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
         name,
         &path,
         CompactionOutputAdmission {
+            finalized: None,
             budget: &budget,
             manual_deadline: None,
         },
@@ -430,6 +432,7 @@ fn upload_charge_case(manual: bool) -> MidgeResult<()> {
         "000000_01_00000000000000000002.sst",
         &path,
         CompactionOutputAdmission {
+            finalized: None,
             budget: &budget,
             manual_deadline,
         },
@@ -680,6 +683,7 @@ fn should_summarize_compaction_output_on_the_worker_when_there_is_no_cloud_stora
         name,
         &path,
         CompactionOutputAdmission {
+            finalized: None,
             budget: &budget,
             manual_deadline: None,
         },
