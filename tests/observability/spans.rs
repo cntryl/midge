@@ -34,6 +34,9 @@ fn should_open_one_span_per_public_operation_given_scoped_subscriber_when_api_is
     let recorder = SpanNames::default();
     let names = Arc::clone(&recorder.0);
     let subscriber = tracing_subscriber::registry().with(recorder);
+    // Keep registrar aggregation active while an unscoped thread reaches the
+    // same callsites. This second dispatcher is never installed as a default.
+    let _other_registrar = tracing::Dispatch::new(tracing_subscriber::registry());
 
     // Act. Other tests in this binary hit these callsites first, with no or a
     // filtering subscriber, so their cached interest must be recomputed
@@ -45,6 +48,21 @@ fn should_open_one_span_per_public_operation_given_scoped_subscriber_when_api_is
             .unwrap();
         tx.put(b"k".to_vec(), b"v".to_vec(), None).unwrap();
         tx.commit(WriteOptions::buffered()).unwrap();
+        // First reach the actual flush callsite on another thread while this
+        // scoped recorder remains live, after the explicit cache rebuild.
+        let unscoped_default = std::thread::scope(|workers| {
+            workers
+                .spawn(|| {
+                    let no_subscriber = tracing::dispatcher::get_default(|dispatch| {
+                        dispatch.is::<tracing::subscriber::NoSubscriber>()
+                    });
+                    engine.flush_cf(&cf).unwrap();
+                    no_subscriber
+                })
+                .join()
+                .unwrap()
+        });
+        eprintln!("unscoped flush registration: no_subscriber={unscoped_default}");
         engine.flush_cf(&cf).unwrap();
         engine.compact_all().unwrap();
     });
