@@ -836,3 +836,12 @@ The simulator's resident-WAL byte scope remains explicitly distinct. Both
 benchmark targets compile; no performance/provider execution or exact-SHA
 result artifact is claimed. The latest failpoint test-target check also passes,
 with only the concurrent #909 work's temporary unused-method warnings.
+
+#979's map audit reviews all 65 catalog IDs, resolves 234 active test symbols,
+refreshes actual source/assertion anchors and removes 29 stale row references.
+It adds CLOUD-8 and SST-10 and preserves historical qualification provenance.
+PROG-1/2 remain explicit active-Cargo coverage gaps pending the next test slice.
+`cntryl-tools validate-docs` passes (66 Markdown files), as does diff checking.
+Postimage hashes describe the captured working-tree sources based on
+`2494eff5`; concurrent sibling edits mean a final anchor/hash refresh is still
+required at the completed code checkpoint. This audit is not test execution.
