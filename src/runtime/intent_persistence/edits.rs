@@ -67,7 +67,7 @@ fn read_state(fs: &Arc<dyn Fs>) -> MidgeResult<IntentState> {
 fn frame_checksum(bytes: &[u8]) -> u32 {
     let mut checksum = [0_u8; 4];
     checksum.copy_from_slice(&bytes[bytes.len() - 4..]);
-    u32::from_le_bytes(checksum)
+    u32::from_be_bytes(checksum)
 }
 
 fn encode_edit(state: &IntentState, intents: &[IntentLogEntry]) -> MidgeResult<Vec<u8>> {

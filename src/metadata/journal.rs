@@ -206,7 +206,7 @@ fn encode_journal_record<T: ?Sized + serde::Serialize>(
     record.push(record_type);
     record.extend_from_slice(&payload_len_u32(&payload)?.to_le_bytes());
     record.extend_from_slice(&payload);
-    record.extend_from_slice(&crc.to_le_bytes());
+    record.extend_from_slice(&crc.to_be_bytes());
     Ok(record)
 }
 

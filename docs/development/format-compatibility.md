@@ -87,7 +87,9 @@ never regress live families, and never revive dropped families.
 Version 9 (#953) stores manifest snapshots and manifest journal payloads in a
 shared binary codec. MessagePack maps retain explicit field names and encode
 integers and key bytes compactly. Each frame records its kind and length and
-has a CRC32C over the header and exact payload. The same decoder reads local
+has a big-endian CRC32C over the header and exact payload. Checksum byte order
+preserves a useful checksum over the complete encoded object, including its
+checksum field. Length fields remain little-endian. The same decoder reads local
 checkpoints and cloud metadata bodies. Decoding checks the complete extent,
 checksum and nesting bound before applying semantic manifest validation.
 
@@ -240,14 +242,14 @@ new database, an older binary must not open it.
 
 ## Fixture Coverage
 
-The publication gate verifies the checked-in populated FORMAT 8/SST V4 fixture
-at `tests/fixtures/compatibility/v8_populated_v4_sst_db`. Compatibility tests
+Compatibility tests verify the checked-in populated FORMAT 9/SST V4 fixture
+at `tests/fixtures/compatibility/v9_populated_v4_sst_db`. They
 also open a copy with strict recovery and read its persisted value across a
 shutdown and reopen. This fixture retains the prior fixture's SST bytes with
-current manifest key bounds and per-family flush frontiers, and omits the
+binary manifest key bounds and per-family flush frontiers, and omits the
 pre-ledger WAL.
 
-Repository gates reject the populated FORMAT 3/SST V4 fixture, a prior FORMAT 2
-fixture and a synthetic future FORMAT 9 fixture with `CompatibilityError`,
+Repository tests reject the populated FORMAT 8 and FORMAT 3/SST V4 fixtures, a prior FORMAT 2
+fixture and a synthetic future FORMAT 10 fixture with `CompatibilityError`,
 without rewriting their markers. Format changes must update these fixtures and
 their CI assertions together.

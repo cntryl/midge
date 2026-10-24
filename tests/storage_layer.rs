@@ -1574,23 +1574,50 @@ mod compatibility_fixtures {
         }
     }
 
+    fn alter_binary_manifest_fixture(path: &Path, field: &str, scalar: Option<u8>) {
+        let mut bytes = fs::read(path).expect("read binary fixture manifest");
+        assert_eq!(&bytes[..8], b"MDGEMD09");
+        let payload_end = bytes.len() - 4;
+        let value = bytes[13..payload_end]
+            .windows(field.len())
+            .position(|candidate| candidate == field.as_bytes())
+            .expect("fixture field")
+            + 13
+            + field.len();
+        if let Some(scalar) = scalar {
+            // This fixture uses positive fixints and booleans for these fields.
+            assert!(bytes[value] < 128 || matches!(bytes[value], 0xc2 | 0xc3));
+            bytes[value] = scalar;
+        } else {
+            assert_eq!(
+                bytes[value], 0xc4,
+                "fixture bound must be a short byte string"
+            );
+            let length = usize::from(bytes[value + 1]);
+            bytes[value + 2..value + 2 + length].fill(b'z');
+        }
+        let checksum = crc32c::crc32c(&bytes[..payload_end]);
+        bytes[payload_end..].copy_from_slice(&checksum.to_be_bytes());
+        fs::write(path, bytes).expect("write independently checksummed fixture mutation");
+    }
+
     #[test]
-    fn should_preserve_populated_v8_fixture_given_strict_recovery_when_reopening() {
+    fn should_preserve_populated_v9_fixture_given_strict_recovery_when_reopening() {
         // Arrange
-        let temp = copy_fixture_dir("v8_populated_v4_sst_db");
+        let temp = copy_fixture_dir("v9_populated_v4_sst_db");
         let before = fs::read(temp.path().join("FORMAT")).expect("read fixture marker");
 
         for _ in 0..2 {
             // Act
             let report = cntryl_midge::StorageVerifier::verify_path(temp.path())
-                .expect("verify format 8 fixture");
+                .expect("verify format 9 fixture");
             let mut engine = Engine::open(
                 OpenOptions::local(temp.path())
                     .recovery_policy(RecoveryPolicy::Strict)
                     .build()
                     .expect("build fixture options"),
             )
-            .expect("open format 8 fixture");
+            .expect("open format 9 fixture");
             let cf = engine
                 .get_column_family("default")
                 .expect("fixture column family");
@@ -1648,9 +1675,36 @@ mod compatibility_fixtures {
     }
 
     #[test]
+    fn should_reject_populated_v8_fixture_when_format_nine_has_no_migration() {
+        for policy in [RecoveryPolicy::Strict, RecoveryPolicy::Salvage] {
+            // Arrange
+            let temp = copy_fixture_dir("v8_populated_v4_sst_db");
+            let before = fs::read(temp.path().join("FORMAT")).expect("read old marker");
+
+            // Act
+            let result = Engine::open(
+                OpenOptions::local(temp.path())
+                    .recovery_policy(policy)
+                    .build()
+                    .expect("build options"),
+            );
+
+            // Assert
+            match result {
+                Err(error) => assert_compatibility_error(error),
+                Ok(_) => panic!("format 8 must be rejected under {policy:?}"),
+            }
+            assert_eq!(
+                fs::read(temp.path().join("FORMAT")).expect("read retained marker"),
+                before
+            );
+        }
+    }
+
+    #[test]
     fn should_reject_manifest_bounds_when_valid_sst_summary_disagrees() {
         // Arrange: the release fixture has a valid SST and a readable point value.
-        let baseline = copy_fixture_dir("v8_populated_v4_sst_db");
+        let baseline = copy_fixture_dir("v9_populated_v4_sst_db");
         let baseline_report = cntryl_midge::StorageVerifier::verify_path(baseline.path())
             .expect("verify unmodified fixture");
         assert_eq!(baseline_report.health, EngineHealth::Healthy);
@@ -1679,31 +1733,17 @@ mod compatibility_fixtures {
             .expect("shutdown baseline engine");
 
         for wrong_key_bounds in [true, false] {
-            let temp = copy_fixture_dir("v8_populated_v4_sst_db");
+            let temp = copy_fixture_dir("v9_populated_v4_sst_db");
             for name in ["manifest.json", "manifest.snapshot.json"] {
                 let path = temp.path().join(name);
-                let mut manifest: serde_json::Value =
-                    serde_json::from_slice(&fs::read(&path).expect("read fixture manifest"))
-                        .expect("decode fixture manifest");
-                let file = manifest["files"][0]
-                    .as_object_mut()
-                    .expect("fixture SST metadata");
                 if wrong_key_bounds {
-                    file.insert(
-                        "smallest_key".into(),
-                        serde_json::json!(hex::encode(b"zzz")),
-                    );
-                    file.insert("largest_key".into(), serde_json::json!(hex::encode(b"zzz")));
-                    file.insert("key_bounds_complete".into(), serde_json::json!(true));
+                    alter_binary_manifest_fixture(&path, "smallest_key", None);
+                    alter_binary_manifest_fixture(&path, "largest_key", None);
+                    alter_binary_manifest_fixture(&path, "key_bounds_complete", Some(0xc3));
                 } else {
-                    file.insert("smallest_seq".into(), serde_json::json!(99));
-                    file.insert("largest_seq".into(), serde_json::json!(99));
+                    alter_binary_manifest_fixture(&path, "smallest_seq", Some(99));
+                    alter_binary_manifest_fixture(&path, "largest_seq", Some(99));
                 }
-                fs::write(
-                    &path,
-                    serde_json::to_vec(&manifest).expect("encode manifest"),
-                )
-                .expect("write modified fixture manifest");
             }
 
             // Act: SST bytes and their recorded size and CRC are unchanged.
@@ -1722,28 +1762,18 @@ mod compatibility_fixtures {
         for complete in [true, false] {
             // Arrange: complete bounds agree with the SST; older advisory bounds
             // may disagree without hiding a point key from readers.
-            let temp = copy_fixture_dir("v8_populated_v4_sst_db");
+            let temp = copy_fixture_dir("v9_populated_v4_sst_db");
             for name in ["manifest.json", "manifest.snapshot.json"] {
                 let path = temp.path().join(name);
-                let mut manifest: serde_json::Value =
-                    serde_json::from_slice(&fs::read(&path).expect("read fixture manifest"))
-                        .expect("decode fixture manifest");
-                let file = manifest["files"][0]
-                    .as_object_mut()
-                    .expect("fixture SST metadata");
-                file.insert("key_bounds_complete".into(), serde_json::json!(complete));
-                if !complete {
-                    file.insert(
-                        "smallest_key".into(),
-                        serde_json::json!(hex::encode(b"zzz")),
-                    );
-                    file.insert("largest_key".into(), serde_json::json!(hex::encode(b"zzz")));
-                }
-                fs::write(
+                alter_binary_manifest_fixture(
                     &path,
-                    serde_json::to_vec(&manifest).expect("encode manifest"),
-                )
-                .expect("write fixture manifest");
+                    "key_bounds_complete",
+                    Some(if complete { 0xc3 } else { 0xc2 }),
+                );
+                if !complete {
+                    alter_binary_manifest_fixture(&path, "smallest_key", None);
+                    alter_binary_manifest_fixture(&path, "largest_key", None);
+                }
             }
 
             // Act
@@ -1802,9 +1832,9 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_future_v9_fixture_given_unsupported_version_when_reopening() {
+    fn should_reject_future_v10_fixture_given_unsupported_version_when_reopening() {
         // Arrange
-        let temp = copy_fixture_dir("future_v9");
+        let temp = copy_fixture_dir("future_v10");
 
         // Act
         let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())

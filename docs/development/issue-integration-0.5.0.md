@@ -595,3 +595,20 @@ retries at that bounded cadence instead of busy-spinning behind an occupied
 worker/publication. This makes the existing idle-reclamation regression's
 bounded wait meaningful; the previous30second-only schedule would not do so.
 Failpoint test targets compile for this follow-up; execution is still pending.
+
+The #953 compatibility slice now includes populated/empty binary FORMAT9
+fixtures and a futureFORMAT10 fixture. Historical FORMAT8 bytes remain rejected
+under strict and salvage. Bounds mutations edit binary fields and recompute
+framing checksums so semantic verification remains tested; CLI/startup/fault
+fixtures use FORMAT9 and production intent encoding.
+
+Frame/journal CRC storage uses big-endian checksum bytes so CRC32C of a complete
+valid frame does not collapse to the little-endian appended-checksum residue.
+An active equal-length frame identity regression guards that distinction.
+The focused production-encoding/reopen fixture regression passed1/1 (0.12s)
+with `cargo test --locked --features failpoints --lib
+metadata::codec::tests::should_reopen_populated_fixture_contents_when_encoded_as_format_nine
+-- --nocapture`. Its earlier little-endian intermediate materialization result
+is superseded. Full codec/fuzz/compatibility qualification remains pending.
+The later #918 SSTV5 slice must preserve this V4 artifact as rejection evidence
+and add the corresponding current V5 fixture.

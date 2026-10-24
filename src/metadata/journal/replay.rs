@@ -285,7 +285,7 @@ pub(super) fn read_journal_record(
         .map_err(FsError::into_midge)?;
     let crc_offset = payload_offset + len as u64;
     let crc_bytes = file.read_at(crc_offset, 4).map_err(FsError::into_midge)?;
-    let got_crc = u32::from_le_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+    let got_crc = u32::from_be_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
 
     Ok(JournalRecordStatus::Record(JournalRecord {
         record_start,
@@ -324,7 +324,7 @@ fn contains_verified_fsync_marker(bytes: &[u8]) -> bool {
             continue;
         };
         let payload = &bytes[payload_start..crc_start];
-        let expected = u32::from_le_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+        let expected = u32::from_be_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
         if crc32c::crc32c(payload) == expected
             && journal_deserialize::<FsyncMarker>(payload).is_ok()
         {

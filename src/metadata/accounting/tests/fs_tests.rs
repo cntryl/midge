@@ -193,10 +193,14 @@ fn should_credit_completed_checkpoint_when_actual_snapshot_and_truncation_commit
         assert_eq!(recovered.edit_checkpoint_id, written.edit_checkpoint_id);
         assert_eq!(
             serde_json::to_value(recovered).unwrap(),
-            serde_json::to_value(crate::metadata::codec::decode::<crate::metadata::Manifest>(
-                crate::metadata::codec::MANIFEST,
-                &bytes,
-            ).unwrap()).unwrap()
+            serde_json::to_value(
+                crate::metadata::codec::decode::<crate::metadata::Manifest>(
+                    crate::metadata::codec::MANIFEST,
+                    &bytes,
+                )
+                .unwrap()
+            )
+            .unwrap()
         );
         assert_eq!(
             fixture.bytes(crate::metadata::files::JOURNAL),

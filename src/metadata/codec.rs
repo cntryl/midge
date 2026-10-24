@@ -33,7 +33,7 @@ pub(crate) fn encode<T: Serialize + ?Sized>(kind: u8, value: &T) -> MidgeResult<
     bytes.extend_from_slice(&length.to_le_bytes());
     bytes.extend_from_slice(&payload);
     let checksum = crc32c::crc32c(&bytes);
-    bytes.extend_from_slice(&checksum.to_le_bytes());
+    bytes.extend_from_slice(&checksum.to_be_bytes());
     Ok(bytes)
 }
 
@@ -71,7 +71,7 @@ pub(crate) fn decode<T: DeserializeOwned>(kind: u8, bytes: &[u8]) -> MidgeResult
     let payload_end = extent - CHECKSUM_BYTES;
     let mut checksum = [0_u8; 4];
     checksum.copy_from_slice(&bytes[payload_end..]);
-    if crc32c::crc32c(&bytes[..payload_end]) != u32::from_le_bytes(checksum) {
+    if crc32c::crc32c(&bytes[..payload_end]) != u32::from_be_bytes(checksum) {
         return Err(MidgeError::Corruption("metadata CRC32C mismatch".into()));
     }
     let payload = &bytes[HEADER_BYTES..payload_end];
@@ -152,12 +152,26 @@ mod tests {
             encoded.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_le_bytes());
             encoded.extend_from_slice(payload);
             let checksum = crc32c::crc32c(&encoded);
-            encoded.extend_from_slice(&checksum.to_le_bytes());
+            encoded.extend_from_slice(&checksum.to_be_bytes());
             assert!(matches!(
                 decode::<serde_json::Value>(MANIFEST, &encoded),
                 Err(MidgeError::Corruption(_))
             ));
         }
+    }
+
+    #[test]
+    fn should_distinguish_object_checksums_when_valid_metadata_frames_have_equal_length() {
+        // Arrange / Act
+        let first = encode(MANIFEST, &[1_u64]).expect("encode first frame");
+        let second = encode(MANIFEST, &[2_u64]).expect("encode second frame");
+
+        // Assert: the appended checksum must not make the checksum over the
+        // complete encoded object a constant residue for equal-length frames.
+        assert_eq!(first.len(), second.len());
+        assert_eq!(decode::<Vec<u64>>(MANIFEST, &first).unwrap(), vec![1]);
+        assert_eq!(decode::<Vec<u64>>(MANIFEST, &second).unwrap(), vec![2]);
+        assert_ne!(crc32c::crc32c(&first), crc32c::crc32c(&second));
     }
 
     #[test]
@@ -191,6 +205,59 @@ mod tests {
             "manifest_20000_files json_bytes={} binary_bytes={}",
             json.len(),
             binary.len()
+        );
+    }
+
+    #[test]
+    fn should_reopen_populated_fixture_contents_when_encoded_as_format_nine() {
+        // Arrange: retain the historical SST bytes and logical metadata while
+        // creating a new-format database, rather than migrating an old marker.
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/compatibility/v8_populated_v4_sst_db");
+        let manifest: crate::metadata::Manifest =
+            serde_json::from_slice(&std::fs::read(fixture.join("manifest.snapshot.json")).unwrap())
+                .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let fs = crate::io::real::test_root(directory.path());
+        crate::metadata::format::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+        crate::metadata::ManifestPersistence::save_with_fs(&fs, &manifest).unwrap();
+        crate::runtime::IntentPersistence::save_with_fs(&fs, &[]).unwrap();
+        std::fs::create_dir_all(directory.path().join("sst")).unwrap();
+        for file in &manifest.files {
+            std::fs::copy(
+                fixture.join("sst").join(&file.name),
+                directory.path().join("sst").join(&file.name),
+            )
+            .unwrap();
+        }
+        let encoded = std::fs::read(directory.path().join("manifest.snapshot.json")).unwrap();
+        let intents = std::fs::read(directory.path().join("intent_log.json")).unwrap();
+
+        // Act
+        let report = crate::StorageVerifier::verify_path(directory.path()).unwrap();
+        let mut engine =
+            crate::Engine::open(crate::OpenOptions::local(directory.path()).build().unwrap())
+                .unwrap();
+        let cf = engine.get_column_family("default").unwrap();
+        let transaction = engine
+            .begin_tx(cf.id(), crate::TransactionMode::ReadOnly)
+            .unwrap();
+        let value = transaction.get(b"fixture/alpha").unwrap();
+        drop(transaction);
+        engine.shutdown(std::time::Duration::from_secs(5)).unwrap();
+
+        // Assert / retain exact encoded fixture evidence for the release copy.
+        assert_eq!(value.as_deref(), Some(b"value-alpha".as_slice()));
+        assert_eq!(report.sst_files_verified, 1);
+        assert_eq!(
+            encode(MANIFEST, &crate::metadata::Manifest::default()).unwrap(),
+            include_bytes!("../../tests/fixtures/compatibility/v9_empty_db/manifest.snapshot.json")
+        );
+        println!("format9_manifest_hex={}", hex::encode(encoded));
+        println!("format9_intent_hex={}", hex::encode(intents));
+        println!(
+            "format9_empty_manifest_hex={}",
+            hex::encode(encode(MANIFEST, &crate::metadata::Manifest::default()).unwrap())
         );
     }
 }
