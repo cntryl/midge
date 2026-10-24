@@ -119,6 +119,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
         let bytes = add_valid_manifest_sst_for_test(&mut el, &name, 81);
         write_test_file(el.state.host_sst_dir().join(&name), &bytes);
     }
+    el.prefetch_flush_sst_names_if_due();
     let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
     el.pipeline.worker_msg_tx = Some(worker_tx);
     // This test drives both worker channels explicitly at each turn boundary.
@@ -153,7 +154,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
         el.actors.flush_actor.is_inflight(),
         "flush work resumes after the compaction and retirement turns"
     );
-    for phase in ["build", "publish", "mirror"] {
+    for phase in ["build", "publish", "manifest mirror", "intent clear mirror"] {
         let completion = el
             .pipeline
             .flush_worker_result_rx
@@ -416,6 +417,7 @@ fn should_not_add_confirmation_waiter_when_cloud_assertion_only_sequence_has_pen
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop.state.sequence = 1;
+    event_loop.state.applied_sequence = 1;
     event_loop.state.wal.frontiers.set_cloud_durable_for_test(0);
     event_loop
         .pipeline
@@ -1845,6 +1847,11 @@ fn attach_provider_metadata_lease(
     el.authority.fencing.leader_holder_id = Some(lease.holder_id());
     el.authority.fencing.leader_store = lease.get_leader_store();
     el.actors.cloud_coordinator.cloud_metadata_storage = Some(cloud);
+    if let Some(storage) = el.actors.cloud_coordinator.hybrid_storage.clone() {
+        // Rebind the physical retirement reader to this fixture's newly
+        // attached metadata authority, as production construction does.
+        el.set_hybrid_storage(storage);
+    }
     lease
 }
 
@@ -1862,6 +1869,32 @@ fn get_cloud_metadata_for_test(
         }) => data,
         other => panic!("metadata get for '{key}' failed: {other:?}"),
     }
+}
+
+fn publish_retired_sst_for_gc_test(
+    el: &mut EventLoop,
+    name: &str,
+    bytes: &[u8],
+) -> crate::common::MidgeResult<()> {
+    // Deletion fixtures need the original durable identity and retirement
+    // horizon, just as a real compaction/reclamation publishes before GC.
+    let file = crate::metadata::FileMeta {
+        name: name.into(),
+        size_bytes: bytes.len() as u64,
+        content_crc32c: Some(crc32c::crc32c(bytes)),
+        ..crate::metadata::FileMeta::default()
+    };
+    let edit = crate::metadata::ManifestEdit::Batch(vec![
+        crate::metadata::ManifestEdit::AddSst(file),
+        crate::metadata::ManifestEdit::RemoveSst { name: name.into() },
+    ]);
+    let id = el
+        .state
+        .manifest_store
+        .append_for(crate::metadata::accounting::Origin::Administration, &edit)?;
+    el.state.manifest.apply_edit(&edit)?;
+    el.state.manifest.note_applied_journal_edit(id);
+    el.mirror_metadata_to_authoritative_cloud()
 }
 
 fn get_committed_cloud_metadata_for_test(
@@ -3206,6 +3239,7 @@ fn should_retry_manifest_reclamation_after_metadata_publication_timeout(
             .expect("hybrid storage"),
     )
     .write_sst_object(sst_name, &sst_bytes)?;
+    publish_retired_sst_for_gc_test(&mut el, sst_name, &sst_bytes)?;
     el.actors
         .gc_actor
         .queue_manifest_reclamation([sst_name.to_string()]);
@@ -3219,6 +3253,11 @@ fn should_retry_manifest_reclamation_after_metadata_publication_timeout(
     std::thread::sleep(Duration::from_millis(25));
     let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
     el.progress_pass(&msg_rx);
+    let until = Instant::now() + Duration::from_secs(5);
+    while el.actors.gc_actor.has_manifest_reclamation() && Instant::now() < until {
+        el.progress_pass(&msg_rx);
+        std::thread::sleep(Duration::from_millis(1));
+    }
     el.actors.gc_actor.shutdown_workers();
 
     // Assert
@@ -3270,6 +3309,11 @@ fn should_retry_manifest_reclamation_under_continuous_request_load(
     // Act: process one normal request while another remains queued.
     let first = msg_rx.recv().expect("receive first queued request");
     el.process_one(first, &msg_rx);
+    let until = Instant::now() + Duration::from_secs(5);
+    while el.actors.gc_actor.has_manifest_reclamation() && Instant::now() < until {
+        el.progress_pass(&msg_rx);
+        std::thread::sleep(Duration::from_millis(1));
+    }
     el.actors.gc_actor.shutdown_workers();
 
     // Assert
@@ -3904,6 +3948,7 @@ fn should_not_block_runtime_when_cloud_sst_delete_is_slow() -> crate::common::Mi
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
     cloud_persistence(&hybrid_storage).write_sst_object(sst_name, &sst_bytes)?;
+    publish_retired_sst_for_gc_test(&mut el, sst_name, &sst_bytes)?;
 
     let request_id = 4546;
     let response_rx = el.routing.router.register(request_id, "TestRequest");
@@ -3989,6 +4034,7 @@ fn should_retry_failed_cloud_sst_delete_without_runtime_restart() -> crate::comm
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
     cloud_persistence(&hybrid_storage).write_sst_object(sst_name, &sst_bytes)?;
+    publish_retired_sst_for_gc_test(&mut el, sst_name, &sst_bytes)?;
 
     let (retry_tx, retry_rx) = crossbeam::channel::unbounded();
     el.actors.gc_actor.set_retry_notifier(Some(retry_tx));
@@ -4066,6 +4112,7 @@ fn should_join_cloud_gc_worker_before_runtime_shutdown() -> crate::common::Midge
     ));
     el.set_hybrid_storage(Arc::clone(&hybrid_storage));
     cloud_persistence(&hybrid_storage).write_sst_object(sst_name, &sst_bytes)?;
+    publish_retired_sst_for_gc_test(&mut el, sst_name, &sst_bytes)?;
 
     let request_id = 4547;
     let (_response_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -4223,11 +4270,7 @@ fn should_retry_prune_after_preflight_failure_clears_inflight() -> crate::common
     else {
         panic!("committed fixture")
     };
-    let body = generation
-        .objects
-        .iter()
-        .find(|object| object.file_name == crate::metadata::files::MANIFEST_SNAPSHOT)
-        .unwrap();
+    let body = generation.objects.first().unwrap();
     let body_path = el.state.db_path.join("cloud_store").join(&body.object_key);
     let body_bytes = std::fs::read(&body_path)?;
     std::fs::remove_file(&body_path).expect("remove exact committed immutable manifest body");
@@ -7291,10 +7334,24 @@ fn should_back_off_failed_cloud_seal_while_normal_requests_make_progress(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: the first lease validation permits the WAL flush, then every
     // post-flush validation fails slowly. The active segment remains retryable.
+    struct SealRetryClock(Mutex<Instant>);
+    impl crate::runtime::retry_schedule::RetryClock for SealRetryClock {
+        fn now(&self) -> Instant {
+            *self.0.lock().unwrap()
+        }
+    }
+    let retry_clock = Arc::new(SealRetryClock(Mutex::new(Instant::now())));
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
+    el.pipeline
+        .durability
+        .set_cloud_seal_retry_clock(retry_clock.clone());
     append_cloud_async_put(&mut el)?;
+    // Finish the unrelated real name prefetch before installing the slow
+    // lease fixture, so provider counts below describe WAL seal attempts.
+    el.prefetch_flush_sst_names_if_due();
+    assert!(el.state.sst_names.reserved_through.contains_key(&0));
     let leader_store = Arc::new(FailAfterFirstLeaderStore::new(
         Duration::from_millis(75),
         "writer-1",
@@ -7319,21 +7376,20 @@ fn should_back_off_failed_cloud_seal_while_normal_requests_make_progress(
 
     // Act: process unrelated requests immediately after the failed attempt,
     // then drive two maintenance passes after the retry becomes due.
-    let request_start = Instant::now();
     for _ in 0..response_receivers.len() {
         let message = msg_rx.recv().expect("receive unrelated request");
         el.process_one(message, &msg_rx);
     }
-    let request_elapsed = request_start.elapsed();
-    std::thread::sleep(Duration::from_millis(25));
+    let reads_after_requests = leader_store.reads();
+    *retry_clock.0.lock().unwrap() += Duration::from_millis(25);
     el.progress_pass(&msg_rx);
     let reads_after_due_retry = leader_store.reads();
     el.progress_pass(&msg_rx);
 
     // Assert
-    assert!(
-        request_elapsed < Duration::from_millis(50),
-        "seal maintenance delayed normal request progress: {request_elapsed:?}"
+    assert_eq!(
+        reads_after_requests, reads_after_failure,
+        "normal requests must finish before the backoff admits another provider check"
     );
     for (request_id, response_rx) in response_receivers {
         assert!(matches!(
