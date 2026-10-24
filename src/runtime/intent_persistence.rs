@@ -19,7 +19,7 @@ impl IntentPersistence {
     const INTENT_FILE_TEMP: &'static str = "intent_log.json.tmp";
 
     #[cfg(test)]
-    pub fn intent_path(db_path: &Path) -> PathBuf {
+    pub(crate) fn intent_path(db_path: &Path) -> PathBuf {
         db_path.join(Self::INTENT_FILE)
     }
 
@@ -93,7 +93,7 @@ impl IntentPersistence {
     }
 
     #[cfg(test)]
-    pub fn load(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
+    pub(crate) fn load(db_path: &Path) -> Result<Vec<IntentLogEntry>, String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
@@ -124,7 +124,7 @@ impl IntentPersistence {
     }
 
     #[cfg(test)]
-    pub fn save(db_path: &Path, intents: &[IntentLogEntry]) -> Result<(), String> {
+    pub(crate) fn save(db_path: &Path, intents: &[IntentLogEntry]) -> Result<(), String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
@@ -135,7 +135,7 @@ impl IntentPersistence {
     }
 
     #[cfg(test)]
-    pub fn delete(db_path: &Path) -> Result<(), String> {
+    pub(crate) fn delete(db_path: &Path) -> Result<(), String> {
         let p = Self::intent_path(db_path);
         let temp = db_path.join(Self::INTENT_FILE_TEMP);
         if p.exists() {

@@ -94,13 +94,13 @@ impl ManifestPersistence {
 
     /// Get the manifest file path
     #[cfg(test)]
-    pub fn manifest_path(db_path: &Path) -> PathBuf {
+    pub(crate) fn manifest_path(db_path: &Path) -> PathBuf {
         db_path.join(ManifestPersistence::MANIFEST_SNAPSHOT)
     }
 
     /// Get the manifest snapshot path
     #[cfg(test)]
-    pub fn manifest_snapshot_path(db_path: &Path) -> PathBuf {
+    pub(crate) fn manifest_snapshot_path(db_path: &Path) -> PathBuf {
         db_path.join(ManifestPersistence::MANIFEST_SNAPSHOT)
     }
 
@@ -429,7 +429,7 @@ impl ManifestPersistence {
     /// in-memory checkpoint horizon when that is safe. Runtime writers go
     /// through `ManifestStore`; this reads the journal position from disk.
     #[cfg(test)]
-    pub fn save_snapshot_and_truncate_journal_with_fs(
+    pub(crate) fn save_snapshot_and_truncate_journal_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
     ) -> Result<WrittenCheckpoint, String> {
@@ -570,9 +570,9 @@ impl ManifestPersistence {
         })
     }
 
-    /// Save `manifest` as JSON through a `RealFs` rooted at `db_path`.
+    /// Save the binary manifest through a `RealFs` rooted at `db_path`.
     #[cfg(test)]
-    pub fn save(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
+    pub(crate) fn save(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
@@ -584,7 +584,7 @@ impl ManifestPersistence {
 
     /// Load the manifest strictly through a `RealFs` rooted at `db_path`.
     #[cfg(test)]
-    pub fn load(db_path: &Path) -> Result<Manifest, String> {
+    pub(crate) fn load(db_path: &Path) -> Result<Manifest, String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
@@ -597,7 +597,7 @@ impl ManifestPersistence {
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
     /// This wrapper constructs a `RealFs` and delegates to the fs-backed implementation.
     #[cfg(test)]
-    pub fn save_snapshot_and_truncate_journal(
+    pub(crate) fn save_snapshot_and_truncate_journal(
         db_path: &Path,
         manifest: &Manifest,
     ) -> Result<WrittenCheckpoint, String> {
