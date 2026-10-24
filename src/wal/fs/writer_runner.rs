@@ -583,6 +583,7 @@ impl WriterRunner {
         let sync_result = Self::run_with_effects(effects, || {
             if let Some(file) = file_opt.as_mut() {
                 let sync_start = Instant::now();
+                crate::failpoints::fail_point!("midge::wal::before_physical_sync");
                 file.sync(Durability::Durable)
                     .map(|()| sync_start.elapsed())
             } else {

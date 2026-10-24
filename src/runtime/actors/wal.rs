@@ -137,6 +137,27 @@ pub(crate) struct PreparedGroupOutcome {
     pub failure: Option<MidgeError>,
 }
 
+/// The runtime thread retains this lexical root until physical sync and its
+/// ledger proof settle. It intentionally cannot be sent to another thread.
+pub(crate) struct PendingStrictSync {
+    root: Option<crate::lease::WriterEffectGroup>,
+    physical: crate::wal::traits::WalPendingSync,
+    receipt: WalSyncReceipt,
+    expected: crate::wal::traits::WalSyncPrefix,
+    started: std::time::Instant,
+    deadline: crate::common::OperationDeadline,
+}
+
+impl PendingStrictSync {
+    pub(crate) fn poll(&self) -> Option<MidgeResult<crate::wal::traits::WalSyncCompletion>> {
+        self.physical.try_complete()
+    }
+
+    pub(crate) fn deadline_expired(&self) -> bool {
+        self.deadline.is_expired()
+    }
+}
+
 enum TransactionIntent<'a> {
     Point {
         cf_id: crate::types::ColumnFamilyId,
@@ -246,6 +267,9 @@ impl WalRotationReceipt {
 /// Actor handling WAL operations
 pub struct WalActor {
     io: WalIoState,
+    /// Logical fencing cannot detach or synchronously join an admitted worker
+    /// while the runtime still needs to service completion/control messages.
+    fenced_writer: Option<Box<dyn WalWriter>>,
     /// Operational counters of the owning engine; shared with every writer.
     counters: crate::telemetry::CounterSink,
     storage_budget: Option<Arc<crate::storage::HybridStorage>>,
@@ -298,6 +322,7 @@ mod durability;
 mod rotation;
 mod spill;
 mod staged_writes;
+mod strict_pipeline;
 #[cfg(test)]
 mod test_append;
 mod transaction;
@@ -562,20 +587,31 @@ impl WalActor {
         let previous = std::mem::replace(&mut self.io, WalIoState::Memory);
         self.io = match previous {
             WalIoState::Memory => WalIoState::Memory,
-            WalIoState::Open { fs, .. } => WalIoState::Fenced {
-                fs,
-                reason,
-                sealed_segment: None,
-                authority_lost,
-            },
+            WalIoState::Open { fs, writer } => {
+                self.fenced_writer = Some(writer);
+                WalIoState::Fenced {
+                    fs,
+                    reason,
+                    sealed_segment: None,
+                    authority_lost,
+                }
+            }
             WalIoState::Transitioning {
-                fs, sealed_segment, ..
-            } => WalIoState::Fenced {
                 fs,
-                reason,
+                writer,
                 sealed_segment,
-                authority_lost,
-            },
+                ..
+            } => {
+                if let Some(writer) = writer {
+                    self.fenced_writer = Some(writer);
+                }
+                WalIoState::Fenced {
+                    fs,
+                    reason,
+                    sealed_segment,
+                    authority_lost,
+                }
+            }
             WalIoState::Fenced {
                 fs,
                 sealed_segment,
@@ -647,6 +683,7 @@ impl WalActor {
         };
 
         let actor = Self {
+            fenced_writer: None,
             io,
             counters,
             storage_budget: None,

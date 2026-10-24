@@ -43,6 +43,26 @@ impl WalCoordinator {
         request: SpilledTransactionRequest,
         response_tx: Option<Sender<RuntimeResponse>>,
     ) -> HandleOutcome {
+        if event_loop.wal_group_in_flight() {
+            let SpilledTransactionRequest {
+                request_id,
+                source,
+                assertions,
+                durability_policy,
+                start_sequence,
+                conflict_policy,
+            } = request;
+            event_loop.gate_message_for_wal_pipeline(RuntimeMsg::ApplySpilledTransaction {
+                request_id,
+                source,
+                assertions,
+                durability_policy,
+                start_sequence,
+                conflict_policy,
+                response_tx,
+            });
+            return HandleOutcome::Continue;
+        }
         let SpilledTransactionRequest {
             request_id,
             source,
@@ -120,6 +140,9 @@ impl WalCoordinator {
         if let Some(response_tx) = response_tx {
             event_loop.register_inline_response(request.request_id, response_tx);
         }
+        let Some(request) = event_loop.defer_transaction_behind_wal(request) else {
+            return HandleOutcome::Continue;
+        };
         let Some(request) = event_loop.prepare_detached_validation(request) else {
             return HandleOutcome::Continue;
         };

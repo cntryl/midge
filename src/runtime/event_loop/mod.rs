@@ -42,6 +42,7 @@ mod sst_names;
 mod validation;
 mod verification;
 mod wal;
+mod wal_pipeline;
 mod wal_retention;
 mod wal_transition;
 mod write_batch;
@@ -197,6 +198,7 @@ struct PublicationCoordination {
 }
 
 struct PipelineCoordination {
+    wal_commits: wal_pipeline::WalCommitPipeline,
     validation: validation::ValidationCoordinator,
     durability: DurabilityCoordinator,
     wal_transition: crate::runtime::wal_transition::WalTransitionProtocol,
@@ -341,6 +343,7 @@ impl EventLoop {
                 flush_barrier_waiters: HashMap::new(),
             },
             pipeline: PipelineCoordination {
+                wal_commits: wal_pipeline::WalCommitPipeline::default(),
                 validation: validation::ValidationCoordinator::default(),
                 durability,
                 wal_transition: crate::runtime::wal_transition::WalTransitionProtocol::new(),

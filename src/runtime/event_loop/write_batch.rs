@@ -171,6 +171,9 @@ impl EventLoop {
         msg_rx: &Receiver<RuntimeMsg>,
         max: usize,
     ) -> usize {
+        if self.wal_group_in_flight() {
+            return 0;
+        }
         if self.actors.wal_actor.is_cloud_async() {
             return 0;
         }
@@ -190,6 +193,9 @@ impl EventLoop {
         let mut drained = 0usize;
 
         while drained < max {
+            if self.wal_group_in_flight() {
+                break;
+            }
             if self.routing.pending_msg.is_some() {
                 break;
             }
@@ -268,6 +274,9 @@ impl EventLoop {
         if max == 0 {
             return 0;
         }
+        let Some(initial) = self.defer_transaction_behind_wal(initial) else {
+            return 1;
+        };
         let Some(initial) = self.prepare_detached_validation(initial) else {
             return 1;
         };
@@ -458,24 +467,50 @@ impl EventLoop {
         }
     }
 
-    fn finish_coalesced_transaction_batch(&mut self, batch: CoalescedTransactionBatch) -> usize {
+    fn finish_coalesced_transaction_batch(
+        &mut self,
+        mut batch: CoalescedTransactionBatch,
+    ) -> usize {
+        let retained =
+            crate::runtime::actors::wal::WalActor::prepared_retained_bytes(&batch.prepared);
+        if batch.coalescing_key.durability_policy == crate::wal::DurabilityPolicy::Strict
+            && self.actors.wal_actor.supports_sync_submission()
+            && retained <= super::wal_pipeline::MAX_INFLIGHT_GROUP_BYTES
+        {
+            return self.start_strict_pipeline_batch(batch, retained);
+        }
+        let prepared = std::mem::take(&mut batch.prepared);
+        let outcome = self
+            .actors
+            .wal_actor
+            .append_prepared_transaction_group(&mut self.state, prepared);
+        self.finish_coalesced_transaction_outcome(batch, outcome, None)
+    }
+
+    pub(super) fn finish_coalesced_transaction_outcome(
+        &mut self,
+        batch: CoalescedTransactionBatch,
+        outcome: crate::common::MidgeResult<crate::runtime::actors::wal::PreparedGroupOutcome>,
+        retained: Option<crate::common::resource_budget::ResourceReservation>,
+    ) -> usize {
         let CoalescedTransactionBatch {
             coalescing_key: _,
             staged_writes: _,
             staged_growth: _,
-            prepared,
+            prepared: _,
             mut touched_cfs,
             request_ids,
             mut handled,
             fallback_request,
             deferred_error,
         } = batch;
+        // The raw prepared bytes have either moved into apply or were dropped
+        // with the batch. Release their admission charge before a fallback
+        // starts another group; it must not contend with a settled prefix.
+        drop(retained);
+        self.pipeline.wal_commits.release_admitting();
 
-        let (applied, failure) = match self
-            .actors
-            .wal_actor
-            .append_prepared_transaction_group(&mut self.state, prepared)
-        {
+        let (applied, failure) = match outcome {
             Ok(outcome) => (outcome.applied, outcome.failure),
             Err(error) => (Vec::new(), Some(error)),
         };
@@ -559,6 +594,40 @@ impl EventLoop {
         handled
     }
 
+    pub(super) fn fail_coalesced_transaction_responses(
+        &self,
+        batch: &CoalescedTransactionBatch,
+        error: &MidgeError,
+    ) {
+        for &request_id in &batch.request_ids {
+            self.respond(
+                request_id,
+                RuntimeResponse::Error {
+                    request_id,
+                    error: error.replay(),
+                },
+            );
+        }
+        if let Some((request_id, deferred)) = &batch.deferred_error {
+            self.respond(
+                *request_id,
+                RuntimeResponse::Error {
+                    request_id: *request_id,
+                    error: deferred.replay(),
+                },
+            );
+        }
+        if let Some(request) = &batch.fallback_request {
+            self.respond(
+                request.request_id,
+                RuntimeResponse::Error {
+                    request_id: request.request_id,
+                    error: not_attempted(error.replay()),
+                },
+            );
+        }
+    }
+
     fn prepare_transaction_for_coalescing(
         &mut self,
         request: ApplyTransactionRequest,
@@ -624,6 +693,9 @@ impl EventLoop {
     }
 
     fn apply_single_transaction_request(&mut self, request: ApplyTransactionRequest) {
+        let Some(request) = self.defer_transaction_behind_wal(request) else {
+            return;
+        };
         let Some(request) = self.prepare_detached_validation(request) else {
             return;
         };
@@ -639,6 +711,17 @@ impl EventLoop {
         let Some(request) = self.prepare_detached_validation(request) else {
             return;
         };
+        if !request.ops.is_empty()
+            && self.actors.wal_actor.supports_sync_submission()
+            && self
+                .actors
+                .wal_actor
+                .coalesced_transaction_durability(request.durability_policy)
+                == Some(crate::wal::DurabilityPolicy::Strict)
+        {
+            self.prepare_single_strict_pipeline_request(request, touched_cfs);
+            return;
+        }
         let ApplyTransactionRequest {
             request_id,
             ops,
@@ -670,6 +753,40 @@ impl EventLoop {
                 touched_cfs,
             });
         self.finish_drained_write(request_id, result);
+    }
+
+    fn prepare_single_strict_pipeline_request(
+        &mut self,
+        request: ApplyTransactionRequest,
+        touched_cfs: Vec<crate::types::ColumnFamilyId>,
+    ) {
+        let key = TransactionCoalescingKey {
+            durability_policy: crate::wal::DurabilityPolicy::Strict,
+            has_start_sequence: request.start_sequence.is_some(),
+            conflict_policy: request.conflict_policy,
+        };
+        let request_id = request.request_id;
+        let prepared = self.actors.wal_actor.prepare_transaction_append_with_proof(
+            &mut self.state,
+            crate::runtime::actors::wal::TransactionAppendParams {
+                request_id,
+                ops: request.ops,
+                assertions: request.assertions,
+                durability_policy: request.durability_policy,
+                start_sequence: request.start_sequence,
+                conflict_policy: request.conflict_policy,
+            },
+            &StagedWriteOverlay::default(),
+            request.validation.as_deref(),
+        );
+        match prepared {
+            Ok(prepared) => {
+                let mut batch = CoalescedTransactionBatch::new(key);
+                batch.push_prepared(request_id, Box::new(prepared), touched_cfs);
+                self.finish_coalesced_transaction_batch(batch);
+            }
+            Err(error) => self.finish_drained_write(request_id, Err(error)),
+        }
     }
 
     fn finish_drained_write(
@@ -768,11 +885,11 @@ enum PrepareOutcome {
     },
 }
 
-struct CoalescedTransactionBatch {
+pub(super) struct CoalescedTransactionBatch {
     coalescing_key: TransactionCoalescingKey,
     staged_writes: StagedWriteOverlay,
     staged_growth: HashMap<u32, usize>,
-    prepared: Vec<crate::runtime::actors::wal::PreparedTransactionAppend>,
+    pub(super) prepared: Vec<crate::runtime::actors::wal::PreparedTransactionAppend>,
     touched_cfs: HashMap<u64, Vec<crate::types::ColumnFamilyId>>,
     request_ids: Vec<u64>,
     handled: usize,
@@ -781,6 +898,11 @@ struct CoalescedTransactionBatch {
 }
 
 impl CoalescedTransactionBatch {
+    pub(super) fn accepted_request_count(&self) -> usize {
+        self.handled
+            + usize::from(self.fallback_request.is_some())
+            + usize::from(self.deferred_error.is_some())
+    }
     fn new(coalescing_key: TransactionCoalescingKey) -> Self {
         Self {
             coalescing_key,

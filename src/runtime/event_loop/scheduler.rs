@@ -7,6 +7,10 @@ use std::time::Duration;
 
 impl EventLoop {
     pub(super) fn has_actionable_work(&self) -> bool {
+        if self.wal_group_in_flight() {
+            return self.pipeline.wal_commits.has_ready_work()
+                || self.routing.pending_msg.is_some();
+        }
         if CompactionCoordinator::manual_compaction_wait_timeout(self) == Some(Duration::ZERO) {
             return true;
         }
@@ -93,6 +97,9 @@ impl EventLoop {
     }
 
     pub(super) fn idle_progress_timeout(&self) -> Option<Duration> {
+        if self.wal_group_in_flight() {
+            return Some(Duration::from_millis(1));
+        }
         // Lease loss can occur without a storage completion or pressure
         // change. Keep pending admission and flush barrier waiters observing
         // terminal authority even when no worker completion can arrive.
@@ -195,6 +202,11 @@ impl EventLoop {
     /// writes into its batched sync; the fairness slot runs after dispatch
     /// and leaves the queue in order.
     pub(super) fn background_progress(&mut self, drain_writes_from: Option<&Receiver<RuntimeMsg>>) {
+        self.progress_wal_pipeline();
+        if self.wal_group_in_flight() {
+            self.drain_validation_results(&crossbeam::channel::never());
+            return;
+        }
         CompactionCoordinator::expire_manual_compaction_waiters(self);
         self.wake_write_stall_waiters();
         self.wake_flush_waiters_for_terminal_fencing();
@@ -255,7 +267,10 @@ impl EventLoop {
         msg: RuntimeMsg,
         msg_rx: &Receiver<RuntimeMsg>,
     ) -> HandleOutcome {
-        if self.publication.verification_barrier.token.is_none() && msg.is_mutation() {
+        if self.publication.verification_barrier.token.is_none()
+            && !self.wal_group_in_flight()
+            && msg.is_mutation()
+        {
             CompactionCoordinator::drain_publish_results(self);
             self.drain_flush_worker_results();
             self.maybe_flush_cloud_async_wal();
@@ -366,10 +381,12 @@ impl EventLoop {
             Err(TryRecvError::Disconnected) => return Some(HandleOutcome::Break),
             Err(TryRecvError::Empty) => {}
         }
-        if let Some(storage_rx) = &self.actors.cloud_coordinator.hybrid_storage_events {
-            if let Ok(event) = storage_rx.try_recv() {
-                self.handle_storage_event(event);
-                return Some(HandleOutcome::Continue);
+        if !self.wal_group_in_flight() {
+            if let Some(storage_rx) = &self.actors.cloud_coordinator.hybrid_storage_events {
+                if let Ok(event) = storage_rx.try_recv() {
+                    self.handle_storage_event(event);
+                    return Some(HandleOutcome::Continue);
+                }
             }
         }
         self.progress_pass(msg_rx);
@@ -385,6 +402,10 @@ impl EventLoop {
         const MAX_DRAIN_WRITES_ON_WAKE: usize = 64;
 
         loop {
+            // Worker completions can remain continuously ready. Settle the
+            // ordered WAL prefix before admitting another worker message so
+            // a receipt or its deadline cannot be starved by that traffic.
+            self.progress_wal_pipeline();
             if let Ok(message) = worker_msg_rx.try_recv() {
                 if RuntimeDispatcher::handle(self, message, msg_rx) == HandleOutcome::Break {
                     break;
@@ -412,7 +433,12 @@ impl EventLoop {
             // Storage events are selected under the barrier too: the handler
             // takes only the ones that cannot change the verified layout and
             // defers the rest.
-            let selectable_storage_rx = self.actors.cloud_coordinator.hybrid_storage_events.clone();
+            // Cloud acknowledgements can retire a local WAL segment. Leave
+            // their existing queue ownership intact while a Strict root owns
+            // that segment, then resume event delivery after settlement.
+            let selectable_storage_rx = (!self.wal_group_in_flight())
+                .then(|| self.actors.cloud_coordinator.hybrid_storage_events.clone())
+                .flatten();
             let msg = if let Some(storage_rx) = selectable_storage_rx {
                 if let Some(timeout) = idle_timeout {
                     crossbeam::channel::select! {

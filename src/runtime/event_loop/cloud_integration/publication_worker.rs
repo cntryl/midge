@@ -236,6 +236,9 @@ impl EventLoop {
     }
 
     pub(in crate::runtime::event_loop) fn reap_cloud_publication(&mut self) {
+        if self.wal_group_in_flight() {
+            return;
+        }
         let identity = self
             .actors
             .cloud_coordinator

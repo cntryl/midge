@@ -237,6 +237,9 @@ impl EventLoop {
     }
 
     pub(in crate::runtime::event_loop) fn drain_auto_flush_memtables(&mut self) -> usize {
+        if self.wal_group_in_flight() {
+            return 0;
+        }
         if self.state.is_memory_mode() || self.shutdown.shutting_down {
             return 0;
         }

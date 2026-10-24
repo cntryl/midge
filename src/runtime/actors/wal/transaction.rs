@@ -244,7 +244,21 @@ impl WalActor {
             });
         }
 
-        for prepared in &prepared_transactions {
+        self.preflight_prepared_group(state, &prepared_transactions)?;
+
+        let strict_group = prepared_transactions
+            .iter()
+            .all(|prepared| matches!(prepared.effective_durability, DurabilityPolicy::Strict));
+        self.append_prepared_group_wal(state, &prepared_transactions, strict_group)?;
+        self.apply_prepared_group(state, prepared_transactions, strict_group)
+    }
+
+    pub(super) fn preflight_prepared_group(
+        &self,
+        state: &mut RuntimeState,
+        prepared_transactions: &[PreparedTransactionAppend],
+    ) -> MidgeResult<()> {
+        for prepared in prepared_transactions {
             self.ensure_write_durability_available(state, prepared.effective_durability)?;
             Self::ensure_family_accepts_writes(state, prepared.sequence_plan.cf_id)?;
         }
@@ -254,13 +268,15 @@ impl WalActor {
             .flat_map(|prepared| prepared.apply_ops.iter())
             .collect::<Vec<_>>();
         Self::preflight_prepared_transaction_ops(state, &apply_ops)?;
-        self.ensure_lease_validity()?;
+        self.ensure_lease_validity()
+    }
 
-        let strict_group = prepared_transactions
-            .iter()
-            .all(|prepared| matches!(prepared.effective_durability, DurabilityPolicy::Strict));
-        self.append_prepared_group_wal(state, &prepared_transactions, strict_group)?;
-
+    pub(crate) fn apply_prepared_group(
+        &mut self,
+        state: &mut RuntimeState,
+        prepared_transactions: Vec<PreparedTransactionAppend>,
+        strict_group: bool,
+    ) -> MidgeResult<PreparedGroupOutcome> {
         let mut results = Vec::with_capacity(prepared_transactions.len());
         let mut pending = prepared_transactions.into_iter();
         while let Some(prepared) = pending.next() {
@@ -343,24 +359,7 @@ impl WalActor {
         strict: bool,
     ) -> MidgeResult<()> {
         let group = if strict {
-            let acquired = self
-                .writer()
-                .and_then(crate::wal::WalWriter::writer_group_capability)
-                .map(|writer| writer.begin_group(self.storage_io_timeout))
-                .transpose();
-            match acquired {
-                Ok(group) => group,
-                Err(error) => {
-                    if Self::is_authority_failure(&error) {
-                        self.fence_with_cause(
-                            state,
-                            format!("WAL group admission authority validation failed: {error}"),
-                            true,
-                        );
-                    }
-                    return Err(error);
-                }
-            }
+            self.begin_strict_writer_group(state)?
         } else {
             None
         };
@@ -384,6 +383,30 @@ impl WalActor {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn begin_strict_writer_group(
+        &mut self,
+        state: &mut RuntimeState,
+    ) -> MidgeResult<Option<crate::lease::WriterEffectGroup>> {
+        let acquired = self
+            .writer()
+            .and_then(crate::wal::WalWriter::writer_group_capability)
+            .map(|writer| writer.begin_group(self.storage_io_timeout))
+            .transpose();
+        match acquired {
+            Ok(group) => Ok(group),
+            Err(error) => {
+                if Self::is_authority_failure(&error) {
+                    self.fence_with_cause(
+                        state,
+                        format!("WAL group admission authority validation failed: {error}"),
+                        true,
+                    );
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Fence the WAL for group units none of whose ops reached the memtables.
@@ -671,7 +694,7 @@ impl WalActor {
         Ok(Some(batch_record))
     }
 
-    fn append_prepared_transaction_batches(
+    pub(super) fn append_prepared_transaction_batches(
         &mut self,
         state: &mut RuntimeState,
         prepared_transactions: &[PreparedTransactionAppend],

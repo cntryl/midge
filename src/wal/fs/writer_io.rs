@@ -214,9 +214,10 @@ impl FsWalWriterIo {
             digest: Arc::clone(&writer.digest),
         };
         let runner = WriterRunner::new(config);
+        let failpoint_gate = crate::failpoints::worker_gate();
         let handle = std::thread::Builder::new()
             .name("midge-wal-writer".to_string())
-            .spawn(move || runner.run())?;
+            .spawn(move || failpoint_gate.run(|| runner.run()))?;
 
         *writer.writer_thread.lock() = Some(handle);
 
@@ -461,6 +462,10 @@ impl FsWalWriterIo {
 }
 
 impl WalWriter for FsWalWriterIo {
+    fn supports_sync_submission(&self) -> bool {
+        true
+    }
+
     fn submit_sync_prefix(
         &self,
         prefix: crate::wal::traits::WalSyncPrefix,

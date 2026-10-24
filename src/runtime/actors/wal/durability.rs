@@ -115,7 +115,7 @@ impl WalActor {
         self.commit_sync_io(state, receipt)
     }
 
-    fn validate_sync_authority(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+    pub(super) fn validate_sync_authority(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
         let admission_prevalidated =
             std::mem::replace(&mut self.sync_authority_prevalidated, false);
         self.ensure_lease_validity()?;
@@ -181,19 +181,7 @@ impl WalActor {
         // Capture the exact admitted prefix before I/O. Future queued work
         // must never be included by reading mutable writer/state fields after
         // the physical barrier returns.
-        let receipt = WalSyncReceipt {
-            durable_sequence: self
-                .writer()
-                .and_then(|writer| writer.tail().last_seq)
-                .unwrap_or(state.sequence),
-            pending_writes: state.wal.pending_writes,
-            pending_sync_count: self.pending_sync_count,
-            bytes_since_sync: self.bytes_since_sync,
-            end_offset: self.writer().map(crate::wal::WalWriter::current_pos),
-            writer_epoch: self.current_epoch,
-            segment_id: state.wal.open_segment(),
-            generation: None,
-        };
+        let receipt = self.capture_sync_receipt(state);
 
         if self.writer().is_some() {
             // Bound the acknowledgement wait so a degraded storage device cannot
@@ -285,7 +273,23 @@ impl WalActor {
         Ok(receipt)
     }
 
-    fn persist_sync_boundary(
+    pub(super) fn capture_sync_receipt(&self, state: &RuntimeState) -> WalSyncReceipt {
+        WalSyncReceipt {
+            durable_sequence: self
+                .writer()
+                .and_then(|writer| writer.tail().last_seq)
+                .unwrap_or(state.sequence),
+            pending_writes: state.wal.pending_writes,
+            pending_sync_count: self.pending_sync_count,
+            bytes_since_sync: self.bytes_since_sync,
+            end_offset: self.writer().map(crate::wal::WalWriter::current_pos),
+            writer_epoch: self.current_epoch,
+            segment_id: state.wal.open_segment(),
+            generation: None,
+        }
+    }
+
+    pub(super) fn persist_sync_boundary(
         &mut self,
         state: &mut RuntimeState,
         group: Option<&crate::lease::WriterEffectGroup>,
@@ -343,7 +347,7 @@ impl WalActor {
     // The failpoint expands to an early return only with the `failpoints`
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
-    fn sync_failure_boundary() -> MidgeResult<()> {
+    pub(super) fn sync_failure_boundary() -> MidgeResult<()> {
         crate::failpoints::fail_point!("midge::wal::inject_no_space_on_sync", |_| Err(
             MidgeError::NoSpace(
                 "wal writer fsync failed: failpoint: no space on WAL sync".to_string()
@@ -355,7 +359,7 @@ impl WalActor {
     // The failpoint expands to an early return only with the `failpoints`
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
-    fn after_fsync_boundary() -> MidgeResult<()> {
+    pub(super) fn after_fsync_boundary() -> MidgeResult<()> {
         crate::failpoints::fail_point!("midge::wal::after_fsync_before_durable_frontier", |_| Err(
             MidgeError::Internal(
                 "failpoint: WAL fsync completed before logical commit".to_string()

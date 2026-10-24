@@ -678,3 +678,19 @@ reuse, a held worker with a full queue, and post-panic progress. The existing
 single production slot is preserved until the multi-job coordinator/shared
 budget handoff is ready. The latest shared compile is in concurrent name-
 prefetch/interface edits; these tests have not executed.
+
+#940's ordered resident Strict fsync stage now parks one exact-prefix physical
+sync, native root and transition ticket on the loop. Reads/control/validation
+can progress against the prior applied cut; later writes and transitions queue
+within bounds until the whole prefix settles. Deadlines fence logical progress
+but retain root, worker and memory ownership until physical termination. The
+same ticket/coordinator path commits receipt then applies/publishes in order.
+Three existing thread fixtures construct EventLoop on its owning thread to
+preserve the lexical root's !Send bound.
+
+An active physical-fsync gate regression checks old-cut read/control progress,
+blocked later BestEffort success, ordered visibility and stale-snapshot behavior.
+Failpoint test targets compile cleanly; no behavioral test execution is claimed.
+Async next-group append, writer encoding/copy work, concurrent apply, spilled
+proof/sync handoff and oversized Strict compatibility remain unfinished. #904's
+explicit recovery-window decision is still pending.

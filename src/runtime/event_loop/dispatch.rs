@@ -24,6 +24,9 @@ impl RuntimeDispatcher {
         msg: RuntimeMsg,
         msg_rx: &Receiver<RuntimeMsg>,
     ) -> HandleOutcome {
+        let Some(msg) = event_loop.gate_message_for_wal_pipeline(msg) else {
+            return HandleOutcome::Continue;
+        };
         if let Some(outcome) = Self::handle_early_control(event_loop, &msg) {
             return outcome;
         }

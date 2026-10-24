@@ -538,6 +538,21 @@ pub(crate) struct TransactionOpSource {
 }
 
 impl TransactionOpSource {
+    pub(crate) fn retained_memory_bytes(&self) -> usize {
+        self.resident_bytes
+            .saturating_add(self.runs.iter().fold(0usize, |total, run| {
+                total
+                    .saturating_add(std::mem::size_of::<SpillRun>())
+                    .saturating_add(run.path.0.len())
+                    .saturating_add(run.range_path.0.len())
+                    .saturating_add(
+                        run.key_bounds
+                            .as_ref()
+                            .map_or(0, |(first, last)| first.len().saturating_add(last.len())),
+                    )
+            }))
+    }
+
     #[must_use]
     pub(crate) fn len(&self) -> usize {
         self.op_count

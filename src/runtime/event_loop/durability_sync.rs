@@ -192,6 +192,17 @@ impl EventLoop {
                 return Err(error);
             }
         };
+        self.commit_synced_generation(source, sealed_generation, next_generation, ticket, receipt)
+    }
+
+    pub(super) fn commit_synced_generation(
+        &mut self,
+        source: CompletionSource,
+        sealed_generation: u64,
+        next_generation: Option<u64>,
+        ticket: crate::runtime::wal_transition::WalSyncTicket,
+        receipt: crate::runtime::actors::wal::WalSyncReceipt,
+    ) -> crate::common::MidgeResult<()> {
         if self.actors.wal_actor.is_cloud_async() {
             if let Err(error) =
                 self.actors
@@ -269,7 +280,10 @@ impl EventLoop {
         }
     }
 
-    fn next_wal_generation(&self, current: u64) -> crate::common::MidgeResult<Option<u64>> {
+    pub(super) fn next_wal_generation(
+        &self,
+        current: u64,
+    ) -> crate::common::MidgeResult<Option<u64>> {
         if self.actors.wal_actor.is_cloud_async() {
             return Ok(None);
         }
@@ -293,6 +307,9 @@ impl EventLoop {
     }
 
     fn sync_batched_wal(&mut self, msg_rx: Option<&Receiver<RuntimeMsg>>) {
+        if self.wal_group_in_flight() {
+            return;
+        }
         const MAX_DRAIN_WRITES_BEFORE_SYNC: usize = 4096;
 
         if self.actors.wal_actor.is_cloud_async() {

@@ -159,6 +159,11 @@ pub trait GroupedWalWriter: Send + Sync {
 }
 
 pub trait WalWriter: Send + Sync {
+    /// Whether this writer implements nonblocking sync submission.
+    fn supports_sync_submission(&self) -> bool {
+        false
+    }
+
     /// Submit a physical sync without waiting. Unsupported writers return
     /// None and retain the synchronous contract.
     ///
