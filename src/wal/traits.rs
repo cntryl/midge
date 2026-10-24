@@ -41,6 +41,95 @@ impl WalAppendError {
 /// (#843); records carry no epoch of their own.
 pub(crate) type WriteAuthority = std::sync::Arc<dyn crate::wal::writer_authority::WriterAuthority>;
 
+/// Exact admitted prefix requested from a nonblocking physical sync.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalSyncPrefix {
+    pub barrier_id: u64,
+    pub writer_epoch: u64,
+    pub segment_id: u64,
+    pub first_sequence: u64,
+    pub last_sequence: u64,
+    pub end_offset: u64,
+}
+
+/// Physical completion for precisely the requested prefix. The device may
+/// have covered later bytes too; those bytes are never added to this receipt.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalSyncCompletion {
+    pub prefix: WalSyncPrefix,
+    pub elapsed: Duration,
+}
+
+/// A loop-owned pending sync. Dropping a caller's wait does not revoke its
+/// admitted storage effect; the native root remains owned until settlement.
+#[doc(hidden)]
+pub struct WalPendingSync {
+    response: std::sync::mpsc::Receiver<MidgeResult<WalSyncCompletion>>,
+    failure: std::sync::Arc<dyn Fn() -> Option<MidgeError> + Send + Sync>,
+    _root: Option<crate::lease::WriterEffectGroup>,
+    settled: std::cell::Cell<bool>,
+}
+
+impl WalPendingSync {
+    pub(crate) fn new(
+        response: std::sync::mpsc::Receiver<MidgeResult<WalSyncCompletion>>,
+        failure: std::sync::Arc<dyn Fn() -> Option<MidgeError> + Send + Sync>,
+        root: Option<crate::lease::WriterEffectGroup>,
+    ) -> Self {
+        Self {
+            response,
+            failure,
+            _root: root,
+            settled: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Poll without blocking the runtime thread.
+    pub fn try_complete(&self) -> Option<MidgeResult<WalSyncCompletion>> {
+        if self.settled.get() {
+            return None;
+        }
+        let result = match self.response.try_recv() {
+            Ok(result) => Some(result),
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err((self.failure)()
+                .unwrap_or_else(|| {
+                    MidgeError::Internal("WAL writer exited before sync completion".into())
+                }))),
+        };
+        if result.is_some() {
+            self.settled.set(true);
+        }
+        result
+    }
+
+    /// Compatibility wait for existing synchronous callers.
+    ///
+    /// # Errors
+    /// Returns the physical failure, a deadline expiry, or worker termination.
+    pub fn wait_with_timeout(&self, timeout: Duration) -> MidgeResult<WalSyncCompletion> {
+        if let Some(result) = self.try_complete() {
+            return result;
+        }
+        let result = match self.response.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Err(MidgeError::Timeout(
+                    "WAL sync completion deadline expired".into(),
+                ))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err((self.failure)()
+                .unwrap_or_else(|| {
+                    MidgeError::Internal("WAL writer exited before sync completion".into())
+                })),
+        };
+        self.settled.set(true);
+        result
+    }
+}
+
 /// A writer that can explicitly attach native authority to submitted work.
 #[doc(hidden)]
 pub trait GroupedWalWriter: Send + Sync {
@@ -70,6 +159,20 @@ pub trait GroupedWalWriter: Send + Sync {
 }
 
 pub trait WalWriter: Send + Sync {
+    /// Submit a physical sync without waiting. Unsupported writers return
+    /// None and retain the synchronous contract.
+    ///
+    /// # Errors
+    /// Returns admission/identity failures before submission; physical failures
+    /// arrive through the returned pending operation.
+    fn submit_sync_prefix(
+        &self,
+        _prefix: WalSyncPrefix,
+        _timeout: Duration,
+        _group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<MidgeResult<WalPendingSync>> {
+        None
+    }
     /// Install the authority fence held around each background storage effect.
     fn set_write_authority(&self, _authority: Option<WriteAuthority>) {}
 

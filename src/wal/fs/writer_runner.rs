@@ -29,6 +29,14 @@ pub(crate) struct PendingSync {
     pub(crate) id: u64,
     pub(crate) writes_through: u64,
     pub(crate) effect: PendingWriterEffect,
+    pub(crate) completion: Option<PendingSyncCompletion>,
+}
+
+pub(crate) struct PendingSyncCompletion {
+    pub(crate) prefix: crate::wal::traits::WalSyncPrefix,
+    pub(crate) sender: std::sync::mpsc::SyncSender<
+        crate::common::MidgeResult<crate::wal::traits::WalSyncCompletion>,
+    >,
 }
 
 impl SyncState {
@@ -514,32 +522,65 @@ impl WriterRunner {
             .last()
             .expect("nonempty ready sync requests have a final barrier")
             .id;
-        let effects = match requests
+        let (pending_effects, completions): (Vec<_>, Vec<_>) = requests
             .into_iter()
-            .map(|request| request.effect.activate())
+            .map(|request| (request.effect, request.completion))
+            .unzip();
+        let result = pending_effects
+            .into_iter()
+            .map(PendingWriterEffect::activate)
             .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(effects) => effects,
-            Err(error) => {
-                self.mark_sync_failure(error);
-                return Err(());
+            .and_then(|effects| {
+                let result = self.perform_physical_sync(file_opt, &effects);
+                // A terminal receipt must not leave an active child behind
+                // for the loop-owned lexical root to wait on.
+                drop(effects);
+                result
+            });
+        match &result {
+            Ok(sync_elapsed) => {
+                self.config.counters.record(|m| {
+                    m.record_wal_fsync_ns(
+                        u64::try_from(sync_elapsed.as_nanos()).unwrap_or(u64::MAX),
+                    );
+                    m.record_wal_fsync_count();
+                });
+                self.config.sync_state.lock().completed_fsyncs = completed;
+                self.config.sync_cond.notify_all();
             }
-        };
+            Err(error) => self.mark_sync_failure(error.replay()),
+        }
+        for completion in completions.into_iter().flatten() {
+            let receipt = result
+                .as_ref()
+                .map(|elapsed| crate::wal::traits::WalSyncCompletion {
+                    prefix: completion.prefix,
+                    elapsed: *elapsed,
+                })
+                .map_err(crate::common::MidgeError::replay);
+            let _ = completion.sender.send(receipt);
+        }
+        result.map(|_| ()).map_err(|_| ())
+    }
 
+    fn perform_physical_sync<'a>(
+        &'a self,
+        file_opt: &mut Option<Box<dyn crate::io::File + 'a>>,
+        effects: &[ActiveRequestEffect],
+    ) -> crate::common::MidgeResult<Duration> {
         if file_opt.is_none() {
             match self.open_file_handle() {
                 Ok(file) => *file_opt = Some(file),
                 Err(error) => {
                     tracing::error!(error = ?error, "WAL fsync failed before sync - marking sync as failed");
-                    self.mark_sync_failure(writer_error(
+                    return Err(writer_error(
                         "wal writer could not reopen file handle for fsync",
                         &error,
                     ));
-                    return Err(());
                 }
             }
         }
-        let sync_result = Self::run_with_effects(&effects, || {
+        let sync_result = Self::run_with_effects(effects, || {
             if let Some(file) = file_opt.as_mut() {
                 let sync_start = Instant::now();
                 file.sync(Durability::Durable)
@@ -548,33 +589,9 @@ impl WriterRunner {
                 Ok(Duration::ZERO)
             }
         });
-        let sync_result = match sync_result {
-            Ok(result) => result,
-            Err(error) => {
-                self.mark_sync_failure(error.error);
-                return Err(());
-            }
-        };
-        match sync_result {
-            Ok(sync_elapsed) => {
-                self.config.counters.record(|m| {
-                    m.record_wal_fsync_ns(
-                        u64::try_from(sync_elapsed.as_nanos()).unwrap_or(u64::MAX),
-                    );
-                    m.record_wal_fsync_count();
-                });
-            }
-            Err(error) => {
-                tracing::error!(error = ?error, "WAL fsync failed - marking sync as failed");
-                self.mark_sync_failure(writer_error("wal writer fsync failed", &error));
-                return Err(());
-            }
-        }
-
-        let mut s = self.config.sync_state.lock();
-        s.completed_fsyncs = completed;
-        self.config.sync_cond.notify_all();
-        Ok(())
+        sync_result
+            .map_err(|error| error.error)?
+            .map_err(|error| writer_error("wal writer fsync failed", &error))
     }
 
     fn take_ready_syncs(&self) -> Result<Vec<PendingSync>, ()> {
@@ -941,6 +958,7 @@ mod tests {
                     id: state.pending_fsyncs,
                     writes_through: state.completed_writes,
                     effect,
+                    completion: None,
                 };
                 state.requests.push_back(request);
             }

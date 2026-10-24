@@ -558,3 +558,14 @@ until the unit drains, after which the acknowledged value recovers. Existing
 graceful/retry and outliving-transaction tests remain active. Combined failpoint
 test targets compile; execution and broader blocked-provider campaigns remain
 pending.
+
+The following #940 slice adds nonblocking lower-writer sync submission. Typed
+prefix/completion identities bind barrier, epoch, segment, sequence range and
+end offset. The pending handle polls once and retains native root ownership
+through settlement; the worker broadcasts completion only after child effects
+settle. Async sync admission is bounded at128 queued requests. The synchronous
+compatibility path waits on the same receipt and keeps its admission/deadline
+behavior. Active held-worker/native-root and wrong-prefix regressions are
+included; failpoint test targets compile without warnings. No behavioral tests
+have executed for this slice. Event-loop pipeline enablement, append completion
+events and writer-thread encoding are still being implemented.

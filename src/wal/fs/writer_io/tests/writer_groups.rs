@@ -664,3 +664,93 @@ fn should_report_unchanged_batch_when_a_child_validation_fails_after_its_noop_ca
     assert!(store.acquire_leadership("successor").unwrap().epoch > 1);
     Ok(())
 }
+
+#[test]
+fn should_return_pending_sync_before_physical_worker_is_released() -> MidgeResult<()> {
+    // Arrange
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let fs = Arc::new(SyncCountingFs {
+        open_gate: Some(Arc::new((entered_tx, std::sync::Mutex::new(release_rx)))),
+        ..SyncCountingFs::default()
+    });
+    let (writer, store) = native_writer(fs, Duration::from_secs(5))?;
+    let release = ReleaseGate(Some(release_tx));
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("writer reached physical open");
+    let prefix = crate::wal::traits::WalSyncPrefix {
+        barrier_id: 940,
+        writer_epoch: writer.header.epoch,
+        segment_id: writer.header.id,
+        first_sequence: 0,
+        last_sequence: 0,
+        end_offset: writer.current_pos(),
+    };
+
+    // Act
+    let pending = writer
+        .submit_sync_prefix(prefix, Duration::from_secs(5), None)
+        .expect("nonblocking capability")?;
+
+    // Assert: the caller already owns a pending handle while the physical
+    // worker has not even opened its file, and no completion is fabricated.
+    assert!(pending.try_complete().is_none());
+    assert_eq!(writer.sync_state.lock().requests.len(), 1);
+    release.release();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let receipt = loop {
+        if let Some(result) = pending.try_complete() {
+            break result?;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "physical sync did not settle"
+        );
+        std::thread::yield_now();
+    };
+    assert_eq!(receipt.prefix, prefix);
+    assert!(pending.try_complete().is_none());
+    drop(pending);
+    assert!(store.acquire_leadership("successor").unwrap().epoch > 1);
+    Ok(())
+}
+
+#[test]
+fn should_reject_nonmatching_prefix_without_enqueuing_physical_sync() -> MidgeResult<()> {
+    for mismatch in 0..4 {
+        // Arrange
+        let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+        let writer = FsWalWriterIo::new("prefix.log", fs)?;
+        writer
+            .append_record_accounted(&record(1))
+            .map_err(|failure| failure.error)?;
+        let mut prefix = crate::wal::traits::WalSyncPrefix {
+            barrier_id: 978,
+            writer_epoch: writer.header.epoch,
+            segment_id: writer.header.id,
+            first_sequence: 1,
+            last_sequence: 1,
+            end_offset: writer.current_pos(),
+        };
+        match mismatch {
+            0 => prefix.writer_epoch += 1,
+            1 => prefix.segment_id += 1,
+            2 => prefix.last_sequence += 1,
+            _ => prefix.end_offset += 1,
+        }
+
+        // Act
+        let result = writer
+            .submit_sync_prefix(prefix, Duration::from_secs(1), None)
+            .expect("nonblocking capability");
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::InvalidArgument(_))
+        ));
+        assert_eq!(writer.sync_state.lock().pending_fsyncs, 0);
+    }
+    Ok(())
+}

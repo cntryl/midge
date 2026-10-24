@@ -34,6 +34,7 @@ use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
 const MAX_BACKOFF_MS: u64 = 100;
 const MAX_WAIT_ATTEMPTS: u32 = 50;
+const MAX_PENDING_SYNC_REQUESTS: usize = 128;
 
 /// Filesystem-backed WAL writer using `io::Fs`.
 ///
@@ -460,6 +461,15 @@ impl FsWalWriterIo {
 }
 
 impl WalWriter for FsWalWriterIo {
+    fn submit_sync_prefix(
+        &self,
+        prefix: crate::wal::traits::WalSyncPrefix,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<MidgeResult<crate::wal::traits::WalPendingSync>> {
+        Some(self.enqueue_sync_prefix(prefix, timeout, group))
+    }
+
     fn set_write_authority(&self, authority: Option<crate::wal::traits::WriteAuthority>) {
         *self.write_authority.write() = authority;
     }
@@ -545,6 +555,77 @@ impl GroupedWalWriter for FsWalWriterIo {
 }
 
 impl FsWalWriterIo {
+    fn enqueue_sync_prefix(
+        &self,
+        prefix: crate::wal::traits::WalSyncPrefix,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<crate::wal::traits::WalPendingSync> {
+        let started = std::time::Instant::now();
+        if let Some(error) = self.writer_failure() {
+            return Err(error);
+        }
+        if prefix.writer_epoch != self.header.epoch
+            || prefix.segment_id != self.header.id
+            || prefix.first_sequence > prefix.last_sequence
+            || prefix.end_offset < HEADER_LEN as u64
+            || prefix.end_offset != self.current_pos()
+            || prefix.last_sequence
+                != self
+                    .tail
+                    .lock()
+                    .last_seq
+                    .unwrap_or(self.header.prev.last_seq)
+        {
+            return Err(MidgeError::InvalidArgument(
+                "WAL sync prefix does not match the acknowledged segment tail".into(),
+            ));
+        }
+        let authority = self.write_authority.read().clone();
+        let (effect, root) = PendingWriterEffect::admit(authority, group, timeout)?;
+        let (sender, response) = std::sync::mpsc::sync_channel(1);
+        {
+            let _queue = self.queue.lock();
+            let mut state = self.sync_state.lock();
+            if let Some(error) = state.failure() {
+                return Err(error);
+            }
+            if started.elapsed() >= timeout {
+                return Err(MidgeError::Timeout(
+                    "WAL sync deadline expired before submission".into(),
+                ));
+            }
+            if state.requests.len() >= MAX_PENDING_SYNC_REQUESTS {
+                return Err(MidgeError::WriteStall(
+                    "WAL sync request queue is full".into(),
+                ));
+            }
+            if state.submitted_writes != state.completed_writes {
+                return Err(MidgeError::WriteStall(
+                    "WAL sync prefix awaits an append acknowledgement".into(),
+                ));
+            }
+            let id = state.pending_fsyncs.checked_add(1).ok_or_else(|| {
+                MidgeError::ResourceLimit("WAL sync barrier identity space exhausted".into())
+            })?;
+            state.pending_fsyncs = id;
+            let writes_through = state.submitted_writes;
+            state.requests.push_back(super::writer_runner::PendingSync {
+                id,
+                writes_through,
+                effect,
+                completion: Some(super::writer_runner::PendingSyncCompletion { prefix, sender }),
+            });
+        }
+        self.queue_cond.notify_one();
+        let failure_state = Arc::clone(&self.sync_state);
+        Ok(crate::wal::traits::WalPendingSync::new(
+            response,
+            Arc::new(move || failure_state.lock().failure()),
+            root,
+        ))
+    }
+
     fn append_batch_with_group(
         &self,
         records: &[WalRecord],
@@ -574,6 +655,9 @@ impl FsWalWriterIo {
         timeout: Duration,
         group: Option<&crate::lease::WriterEffectGroup>,
     ) -> MidgeResult<()> {
+        if let Some(result) = self.sync_acknowledged_prefix(timeout, group) {
+            return result;
+        }
         if let Some(error) = self.writer_failure() {
             return Err(error);
         }
@@ -585,28 +669,8 @@ impl FsWalWriterIo {
         // Note: we MUST request fsync even if queue is empty, because data may have
         // been written to the file but not yet fsynced (the writer thread writes
         // asynchronously).
-        let my_sync_id = {
-            let _queue = self.queue.lock();
-            let mut s = self.sync_state.lock();
-            if let Some(error) = s.failure() {
-                return Err(error);
-            }
-            if native && sync_start.elapsed() >= timeout {
-                return Err(MidgeError::Timeout(format!(
-                    "WAL sync deadline expired before queue submission after {timeout:?}"
-                )));
-            }
-            s.pending_fsyncs = s.pending_fsyncs.saturating_add(1);
-            let request = super::writer_runner::PendingSync {
-                id: s.pending_fsyncs,
-                writes_through: s.submitted_writes,
-                effect,
-            };
-            s.requests.push_back(request);
-            s.pending_fsyncs
-        };
-        // Wake writer so it can perform fsync
-        self.queue_cond.notify_one();
+        let (my_sync_id, pending) =
+            self.enqueue_legacy_sync(effect, sync_start, timeout, native)?;
 
         let mut s = self.sync_state.lock();
         while s.completed_fsyncs < my_sync_id {
@@ -636,7 +700,114 @@ impl FsWalWriterIo {
                 return Err(crate::common::MidgeError::Timeout(message));
             }
         }
-        Ok(())
+        drop(s);
+        pending
+            .wait_with_timeout(timeout.saturating_sub(sync_start.elapsed()))
+            .map(|_| ())
+    }
+
+    fn enqueue_legacy_sync(
+        &self,
+        effect: PendingWriterEffect,
+        started: std::time::Instant,
+        timeout: Duration,
+        native: bool,
+    ) -> MidgeResult<(u64, crate::wal::traits::WalPendingSync)> {
+        let (first_sequence, last_sequence) = {
+            let tail = self.tail.lock();
+            (
+                tail.first_seq.unwrap_or(0),
+                tail.last_seq.unwrap_or(self.header.prev.last_seq),
+            )
+        };
+        let (sender, response) = std::sync::mpsc::sync_channel(1);
+        let my_sync_id = {
+            let _queue = self.queue.lock();
+            let mut s = self.sync_state.lock();
+            if let Some(error) = s.failure() {
+                return Err(error);
+            }
+            if native && started.elapsed() >= timeout {
+                return Err(MidgeError::Timeout(format!(
+                    "WAL sync deadline expired before queue submission after {timeout:?}"
+                )));
+            }
+            s.pending_fsyncs = s.pending_fsyncs.saturating_add(1);
+            let request = super::writer_runner::PendingSync {
+                id: s.pending_fsyncs,
+                writes_through: s.submitted_writes,
+                effect,
+                completion: Some(super::writer_runner::PendingSyncCompletion {
+                    prefix: crate::wal::traits::WalSyncPrefix {
+                        barrier_id: s.pending_fsyncs,
+                        writer_epoch: self.header.epoch,
+                        segment_id: self.header.id,
+                        first_sequence,
+                        last_sequence,
+                        end_offset: self.current_pos(),
+                    },
+                    sender,
+                }),
+            };
+            s.requests.push_back(request);
+            s.pending_fsyncs
+        };
+        // Wake writer so it can perform fsync
+        self.queue_cond.notify_one();
+
+        let failure_state = Arc::clone(&self.sync_state);
+        let pending = crate::wal::traits::WalPendingSync::new(
+            response,
+            Arc::new(move || failure_state.lock().failure()),
+            None,
+        );
+
+        Ok((my_sync_id, pending))
+    }
+
+    /// Existing callers wait on the same typed operation that the event loop
+    /// can park later. Concurrent raw appends retain the queued legacy path.
+    fn sync_acknowledged_prefix(
+        &self,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<MidgeResult<()>> {
+        let started = std::time::Instant::now();
+        {
+            let state = self.sync_state.lock();
+            if state.submitted_writes != state.completed_writes {
+                return None;
+            }
+        }
+        let (first_sequence, last_sequence) = {
+            let tail = self.tail.lock();
+            (
+                tail.first_seq.unwrap_or(0),
+                tail.last_seq.unwrap_or(self.header.prev.last_seq),
+            )
+        };
+        let prefix = crate::wal::traits::WalSyncPrefix {
+            barrier_id: self.sync_state.lock().pending_fsyncs.saturating_add(1),
+            writer_epoch: self.header.epoch,
+            segment_id: self.header.id,
+            first_sequence,
+            last_sequence,
+            end_offset: self.current_pos(),
+        };
+        let pending = match self.submit_sync_prefix(prefix, timeout, group)? {
+            Ok(pending) => pending,
+            Err(MidgeError::WriteStall(_) | MidgeError::InvalidArgument(_)) => return None,
+            Err(error) => return Some(Err(error)),
+        };
+        let result = pending.wait_with_timeout(timeout.saturating_sub(started.elapsed()));
+        if let Err(error @ MidgeError::Timeout(_)) = &result {
+            let mut state = self.sync_state.lock();
+            state.sync_failed = true;
+            state.last_sync_error = Some(error.replay());
+            self.sync_cond.notify_all();
+            self.queue_cond.notify_all();
+        }
+        Some(result.map(|_| ()))
     }
 }
 
