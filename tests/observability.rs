@@ -651,7 +651,6 @@ mod recovery_metrics_api {
     //! Validates engine-level visibility into startup recovery work.
 
     use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
-    use std::fs;
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;

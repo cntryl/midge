@@ -2877,7 +2877,9 @@ mod recovery_policy_api {
         ] {
             let path = db_path.join(name);
             if path.exists() {
-                fs::write(&path, b"not-a-valid-manifest").expect("corrupt manifest file");
+                let mut bytes = fs::read(&path).expect("read current-format authority");
+                *bytes.last_mut().expect("authority contains a checksum") ^= 0xff;
+                fs::write(&path, bytes).expect("corrupt manifest checksum");
             }
         }
 
@@ -2893,7 +2895,7 @@ mod recovery_policy_api {
 
         // Assert
         assert!(
-            message.contains("manifest snapshot"),
+            message.contains("metadata CRC32C mismatch"),
             "unexpected error: {message}"
         );
         assert_eq!(
