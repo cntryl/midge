@@ -14,6 +14,10 @@ Midge is currently in the 0.4 release line. Compatibility expectations for pre-1
 - Loom models of the lock-free skiplist's insert, append and read races under
   `cfg(midge_loom)`, and a documented miri run of its unit tests, both part of
   the local gate for memtable changes (#931).
+- A differential fuzz target and proptest, `engine_differential`, that replay
+  random multi-key histories with snapshots, TTL, range deletes, flushes,
+  compactions, reopens and power-loss crashes against a `BTreeMap` model, plus
+  a concurrent-writer mode reconciled by commit sequence (#951).
 
 ### Changed
 

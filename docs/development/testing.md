@@ -125,6 +125,17 @@ endpoint override, not the native OCI API.
 The scheduled fuzz workflow builds every registered target and runs bounded
 smokes. Local smoke commands should use the same time and per-input bounds.
 
+The `engine_differential` target (#951) drives the public engine API from the
+input bytes (multi-key transactions, TTL, range deletes, snapshots, flushes,
+compactions, reopens, power-loss crashes) and checks every read against a
+`BTreeMap` model; the driver lives in `tests/support/differential.rs` and
+`tests/engine_differential.rs` runs it as a proptest with 256 cases
+(`PROPTEST_CASES` overrides) plus the corpus seeds. Budget: at least four
+machine-hours per release, `cargo +nightly fuzz run -s none engine_differential
+fuzz/corpus/engine_differential -- -max_len=512`, with new corpus entries
+committed when they reach code the seeds did not. A finding is a `flea` with a
+regression test; the fuzzer is never left failing silently.
+
 Sqrzl provider-engine tests require the `sqrzl-tests` feature. The
 provider integration workflows use GitHub-managed Sqrzl services and run tests
 through Cargo, without start, wait, or cleanup steps. Once selected,
