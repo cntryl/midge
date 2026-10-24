@@ -199,11 +199,24 @@ impl SstFileIo {
         let layout = crate::sst::data_block::DataBlockLayout::read(block_data)?;
         let (restart, probes) = layout.seek_interval(key)?;
         let mut decoder = BlockEntryDecoder::at_restart(block_data, restart)?;
+        let mut interval = restart;
         let mut entries_decoded = probes as u64;
         let mut best_state = KeyState::Absent;
-        while let Some(entry) =
-            decoder.next(block_data, self.format_version, None, "point decoder key")?
-        {
+        loop {
+            if decoder.offset == layout.interval_end(interval)? {
+                interval += 1;
+                if interval == layout.restart_count
+                    || !layout.restart(interval)?.1
+                    || decoder.key() != key
+                {
+                    break;
+                }
+            }
+            let Some(entry) =
+                decoder.next(block_data, self.format_version, None, "point decoder key")?
+            else {
+                break;
+            };
             entries_decoded += 1;
             match decoder.key().cmp(key) {
                 std::cmp::Ordering::Less => {}

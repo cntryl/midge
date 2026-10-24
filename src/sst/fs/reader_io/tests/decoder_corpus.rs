@@ -88,6 +88,34 @@ fn retain_real_sst_blocks(directory: &Path, reader: &SstFileIo, seed: u64) -> Mi
     Ok(())
 }
 
+fn retain_real_journal(seed: u64, input: &[u8]) -> MidgeResult<()> {
+    let name = format!("real-v9-{seed}-0");
+    if seed_root().is_some() {
+        retain_seed("manifest_journal_replay", &name, input);
+        return Ok(());
+    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fuzz/corpus/manifest_journal_replay")
+        .join(name);
+    let expected = std::fs::read(path)?;
+    assert_eq!(input.first(), Some(&0));
+    assert_eq!(expected.first(), Some(&0));
+    let scope = crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded());
+    // Sync timestamps vary. Strict production replay validates both frame
+    // CRCs and durable marker cuts before comparing exact edit identities.
+    let actual =
+        crate::metadata::journal::replay_identified_edits_from_bytes(&input[1..], 0, &scope)?;
+    let expected =
+        crate::metadata::journal::replay_identified_edits_from_bytes(&expected[1..], 0, &scope)?;
+    assert_eq!(actual.len(), 1);
+    assert_eq!(actual[0].0, 1);
+    assert_eq!(
+        serde_json::to_value(actual).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+    Ok(())
+}
+
 fn retain_real_metadata(directory: &Path, fs: &Arc<dyn Fs>, seed: u64) -> MidgeResult<()> {
     let mut manifest = crate::metadata::Manifest::default();
     manifest.next_sst_seqs.insert(0, seed + 2);
@@ -103,11 +131,15 @@ fn retain_real_metadata(directory: &Path, fs: &Arc<dyn Fs>, seed: u64) -> MidgeR
     for (selector, file) in [(0, "manifest.journal"), (1, "manifest.snapshot.json")] {
         let mut input = vec![selector];
         input.extend_from_slice(&std::fs::read(directory.join(file)).unwrap());
-        retain_seed(
-            "manifest_journal_replay",
-            &format!("real-v9-{seed}-{selector}"),
-            &input,
-        );
+        if selector == 0 {
+            retain_real_journal(seed, &input)?;
+        } else {
+            retain_seed(
+                "manifest_journal_replay",
+                &format!("real-v9-{seed}-{selector}"),
+                &input,
+            );
+        }
     }
     Ok(())
 }
