@@ -17,6 +17,11 @@ impl FsWalWriterIo {
         group: Option<&crate::lease::WriterEffectGroup>,
     ) -> Result<WalPendingAppend, WalAppendError> {
         self.validate_sequenced_submission(prefix, &units)?;
+        crate::failpoints::fail_point!("midge::wal::timeout_before_enqueue", |_| Err(
+            WalAppendError::unchanged(MidgeError::Timeout(
+                "injected timeout before WAL enqueue".into()
+            ))
+        ));
         let retained = units
             .iter()
             .try_fold(0usize, |bytes, unit| {
