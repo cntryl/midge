@@ -85,5 +85,31 @@ Validation recorded during the slice:
 - Workspace/all-target/all-feature pedantic Clippy and cntryl-tools test
   structure validation passed. No ignored tests or relaxed assertions.
 
-Next: #893's deterministic DDL provider-commit barrier, then #975's writer
-contract. No issue is claimed merged or production-qualified by local commits.
+### #893: implemented locally
+
+The delayed DDL fixture now holds its admitted provider CAS behind a
+test-owned condition variable until both negative-readback fencing assertions
+finish. Releasing it preserves the committed-operation reconciliation checks.
+Dropping the backend also releases the worker if an assertion fails. The
+fixture models an admitted provider operation surviving the caller deadline;
+its delegated filesystem write does not re-admit against that expired deadline.
+
+A forced early-commit negative control failed with `ColumnFamilyCreated`
+instead of `Fenced`, demonstrating the scheduling assumption in the old
+fixture. This was a controlled ordering change, not a claim of reproducing
+the original intermittent failure on unchanged source. The control is removed
+from the final patch. The separate exact ambiguous-CAS readback success test
+also passes.
+
+Validation: `cargo test --locked --features failpoints --lib
+runtime::event_loop::cloud_integration::tests:: -- --nocapture` passed the
+DDL regression and 164 other tests, but failed
+`should_reconcile_wal_prune_when_catalog_retirement_commits_before_timeout`
+at its second-pass bookkeeping assertion. That test passed alone in 3.13
+seconds. The changed backend is used only by the DDL regression; this is
+another unresolved broad-run observation, not a diagnosed baseline defect.
+Workspace/all-target/all-feature pedantic Clippy, rustfmt and cntryl-tools
+test validation passed.
+
+Next: #975's writer contract. No issue is claimed merged or production-qualified
+by local commits.

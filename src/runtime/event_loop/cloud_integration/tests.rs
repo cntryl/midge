@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
 };
 use std::time::{Duration, Instant};
 
@@ -790,6 +790,7 @@ struct DelayedCommitDdlBackend {
     inner: Arc<crate::storage::filesystem::FileSystem>,
     delay_first_registry_cas: AtomicBool,
     commit_complete: Arc<AtomicBool>,
+    commit_gate: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl DelayedCommitDdlBackend {
@@ -798,11 +799,25 @@ impl DelayedCommitDdlBackend {
             inner,
             delay_first_registry_cas: AtomicBool::new(true),
             commit_complete: Arc::new(AtomicBool::new(false)),
+            commit_gate: Arc::new((Mutex::new(false), Condvar::new())),
         }
     }
 
     fn commit_complete(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.commit_complete)
+    }
+
+    fn release_commit(&self) {
+        let (released, ready) = &*self.commit_gate;
+        *released.lock().unwrap() = true;
+        ready.notify_all();
+    }
+}
+
+impl Drop for DelayedCommitDdlBackend {
+    fn drop(&mut self) {
+        // Also release the provider worker if an earlier test assertion fails.
+        self.release_commit();
     }
 }
 
@@ -1121,8 +1136,18 @@ impl crate::storage::StorageBackend for DelayedCommitDdlBackend {
             let key = request.key.clone();
             let inner = Arc::clone(&self.inner);
             let commit_complete = Arc::clone(&self.commit_complete);
+            let commit_gate = Arc::clone(&self.commit_gate);
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100));
+                let (released, ready) = &*commit_gate;
+                drop(
+                    ready
+                        .wait_while(released.lock().unwrap(), |released| !*released)
+                        .unwrap(),
+                );
+                // This fixture models a provider mutation already admitted
+                // before the caller's timeout, with no cancellation guarantee.
+                let mut request = request;
+                request.deadline = crate::common::OperationDeadline::unbounded();
                 let (tx, rx) = std::sync::mpsc::channel();
                 inner.submit_write_request(request, data, tx);
                 let committed = matches!(
@@ -2361,7 +2386,7 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
     let commit_complete = delayed_cloud.commit_complete();
     el.actors.cloud_coordinator.hybrid_storage =
         Some(Arc::new(crate::storage::HybridStorage::with_policy(
-            delayed_cloud,
+            delayed_cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )));
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -2417,6 +2442,8 @@ fn should_keep_ddl_fenced_until_delayed_cas_commit_is_observed() -> crate::commo
     assert!(el.authority.fencing.ddl_authority_ambiguous);
     assert!(el.state.db_path.join("ddl.prepare.json").exists());
 
+    assert!(!commit_complete.load(Ordering::SeqCst));
+    delayed_cloud.release_commit();
     // The provider worker may run late under a loaded test runner. The
     // operation's one-second timeout is exercised above; completion is a
     // separate condition, so give it a load-tolerant deadline.
