@@ -714,9 +714,10 @@ impl GcActor {
         ssts: Vec<crate::metadata::FileMeta>,
         completion: SstDeleteWorkerState,
     ) -> MidgeResult<JoinHandle<()>> {
+        let failpoint_gate = crate::failpoints::worker_gate();
         std::thread::Builder::new()
             .name("midge-sst-gc".to_string())
-            .spawn(move || {
+            .spawn(move || failpoint_gate.run(|| {
                 let storage = CloudPersistence::new(storage);
                 for file in ssts {
                     let sst_name = file.name.clone();
@@ -741,7 +742,7 @@ impl GcActor {
                         let _ = notifier.try_send(RuntimeMsg::RetryGc);
                     }
                 }
-            })
+            }))
             .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))
     }
 

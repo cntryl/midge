@@ -76,11 +76,13 @@ impl EventLoop {
             _ => None,
         };
         let (result_tx, result) = crossbeam::channel::bounded(1);
+        let failpoint_gate = crate::failpoints::worker_gate();
         let worker = std::thread::Builder::new()
             .name("midge-metadata-mirror".into())
             .spawn(move || {
-                crate::failpoints::fail_point!("midge::metadata_mirror::before_provider");
-                let outcome =
+                failpoint_gate.run(|| {
+                    crate::failpoints::fail_point!("midge::metadata_mirror::before_provider");
+                    let outcome =
                     crate::runtime::hybrid_persistence::mirror_captured_control_metadata_within(
                         crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
                             cloud: &cloud,
@@ -102,21 +104,22 @@ impl EventLoop {
                         |deadline| fence.validate_within(deadline),
                     )
                     .and_then(|()| fence.check_health());
-                drop(source);
-                let outcome = outcome.and_then(|()| {
-                    if let Some(sweep) = sweep {
-                        let storage = storage.as_deref().ok_or_else(|| {
-                            MidgeError::Fenced("orphan sweep lost its storage owner".into())
-                        })?;
-                        sweep.execute(storage, &cloud, &publication_lock, &fence, &deadline)?;
+                    drop(source);
+                    let outcome = outcome.and_then(|()| {
+                        if let Some(sweep) = sweep {
+                            let storage = storage.as_deref().ok_or_else(|| {
+                                MidgeError::Fenced("orphan sweep lost its storage owner".into())
+                            })?;
+                            sweep.execute(storage, &cloud, &publication_lock, &fence, &deadline)?;
+                        }
+                        fence.check_health()
+                    });
+                    crate::failpoints::fail_point!("midge::metadata_mirror::before_completion");
+                    let _ = result_tx.send(outcome);
+                    if let Some(storage) = storage {
+                        storage.queue_cloud_metadata_mirror_complete(id, epoch);
                     }
-                    fence.check_health()
-                });
-                crate::failpoints::fail_point!("midge::metadata_mirror::before_completion");
-                let _ = result_tx.send(outcome);
-                if let Some(storage) = storage {
-                    storage.queue_cloud_metadata_mirror_complete(id, epoch);
-                }
+                })
             })
             .map_err(|error| {
                 MidgeError::Internal(format!("metadata mirror worker could not start: {error}"))

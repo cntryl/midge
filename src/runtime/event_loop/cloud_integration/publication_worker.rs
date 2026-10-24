@@ -204,12 +204,15 @@ impl EventLoop {
         };
         let epoch = self.state.writer_epoch;
         let (result_tx, result) = crossbeam::channel::bounded(1);
+        let failpoint_gate = crate::failpoints::worker_gate();
         let worker = std::thread::Builder::new()
             .name("midge-wal-publication".into())
             .spawn(move || {
-                let completion = run_work(&persistence, &fence, acknowledged, deadline, work);
-                let _ = result_tx.send(completion);
-                storage.queue_cloud_wal_publication_complete(id, epoch);
+                failpoint_gate.run(|| {
+                    let completion = run_work(&persistence, &fence, acknowledged, deadline, work);
+                    let _ = result_tx.send(completion);
+                    storage.queue_cloud_wal_publication_complete(id, epoch);
+                })
             });
         match worker {
             Ok(worker) => {
