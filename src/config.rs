@@ -241,9 +241,12 @@ pub enum RecoveryPolicy {
 }
 
 /// High-level engine health state for operators and diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub enum EngineHealth {
     Healthy,
+    /// Conservative value for an unpopulated observation. Runtime snapshots
+    /// always replace this with the owner's observed health.
+    #[default]
     Degraded,
     SalvageMode,
     WriteStalled,

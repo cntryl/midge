@@ -295,8 +295,19 @@ pub struct RuntimeLatencySummaries {
 }
 
 /// Stable operator-facing snapshot of runtime metrics.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RuntimeMetricsSnapshot {
+    /// Durable ledger file sync calls, including failed/unknown attempts.
+    pub wal_ledger_file_sync_attempts: u64,
+    /// Ledger file sync calls which returned success, including checkpoints.
+    pub wal_ledger_file_syncs: u64,
+    /// Durable ledger checkpoint directory sync attempts.
+    pub wal_ledger_directory_sync_attempts: u64,
+    /// Ledger checkpoint directory sync calls which returned success.
+    pub wal_ledger_directory_syncs: u64,
+    /// Successful writer barrier plus ledger file/directory sync calls. This
+    /// excludes segment initialization/repair and other filesystem syncs.
+    pub wal_accounted_syncs: u64,
     /// Caller time spent in admission slowdown before submission.
     pub write_slowdown_ns_total: u64,
     /// Submissions which entered caller-side slowdown.

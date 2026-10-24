@@ -911,3 +911,14 @@ assertion/helper anchors are mapped, and all 241 `should_...` tokens anywhere
 in JSON resolve. `cntryl-tools validate-docs` passes (67 Markdown files).
 Historical qualification remains separate, and final source postimages must
 still be refreshed after the remaining code changes.
+
+#904's safe preparation observes ledger file/directory sync attempts and
+successful receipts at real Fs boundaries, exposing them beside writer barrier
+syncs and an explicitly scoped accounted sum in runtime metrics and existing
+Strict/rotation rows. Segment initialization/repair and other filesystem work
+are excluded from that sum; it is not a complete physical-device count.
+Active regressions cover ledger checkpoints, failed/after-effect syncs and a
+public Strict commit/reopen. Exact floors, encoding and recovery semantics stay
+unchanged. All-target compilation passes; behavior and measurements remain
+pending. The metric builder uses conservative empty defaults while always
+installing actual runtime health; focused helpers keep hard function limits.

@@ -86,6 +86,9 @@ fn with_writer_fence<T>(
 
 /// Where a [`WalHistory`] persists its ledger edits.
 pub(crate) trait LedgerJournal: Send {
+    fn sync_counts(&self) -> crate::wal::ledger_store::LedgerSyncSnapshot {
+        Default::default()
+    }
     /// The ledger as persisted.
     fn ledger(&self) -> &WalLedger;
 
@@ -98,6 +101,9 @@ pub(crate) trait LedgerJournal: Send {
 }
 
 impl LedgerJournal for LedgerStore {
+    fn sync_counts(&self) -> crate::wal::ledger_store::LedgerSyncSnapshot {
+        LedgerStore::sync_counts(self)
+    }
     fn ledger(&self) -> &WalLedger {
         LedgerStore::ledger(self)
     }
@@ -155,6 +161,9 @@ impl std::fmt::Debug for WalHistory {
 }
 
 impl WalHistory {
+    pub(crate) fn ledger_sync_counts(&self) -> crate::wal::ledger_store::LedgerSyncSnapshot {
+        self.journal.sync_counts()
+    }
     /// The ledger as stored in `wal`, without changing anything: for epoch
     /// discovery and verification, which do not hold the lease. `None`
     /// before the first open.

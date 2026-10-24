@@ -755,22 +755,20 @@ impl RuntimeState {
         telemetry: &crate::telemetry::metrics::MetricsSnapshot,
         read_path: &crate::diagnostics::ReadPathDiagnosticsSnapshot,
     ) -> crate::types::RuntimeMetricsSnapshot {
+        let ledger_syncs = self.wal.history.ledger_sync_counts();
+        let admission = &self.write_pressure.admission;
         crate::types::RuntimeMetricsSnapshot {
-            write_slowdown_ns_total: self
-                .write_pressure
-                .admission
-                .slowdown_ns
-                .load(Ordering::Relaxed),
-            write_slowdown_count: self
-                .write_pressure
-                .admission
-                .slowdown_count
-                .load(Ordering::Relaxed),
-            background_rate_limited_bytes: self
-                .write_pressure
-                .admission
-                .limited_bytes
-                .load(Ordering::Relaxed),
+            wal_ledger_file_sync_attempts: ledger_syncs.file_attempts,
+            wal_ledger_file_syncs: ledger_syncs.file_completed,
+            wal_ledger_directory_sync_attempts: ledger_syncs.directory_attempts,
+            wal_ledger_directory_syncs: ledger_syncs.directory_completed,
+            wal_accounted_syncs: telemetry
+                .wal_fsync_count
+                .saturating_add(ledger_syncs.file_completed)
+                .saturating_add(ledger_syncs.directory_completed),
+            write_slowdown_ns_total: admission.slowdown_ns.load(Ordering::Relaxed),
+            write_slowdown_count: admission.slowdown_count.load(Ordering::Relaxed),
+            background_rate_limited_bytes: admission.limited_bytes.load(Ordering::Relaxed),
             estimated_pending_compaction_bytes: self.write_pressure.admission.pending_bytes(),
             health: self.health(),
             current_sequence: self.sequence,
@@ -818,9 +816,6 @@ impl RuntimeState {
             wal_fsync_ns_total: telemetry.wal_fsync_ns_total,
             wal_fsync_ns_max: telemetry.wal_fsync_ns_max,
             latency: telemetry.latency,
-            durability_waiters_fanned_out_total: 0,
-            abandoned_runtime_requests_total: 0,
-            late_runtime_responses_total: 0,
             sst_bloom_rejects_total: read_path.bloom_rejects,
             sst_bloom_checks_total: read_path.bloom_checks,
             sst_data_blocks_read_total: read_path.data_blocks_read,
@@ -851,21 +846,11 @@ impl RuntimeState {
             cloud_async_wal_uploads_failed: telemetry.cloud_async_wal_uploads_failed,
             cloud_async_wal_upload_latency_us: telemetry.cloud_async_wal_upload_latency_us,
             cloud_async_wal_ack_latency_us: telemetry.cloud_async_wal_ack_latency_us,
-            hybrid_max_local_bytes: 0,
-            hybrid_total_committed_bytes: 0,
-            hybrid_free_bytes: 0,
-            hybrid_usage_percent: 0,
-            hybrid_pending_evictions: 0,
-            local_storage: None,
-            remote_range_requests_total: 0,
-            remote_range_bytes_total: 0,
-            remote_range_failures_total: 0,
-            remote_range_latency_ns_total: 0,
-            remote_range_latency_ns_max: 0,
             wal_recovery_records_replayed: self.recovery_stats.wal_recovery_records_replayed,
             wal_recovery_bytes_replayed: self.recovery_stats.wal_recovery_bytes_replayed,
             intent_log_replay_runs: self.recovery_stats.intent_log_replay_runs,
             intent_log_entries_replayed: self.recovery_stats.intent_log_entries_replayed,
+            ..Default::default()
         }
     }
 

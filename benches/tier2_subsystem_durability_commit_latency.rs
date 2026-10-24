@@ -24,6 +24,7 @@ const ROTATION_TRANSACTIONS_PER_RUN: usize = 512;
 const ROTATION_RUNS: usize = 5;
 
 struct StrictCommitSample {
+    ledger: LedgerSyncSample,
     elapsed: Duration,
     completed: u64,
     wal_appends: u64,
@@ -32,6 +33,7 @@ struct StrictCommitSample {
 }
 
 struct RotationRunSample {
+    ledger: LedgerSyncSample,
     elapsed: Duration,
     commit_p50_us: u64,
     commit_p95_us: u64,
@@ -46,6 +48,75 @@ struct RotationRunSample {
     flush_build_ns_total: u64,
     flush_publish_count: u64,
     flush_publish_ns_total: u64,
+}
+
+#[derive(Default)]
+struct LedgerSyncSample {
+    file_attempts: u64,
+    file_completed: u64,
+    directory_attempts: u64,
+    directory_completed: u64,
+    accounted: u64,
+}
+
+impl LedgerSyncSample {
+    fn between(start: &RuntimeMetricsSnapshot, end: &RuntimeMetricsSnapshot) -> Self {
+        Self {
+            file_attempts: end
+                .wal_ledger_file_sync_attempts
+                .saturating_sub(start.wal_ledger_file_sync_attempts),
+            file_completed: end
+                .wal_ledger_file_syncs
+                .saturating_sub(start.wal_ledger_file_syncs),
+            directory_attempts: end
+                .wal_ledger_directory_sync_attempts
+                .saturating_sub(start.wal_ledger_directory_sync_attempts),
+            directory_completed: end
+                .wal_ledger_directory_syncs
+                .saturating_sub(start.wal_ledger_directory_syncs),
+            accounted: end
+                .wal_accounted_syncs
+                .saturating_sub(start.wal_accounted_syncs),
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.file_attempts += other.file_attempts;
+        self.file_completed += other.file_completed;
+        self.directory_attempts += other.directory_attempts;
+        self.directory_completed += other.directory_completed;
+        self.accounted += other.accounted;
+    }
+
+    fn record(&self, ctx: &mut StressContext) {
+        ctx.parameter("physical_fsync_scope", "successful_writer_runner_barriers");
+        ctx.parameter(
+            "accounted_sync_scope",
+            "writer_barriers_plus_ledger_files_and_directories_excludes_other_syncs",
+        );
+        for (name, count) in [
+            ("ledger_file_sync_attempts", self.file_attempts),
+            ("ledger_file_syncs", self.file_completed),
+            ("ledger_directory_sync_attempts", self.directory_attempts),
+            ("ledger_directory_syncs", self.directory_completed),
+            ("wal_and_ledger_accounted_syncs", self.accounted),
+        ] {
+            ctx.record_observation(
+                name,
+                u64_to_f64(count),
+                ObservationUnit::Count,
+                ObservationDirection::Informational,
+            );
+        }
+        assert_eq!(
+            self.file_attempts, self.file_completed,
+            "ledger file sync errors invalidate cost measurements"
+        );
+        assert_eq!(
+            self.directory_attempts, self.directory_completed,
+            "ledger directory sync errors invalidate cost measurements"
+        );
+    }
 }
 
 fn metrics_delta(start: &RuntimeMetricsSnapshot, end: &RuntimeMetricsSnapshot) -> (u64, u64) {
@@ -166,6 +237,7 @@ fn execute_rotation_run() -> RotationRunSample {
         .expect("capture ending rotation metrics");
 
     RotationRunSample {
+        ledger: LedgerSyncSample::between(&start_metrics, &end_metrics),
         elapsed,
         commit_p50_us: all.value_at_quantile(0.50),
         commit_p95_us: all.value_at_quantile(0.95),
@@ -279,6 +351,7 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
         .expect("shut down strict commit benchmark engine");
 
     StrictCommitSample {
+        ledger: LedgerSyncSample::between(&start_metrics, &end_metrics),
         elapsed,
         completed: u64::try_from(transactions_per_sample).expect("transaction count fits in u64"),
         wal_appends,
@@ -302,6 +375,7 @@ fn run_strict_commit_case(ctx: &mut StressContext, scenario: &'static str, write
     ctx.parameter("value_size_bytes", VALUE_SIZE);
     ctx.parameter("operation_surface", "single_put_single_commit");
     let sample = execute_strict_commit_case(writers);
+    sample.ledger.record(ctx);
     record_success(
         ctx,
         scenario,
@@ -353,6 +427,11 @@ fn record_rotation_observations(
     samples: &[RotationRunSample],
     elapsed: Duration,
 ) {
+    let mut ledger = LedgerSyncSample::default();
+    for sample in samples {
+        ledger.add(&sample.ledger);
+    }
+    ledger.record(ctx);
     let wal_fsyncs = samples.iter().map(|sample| sample.wal_fsyncs).sum::<u64>();
     let wal_fsync_ns_total = samples
         .iter()

@@ -112,6 +112,9 @@ Hybrid:
 - `tier2_subsystem_durability_commit_latency` owns 1-, 16-, and 64-writer local
   strict throughput, commit p50/p99, WAL append/fsync counts, and commits per
   physical fsync.
+  [WAL sync accounting](wal-sync-accounting.md) distinguishes the writer-only
+  metric from ledger file/directory calls and the explicitly scoped accounted
+  sum; adding those counters does not approve amortized ledger floors.
 - `tier2_subsystem_hybrid_durability_lag` owns the hybrid claim's two numbers
   side by side on the object-store simulator: `cloud_async()` and
   `cloud_strict()` commit p50/p99 against the cloud-durable lag sampled during
