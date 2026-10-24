@@ -1350,8 +1350,9 @@ impl StorageBackend for NeverCompletesBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        let _ = (request, callback);
-        panic!("test backend received undeclared range HEAD capability");
+        crate::storage::dispatch_head_request(request, callback, |_key, _, callback| {
+            self.retain_callback(callback);
+        });
     }
 
     fn submit_metadata_read_request(
@@ -2165,10 +2166,10 @@ fn should_readback_remote_wal_before_upload_worker_emits_ack() {
     );
     assert!(
         mock_cloud
-            .get_downloads()
+            .get_range_downloads()
             .iter()
             .any(|key| key.ends_with("wal/epochs/00000000000000000001/00000000000000000009.wal")),
-        "upload worker must read back the remote WAL before ack"
+        "upload worker must read back identity-pinned remote WAL ranges before ack"
     );
 }
 
