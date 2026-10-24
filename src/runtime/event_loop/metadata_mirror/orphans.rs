@@ -84,13 +84,9 @@ impl EventLoop {
             Ok(Some(task)) => MirrorContinuation::OrphanSweep(task),
             Err(error) => {
                 tracing::debug!(%error, "orphan source capture deferred; metadata retention still runs");
-                MirrorContinuation::Auxiliary {
-                    context: "periodic cloud metadata retention".into(),
-                }
+                MirrorContinuation::Retention
             }
-            Ok(None) => MirrorContinuation::Auxiliary {
-                context: "periodic cloud metadata retention".into(),
-            },
+            Ok(None) => MirrorContinuation::Retention,
         }
     }
 

@@ -77,6 +77,12 @@ round trips. Flush build/upload work keeps its owned identity and completed
 build while publication is pending. An unrelated compaction cannot reset it
 to `Queued`. A matching flush receipt installs only its validated edit against
 the current view and releases the corresponding immutable generation.
+Cloud flush publication first selects its exact `ManifestPublished` intent,
+then captures and selects its clear before terminal settlement. The two mirror
+effects have distinct physical phase identities and share the original absolute
+deadline. A delayed first-phase completion cannot settle the clear. This also
+lets an earlier capture retain a failed flush's `OutputDurable` intent while
+the same immutable retries, without weakening the selected terminal proof.
 
 GC must include admitted cuts in its protection protocol. A conservative first
 implementation may defer reclamation while cuts are admitted. Known-retired

@@ -31,8 +31,8 @@ use crate::storage::hybrid::backend::ControlObject;
 pub(crate) use catalog::refusal_error;
 pub(crate) use catalog::AdmittedCatalog;
 use catalog::{load_and_repair_catalog_within, mutate_wal_catalog_within, Missing, Mutation};
-pub(crate) use metadata_retention::MetadataRetentionState;
 pub(crate) use metadata_retention::INTERVAL as METADATA_RETENTION_INTERVAL;
+pub(crate) use metadata_retention::{collect_selected_metadata_within, MetadataRetentionState};
 pub(crate) use metadata_snapshot::{
     decode_generation_manifest, mirror_control_metadata_within,
     read_committed_metadata_bodies_within, CloudMetadataMirrorAuthority,

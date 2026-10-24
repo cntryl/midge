@@ -4,6 +4,66 @@ use super::{EventLoop, MetadataMirrorJob, MirrorContinuation};
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 use std::sync::Arc;
 
+struct MetadataControlWork {
+    cloud: Arc<crate::storage::cloud::CloudStorage>,
+    fs: Arc<dyn crate::io::Fs>,
+    source: Option<Arc<crate::runtime::CapturedMetadataCut>>,
+    publication_lock: crate::runtime::MetadataPublicationLock,
+    fence: super::super::fencing::RuntimeFence,
+    deadline: OperationDeadline,
+    storage: Option<Arc<crate::storage::HybridStorage>>,
+    sweep: Option<super::orphans::OrphanSweepTask>,
+}
+
+impl MetadataControlWork {
+    fn run(self) -> MidgeResult<()> {
+        let context = crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+            cloud: &self.cloud,
+            fs: self.fs.as_ref(),
+            publication_lock: &self.publication_lock,
+            lock_wait_budget: self.cloud.callback_timeout(),
+            deadline: &self.deadline,
+            authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                store: self.fence.leader_store.as_deref().expect("admitted store"),
+                holder_id: self.fence.leader_holder_id.as_deref().unwrap_or_default(),
+                writer_epoch: self.fence.writer_epoch,
+            },
+        };
+        let outcome = if let Some(source) = self.source.as_ref() {
+            crate::runtime::hybrid_persistence::mirror_captured_control_metadata_within(
+                context,
+                source,
+                |deadline| self.fence.validate_within(deadline),
+            )
+        } else {
+            crate::runtime::hybrid_persistence::collect_selected_metadata_within(
+                &context,
+                |deadline| self.fence.validate_within(deadline),
+            )
+        }
+        .and_then(|()| self.fence.check_health());
+        // The copied body has no remaining user before its source charge can
+        // drop. Maintenance then observes pending publication owners itself.
+        drop(self.fs);
+        drop(self.source);
+        outcome?;
+        if let Some(sweep) = self.sweep {
+            let storage = self
+                .storage
+                .as_deref()
+                .ok_or_else(|| MidgeError::Fenced("orphan sweep lost its storage owner".into()))?;
+            sweep.execute(
+                storage,
+                &self.cloud,
+                &self.publication_lock,
+                &self.fence,
+                &self.deadline,
+            )?;
+        }
+        self.fence.check_health()
+    }
+}
+
 impl EventLoop {
     /// `true` means the continuation is retained by the worker owner. Local-only
     /// and deterministic inline fixtures complete in this turn and return false.
@@ -64,16 +124,38 @@ impl EventLoop {
         // The loop owns journal/intent changes during this capture. A cloned
         // live Fs would allow later appends to change the admitted operation.
         // Provider work sees only this exact presence/absence and byte cut.
-        let source = self
-            .publication
-            .metadata_publication_lock
-            .capture_control_cut(&self.state.fs, self.state.writer_epoch, &deadline)?;
+        let maintenance = matches!(
+            &continuation,
+            MirrorContinuation::Retention | MirrorContinuation::OrphanSweep(_)
+        );
+        let source = (!maintenance)
+            .then(|| {
+                self.publication
+                    .metadata_publication_lock
+                    .capture_control_cut(&self.state.fs, self.state.writer_epoch, &deadline)
+            })
+            .transpose()?;
+        // Maintenance never reads these control bodies; publication uses the
+        // immutable captured Fs rather than this live root.
+        let fs = source
+            .as_ref()
+            .map_or_else(|| Arc::clone(&self.state.fs), |cut| Arc::clone(cut.fs()));
         let publication_lock = self.publication.metadata_publication_lock.clone();
         let storage = self.actors.cloud_coordinator.hybrid_storage.clone();
         let epoch = self.state.writer_epoch;
         let sweep = match &continuation {
             MirrorContinuation::OrphanSweep(task) => Some(task.clone()),
             _ => None,
+        };
+        let work = MetadataControlWork {
+            cloud,
+            fs,
+            source,
+            publication_lock,
+            fence,
+            deadline,
+            storage: storage.clone(),
+            sweep,
         };
         let (result_tx, result) = crossbeam::channel::bounded(1);
         let failpoint_gate = crate::failpoints::worker_gate();
@@ -82,38 +164,7 @@ impl EventLoop {
             .spawn(move || {
                 failpoint_gate.run(|| {
                     crate::failpoints::fail_point!("midge::metadata_mirror::before_provider");
-                    let outcome =
-                    crate::runtime::hybrid_persistence::mirror_captured_control_metadata_within(
-                        crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
-                            cloud: &cloud,
-                            fs: source.fs().as_ref(),
-                            publication_lock: &publication_lock,
-                            lock_wait_budget: cloud.callback_timeout(),
-                            deadline: &deadline,
-                            authority:
-                                crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
-                                    store: fence.leader_store.as_deref().expect("admitted store"),
-                                    holder_id: fence
-                                        .leader_holder_id
-                                        .as_deref()
-                                        .unwrap_or_default(),
-                                    writer_epoch: epoch,
-                                },
-                        },
-                        &source,
-                        |deadline| fence.validate_within(deadline),
-                    )
-                    .and_then(|()| fence.check_health());
-                    drop(source);
-                    let outcome = outcome.and_then(|()| {
-                        if let Some(sweep) = sweep {
-                            let storage = storage.as_deref().ok_or_else(|| {
-                                MidgeError::Fenced("orphan sweep lost its storage owner".into())
-                            })?;
-                            sweep.execute(storage, &cloud, &publication_lock, &fence, &deadline)?;
-                        }
-                        fence.check_health()
-                    });
+                    let outcome = work.run();
                     crate::failpoints::fail_point!("midge::metadata_mirror::before_completion");
                     let _ = result_tx.send(outcome);
                     if let Some(storage) = storage {

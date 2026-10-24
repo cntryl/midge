@@ -16,6 +16,39 @@ pub(crate) const INTERVAL: Duration = Duration::from_secs(30);
 const LIST_BUDGET: usize = 4;
 const CANDIDATE_BUDGET: usize = 8;
 
+/// Idle maintenance observes already selected history. It must not publish a
+/// new cut merely to reclaim old ones, or write-idle history never converges.
+pub(crate) fn collect_selected_metadata_within(
+    context: &CloudMetadataMirrorContext<'_>,
+    mut validate_lease: impl FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
+) -> MidgeResult<()> {
+    let mut guard = context
+        .publication_lock
+        .lock_for(context.deadline.remaining())
+        .ok_or_else(|| MidgeError::Timeout("metadata retention waits for local capture".into()))?;
+    if context.publication_lock.pending_captures() != 0 {
+        return Ok(());
+    }
+    validate_lease(context.deadline)?;
+    context
+        .authority
+        .store
+        .validate_metadata_epoch_with_timeout(
+            context.authority.holder_id,
+            context.authority.writer_epoch,
+            context.deadline.remaining(),
+        )
+        .map_err(|error| error.into_validation_error("metadata retention authority"))?;
+    if let CloudMetadataHead::Committed(generation) = context
+        .authority
+        .store
+        .read_committed_metadata(context.deadline.remaining())?
+    {
+        collect_after_commit(context, &generation, &mut guard.retention);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -145,8 +178,7 @@ fn reclaim_candidate(
     key: &str,
     ordinal: u64,
 ) -> MidgeResult<bool> {
-    let io = BlockingCloud::new(context.cloud, context.deadline);
-    let Ok(Some(metadata)) = io.head_optional(key) else {
+    let Ok(metadata) = range_identity(context, key) else {
         return Ok(false);
     };
     if metadata.size == 0 || metadata.size > crate::metadata::cloud_manifest::MAX_CHAIN_BYTES {
@@ -167,6 +199,25 @@ fn reclaim_candidate(
     }
     validate_current(context, generation)?;
     delete_identity(context, key, metadata)
+}
+
+fn range_identity(
+    context: &CloudMetadataMirrorContext<'_>,
+    key: &str,
+) -> MidgeResult<StorageObjectMetadata> {
+    let request = request(context, key)?;
+    let timeout = request.remaining_timeout();
+    let (tx, rx) = std::sync::mpsc::channel();
+    context.cloud.submit_range_head_request(request, tx);
+    match rx.recv_timeout(timeout) {
+        Ok(StorageEvent::HeadComplete {
+            key: actual,
+            result: StorageOutcome::Ok(metadata),
+        }) if actual == key => Ok(metadata),
+        result => Err(MidgeError::Io(std::io::Error::other(format!(
+            "metadata retention range identity: {result:?}"
+        )))),
+    }
 }
 
 fn request(context: &CloudMetadataMirrorContext<'_>, key: &str) -> MidgeResult<StorageRequest> {

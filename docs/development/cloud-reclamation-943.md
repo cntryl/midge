@@ -40,7 +40,7 @@ The runtime binds this immutable floor to its acquired epoch. A moving
 `next_sst_seqs` counter never expands orphan authority. Missing family bounds,
 unrecognized names and an epoch mismatch retain objects.
 
-The periodic mirror continuation captures current manifest names, durable
+The periodic maintenance continuation captures current manifest names, durable
 retired proofs, live snapshot sources, all publication intents, concurrent
 compaction inputs/prepared names/output generations and pending mirror
 compaction/flush work. Snapshot acquisition exclusion closes the source-capture
@@ -48,11 +48,17 @@ to pin-registration gap. Capture admission and physical reclamation share the
 local publication mutex. Each physical turn defers while any unresolved control
 cut remains admitted, and keeps that mutex through its final checks and effects.
 Known-retired local SST/WAL deletion and cloud SST workers apply the same rule.
-The worker's own mirror settles before collection, avoiding self-blocking.
+Idle maintenance reads already selected authority without publishing another
+control cut, immutable body or pointer CAS. It therefore creates no history
+while reclaiming a write-idle backlog and has no source cut to self-block on.
 Before deletion, the worker also reads and verifies the current selected
 metadata closure and intent bytes, and freshly validates both lease and pointer.
 Uncertain reference reads retain the candidate. Maintenance memory bounds the
 captured set and decoded shared references.
+
+Metadata body probes pair the explicit range HEAD with a conditional bounded
+range read and conditional delete. The filesystem compatibility adapter keeps
+its stable range identity distinct from ordinary mutable metadata identities.
 
 Only canonical names strictly below the frozen floor and absent from every
 protected source are candidates. Successor admissions start at or above that

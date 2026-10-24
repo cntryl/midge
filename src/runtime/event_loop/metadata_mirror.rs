@@ -12,6 +12,7 @@ pub(super) enum MirrorContinuation {
     Auxiliary { context: String },
     SstReservation { cf_id: u32, next_seq: u64 },
     Reclamation,
+    Retention,
     OrphanSweep(orphans::OrphanSweepTask),
 }
 
@@ -259,6 +260,11 @@ impl EventLoop {
             }
             MirrorContinuation::Reclamation => {
                 super::gc::GcCoordinator::finish_manifest_reclamation(self, result);
+            }
+            MirrorContinuation::Retention => {
+                if let Err(error) = result {
+                    tracing::debug!(%error, "metadata retention kept uncertain history");
+                }
             }
             MirrorContinuation::OrphanSweep(task) => {
                 if let Err(error) = result {

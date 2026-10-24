@@ -21,6 +21,9 @@ fn should_reclaim_bounded_backlog_on_idle_turns_without_new_metadata_writes() ->
         .map_err(crate::common::MidgeError::Internal)?;
         event_loop.mirror_metadata_to_authoritative_cloud()?;
     }
+    // Settle the independent first-use name prewarm before freezing the idle
+    // authority. This is a genuine metadata edit, rather than retention work.
+    event_loop.prefetch_flush_sst_names_if_due();
     // Inject a short interval in both owners; do not reset the collector's
     // cooldown or cursor. Every following attempt is scheduled by idle time.
     let interval = Duration::from_millis(5);
@@ -41,6 +44,13 @@ fn should_reclaim_bounded_backlog_on_idle_turns_without_new_metadata_writes() ->
         .clone()
         .unwrap();
     let deadline = OperationDeadline::from_budget(Duration::from_secs(3));
+    let selected_before = event_loop
+        .authority
+        .fencing
+        .leader_store
+        .as_ref()
+        .unwrap()
+        .read_committed_metadata(deadline.remaining())?;
 
     // Act: only production background progress and its actual idle wakeups run.
     loop {
@@ -76,6 +86,11 @@ fn should_reclaim_bounded_backlog_on_idle_turns_without_new_metadata_writes() ->
     else {
         panic!("selected history remains committed")
     };
+    assert_eq!(
+        CloudMetadataHead::Committed(generation.clone()),
+        selected_before,
+        "idle cleanup must not publish new manifest versions"
+    );
     crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
         &cloud,
         &generation,
