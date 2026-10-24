@@ -31,8 +31,9 @@ Tier 3 and Tier 4 stress benchmarks:
 - No workflow enforces these budgets automatically: every `bench-tier*.yml`
   workflow is dispatched by hand (Tiers 5 and 6 also on a schedule), and
   `ci.yml` runs no benchmarks. The 15% budget for the memory-mode batched-write
-  row is checked by comparing three base and three candidate reports from the
-  same machine in the pull request, following
+  row is checked with three alternating base/candidate pairs on the same
+  machine, reporting the median pair delta and retaining inconclusive rows,
+  following
   [the baseline procedure](baseline-procedure.md).
 
 ## External LSM Comparisons

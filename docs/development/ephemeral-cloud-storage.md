@@ -102,15 +102,12 @@ Only a pending manual request forces compaction below ordinary background
 thresholds. Local and non-ephemeral modes retain worker overlap
 and direct manual continuation, with automatic work using background policy.
 
-Retirement proof work cooperatively yields after acknowledged progress so a
-large backlog cannot consume the full request timeout on every maintenance
-turn. The work slice does not shorten a provider request's timeout. Mandatory
-identity checks, one indivisible proof step, and final catalog publication
-remain subject to the existing outer deadline; the slice is not a hard bound
-on total turn latency. A yielded proof retains source WAL and resumes from
-validated process-local progress on a later turn. Its retained memory charge
-reduces the next compaction's execution and publication allowances within the
-existing budget.
+WAL retirement uses the verified summaries in the authorized catalog and the
+per-family frontiers in a committed shared metadata generation. It selects
+only a covered prefix and revalidates the generation and writer authority
+before the catalog CAS. Provider identity probes supply conditional delete
+targets; they do not prove data coverage. Failure, uncertain authority or an
+expired attempt retains the unretired prefix for a later attempt.
 
 Compaction streams remote inputs and drains each completed output partition to
 object storage before producing the next. Its staging reservation covers the
@@ -146,10 +143,13 @@ that memory and evicts the published local SST. An indivisible transaction
 still needs enough working capacity; total cloud backlog has no corresponding
 size cap. Existing local residue continues to count against local capacity.
 
-Checkpoints never retire source WAL. An interrupted startup can replay again
-using the durable manifest, with exact SST coverage checks for values already
-published. Deletes and uncertain coverage are replayed conservatively. Input
-validation and epoch discovery require multiple streaming passes; recovery
+Recovery checkpoints do not themselves retire source WAL. They publish SSTs
+and advance the relevant family's flush frontier in the durable manifest.
+After an interrupted startup, replay uses the authorized chain and those
+frontiers to admit complete transaction units; it does not probe SST contents
+to infer which individual values or deletes are covered. A missing required
+family frontier fails closed. Input validation and epoch discovery require
+multiple streaming passes; recovery
 time and object-store traffic therefore grow with the backlog. Catalog and
 source identity metadata grow with the number of objects, not their contents.
 
@@ -171,27 +171,22 @@ Explicit salvage recovery can retain an individually verified local SST when
 its remote copy is unavailable. Only those named, verified copies bypass remote
 reads, and they continue to count against the local budget.
 
-WAL retirement preserves its exact coverage and integrity proof. Relevant SSTs
-may require a streamed complete-file checksum before a WAL can be retired;
-unrelated complete key ranges are excluded. This bounds buffers and local
-residency, but does not make all maintenance I/O proportional to point reads.
-Ephemeral-mode retirement decodes one WAL frame at a time with bounded
-read-ahead and uses the configured compaction memory allowance while compaction
-is idle. An object is not rejected merely because its total length exceeds
-that allowance. Oversized indivisible records, proof memory pressure, missing
-coverage, or an attempt deadline retain WAL authority for a later attempt.
-Exact key probes still require SST reads, so large-segment retirement latency
-needs separate provider qualification.
-Within one process, retirement keeps bounded checksum, frame, transaction
-operation, SST summary, and row-cursor progress across attempt deadlines.
-Before reuse it revalidates pinned identities and the authoritative oldest WAL
-entry. Only provably irrelevant appended SSTs preserve semantic coverage;
-overlapping, changed, removed, or uncertain inputs reset that coverage.
-Completed proof dependencies stay alive through the conditional catalog update
-and are reclaimed after retirement. Restart discards this optimization and
-revalidates from durable metadata; there is no new recovery format.
-Persisting provider identities alongside publication checksums would allow a
-separate optimization of that verification cost.
+WAL retirement is prefix-only. A verified catalog entry records per-family
+maximum sequences; every live family must be flushed through its maximum in
+the committed shared generation, or have a durable dropped-family frontier.
+The catalog retirement records that generation in `retired_by` before physical
+deletion is scheduled. It does not rescan WAL records or use exact key probes
+and SST checksums to infer coverage. Object identity still matters for
+conditional deletion, and publication/recovery retain their own checksum
+validation. Local retirement similarly advances durable `log_start` before
+removing files. See [the WAL authority design](wal-redesign-808.md).
+
+A process-local cleanup queue can lose physical delete work on crash while
+the catalog still durably excludes the retired prefix. The planned sweeper
+in #943 addresses that storage leak; it is not implemented by this document.
+Any general SST orphan sweep must additionally protect live snapshot sources,
+compaction inputs, publication intents and admitted work. An age window and
+absence from the current manifest do not authorize deleting a pinned SST.
 
 The state transitions that permit release or deletion are:
 
@@ -203,11 +198,12 @@ The state transitions that permit release or deletion are:
 | SST publication to cache eviction | The remote object is durable and the manifest makes it authoritative. |
 | Compaction inputs to obsolete files | The complete replacement set is published before any authoritative input is deleted. |
 | Failed staging to available disk | Every possible output and scratch file is absent or remains explicitly charged. |
-| Cloud WAL to retired objects | Exact coverage, object identities, and metadata dependencies validate before catalog retirement and conditional deletion. |
+| Cloud WAL to retired objects | The committed shared family's frontiers cover a catalog prefix; generation and writer authority are revalidated, the catalog records retirement, then identity-conditional deletes run. |
 
 No global replay sequence alone proves that another column family's records
-were checkpointed. Recovery keeps transaction boundaries and verifies actual
-coverage before suppressing replayed values.
+were checkpointed. Recovery keeps whole transaction units and uses that
+family's persisted frontier to decide replay eligibility. SST contents do not
+independently authorize WAL replay suppression or retirement.
 
 ## Qualification
 
