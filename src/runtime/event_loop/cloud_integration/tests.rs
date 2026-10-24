@@ -3,7 +3,6 @@ use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::super::EventLoop;
 use crate::runtime::durability::{DurabilityWaiter, TestDurabilityWaiter};
 use crate::runtime::hybrid_persistence::CloudPersistence;
-use crate::storage::cloud::CloudReadCapability;
 
 /// Wrap the raw hybrid backend in the runtime persistence layer under test.
 fn cloud_persistence(storage: &Arc<crate::storage::HybridStorage>) -> CloudPersistence {
@@ -624,8 +623,7 @@ impl crate::storage::cloud::CloudWriteCapability for FailThirdIntentPutBackend {
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        if key.contains("metadata/generations/")
-            && key.ends_with("/intent_log.json")
+        if is_cloud_manifest_key_for_test(key)
             && self.intent_puts.fetch_add(1, Ordering::SeqCst) >= 2
         {
             let key = key.to_string();
@@ -672,6 +670,14 @@ struct ObserveIntentBeforeRemoteSstBackend {
     remote_existed_at_intent_publish: Arc<AtomicBool>,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+struct MetadataPointerForTest {
+    writer_epoch: u64,
+    holder_id: String,
+    owner_token: String,
+    committed: Option<crate::lease::CloudMetadataGeneration>,
+}
+
 impl crate::storage::cloud::CloudReadCapability for ObserveIntentBeforeRemoteSstBackend {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata);
 
@@ -691,7 +697,7 @@ impl crate::storage::cloud::CloudWriteCapability for ObserveIntentBeforeRemoteSs
         let event = rx
             .recv_timeout(Duration::from_secs(1))
             .expect("observe metadata provider put");
-        if key.ends_with(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+        if key.ends_with("metadata/committed-pointer.v1")
             && matches!(
                 &event,
                 crate::storage::cloud::CloudEvent::Put {
@@ -700,30 +706,21 @@ impl crate::storage::cloud::CloudWriteCapability for ObserveIntentBeforeRemoteSs
                 }
             )
         {
-            let document = String::from_utf8(data).expect("lease document UTF-8");
-            let generation = document
-                .lines()
-                .find_map(|line| line.strip_prefix("metadata: "))
-                .and_then(|json| {
-                    serde_json::from_str::<Option<crate::lease::CloudMetadataGeneration>>(json)
-                        .expect("parse committed lease metadata")
-                });
-            if let Some(intent) = generation.and_then(|generation| {
-                generation
-                    .objects
-                    .into_iter()
-                    .find(|object| object.file_name == crate::metadata::files::INTENT_LOG)
-            }) {
-                let (tx, rx) = std::sync::mpsc::channel();
-                self.inner.submit_get(
-                    &format!("{}/{}", self.metadata_prefix, intent.object_key),
-                    tx,
+            let pointer: MetadataPointerForTest =
+                crate::metadata::codec::decode(4, &data).expect("decode committed pointer");
+            if let Some(generation) = pointer.committed {
+                let cloud = crate::storage::cloud::CloudStorage::new(
+                    self.inner.clone(),
+                    self.metadata_prefix.clone(),
                 );
-                if let Ok(crate::storage::cloud::CloudEvent::Get {
-                    result: crate::storage::cloud::CloudOutcome::Ok(intent_bytes),
-                    ..
-                }) = rx.recv_timeout(Duration::from_secs(1))
-                {
+                let bodies =
+                    crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
+                        &cloud,
+                        &generation,
+                        &crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+                    )
+                    .expect("validate selected intent closure");
+                if let Some(intent_bytes) = bodies.get(crate::metadata::files::INTENT_LOG) {
                     if intent_bytes
                         .windows(b"CompactionPublish".len())
                         .any(|window| window == b"CompactionPublish")
@@ -1882,29 +1879,18 @@ fn get_committed_cloud_metadata_for_test(
         crate::lease::CloudMetadataHead::Committed(generation) => generation,
         head => panic!("expected committed metadata generation, got {head:?}"),
     };
-    let object = generation
-        .objects
-        .iter()
-        .find(|object| object.file_name == file_name)
-        .unwrap_or_else(|| panic!("committed generation omits '{file_name}'"));
-    let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_get(&object.object_key, tx);
-    let bytes = match rx.recv_timeout(Duration::from_secs(1)) {
-        Ok(crate::storage::cloud::CloudEvent::Get {
-            result: crate::storage::cloud::CloudOutcome::Ok(bytes),
-            ..
-        }) => bytes,
-        other => panic!(
-            "committed metadata get for '{}' failed: {other:?}",
-            object.object_key
-        ),
-    };
-    assert_eq!(
-        u64::try_from(bytes.len()).expect("metadata length"),
-        object.len
-    );
-    assert_eq!(crc32c::crc32c(&bytes), object.crc32c);
-    bytes
+    crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
+        cloud,
+        &generation,
+        &crate::common::OperationDeadline::from_budget(Duration::from_secs(1)),
+    )
+    .expect("validate committed metadata closure")
+    .remove(file_name)
+    .unwrap_or_else(|| panic!("committed generation omits '{file_name}'"))
+}
+
+fn is_cloud_manifest_key_for_test(key: &str) -> bool {
+    key.starts_with("manifest/") || key.contains("/manifest/")
 }
 
 fn put_all_cloud_metadata_for_test(cloud: &crate::storage::cloud::CloudStorage, db_path: &Path) {
@@ -1948,7 +1934,7 @@ impl crate::storage::cloud::CloudReadCapability for ProviderTimeoutMetadataBacke
     crate::storage::cloud::forward_cloud_backend!(inner; submit_get_with_metadata);
 
     fn submit_get(&self, key: &str, callback: crate::storage::cloud::CloudCallback) {
-        if !key.contains("/metadata/generations/") {
+        if !is_cloud_manifest_key_for_test(key) {
             self.inner.submit_get(key, callback);
             return;
         }
@@ -2174,8 +2160,7 @@ impl crate::storage::cloud::CloudWriteCapability for AdvanceCommittedPointerBefo
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        let is_pointer_cas = key
-            .ends_with(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+        let is_pointer_cas = key.ends_with("metadata/committed-pointer.v1")
             && headers
                 .iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case("if-match"));
@@ -2188,19 +2173,13 @@ impl crate::storage::cloud::CloudWriteCapability for AdvanceCommittedPointerBefo
             None
         };
         if let Some(generation) = competing_generation {
-            let candidate = String::from_utf8(data.clone()).expect("UTF-8 lease document");
-            let metadata_line = candidate
-                .lines()
-                .find(|line| line.starts_with("metadata: "))
-                .expect("V2 lease metadata field");
-            let replacement = format!(
-                "metadata: {}",
-                serde_json::to_string(&Some(generation)).expect("serialize advanced pointer")
-            );
-            let advanced = candidate.replacen(metadata_line, &replacement, 1);
+            let mut candidate: MetadataPointerForTest =
+                crate::metadata::codec::decode(4, &data).expect("decode candidate pointer");
+            candidate.committed = Some(generation);
+            let advanced =
+                crate::metadata::codec::encode(4, &candidate).expect("encode advanced pointer");
             let (tx, rx) = std::sync::mpsc::channel();
-            self.inner
-                .submit_put(key, advanced.into_bytes(), headers.clone(), tx);
+            self.inner.submit_put(key, advanced, headers.clone(), tx);
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(crate::storage::cloud::CloudEvent::Put {
                     result: crate::storage::cloud::CloudOutcome::Ok(()),
@@ -2520,7 +2499,7 @@ fn should_preserve_provider_timeout_from_manifest_metadata_mirror() -> crate::co
             error: crate::common::MidgeError::Timeout(message),
             ..
         } => assert!(
-            message.contains("metadata"),
+            message.contains("manifest/") && message.contains("request timed out after 30 ms"),
             "unexpected timeout: {message}"
         ),
         other => panic!("expected typed metadata timeout, got {other:?}"),
@@ -2773,42 +2752,19 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
     el.mirror_metadata_to_authoritative_cloud()?;
 
     let leader_store = lease.get_leader_store().expect("provider leader store");
-    let mut advanced_generation = match leader_store
+    let baseline = match leader_store
         .read_committed_metadata(Duration::from_secs(1))
         .expect("read baseline pointer")
     {
         crate::lease::CloudMetadataHead::Committed(generation) => generation,
         head => panic!("expected baseline committed generation, got {head:?}"),
     };
-    let advanced_bytes =
-        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &advanced_manifest)
-            .expect("serialize advanced manifest");
-    let advanced_object = advanced_generation
-        .objects
-        .iter_mut()
-        .find(|object| object.file_name == crate::metadata::files::MANIFEST_SNAPSHOT)
-        .expect("baseline generation has a manifest snapshot");
-    advanced_object.object_key = format!(
-        "metadata/generations/{}/{}",
-        uuid::Uuid::new_v4(),
-        crate::metadata::files::MANIFEST_SNAPSHOT
-    );
-    advanced_object.len = u64::try_from(advanced_bytes.len()).expect("advanced manifest length");
-    advanced_object.crc32c = crc32c::crc32c(&advanced_bytes);
-    let (put_tx, put_rx) = std::sync::mpsc::channel();
-    metadata_storage.submit_put(&advanced_object.object_key, advanced_bytes, vec![], put_tx);
-    assert!(matches!(
-        put_rx.recv_timeout(Duration::from_secs(1)),
-        Ok(crate::storage::cloud::CloudEvent::Put {
-            result: crate::storage::cloud::CloudOutcome::Ok(()),
-            ..
-        })
-    ));
-    advanced_generation.id = advanced_generation
-        .id
-        .checked_next()
-        .expect("generation space");
-    advanced_generation.manifest_horizon = advanced_manifest.edit_checkpoint_id;
+    let advanced_generation = stage_competing_generation_for_test(
+        &metadata_storage,
+        &el.state.manifest,
+        &advanced_manifest,
+    )?;
+    assert_eq!(advanced_generation.id, baseline.id.checked_next().unwrap());
 
     // A local sequence-30 edit requires another pointer commit. The backend
     // installs the newer complete generation after preflight, just before CAS.
@@ -2840,6 +2796,47 @@ fn should_not_overwrite_manifest_metadata_advanced_after_preflight(
     );
 
     Ok(())
+}
+
+fn stage_competing_generation_for_test(
+    cloud: &crate::storage::cloud::CloudStorage,
+    baseline: &crate::metadata::Manifest,
+    advanced: &crate::metadata::Manifest,
+) -> crate::common::MidgeResult<crate::lease::CloudMetadataGeneration> {
+    use crate::lease::LeaderStore as _;
+    let directory = tempfile::tempdir()?;
+    let fs = crate::io::real::test_root(directory.path());
+    crate::metadata::ensure_or_create_format_marker(&fs, directory.path())?;
+    let store = crate::lease::fs_leader_store::FsLeaderStore::new(
+        fs.clone(),
+        crate::lease::LeaseClock::default(),
+    );
+    store.acquire_leadership("competing")?;
+    let lock = crate::runtime::MetadataPublicationLock::default();
+    for manifest in [baseline, advanced] {
+        crate::metadata::ManifestPersistence::save_with_fs(&fs, manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+                cloud,
+                fs: fs.as_ref(),
+                publication_lock: &lock,
+                lock_wait_budget: Duration::from_secs(5),
+                deadline: &deadline,
+                authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                    store: &store,
+                    holder_id: "competing",
+                    writer_epoch: 1,
+                },
+            },
+            |_| Ok(()),
+        )?;
+    }
+    match store.read_committed_metadata(Duration::from_secs(1))? {
+        crate::lease::CloudMetadataHead::Committed(generation) => Ok(generation),
+        head => panic!("expected competing committed generation, got {head:?}"),
+    }
 }
 
 #[test]
@@ -3545,25 +3542,13 @@ fn should_prune_remote_wal_when_flush_intent_clear_is_mirrored() -> crate::commo
     let metadata_uploads = metadata_backend.get_uploads();
     let immutable_uploads: Vec<_> = metadata_uploads
         .iter()
-        .filter(|(key, _)| key.contains("metadata/generations/"))
+        .filter(|(key, _)| is_cloud_manifest_key_for_test(key))
         .collect();
-    let expected_metadata_uploads = crate::metadata::files::CLOUD_MIRRORED
-        .iter()
-        .filter(|file_name| el.state.db_path.join(file_name).exists())
-        .count();
     assert_eq!(
             immutable_uploads.len(),
-            expected_metadata_uploads,
+            1,
             "flush publication should use the existing metadata mirror, not perform a second full mirror: {metadata_uploads:?}"
         );
-    assert_eq!(
-        immutable_uploads
-            .iter()
-            .filter(|(key, _)| key.ends_with("/intent_log.json"))
-            .count(),
-        1,
-        "intent metadata should be uploaded once as part of the existing mirror"
-    );
     assert!(
         !remote_wal_path_for_test(&el, segment_id).exists(),
         "remote WAL should prune after flush coverage and current cloud metadata are both verified"
@@ -8069,7 +8054,7 @@ fn should_defer_metadata_cleanup_before_body_reads_when_shared_budget_is_exhaust
     assert!(provider
         .get_downloads()
         .iter()
-        .all(|key| !key.contains("metadata/generations/")));
+        .all(|key| !is_cloud_manifest_key_for_test(key)));
     assert_eq!(provider.get_range_downloads().len(), 0);
     drop(reservation);
     assert_eq!(budget.used(), 0);

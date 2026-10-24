@@ -32,7 +32,6 @@ pub struct LeasePutProof {
     owner: String,
     acquired: String,
     expires: String,
-    metadata: String,
 }
 
 impl LeasePutProof {
@@ -44,13 +43,17 @@ impl LeasePutProof {
                 .find_map(|line| line.strip_prefix(name))
                 .map(str::to_string)
         };
+        // Current leases carry renewable ownership only. Metadata authority
+        // lives in the separate committed pointer, never in this document.
+        if field("lease_version: ")?.as_str() != "4" || field("metadata: ").is_some() {
+            return None;
+        }
         Some(Self {
             epoch: field("fencing_epoch: ")?.parse().ok()?,
             holder: field("holder: ")?,
             owner: field("owner: ")?,
             acquired: field("acquired: ")?,
             expires: field("expires: ")?,
-            metadata: field("metadata: ")?,
         })
     }
 
@@ -59,12 +62,11 @@ impl LeasePutProof {
             .is_ok_and(|expires| chrono::Utc::now() > expires)
     }
 
-    fn same_owner_and_metadata(&self, other: &Self) -> bool {
+    fn same_authority_owner(&self, other: &Self) -> bool {
         self.epoch == other.epoch
             && self.holder == other.holder
             && self.owner == other.owner
             && self.acquired == other.acquired
-            && self.metadata == other.metadata
     }
 }
 
@@ -230,7 +232,7 @@ impl Control {
                 && observation.status == Some(200)
                 && observation.response_written
                 && observation.lease_put.as_ref().is_some_and(|released| {
-                    released.expired() && released.same_owner_and_metadata(committed)
+                    released.expired() && released.same_authority_owner(committed)
                 })
         };
         let (events, _) = self
