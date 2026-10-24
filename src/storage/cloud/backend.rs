@@ -497,6 +497,9 @@ pub trait CloudReadCapability: Send + Sync {
 /// impl CloudWriteCapability for MissingWrite {}
 /// ```
 pub trait CloudWriteCapability: Send + Sync {
+    /// Configure retries; this does not authorize replay of shared-key mutations.
+    fn set_retry_policy(&self, _policy: super::CloudRetryPolicy) {}
+
     /// [`crate::storage::StorageBackend::write_payload_copies`]. A provider
     /// lowers the conservative default only when it bounds its own copies.
     fn write_payload_copies(&self) -> usize {

@@ -36,6 +36,12 @@ impl PublicationAdmission {
 }
 
 impl HybridStorage {
+    /// Tune retries for immutable put-if-absent publication. Every failed
+    /// attempt reconciles the same key and exact body before replaying it.
+    pub fn set_immutable_retry_policy(&mut self, policy: crate::storage::cloud::CloudRetryPolicy) {
+        self.immutable_retry = policy;
+    }
+
     /// Leave three quarters of the variable workspace for live merge readers,
     /// the current writer, and one indivisible key. Publication temporarily
     /// needs [`Self::publication_copies`] of the encoded partition, so using
@@ -143,13 +149,65 @@ impl HybridStorage {
         bytes: &[u8],
         admission: &PublicationAdmission,
     ) -> MidgeResult<StorageObjectMetadata> {
-        if let Some(metadata) = self.file_publication_head(key, admission)? {
-            self.verify_publication_ranges(key, bytes, &metadata, admission)?;
-            return Ok(metadata);
+        for attempt in 0..=self.immutable_retry.max_retries {
+            if let Some(metadata) = self.file_publication_head(key, admission)? {
+                self.verify_publication_ranges(key, bytes, &metadata, admission)?;
+                return Ok(metadata);
+            }
+            let outcome = self.put_file_bytes_with_receipt(key, bytes, admission);
+            match outcome {
+                Ok(Some(receipt)) => {
+                    if !receipt.matches(bytes) {
+                        return Err(MidgeError::Corruption(
+                            "immutable upload checksum receipt does not match sent bytes".into(),
+                        ));
+                    }
+                    return Ok(receipt.metadata);
+                }
+                Err(error) if error.is_timeout() => {
+                    return Err(MidgeError::Timeout(error.to_string()));
+                }
+                Err(error)
+                    if error.kind() != crate::storage::StorageErrorKind::Transport
+                        && !Self::storage_error_indicates_precondition_failure(&error) =>
+                {
+                    return Err(MidgeError::Internal(error.to_string()));
+                }
+                outcome => {
+                    // Even an ambiguous successful PUT can be repeated safely
+                    // only because this key is immutable and every attempt
+                    // carries IfAbsent and the exact same admitted bytes.
+                    if let Some(metadata) = self.file_publication_head(key, admission)? {
+                        self.verify_publication_ranges(key, bytes, &metadata, admission)?;
+                        return Ok(metadata);
+                    }
+                    let Err(error) = outcome else {
+                        return Err(MidgeError::Corruption(
+                            "uploaded immutable object is absent".into(),
+                        ));
+                    };
+                    if error.kind() != crate::storage::StorageErrorKind::Transport
+                        || attempt == self.immutable_retry.max_retries
+                    {
+                        return Err(MidgeError::Internal(error.to_string()));
+                    }
+                    let remaining = admission.timeout(self, key)?;
+                    std::thread::sleep(self.immutable_retry.delay(attempt).min(remaining));
+                }
+            }
         }
+        unreachable!("the final immutable upload attempt returns its outcome")
+    }
+
+    fn put_file_bytes_with_receipt(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        admission: &PublicationAdmission,
+    ) -> Result<Option<crate::storage::StorageWriteReceipt>, crate::storage::StorageError> {
         admission.timeout(self, key)?;
         let (tx, rx) = mpsc::channel();
-        self.stores.sst.submit_write_request(
+        self.stores.sst.submit_write_receipt_request(
             crate::storage::StorageRequest::new(key, admission.deadline, self.callback_timeout)
                 .with_precondition(crate::storage::StoragePrecondition::IfAbsent)
                 .with_reservation(Arc::clone(&admission.memory)),
@@ -157,40 +215,11 @@ impl HybridStorage {
             tx,
         );
         let timeout = admission.timeout(self, key)?;
-        match rx.recv_timeout(timeout) {
-            Ok(StorageEvent::WriteComplete {
-                result: StorageOutcome::Ok(()),
-                ..
-            }) => {}
-            Ok(StorageEvent::WriteComplete {
-                result: StorageOutcome::Err(error),
-                ..
-            }) if !Self::storage_error_indicates_timeout(&error) => {
-                // A conflicting or ambiguous response is accepted only after
-                // every existing byte matches through one pinned identity.
-            }
-            Ok(StorageEvent::WriteComplete {
-                result: StorageOutcome::Err(error),
-                ..
-            }) => {
-                return Err(MidgeError::Timeout(error.to_string()));
-            }
-            Ok(event) => {
-                return Err(MidgeError::Internal(format!(
-                    "immutable upload did not complete: {event:?}"
-                )))
-            }
-            Err(error) => {
-                return Err(MidgeError::Timeout(format!(
-                    "immutable upload callback: {error}"
-                )))
-            }
-        }
-        let metadata = self
-            .file_publication_head(key, admission)?
-            .ok_or_else(|| MidgeError::Corruption("uploaded immutable object is absent".into()))?;
-        self.verify_publication_ranges(key, bytes, &metadata, admission)?;
-        Ok(metadata)
+        let result = rx.recv_timeout(timeout).map_err(|error| {
+            crate::storage::storage_timeout_error(format!("immutable upload callback: {error}"))
+        })?;
+        admission.timeout(self, key)?;
+        result
     }
 
     fn file_publication_head(

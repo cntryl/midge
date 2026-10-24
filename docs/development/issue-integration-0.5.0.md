@@ -372,3 +372,24 @@ the latest shared check stops in concurrent cloud-publication interface edits.
 Execution, A/B write amplification and narrowing the existing Fragment fallback
 remain pending. The fallback is retained conservatively for legacy or oversized
 source/target layouts while the new partition policy is qualified.
+
+### #927 and #915 receipt slice: implemented candidates
+
+Cold-start SST inventory uses a bounded group of concurrent probes, retains
+manifest order, and advances progress only after verified outcomes. Native
+provider executors use configurable bounded full-jitter retry delays. Immutable
+SST retries retain the same IfAbsent key, body, deadline and memory admission,
+reconciling ambiguous effects by pinned content verification. Generic catalog
+and unconditional mutation replay stays disabled.
+
+Immutable publication now uses the existing validated provider receipt path;
+a matching digest over the exact sent bytes avoids range readback. Missing
+receipts retain identity-pinned verification. The source still has to match the
+writer's finalized size and CRC before upload. Active regressions cover receipt
+success/fallback/mismatch, ambiguous immutable creation, bounded startup probes
+and failed progress. Code compiles through these paths; execution, provider
+qualification and latency/request targets are pending.
+
+#915's streaming multipart stage, bounded part reservations and removal of
+whole-file admission remain uncoded. #907 off-loop catalog publication and
+#916 parallel upload scheduling are separate following slices.

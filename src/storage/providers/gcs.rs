@@ -1433,6 +1433,10 @@ impl crate::storage::cloud::CloudReadCapability for GcsBackend {
 }
 
 impl crate::storage::cloud::CloudWriteCapability for GcsBackend {
+    fn set_retry_policy(&self, policy: crate::storage::cloud::CloudRetryPolicy) {
+        self.executor.set_retry_policy(policy);
+    }
+
     fn write_payload_copies(&self) -> usize {
         crate::storage::SHARED_BODY_WRITE_PAYLOAD_COPIES
     }

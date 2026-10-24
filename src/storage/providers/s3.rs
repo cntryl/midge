@@ -1338,6 +1338,10 @@ impl crate::storage::cloud::CloudReadCapability for S3Backend {
 }
 
 impl crate::storage::cloud::CloudWriteCapability for S3Backend {
+    fn set_retry_policy(&self, policy: crate::storage::cloud::CloudRetryPolicy) {
+        self.executor.set_retry_policy(policy);
+    }
+
     fn write_payload_copies(&self) -> usize {
         crate::storage::SHARED_BODY_WRITE_PAYLOAD_COPIES
     }

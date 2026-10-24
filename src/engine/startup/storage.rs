@@ -1122,15 +1122,20 @@ impl RuntimeStorageMaterialization {
         let (tx, rx) = crossbeam::channel::bounded::<crate::storage::StorageEvent>(
             crate::storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
         );
-        let hybrid_storage = Arc::new(
+        let retry = opts.cloud_write_policy_value().transient_retry;
+        for storage in [wal_storage, sst_storage, metadata_storage] {
+            storage.set_retry_policy(retry);
+        }
+        let mut hybrid_storage =
             crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
                 wal_backend,
                 sst_backend,
                 control_backend,
                 tx,
                 opts.storage_io_timeout(),
-            ),
-        );
+            );
+        hybrid_storage.set_immutable_retry_policy(retry);
+        let hybrid_storage = Arc::new(hybrid_storage);
         // The remote block cache holds its share outside this ledger (#938).
         let budget = opts.local_storage_budget_bytes();
         hybrid_storage.enable_ephemeral_sst_cache(budget - remote_block_cache_share(budget));

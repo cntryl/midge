@@ -163,6 +163,7 @@ pub struct HybridStorage {
 
     /// Maximum wait for a callback-based storage backend to respond.
     callback_timeout: Duration,
+    immutable_retry: crate::storage::cloud::CloudRetryPolicy,
 
     /// Flag indicating if WAL upload worker thread failed to spawn
     upload_worker_failed: bool,
@@ -341,6 +342,7 @@ impl HybridStorage {
                 handle: upload_worker_handle,
             }),
             callback_timeout: limits.callback_timeout,
+            immutable_retry: crate::storage::cloud::CloudRetryPolicy::default(),
             upload_worker_failed,
             wal_catalog_mutation: Mutex::new(()),
             wal_catalog_cache: Mutex::new(None),

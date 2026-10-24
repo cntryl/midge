@@ -1,9 +1,36 @@
 use crate::common::{MidgeError, MidgeResult};
 use std::time::Duration;
 
+/// Bounded transient retries. Mutation replay requires an independent
+/// provider or caller reconciliation proof even when retries are configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloudRetryPolicy {
+    pub max_retries: u32,
+    pub base_delay: Duration,
+}
+
+impl Default for CloudRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            base_delay: Duration::from_millis(50),
+        }
+    }
+}
+
+impl CloudRetryPolicy {
+    pub(crate) fn delay(self, attempt: u32) -> Duration {
+        let ceiling = self.base_delay.saturating_mul(1 << attempt.min(4));
+        let nanos = u64::try_from(ceiling.as_nanos()).unwrap_or(u64::MAX);
+        Duration::from_nanos(rand::random_range(0..=nanos))
+    }
+}
+
 /// Cloud-backed write tuning used by database open options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudWritePolicy {
+    /// Transient read and reconciled immutable-publication retry budget.
+    pub transient_retry: CloudRetryPolicy,
     /// Flush a column family whose active memtable started this many WAL
     /// segments ago, bounding the cloud WAL catalog. Local mode bounds WAL
     /// retention in bytes instead (four memtable flush triggers' worth).
@@ -16,6 +43,7 @@ pub struct CloudWritePolicy {
 impl Default for CloudWritePolicy {
     fn default() -> Self {
         Self {
+            transient_retry: CloudRetryPolicy::default(),
             eventual_flush_segment_gap: 128,
             wal_seal_min_segment_bytes: 16 * 1024 * 1024,
             wal_seal_max_flush_delay: Duration::from_millis(500),

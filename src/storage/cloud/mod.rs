@@ -56,8 +56,8 @@ pub mod executor;
 mod list_budget;
 
 pub(crate) use blocking::BlockingCloud;
-pub use config::CloudWritePolicy;
 pub(crate) use config::CloudWritePolicyConfig;
+pub use config::{CloudRetryPolicy, CloudWritePolicy};
 
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome};
 #[cfg(test)]

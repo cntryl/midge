@@ -90,13 +90,13 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
             #[cfg(any(test, feature = "cloud-common"))]
             CloudError::Unauthorized(_) => StorageErrorKind::Unauthorized,
             CloudError::Transport(_) => StorageErrorKind::Transport,
+            #[cfg(any(test, feature = "cloud-common"))]
+            CloudError::ServerError(_) => StorageErrorKind::Transport,
             CloudError::Protocol(_) | CloudError::ConditionalConflict(_) => {
                 StorageErrorKind::Protocol
             }
             #[cfg(any(test, feature = "cloud-common"))]
-            CloudError::InvalidRequest(_) | CloudError::ServerError(_) => {
-                StorageErrorKind::Protocol
-            }
+            CloudError::InvalidRequest(_) => StorageErrorKind::Protocol,
             _ => StorageErrorKind::Io,
         }
     };

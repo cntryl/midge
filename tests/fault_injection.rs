@@ -5743,6 +5743,7 @@ mod shutdown_orchestration {
                 wal_seal_min_segment_bytes: usize::MAX,
                 wal_seal_max_flush_delay: Duration::from_mins(1),
                 wal_seal_max_pending_writes: 1,
+                ..CloudWritePolicy::default()
             })
             .shutdown_cloud_drain_timeout_for_testing(shutdown_cloud_drain_timeout)
             .on_lease_loss(move || {
@@ -7380,6 +7381,7 @@ mod cloud_crash_recovery {
             wal_seal_min_segment_bytes: usize::MAX,
             wal_seal_max_flush_delay: Duration::from_hours(1),
             wal_seal_max_pending_writes: 1,
+            ..CloudWritePolicy::default()
         }
     }
 
@@ -7389,6 +7391,7 @@ mod cloud_crash_recovery {
             wal_seal_min_segment_bytes: usize::MAX,
             wal_seal_max_flush_delay: Duration::from_hours(1),
             wal_seal_max_pending_writes: usize::MAX,
+            ..CloudWritePolicy::default()
         }
     }
 

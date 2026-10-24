@@ -20,6 +20,10 @@ pub struct CloudStorage {
 }
 
 impl CloudStorage {
+    pub(crate) fn set_retry_policy(&self, policy: super::CloudRetryPolicy) {
+        self.writes.set_retry_policy(policy);
+    }
+
     #[cfg(test)]
     pub fn new(backend: Arc<dyn CloudBackend>, namespace: String) -> Self {
         Self::new_with_timeout(

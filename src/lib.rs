@@ -343,6 +343,7 @@ pub use common::time::{Clock, SystemClock};
 
 // `engine::Key` is a public alias to `bytes::Bytes`; re-export it as `Bytes`.
 pub use engine::Key as Bytes;
+pub use storage::cloud::CloudRetryPolicy;
 // Re-export BytesMut directly from the `bytes` crate.
 pub use bytes::BytesMut;
 
