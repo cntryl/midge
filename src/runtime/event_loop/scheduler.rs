@@ -22,19 +22,13 @@ impl EventLoop {
         if self.publication.verification_barrier.token.is_some() {
             // Verification freezes layout maintenance, but group-commit fsync
             // does not change the layout being verified.
-            let due_sync = self.actors.wal_actor.should_sync_batch()
-                && (self.actors.wal_actor.has_pending_data()
-                    || self.pipeline.durability.has_pending_waiters());
-            return due_sync
-                || self
-                    .actors
-                    .cloud_coordinator
-                    .hybrid_storage_events
-                    .as_ref()
-                    .is_some_and(|rx| !rx.is_empty());
+            return self.has_actionable_verification_work();
         }
 
         if self.has_ready_reserved_compaction() {
+            return true;
+        }
+        if self.flush_mirror_retry_timeout() == Some(Duration::ZERO) {
             return true;
         }
         if CompactionCoordinator::capture_retry_timeout(self) == Some(Duration::ZERO) {
@@ -122,6 +116,14 @@ impl EventLoop {
         false
     }
 
+    fn has_actionable_verification_work(&self) -> bool {
+        let due_sync = self.actors.wal_actor.should_sync_batch()
+            && (self.actors.wal_actor.has_pending_data()
+                || self.pipeline.durability.has_pending_waiters());
+        due_sync || self.actors.cloud_coordinator.hybrid_storage_events
+            .as_ref().is_some_and(|rx| !rx.is_empty())
+    }
+
     pub(super) fn idle_progress_timeout(&self) -> Option<Duration> {
         if self.wal_group_in_flight() {
             return Some(Duration::from_millis(1));
@@ -150,6 +152,7 @@ impl EventLoop {
         [
             self.actors.wal_actor.sync_deadline_timeout(),
             self.retry_deadlines().min(),
+            self.flush_mirror_retry_timeout(),
             self.actors
                 .cloud_coordinator
                 .hybrid_storage
@@ -245,6 +248,7 @@ impl EventLoop {
         self.wake_flush_waiters_for_terminal_fencing();
         CompactionCoordinator::drain_publish_results(self);
         self.drain_flush_worker_results();
+        self.retry_flush_mirrors_if_due();
         if let Some(msg_rx) = drain_writes_from {
             self.drain_validation_results(msg_rx);
         } else {

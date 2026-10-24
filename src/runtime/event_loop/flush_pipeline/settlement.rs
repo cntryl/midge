@@ -63,6 +63,7 @@ impl EventLoop {
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
         error: &crate::common::MidgeError,
     ) {
+        self.forget_flush_mirror_retry(flush_id);
         self.state.finish_flush_publication_attempt(flush_id, true);
         let identity = self
             .state

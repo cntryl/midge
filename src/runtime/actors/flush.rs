@@ -212,7 +212,7 @@ pub(crate) struct FlushMirrorTask {
     pub lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
     pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
-    pub runtime_response_timeout: std::time::Duration,
+    pub deadline: crate::common::OperationDeadline,
 }
 
 pub(crate) struct FlushMirrorCompletion {
@@ -846,17 +846,9 @@ fn validate_monotonic_lease(
 }
 
 fn mirror_after_local_commit(task: &FlushMirrorTask) -> MidgeResult<bool> {
-    let validate = || {
-        validate_publication_lease(
-            task.delta.identity,
-            task.lease_healthy.as_ref(),
-            task.lease_validity.as_ref(),
-            task.leader_store.as_ref(),
-            task.leader_holder_id.as_deref(),
-        )
-    };
+    let deadline = task.deadline;
+    let validate = || validate_mirror_lease(task, &deadline);
     validate()?;
-    let deadline = crate::common::OperationDeadline::from_budget(task.runtime_response_timeout);
     let mut validate_lease = |_deadline: &crate::common::OperationDeadline| validate();
     let authority = task.leader_store.as_deref().map(|store| {
         crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
@@ -883,7 +875,40 @@ fn mirror_after_local_commit(task: &FlushMirrorTask) -> MidgeResult<bool> {
         )
     }?;
     crate::failpoints::fail_point!("midge::flush_worker::after_control_metadata_publication");
+    crate::common::DeadlineScope::new(deadline).check("flush metadata mirror completion")?;
     Ok(mirrored || task.storage.has_hybrid_storage())
+}
+
+fn validate_mirror_lease(
+    task: &FlushMirrorTask,
+    deadline: &crate::common::OperationDeadline,
+) -> MidgeResult<()> {
+    crate::common::DeadlineScope::new(*deadline).check("flush metadata mirror authority")?;
+    if task
+        .lease_healthy
+        .as_ref()
+        .is_some_and(|healthy| !healthy.load(Ordering::Acquire))
+    {
+        return Err(MidgeError::Fenced(
+            "flush metadata mirror lease is unhealthy".into(),
+        ));
+    }
+    let epoch = task.delta.identity.writer_epoch;
+    if let Some(validity) = &task.lease_validity {
+        validity
+            .remaining(epoch)
+            .map_err(|error| error.into_validation_error("flush mirror lease validity"))?;
+    }
+    if let Some(store) = &task.leader_store {
+        store
+            .validate_metadata_epoch_with_timeout(
+                task.leader_holder_id.as_deref().unwrap_or_default(),
+                epoch,
+                deadline.remaining(),
+            )
+            .map_err(|error| error.into_validation_error("flush mirror writer authority"))?;
+    }
+    crate::common::DeadlineScope::new(*deadline).check("flush metadata mirror authority completion")
 }
 
 fn finalize_staged_sst(
@@ -1243,7 +1268,9 @@ mod tests {
             lease_healthy: fixture.task.lease_healthy.clone(),
             leader_store: fixture.task.leader_store.clone(),
             leader_holder_id: fixture.task.leader_holder_id.clone(),
-            runtime_response_timeout: crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
+            deadline: crate::common::OperationDeadline::from_budget(
+                crate::config::DEFAULT_RUNTIME_RESPONSE_TIMEOUT,
+            ),
         }
     }
 
@@ -1776,7 +1803,8 @@ mod tests {
         let publication_lock = fixture.metadata_publication_lock.clone();
         let guard = publication_lock.lock();
         let mut task = mirror_task(&fixture, delta);
-        task.runtime_response_timeout = std::time::Duration::from_millis(100);
+        task.deadline =
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_millis(100));
         let (result_tx, result_rx) = std::sync::mpsc::channel();
 
         // Act: keep the lock on this thread so the old blocking lock path

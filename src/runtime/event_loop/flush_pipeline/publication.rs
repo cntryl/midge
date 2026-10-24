@@ -272,29 +272,12 @@ impl EventLoop {
         delta: FlushPublicationDelta,
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) -> crate::common::MidgeResult<()> {
-        let metadata_cut = if !self.pipeline.inline_flush_worker
-            && self
-                .actors
-                .cloud_coordinator
-                .cloud_metadata_storage
-                .is_some()
-        {
-            let deadline = crate::common::OperationDeadline::from_budget(
-                self.routing.runtime_response_timeout,
-            );
-            Some(
-                self.publication
-                    .metadata_publication_lock
-                    .capture_control_cut(&self.state.fs, delta.identity.writer_epoch, &deadline)?,
-            )
-        } else {
-            None
-        };
+        let deadline = self.flush_mirror_deadline(delta.identity);
         let task = FlushMirrorTask {
             delta,
             reservation,
             fs: Arc::clone(&self.state.fs),
-            metadata_cut,
+            metadata_cut: None,
             storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
                 self.actors.cloud_coordinator.hybrid_storage.clone(),
                 self.actors.cloud_coordinator.cloud_metadata_storage.clone(),
@@ -304,9 +287,9 @@ impl EventLoop {
             lease_healthy: self.authority.fencing.lease_healthy.clone(),
             leader_store: self.authority.fencing.leader_store.clone(),
             leader_holder_id: self.authority.fencing.leader_holder_id.clone(),
-            runtime_response_timeout: self.routing.runtime_response_timeout,
+            deadline,
         };
-        self.actors.flush_actor.submit_mirror(task)
+        self.admit_flush_mirror(task)
     }
 
     pub(super) fn handle_flush_mirror_completion(
@@ -347,13 +330,7 @@ impl EventLoop {
         &self,
         identity: FlushIdentity,
     ) -> crate::common::MidgeResult<()> {
-        self.check_lease_health()?;
-        if identity.writer_epoch != self.authority.fencing.writer_epoch {
-            return Err(crate::common::MidgeError::Fenced(format!(
-                "flush {} epoch {} does not match runtime epoch {}",
-                identity.flush_id, identity.writer_epoch, self.authority.fencing.writer_epoch
-            )));
-        }
+        self.validate_flush_owner(identity)?;
         if let Some(store) = &self.authority.fencing.leader_store {
             store
                 .validate_epoch(
@@ -372,6 +349,20 @@ impl EventLoop {
                 })?;
         }
         self.check_lease_health()?;
+        Ok(())
+    }
+
+    pub(in crate::runtime::event_loop) fn validate_flush_owner(
+        &self,
+        identity: FlushIdentity,
+    ) -> crate::common::MidgeResult<()> {
+        self.check_lease_health()?;
+        if identity.writer_epoch != self.authority.fencing.writer_epoch {
+            return Err(crate::common::MidgeError::Fenced(format!(
+                "flush {} epoch {} does not match runtime epoch {}",
+                identity.flush_id, identity.writer_epoch, self.authority.fencing.writer_epoch
+            )));
+        }
         let Some((cf_id, flush)) = self.state.immutable_flush_by_id(identity.flush_id) else {
             return Err(crate::common::MidgeError::Fenced(format!(
                 "flush {} is no longer owned by this runtime",

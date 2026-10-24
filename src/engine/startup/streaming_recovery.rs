@@ -497,12 +497,10 @@ fn commit_and_mirror_checkpoint(
         lease_healthy: config.lease_healthy.clone(),
         leader_store: config.leader_store.clone(),
         leader_holder_id: config.leader_holder_id.clone(),
-        runtime_response_timeout: state
-            .startup_scope
-            .as_ref()
-            .map_or(config.runtime_response_timeout, |scope| {
-                scope.clamp(config.runtime_response_timeout)
-            }),
+        deadline: state.startup_scope.as_ref().map_or_else(
+            || crate::common::OperationDeadline::from_budget(config.runtime_response_timeout),
+            crate::common::DeadlineScope::deadline,
+        ),
     })?;
     let FlushWorkerResult::Mirror(mirror) = receive_completion(
         actor,

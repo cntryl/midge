@@ -156,9 +156,12 @@ impl EventLoop {
     }
 
     fn drain_local_shutdown_flush_pipeline(&mut self) {
-        while self.actors.flush_actor.is_inflight() {
+        while self.actors.flush_actor.is_inflight()
+            || !self.pipeline.pending_flush_mirrors.is_empty()
+        {
             self.reap_cloud_wal_prune_worker();
             self.drain_flush_worker_results();
+            self.retry_flush_mirrors_if_due();
             match self
                 .pipeline
                 .flush_worker_result_rx
@@ -391,6 +394,7 @@ impl EventLoop {
         loop {
             self.reap_cloud_wal_prune_worker();
             self.drain_flush_worker_results();
+            self.retry_flush_mirrors_if_due();
             let pending = self
                 .state
                 .column_families
