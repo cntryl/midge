@@ -74,6 +74,7 @@ pub(crate) mod inventory;
 pub(crate) mod providers;
 mod write_receipt;
 pub use write_receipt::{StorageWriteReceipt, WriteReceiptCallback};
+pub(crate) mod remote_block_cache;
 pub(crate) mod remote_sst;
 pub(crate) mod retained_callback;
 pub(crate) mod simulated;

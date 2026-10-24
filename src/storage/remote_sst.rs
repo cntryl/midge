@@ -1,6 +1,7 @@
 //! Immutable remote SST range views. Normal readers use cloud authority;
 //! explicit salvage overrides name only startup-verified local copies.
 
+use super::remote_block_cache::RemoteBlockCache;
 use super::{StorageBackend, StorageEvent, StorageObjectMetadata, StorageOutcome};
 use crate::io::traits::{DirEntry, Metadata};
 use crate::io::{
@@ -19,6 +20,8 @@ pub(crate) struct RemoteSstFs {
     deadline: Option<crate::common::OperationDeadline>,
     verified_local_overrides: Arc<std::collections::HashSet<String>>,
     observer: Option<Arc<dyn crate::io::traits::ReadObserver>>,
+    /// Local disk cache of fetched ranges, shared by every view (#938).
+    cache: Option<Arc<RemoteBlockCache>>,
 }
 
 #[derive(Clone)]
@@ -29,6 +32,25 @@ struct RemoteSstFile {
     timeout: Duration,
     deadline: Option<crate::common::OperationDeadline>,
     observer: Option<Arc<dyn crate::io::traits::ReadObserver>>,
+    cache: Option<Arc<RemoteBlockCache>>,
+}
+
+/// Bytes fetched when a read touches the object's tail: the footer and, for
+/// most SSTs, every metadata block behind it, so a reader open costs one range
+/// read instead of one per block (#938).
+const TAIL_PREFETCH_BYTES: u64 = 64 * 1024;
+
+impl RemoteSstFile {
+    /// The cache key for this pinned object version. Identity includes the
+    /// provider's version so a replaced object never serves a stale range.
+    fn cache_identity(&self) -> String {
+        format!(
+            "{}|{}|{}",
+            self.key,
+            self.metadata.etag,
+            self.metadata.generation.as_deref().unwrap_or("")
+        )
+    }
 }
 
 struct RangeObservation<'a> {
@@ -71,6 +93,7 @@ impl RemoteSstFs {
             deadline: None,
             verified_local_overrides: Arc::default(),
             observer: None,
+            cache: None,
         }
     }
 
@@ -88,6 +111,7 @@ impl RemoteSstFs {
             deadline: None,
             verified_local_overrides: Arc::default(),
             observer: None,
+            cache: None,
             pinned: Some(Arc::new(RemoteSstFile {
                 cloud,
                 key,
@@ -95,8 +119,20 @@ impl RemoteSstFs {
                 timeout,
                 deadline: None,
                 observer: None,
+                cache: None,
             })),
         }
+    }
+
+    /// Serve fetched ranges from, and record them into, a local disk cache.
+    pub(crate) fn with_block_cache(mut self, cache: Arc<RemoteBlockCache>) -> Self {
+        if let Some(file) = &mut self.pinned {
+            Arc::get_mut(file)
+                .expect("new remote SST view is exclusively owned")
+                .cache = Some(Arc::clone(&cache));
+        }
+        self.cache = Some(cache);
+        self
     }
 
     pub(crate) fn with_deadline(mut self, deadline: crate::common::OperationDeadline) -> Self {
@@ -179,6 +215,7 @@ impl RemoteSstFs {
             timeout: self.timeout,
             deadline: self.deadline,
             observer: self.observer.clone(),
+            cache: self.cache.clone(),
         }))
     }
 }
@@ -214,6 +251,19 @@ impl crate::io::ReadFile for Arc<RemoteSstFile> {
         if len == 0 {
             return Ok(Bytes::new());
         }
+        let identity = self.cache.as_ref().map(|_| self.cache_identity());
+        if let (Some(cache), Some(identity)) = (&self.cache, &identity) {
+            if let Some(bytes) = cache.get(identity, offset, len) {
+                return Ok(bytes);
+            }
+        }
+        // A read that reaches the object's end is the footer: with a cache,
+        // fetch the whole tail so the metadata reads that follow are hits.
+        let fetch_offset = if identity.is_some() && end == self.metadata.size {
+            end.saturating_sub(TAIL_PREFETCH_BYTES).min(offset)
+        } else {
+            offset
+        };
         let timeout = self
             .deadline
             .map_or(self.timeout, |deadline| deadline.clamp(self.timeout));
@@ -238,7 +288,7 @@ impl crate::io::ReadFile for Arc<RemoteSstFile> {
                 timeout,
             )
             .with_precondition(super::StoragePrecondition::IfMatch(self.metadata.clone())),
-            offset..end,
+            fetch_offset..end,
             tx,
         );
         let bytes = rx
@@ -253,13 +303,21 @@ impl crate::io::ReadFile for Arc<RemoteSstFile> {
             })?
             .map_err(storage_error)?;
         observation.returned_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if u64::try_from(bytes.len()).ok() != Some(len) {
+        if u64::try_from(bytes.len()).ok() != Some(end - fetch_offset) {
             return Err(FsError::Corruption(
                 "remote SST range response length mismatch".into(),
             ));
         }
         observation.failed = false;
-        Ok(Bytes::from(bytes))
+        let fetched = Bytes::from(bytes);
+        if let (Some(cache), Some(identity)) = (&self.cache, &identity) {
+            cache.insert(identity, fetch_offset, &fetched);
+        }
+        let start = usize::try_from(offset - fetch_offset)
+            .map_err(|_| FsError::Corruption("remote SST range offset overflow".into()))?;
+        let stop = usize::try_from(end - fetch_offset)
+            .map_err(|_| FsError::Corruption("remote SST range offset overflow".into()))?;
+        Ok(fetched.slice(start..stop))
     }
 
     fn len(&self) -> FsResult<u64> {
@@ -343,6 +401,7 @@ impl Fs for RemoteSstFs {
                 })
             }),
             observer: Some(observer),
+            cache: self.cache.clone(),
         }))
     }
 
@@ -386,6 +445,7 @@ impl Fs for RemoteSstFs {
             verified_local_overrides: Arc::clone(&self.verified_local_overrides),
             pinned: Some(self.remote_file(path)?),
             observer: self.observer.clone(),
+            cache: self.cache.clone(),
         })))
     }
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {

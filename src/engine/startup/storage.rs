@@ -21,21 +21,72 @@ struct CloudWalRecoveryMetadata<'a> {
     hydrated_generation: Option<crate::lease::SharedGenerationId>,
 }
 
+/// Local budgets below this are entirely working space: the remote block cache
+/// only appears when a quarter of the budget leaves the WAL, spill, flush and
+/// staging ledger with room for the transactions it already admitted.
+const REMOTE_BLOCK_CACHE_MIN_BUDGET: u64 = 32 * 1024 * 1024;
+
+/// The share of the local storage budget that caches remote SST ranges (#938).
+/// It is carved out before WAL, spill, flush and staging admission, so the
+/// cache can never take space those need; small budgets get no cache.
+pub(crate) fn remote_block_cache_share(local_budget_bytes: u64) -> u64 {
+    if local_budget_bytes < REMOTE_BLOCK_CACHE_MIN_BUDGET {
+        0
+    } else {
+        local_budget_bytes / 4
+    }
+}
+
+fn remote_block_cache(
+    local_budget_bytes: u64,
+    path: &StartupStoragePath,
+) -> Option<Arc<crate::storage::remote_block_cache::RemoteBlockCache>> {
+    let share = remote_block_cache_share(local_budget_bytes);
+    if share == 0 {
+        return None;
+    }
+    match crate::storage::remote_block_cache::RemoteBlockCache::open(Arc::clone(&path.root), share)
+    {
+        Ok(cache) => Some(Arc::new(cache)),
+        Err(error) => {
+            // Advisory: a database without the cache works, it just pays
+            // provider requests per miss.
+            tracing::warn!(%error, "remote SST block cache unavailable");
+            None
+        }
+    }
+}
+
+/// The SST read view over `backend` and the disk cache it serves from, which
+/// recovery keeps so a rebuilt view stays cached.
 fn remote_sst_read_fs(
     opts: &OpenOptions,
     path: &StartupStoragePath,
     backend: Arc<dyn crate::storage::StorageBackend>,
     scope: Option<&DeadlineScope>,
-) -> Arc<dyn crate::io::Fs> {
-    let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+) -> (
+    Arc<dyn crate::io::Fs>,
+    Option<Arc<crate::storage::remote_block_cache::RemoteBlockCache>>,
+) {
+    let cache = remote_block_cache(
+        opts.simulated_cloud_local_storage_budget_bytes()
+            .unwrap_or_else(|| opts.local_storage_budget_bytes()),
+        path,
+    );
+    let mut remote = crate::storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&path.root),
         backend,
         opts.storage_io_timeout(),
-    ));
-    scope.map_or_else(
+    );
+    if let Some(cache) = &cache {
+        remote = remote.with_block_cache(Arc::clone(cache));
+    }
+    let fs: Arc<dyn crate::io::Fs> = Arc::new(remote);
+    let fs = scope.map_or_else(
         || Arc::clone(&fs),
         |scope| crate::io::scope_fs(Arc::clone(&fs), scope.clone()),
-    )
+    );
+    (fs, cache)
 }
 
 fn scope_cloud_store(
@@ -936,10 +987,13 @@ impl RuntimeStorageMaterialization {
             Arc::clone(store),
             opts.simulated_cloud_local_storage_budget_bytes(),
         );
-        cloud.hybrid_storage.enable_ephemeral_sst_cache(
-            opts.simulated_cloud_local_storage_budget_bytes()
-                .unwrap_or_else(|| opts.local_storage_budget_bytes()),
-        );
+        let budget = opts
+            .simulated_cloud_local_storage_budget_bytes()
+            .unwrap_or_else(|| opts.local_storage_budget_bytes());
+        // The remote block cache holds its share outside this ledger (#938).
+        cloud
+            .hybrid_storage
+            .enable_ephemeral_sst_cache(budget - remote_block_cache_share(budget));
         cloud
     }
 
@@ -958,7 +1012,8 @@ impl RuntimeStorageMaterialization {
         let store = location.open()?;
         let cloud = Self::build_simulated_cloud_stores(opts, &store);
         let backend: Arc<dyn crate::storage::StorageBackend> = Arc::clone(&store) as _;
-        let sst_read_fs = remote_sst_read_fs(opts, storage_path, Arc::clone(&backend), scope);
+        let (sst_read_fs, remote_block_cache) =
+            remote_sst_read_fs(opts, storage_path, Arc::clone(&backend), scope);
         CloudStartupRecovery::reject_cloud_wal_without_catalog(store.as_ref(), scope)?;
         cloud
             .hybrid_storage
@@ -1036,6 +1091,7 @@ impl RuntimeStorageMaterialization {
             sst_inventory: Some(store as _),
             cloud_storage_for_restore: None,
             cloud_metadata_storage_for_mirror: Some(metadata_storage),
+            remote_block_cache,
             streaming_wal: Some(super::streaming_recovery::CloudReplay {
                 fs: streaming.fs,
                 segments: streaming.segments,
@@ -1075,7 +1131,9 @@ impl RuntimeStorageMaterialization {
                 opts.storage_io_timeout(),
             ),
         );
-        hybrid_storage.enable_ephemeral_sst_cache(opts.local_storage_budget_bytes());
+        // The remote block cache holds its share outside this ledger (#938).
+        let budget = opts.local_storage_budget_bytes();
+        hybrid_storage.enable_ephemeral_sst_cache(budget - remote_block_cache_share(budget));
         hybrid_storage.configure_maintenance_memory(opts.compaction_memory_pool_size());
         (hybrid_storage, rx)
     }
@@ -1084,12 +1142,20 @@ impl RuntimeStorageMaterialization {
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
         sst_storage: &Arc<crate::storage::cloud::CloudStorage>,
-    ) -> Arc<crate::storage::remote_sst::RemoteSstFs> {
-        Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+    ) -> (
+        Arc<dyn crate::io::Fs>,
+        Option<Arc<crate::storage::remote_block_cache::RemoteBlockCache>>,
+    ) {
+        let cache = remote_block_cache(opts.local_storage_budget_bytes(), storage_path);
+        let mut remote = crate::storage::remote_sst::RemoteSstFs::new(
             Arc::clone(&storage_path.root),
             sst_storage.clone(),
             opts.storage_io_timeout(),
-        ))
+        );
+        if let Some(cache) = &cache {
+            remote = remote.with_block_cache(Arc::clone(cache));
+        }
+        (Arc::new(remote), cache)
     }
 
     fn materialize_cloud(
@@ -1108,7 +1174,7 @@ impl RuntimeStorageMaterialization {
         let (hybrid_storage, rx) =
             Self::build_hybrid_storage(opts, &wal_storage, &sst_storage, &metadata_storage);
         fence_cloud_ddl_scoped(opts, &hybrid_storage, startup_lease, scope)?;
-        let sst_read_fs: Arc<dyn crate::io::Fs> =
+        let (sst_read_fs, remote_block_cache) =
             Self::build_provider_sst_read_fs(opts, storage_path, &sst_storage);
         let sst_read_fs = scope.map_or_else(
             || sst_read_fs.clone(),
@@ -1181,6 +1247,7 @@ impl RuntimeStorageMaterialization {
             sst_inventory: Some(sst_storage.clone() as _),
             cloud_storage_for_restore: Some(sst_storage),
             cloud_metadata_storage_for_mirror: Some(metadata_storage),
+            remote_block_cache,
             streaming_wal: Some(super::streaming_recovery::CloudReplay {
                 fs: streaming.fs,
                 segments: streaming.segments,
@@ -1249,6 +1316,7 @@ impl RuntimeStorageMaterialization {
             sst_inventory: None,
             cloud_storage_for_restore: None,
             cloud_metadata_storage_for_mirror: None,
+            remote_block_cache: None,
             streaming_wal: None,
         })
     }

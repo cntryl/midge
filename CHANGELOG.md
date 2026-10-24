@@ -11,6 +11,13 @@ Midge is currently in the 0.4 release line. Compatibility expectations for pre-1
 
 ### Changed
 
+- Cloud mode caches fetched remote SST ranges on local disk, keyed by the
+  object's pinned identity and checksummed, in a quarter of a local storage
+  budget of at least 32 MiB. That quarter is carved out before WAL, spill,
+  flush and staging admission, which now see three quarters of
+  `local_storage_budget`. A reader open fetches the object's last 64 KiB once
+  instead of one request per metadata block, so `remote_range_bytes_total`
+  counts the prefetched tail (#938).
 - Range scans no longer insert the SST blocks they read into the block cache
   unless they are bounded by a `limit` of at most
   `Query::SMALL_SCAN_FILL_LIMIT` rows, so a one-pass scan leaves the
