@@ -139,13 +139,23 @@ pub(in crate::runtime::event_loop) fn begin_snapshot(
 }
 
 #[test]
-fn should_serve_old_cut_and_queue_later_writes_when_strict_fsync_is_held() -> MidgeResult<()> {
-    assert_ordered_progress_when_held("midge::wal::before_physical_sync")
+fn should_preserve_ordered_visibility_when_strict_fsync_is_held() -> MidgeResult<()> {
+    // Arrange
+    let held_stage = "midge::wal::before_physical_sync";
+    // Act
+    assert_ordered_progress_when_held(held_stage)?;
+    // Assert: propagate the complete prefix-order fixture's assertions.
+    Ok(())
 }
 
 #[test]
-fn should_serve_old_cut_and_queue_later_writes_when_writer_encoding_is_held() -> MidgeResult<()> {
-    assert_ordered_progress_when_held("midge::wal::before_writer_encode")
+fn should_preserve_ordered_visibility_when_writer_encoding_is_held() -> MidgeResult<()> {
+    // Arrange
+    let held_stage = "midge::wal::before_writer_encode";
+    // Act
+    assert_ordered_progress_when_held(held_stage)?;
+    // Assert: propagate the complete prefix-order fixture's assertions.
+    Ok(())
 }
 
 fn wait_for_hold(event_loop: &mut EventLoop, held: &HeldSync) {
@@ -285,8 +295,7 @@ fn should_preserve_unchanged_append_failure_when_writer_proves_durable_rollback(
 }
 
 #[test]
-fn should_keep_wal_frontiers_and_visibility_unchanged_until_runtime_owner_drains_completion(
-) -> MidgeResult<()> {
+fn should_keep_wal_runtime_state_unchanged_until_owner_drains_completion() -> MidgeResult<()> {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
@@ -443,7 +452,7 @@ fn should_preserve_lookahead_rotation_before_newer_deferred_writers() -> MidgeRe
 }
 
 #[test]
-fn should_drain_earlier_group_before_streaming_spill_and_newer_resident_write() -> MidgeResult<()> {
+fn should_preserve_prefix_order_when_spill_separates_resident_groups() -> MidgeResult<()> {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;

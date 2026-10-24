@@ -6,7 +6,7 @@ use crate::wal::format::{ChainLink, SealedFacts};
 use crate::wal::ledger::{HolderId, LedgerEdit, OpenFacts};
 
 #[test]
-fn should_count_ledger_file_and_directory_syncs_at_their_production_boundaries() {
+fn should_count_exact_ledger_barriers_at_their_production_boundaries() {
     // Arrange
     let device = CrashDevice::new();
     let fs = crash_fs(&device);

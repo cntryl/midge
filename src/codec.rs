@@ -1180,10 +1180,10 @@ mod tests {
         // Arrange
         let values = [vec![b'x'; 17], pseudo_random_bytes(4096)];
 
-        // Act / Assert: the final frame can read the caller's actual buffer.
-        // Pointer identity makes the eliminated allocation/copy observable.
+        // Act: the final frame can read the caller's actual buffer.
         for value in values {
             let (encoded, marker) = super::compress_wal_value_borrowed(&value);
+            // Assert: pointer identity makes the eliminated copy observable.
             assert!(matches!(encoded, std::borrow::Cow::Borrowed(_)));
             assert_eq!(encoded.as_ptr(), value.as_ptr());
             assert_eq!(encoded.as_ref(), value.as_slice());

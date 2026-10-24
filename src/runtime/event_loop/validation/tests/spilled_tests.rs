@@ -39,23 +39,43 @@ fn seed_spanning_sst(event_loop: &mut EventLoop) {
 
 #[test]
 fn should_retry_spilled_point_validation_when_intervening_conflict_is_flushed() -> MidgeResult<()> {
-    assert_spilled_flushed_conflict(false, false, false)
+    // Arrange
+    let case = (false, false, false);
+    // Act
+    assert_spilled_flushed_conflict(case.0, case.1, case.2)?;
+    // Assert: the shared schedule checks the point conflict through strict reopen.
+    Ok(())
 }
 
 #[test]
 fn should_retry_spilled_insert_validation_when_intervening_value_is_flushed() -> MidgeResult<()> {
-    assert_spilled_flushed_conflict(true, false, false)
+    // Arrange
+    let case = (true, false, false);
+    // Act
+    assert_spilled_flushed_conflict(case.0, case.1, case.2)?;
+    // Assert: the shared schedule requires the exact duplicate outcome.
+    Ok(())
 }
 
 #[test]
 fn should_retry_spilled_assertion_validation_when_intervening_write_is_flushed() -> MidgeResult<()>
 {
-    assert_spilled_flushed_conflict(false, true, false)
+    // Arrange
+    let case = (false, true, false);
+    // Act
+    assert_spilled_flushed_conflict(case.0, case.1, case.2)?;
+    // Assert: the shared schedule requires rejection of the stale assertion.
+    Ok(())
 }
 
 #[test]
 fn should_retry_spilled_range_validation_when_intervening_write_is_flushed() -> MidgeResult<()> {
-    assert_spilled_flushed_conflict(false, false, true)
+    // Arrange
+    let case = (false, false, true);
+    // Act
+    assert_spilled_flushed_conflict(case.0, case.1, case.2)?;
+    // Assert: the shared schedule preserves the entire rejected range.
+    Ok(())
 }
 
 fn assert_spilled_flushed_conflict(
@@ -237,12 +257,22 @@ fn should_admit_spilled_insert_when_ttl_expires_after_detached_reads_without_new
 #[test]
 fn should_preserve_spilled_error_order_when_earlier_ttl_duplicate_remains_live() -> MidgeResult<()>
 {
-    assert_ttl_error_order(false)
+    // Arrange
+    let expire_before_admission = false;
+    // Act
+    assert_ttl_error_order(expire_before_admission)?;
+    // Assert: the earlier live duplicate remains the first error.
+    Ok(())
 }
 
 #[test]
 fn should_report_later_spilled_conflict_when_earlier_ttl_duplicate_expires() -> MidgeResult<()> {
-    assert_ttl_error_order(true)
+    // Arrange
+    let expire_before_admission = true;
+    // Act
+    assert_ttl_error_order(expire_before_admission)?;
+    // Assert: expiry makes the later static conflict the first error.
+    Ok(())
 }
 
 fn assert_ttl_error_order(expire: bool) -> MidgeResult<()> {

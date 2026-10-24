@@ -209,8 +209,7 @@ fn should_report_completed_work_when_actual_journal_replay_restores_exact_edit_f
 }
 
 #[test]
-fn should_isolate_actual_recovery_work_from_background_threads_old_phases_and_ended_scopes(
-) -> MidgeResult<()> {
+fn should_credit_only_current_caller_recovery_work() -> MidgeResult<()> {
     // Arrange
     let roots = (0..6)
         .map(|_| tempfile::tempdir())
@@ -223,7 +222,7 @@ fn should_isolate_actual_recovery_work_from_background_threads_old_phases_and_en
     let phase = Arc::new(AtomicU64::new(1));
 
     with_listener(|| -> MidgeResult<()> {
-        // Act / Assert: sharing a subscriber does not transfer caller scope.
+        // Act: sharing a subscriber does not transfer caller scope.
         let scope = workload_listener::RecoveryScope::enter_with_completion(
             callback(&completed),
             &phase,
@@ -236,6 +235,7 @@ fn should_isolate_actual_recovery_work_from_background_threads_old_phases_and_en
         })
         .join()
         .expect("join actual background replay")?;
+        // Assert: only the current recovery caller earns completed-work credit.
         verify_wal(&result);
         assert_eq!(completed.load(Ordering::Acquire), 0);
         verify_wal(&fixtures.remove(0).run()?);

@@ -93,48 +93,65 @@ fn apply_and_flush(event_loop: &mut EventLoop, request: ApplyTransactionRequest)
 #[test]
 fn should_retry_detached_validation_when_intervening_conflicting_write_is_flushed(
 ) -> MidgeResult<()> {
-    assert_intervening_flushed_write_is_seen(request(94_601, b"conflict", true), |error| {
+    // Arrange
+    let checked = request(94_601, b"conflict", true);
+    // Act
+    assert_intervening_flushed_write_is_seen(checked, |error| {
         matches!(error, MidgeError::WriteConflict(_))
-    })
+    })?;
+    // Assert: the shared schedule requires the original typed conflict.
+    Ok(())
 }
 
 #[test]
 fn should_retry_detached_insert_only_validation_when_intervening_write_is_flushed(
 ) -> MidgeResult<()> {
+    // Arrange
     let mut insert = request(94_601, b"conflict", false);
     if let TransactionOp::Put { insert_only, .. } = &mut insert.ops[0] {
         *insert_only = true;
     }
+    // Act
     assert_intervening_flushed_write_is_seen(
         insert,
         |error| matches!(error, MidgeError::InvalidArgument(message) if message == "key already exists"),
-    )
+    )?;
+    // Assert: the shared schedule requires the existing duplicate outcome.
+    Ok(())
 }
 
 #[test]
 fn should_retry_detached_assertion_validation_when_intervening_write_is_flushed() -> MidgeResult<()>
 {
+    // Arrange
     let mut asserting = request(94_601, b"unrelated", false);
     asserting.assertions.push(crate::runtime::KeyAssertion {
         cf_id: 0,
         key: Bytes::from_static(b"conflict"),
     });
+    // Act
     assert_intervening_flushed_write_is_seen(asserting, |error| {
         matches!(error, MidgeError::WriteConflict(_))
-    })
+    })?;
+    // Assert: the shared schedule rejects the stale assertion before allocation.
+    Ok(())
 }
 
 #[test]
 fn should_retry_detached_range_validation_when_intervening_write_is_flushed() -> MidgeResult<()> {
+    // Arrange
     let mut deleting = request(94_601, b"unused", true);
     deleting.ops = vec![TransactionOp::DeleteRange {
         cf_id: 0,
         start_key: Bytes::from_static(b"a"),
         end_key: Bytes::from_static(b"z"),
     }];
+    // Act
     assert_intervening_flushed_write_is_seen(deleting, |error| {
         matches!(error, MidgeError::WriteConflict(_))
-    })
+    })?;
+    // Assert: the shared schedule detects the whole intervening range conflict.
+    Ok(())
 }
 
 fn assert_intervening_flushed_write_is_seen(

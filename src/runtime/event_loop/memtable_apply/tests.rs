@@ -148,7 +148,7 @@ fn should_publish_one_ordered_cut_when_later_apply_finishes_before_first_unit(
 }
 
 #[test]
-fn should_fence_every_family_and_recover_whole_group_when_authority_is_lost_during_apply(
+fn should_preserve_group_authority_when_authority_is_lost_during_apply(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
