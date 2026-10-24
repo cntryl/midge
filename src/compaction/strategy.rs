@@ -304,7 +304,7 @@ impl Compactor {
             let target_size =
                 self.level_target_size(u32::try_from(level).expect("level index fits in u32"));
             if level_size > target_size {
-                return self.plan_inner_level(&levels, cf_id, level);
+                return self.plan_inner_level_filtered(&levels, cf_id, level, &|_| true);
             }
         }
         Ok(None)
