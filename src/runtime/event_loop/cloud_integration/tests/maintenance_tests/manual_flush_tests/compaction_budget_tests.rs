@@ -303,6 +303,14 @@ impl BudgetFixture {
 
     fn new_with_all_families(all_families: bool) -> MidgeResult<Self> {
         let (mut el, compute, _) = cloud_debt(4)?;
+        // Finish the seed's accepted mirror/name continuations under their
+        // original authority before this fixture installs its own provider.
+        el.drain_metadata_mirror_within(&OperationDeadline::from_budget(FIXTURE_WAIT))?;
+        assert_eq!(
+            el.publication.metadata_publication_lock.pending_captures(),
+            0,
+            "seed authority must have no unresolved metadata cut before rebinding"
+        );
         // One actual generation; independent multi-CF coverage is separate.
         if !all_families {
             el.state
@@ -365,6 +373,15 @@ impl BudgetFixture {
             stopped: false,
         };
         fixture.seed_committed_metadata()?;
+        assert_eq!(
+            fixture
+                .el
+                .publication
+                .metadata_publication_lock
+                .pending_captures(),
+            0,
+            "manual origin must start without inherited metadata ownership"
+        );
         Ok(fixture)
     }
 
@@ -518,6 +535,63 @@ impl BudgetFixture {
         }
     }
 
+    fn drain_retired_inputs_after_clear(&mut self) -> MidgeResult<()> {
+        let inputs = self
+            .inputs
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        assert!(!self
+            .el
+            .state
+            .has_compaction_publication_intent(&inputs, &self.outputs));
+        let uploads = self.backend.inner.get_uploads();
+        let storage = self.el.actors.cloud_coordinator.hybrid_storage.clone();
+        eprintln!(
+            "post-clear GC: captures={}, publication={}, compacting={:?}",
+            self.el
+                .publication
+                .metadata_publication_lock
+                .pending_captures(),
+            self.el.actors.compaction_publish_actor.is_inflight(),
+            self.el.state.compaction.compacting_ssts,
+        );
+        // This bounds observation of independently authorized GC only. The
+        // original publication deadline and its already captured caller result
+        // remain unchanged; do not run metadata publication/fairness here.
+        let deadline = OperationDeadline::from_budget(FIXTURE_WAIT);
+        loop {
+            crate::common::DeadlineScope::new(deadline).check("post-clear fixture retirement")?;
+            self.el
+                .actors
+                .gc_actor
+                .retry_failed_cloud_deletes_if_due(&mut self.el.state, storage.clone());
+            self.el
+                .actors
+                .gc_actor
+                .retry_pending(&mut self.el.state, storage.clone());
+            self.el.actors.gc_actor.shutdown_workers();
+            if inputs
+                .iter()
+                .all(|name| !remote_sst_path_for_test(&self.el, name).exists())
+            {
+                self.el
+                    .actors
+                    .gc_actor
+                    .retry_pending(&mut self.el.state, storage.clone());
+                self.el.actors.gc_actor.shutdown_workers();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            self.backend.inner.get_uploads(),
+            uploads,
+            "post-clear GC cannot retry or renew metadata authority publication"
+        );
+        Ok(())
+    }
+
     fn stop(&mut self) -> MidgeResult<()> {
         if self.stopped {
             return Ok(());
@@ -611,6 +685,7 @@ fn complete_manual_case() -> MidgeResult<()> {
     let committed = fixture.committed_manifest();
     let outcome = fixture.drive_manual_response(&response);
     let route_state = describe_settle_state(&fixture.el);
+    fixture.drain_retired_inputs_after_clear()?;
     fixture.el.actors.gc_actor.shutdown_workers();
     let input_retired: Vec<_> = fixture
         .inputs

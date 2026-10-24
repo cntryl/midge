@@ -33,8 +33,12 @@ fn capture_queued_evidence(
     fixture: &mut BudgetFixture,
     response: &crossbeam::channel::Receiver<RuntimeResponse>,
     uploads_before: Vec<(String, u64)>,
+    terminal_clear: bool,
 ) -> MidgeResult<QueuedEvidence> {
     let outcome = fixture.drive_manual_response(response);
+    if terminal_clear {
+        fixture.drain_retired_inputs_after_clear()?;
+    }
     fixture.el.actors.gc_actor.shutdown_workers();
     let inputs = input_names(fixture);
     let quotas = fixture
@@ -157,7 +161,12 @@ fn delayed_success_case_inner(phase: CompactionPublishPhase) -> MidgeResult<Queu
     if let Some(duplicate) = duplicate {
         CompactionCoordinator::handle_publication_completion(&mut fixture.el, duplicate);
     }
-    capture_queued_evidence(&mut fixture, &response, uploads_before)
+    capture_queued_evidence(
+        &mut fixture,
+        &response,
+        uploads_before,
+        phase == CompactionPublishPhase::IntentCleared,
+    )
 }
 
 fn assert_common_queued_evidence(evidence: &QueuedEvidence) {
@@ -247,10 +256,14 @@ fn final_clear_timeout_case(
     let first = fixture.complete_actual_phase(None);
     assert!(first.error.is_none() && first.completed_at < started + CALLER_BUDGET);
     let final_budget_bound = OperationDeadline::from_start(started, CALLER_BUDGET).remaining();
-    let second = fixture.complete_actual_phase(Some(MetadataHold {
-        phase: CompactionPublishPhase::IntentCleared,
-        until: started + CALLER_BUDGET + Duration::from_millis(500),
-    }));
+    let second = complete_manifest_after_real_input_retirement(
+        &mut fixture,
+        started,
+        MetadataHold {
+            phase: CompactionPublishPhase::IntentCleared,
+            until: started + CALLER_BUDGET + Duration::from_millis(500),
+        },
+    )?;
     assert!(second.error.is_none() && second.completed_at < started + CALLER_BUDGET);
     assert!(
         fixture.el.actors.compaction_publish_actor.is_inflight(),
@@ -287,8 +300,72 @@ fn final_clear_timeout_case(
     assert!(reads[0]
         .provider_budget
         .is_some_and(|budget| !budget.is_zero() && budget <= final_budget_bound));
-    let evidence = capture_queued_evidence(&mut fixture, &response, uploads_before)?;
+    let evidence = capture_queued_evidence(&mut fixture, &response, uploads_before, true)?;
     Ok((evidence, reads, phase))
+}
+
+fn complete_manifest_after_real_input_retirement(
+    fixture: &mut BudgetFixture,
+    started: Instant,
+    next_hold: MetadataHold,
+) -> MidgeResult<PhaseEvidence> {
+    let completion =
+        receive_live_success(fixture, CompactionPublishPhase::ManifestPublished, started);
+    let committed = fixture.committed_manifest()?;
+    assert!(fixture
+        .inputs
+        .iter()
+        .all(|(name, _)| committed.retired_ssts.contains_key(name)));
+    let fs = Arc::clone(&fixture.el.state.fs);
+    let paths = fixture
+        .inputs
+        .iter()
+        .flat_map(|(name, _)| {
+            [
+                remote_sst_path_for_test(&fixture.el, name),
+                fixture.el.state.host_sst_dir().join(name),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let original = OperationDeadline::from_start(started, CALLER_BUDGET);
+    let inherited = crate::failpoints::worker_gate();
+    let (ready, entered) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        // The actual MMP worker has finished its checkpoint. Holding this
+        // existing writer lock delays the subsequent intent-clear save, not
+        // GC's physical effects, which use the separate publication lock.
+        let observer = scope.spawn(move || {
+            inherited.run(|| {
+                crate::metadata::journal::with_manifest_writer_lock(&fs, || {
+                    ready.send(()).unwrap();
+                    while paths.iter().any(|path| path.exists()) {
+                        crate::common::DeadlineScope::new(original)
+                            .check("actual input GC before clear admission")?;
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok::<_, MidgeError>(())
+                })
+            })
+        });
+        entered
+            .recv_timeout(FIXTURE_WAIT)
+            .expect("pre-clear writer observation acquired");
+        fixture.backend.arm(next_hold.phase, next_hold.until);
+        let evidence = PhaseEvidence {
+            phase: completion.phase,
+            completed_at: Instant::now(),
+            error: completion.result.as_ref().err().map(MidgeError::replay),
+        };
+        CompactionCoordinator::handle_publication_completion(&mut fixture.el, completion);
+        observer
+            .join()
+            .expect("join actual input retirement observation")?;
+        assert!(
+            !original.is_expired(),
+            "input GC must complete under the original caller clock"
+        );
+        Ok(evidence)
+    })
 }
 
 #[test]

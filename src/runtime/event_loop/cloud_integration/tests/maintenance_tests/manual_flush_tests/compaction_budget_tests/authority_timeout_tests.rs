@@ -126,7 +126,14 @@ fn begin_held_manifest_phase(
         .publication
         .compaction_publish_result_rx
         .recv_timeout(FIXTURE_WAIT)
-        .expect("genuine OutputDurable completion");
+        .unwrap_or_else(|error| panic!(
+            "genuine OutputDurable completion: {error:?}; {}; publisher={}, mirror={}, cuts={}; writes={:?}",
+            describe_settle_state(&fixture.el),
+            fixture.el.actors.compaction_publish_actor.is_inflight(),
+            fixture.el.actors.cloud_coordinator.metadata_mirror.is_running(),
+            fixture.el.publication.metadata_publication_lock.pending_captures(),
+            fixture.backend.inner.get_uploads(),
+        ));
     let evidence = PhaseEvidence {
         phase: completion.phase,
         completed_at: Instant::now(),
