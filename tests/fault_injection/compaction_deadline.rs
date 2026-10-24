@@ -166,7 +166,8 @@ fn assert_exact_rows(observed: MidgeResult<ReadSnapshot>, acknowledged: &[Row]) 
 fn should_retain_acknowledged_inputs_when_expired_publication_remains_owned_during_shutdown() {
     // Arrange
     let boundary = OUTPUT_PROVED;
-    // Act / Assert
+    // Act: expire the caller while the chosen physical effect stays held.
+    // Assert: the shared scenario checks writer ownership and exact recovery.
     verify_expired_owned_compaction(boundary);
 }
 
@@ -174,7 +175,8 @@ fn should_retain_acknowledged_inputs_when_expired_publication_remains_owned_duri
 fn should_retain_writer_ownership_while_failed_compaction_cleanup_is_held() {
     // Arrange
     let boundary = FAILED_OUTPUT_DELETE;
-    // Act / Assert
+    // Act: expire the caller while the chosen physical effect stays held.
+    // Assert: the shared scenario checks writer ownership and exact recovery.
     verify_expired_owned_compaction(boundary);
 }
 
