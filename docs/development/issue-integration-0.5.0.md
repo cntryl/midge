@@ -745,3 +745,18 @@ insufficient raw admission budgets. Test targets compile; execution and A/B
 qualification remain pending. Large/spilled/non-filesystem paths retain their
 drained synchronous compatibility barriers. Next-group append is still ordered
 behind the active group; this slice does not claim a multi-group pipeline.
+
+#918/#952 add SSTV5 varint entries, optional TTL headers and sixteen-entry
+restart directories with continued-version markers. Point seeks use binary
+restart selection; forward/reverse scans decode intervals lazily. Historical
+V4 bytes remain rejection evidence. Active tests cover decode bounds, equal-key
+versions spanning intervals, TTL/deletes, reverse bounds and malformed framing.
+Three production decoder fuzz targets each have eight real writer-produced
+seeds, with additional footer/range and binary metadata/journal seeds.
+
+The existing Cargo fixture/corpus tests passed 2/2 (latest 0.39s); the new
+FORMAT9/SSTV5 fixture verifies and Engine reads its data. All fuzz binaries
+compile through the existing fuzz package. Restart/conformance regressions,
+fuzz time budgets, performance and system footprint qualification remain
+pending. Redundant unsafe lease auto-trait declarations were removed and a
+compiler trait-bound assertion retains the requirement.

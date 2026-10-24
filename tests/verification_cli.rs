@@ -73,7 +73,7 @@ fn should_verify_candidate_written_database_when_cli_runs() {
 #[test]
 fn should_emit_v1_json_given_populated_release_fixture_when_midge_verify_runs() {
     // Arrange
-    let path = fixture_path("tests/fixtures/compatibility/v9_populated_v4_sst_db");
+    let path = fixture_path("tests/fixtures/compatibility/v9_populated_v5_sst_db");
     let expected: Value =
         serde_json::from_str(include_str!("fixtures/verification/healthy_v1.json"))
             .expect("parse healthy report golden");

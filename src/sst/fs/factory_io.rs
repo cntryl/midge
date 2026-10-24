@@ -299,7 +299,19 @@ impl DynSstWriter for FsSstWriter {
                     usize::try_from(streaming.sink.offset().unwrap_or(u64::MAX))
                         .unwrap_or(usize::MAX),
                 )
-                .saturating_add(pipeline.current_block.len().saturating_mul(2))
+                .saturating_add(
+                    pipeline
+                        .current_block
+                        .len()
+                        .saturating_add(
+                            pipeline
+                                .restart_offsets
+                                .len()
+                                .saturating_add(1)
+                                .saturating_mul(4),
+                        )
+                        .saturating_mul(2),
+                )
                 .saturating_add(index)
                 .saturating_add(current_index)
                 .saturating_add(key_bounds)

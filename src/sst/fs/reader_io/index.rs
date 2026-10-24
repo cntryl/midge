@@ -303,6 +303,9 @@ impl SstFileIo {
                     || self.read_block(handle),
                     |file| self.read_block_from(file, handle),
                 )?;
+                // Immutable cached blocks carry a checked restart directory.
+                // Cache hits need only constant framing and binary key probes.
+                crate::sst::data_block::DataBlockLayout::parse(&bytes)?;
                 read_metrics.record_data_block_read();
                 if cache_fill == CacheFill::Normal {
                     cache.put(cache_key, &bytes);
@@ -314,6 +317,7 @@ impl SstFileIo {
                 || self.read_block(handle),
                 |file| self.read_block_from(file, handle),
             )?;
+            crate::sst::data_block::DataBlockLayout::parse(&bytes)?;
             read_metrics.record_data_block_read();
             Ok(bytes)
         }
@@ -360,6 +364,7 @@ impl SstFileIo {
             frame
         };
         let (block, ()) = Self::decode_framed_block(&frame, |_| Ok(()))?;
+        crate::sst::data_block::DataBlockLayout::parse(&block)?;
         read_metrics.record_data_block_read();
         Ok(block)
     }

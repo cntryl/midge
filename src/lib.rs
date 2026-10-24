@@ -196,8 +196,11 @@ pub mod __internal {
         };
     }
     pub mod sst {
+        pub mod decoder {
+            pub use crate::sst::fs::reader_io::{validate_data_block, validate_index_block};
+        }
         pub mod bloom {
-            pub use crate::sst::bloom::{BloomReader, BloomWriter};
+            pub use crate::sst::bloom::{BlockBloomFilter, BloomReader, BloomWriter};
             pub mod writer {
                 pub use crate::sst::bloom::writer::BloomFilterOps;
             }

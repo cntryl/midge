@@ -908,15 +908,6 @@ impl PrimaryLease for CloudStorageLease {
         Some(Arc::clone(&self.leader_store))
     }
 }
-// SAFETY: CloudStorageLease is Send + Sync because:
-// - `config`, paths, holder identities, and `ttl` are immutable after construction.
-// - `acquired` uses `AtomicBool` for lock-free thread-safe access.
-// - `acquired_epoch` uses `AtomicU64` for lock-free thread-safe access.
-// - `last_renewal` uses `Mutex` for interior mutability with proper synchronization.
-// - Filesystem and leader-store trait objects require Send + Sync.
-unsafe impl Send for CloudStorageLease {}
-unsafe impl Sync for CloudStorageLease {}
-
 /// Parsed lease document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LeaseDocumentVersion {

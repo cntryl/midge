@@ -137,7 +137,7 @@ impl SstFileIo {
         let metadata = self.fs.metadata(&self.path).map_err(FsError::into_midge)?;
         let file_size = metadata.len;
 
-        let footer_size = u64::try_from(SST_FOOTER_SIZE).expect("V4 footer size fits u64");
+        let footer_size = u64::try_from(SST_FOOTER_SIZE).expect("V5 footer size fits u64");
         let read_only = crate::io::OpenOptions {
             mode: crate::io::OpenMode::ReadOnly,
             create: false,
@@ -191,7 +191,7 @@ impl SstFileIo {
         Ok(())
     }
 
-    /// Decode the V4 footer at the end of `file`, naming legacy formats.
+    /// Decode the V5 footer at the end of `file`, naming legacy formats.
     fn read_footer(file: &dyn File, file_size: u64, footer_size: u64) -> MidgeResult<Footer> {
         if file_size < footer_size {
             if file_size >= 8
@@ -202,11 +202,11 @@ impl SstFileIo {
                     .eq(&SST_FOOTER_MAGIC.to_le_bytes())
             {
                 return Err(MidgeError::CompatibilityError(
-                    "legacy SST V1-V3 is unsupported; this build requires V4".into(),
+                    "legacy SST V1-V4 is unsupported; this build requires V5".into(),
                 ));
             }
             return Err(MidgeError::Corruption(format!(
-                "SST is too short for the {SST_FOOTER_SIZE}-byte V4 footer"
+                "SST is too short for the {SST_FOOTER_SIZE}-byte V5 footer"
             )));
         }
         let footer_data = file
@@ -220,7 +220,7 @@ impl SstFileIo {
                     .map_err(FsError::into_midge)?;
                 if trailing_magic.as_ref() == SST_FOOTER_MAGIC.to_le_bytes() {
                     return Err(MidgeError::CompatibilityError(
-                        "legacy SST V1-V3 is unsupported; this build requires V4".into(),
+                        "legacy SST V1-V4 is unsupported; this build requires V5".into(),
                     ));
                 }
                 Err(error)
@@ -236,7 +236,7 @@ impl SstFileIo {
         let metadata_bytes = self.read_metadata_block(&footer.meta_index_handle, "SST metadata")?;
         if metadata_bytes.is_empty() {
             return Err(MidgeError::Corruption(
-                "SST V4 metadata block is empty".into(),
+                "SST V5 metadata block is empty".into(),
             ));
         }
 
@@ -341,7 +341,7 @@ impl SstFileIo {
             handle.offset.checked_add(handle.size) != Some(self.block_region_end)
         }) {
             return Err(MidgeError::Corruption(
-                "SST block references do not exactly reach the V4 footer".into(),
+                "SST block references do not exactly reach the V5 footer".into(),
             ));
         }
         Ok(())
@@ -479,7 +479,7 @@ impl SstFileIo {
         let payload = &buffer[4..];
         if payload.len() < crate::codec::BLOCK_TRAILER_SIZE {
             return Err(MidgeError::Corruption(
-                "SST V4 block is too short for its mandatory trailer".into(),
+                "SST V5 block is too short for its mandatory trailer".into(),
             ));
         }
         Ok(payload)

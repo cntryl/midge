@@ -14,7 +14,7 @@ use crate::sst::index::profiler::KeyStructureProfiler;
 use crate::sst::index::tuner::{IndexKind, IndexTuner};
 use crate::sst::trie::writer::TrieWriter;
 use crate::sst::types::{
-    encode_range_tombstones, BlockHandle, Footer, KeyRangeMetadata, SstMetadata, SST_FORMAT_V4,
+    encode_range_tombstones, BlockHandle, Footer, KeyRangeMetadata, SstMetadata, SST_FORMAT_V5,
 };
 use crate::types::{EntryType, RangeTombstone};
 use std::sync::Arc;
@@ -70,6 +70,7 @@ pub(super) struct BlockPipeline {
     pub(super) current_first_key: Option<Vec<u8>>,
     pub(super) block_bloom: BlockBloomFilter,
     previous_key: Vec<u8>,
+    pub(super) restart_offsets: Vec<u32>,
     last_key: Option<Vec<u8>>,
     last_sequence: u64,
     pub(super) smallest_key: Option<Vec<u8>>,
@@ -90,6 +91,7 @@ impl BlockPipeline {
             current_first_key: None,
             block_bloom: BlockBloomFilter::new(),
             previous_key: Vec::new(),
+            restart_offsets: Vec::new(),
             last_key: None,
             last_sequence: 0,
             smallest_key: None,
@@ -175,6 +177,11 @@ impl BlockPipeline {
             return Ok(());
         }
 
+        crate::sst::data_block::append_restart_directory(
+            &mut self.current_block,
+            &self.restart_offsets,
+        )?;
+
         let retained_metadata_bytes = self
             .current_first_key
             .as_ref()
@@ -199,6 +206,7 @@ impl BlockPipeline {
         }
         self.block_bloom.add_block_bloom(&bloom);
         self.current_block.clear();
+        self.restart_offsets.clear();
         sink.finish_block(reservation);
         Ok(())
     }
@@ -231,13 +239,39 @@ impl BlockPipeline {
         FsSstWriter::update_key_bounds(&mut self.smallest_key, &mut self.largest_key, &entry.key);
 
         let target_block_size = FsSstWriter::clamp_block_size(block_size);
+        let restart = self.current_block_keys.len() % crate::sst::data_block::RESTART_INTERVAL == 0;
+        let mut continued =
+            restart && !self.current_block.is_empty() && self.previous_key == entry.key;
+        if restart {
+            self.previous_key.clear();
+        }
         let mut encoded = FsSstWriter::encode_pending_entry(&self.previous_key, &entry)?;
         if !self.current_block.is_empty()
-            && self.current_block.len().saturating_add(encoded.len()) > target_block_size
+            && self
+                .current_block
+                .len()
+                .saturating_add(encoded.len())
+                .saturating_add((self.restart_offsets.len() + usize::from(restart) + 1) * 4)
+                > target_block_size
         {
             self.flush_current_block(sink, compression_policy)?;
             self.previous_key.clear();
+            continued = false;
             encoded = FsSstWriter::encode_pending_entry(&self.previous_key, &entry)?;
+        }
+
+        if self.current_block_keys.len() % crate::sst::data_block::RESTART_INTERVAL == 0 {
+            let offset = u32::try_from(self.current_block.len()).map_err(|_| {
+                crate::common::MidgeError::ResourceLimit("SST restart offset exceeds u32".into())
+            })?;
+            self.restart_offsets.push(
+                offset
+                    | if continued {
+                        crate::sst::data_block::CONTINUED_KEY
+                    } else {
+                        0
+                    },
+            );
         }
 
         if self.current_first_key.is_none() {
@@ -292,7 +326,7 @@ impl BlockPipeline {
         let index_kind = FsSstWriter::effective_index_kind(chosen, trie_bytes.as_ref());
         let trie_handle = Self::append_trie_block(sink, compression_policy, trie_bytes.as_ref())?;
         let metadata = SstMetadata {
-            format_version: SST_FORMAT_V4,
+            format_version: SST_FORMAT_V5,
             index_kind,
             range_tombstone_handle,
             key_range: self.smallest_key.clone().zip(self.largest_key.clone()).map(
@@ -395,7 +429,7 @@ impl FsSstWriter {
             .zip(key.iter())
             .take_while(|(left, right)| left == right)
             .count();
-        u16::try_from(shared.min(u16::MAX as usize)).unwrap_or(u16::MAX)
+        u16::try_from(shared.min(crate::sst::encoding::MAX_SHARED_PREFIX_LEN)).unwrap_or(u16::MAX)
     }
 
     pub(super) fn sort_entries(mut entries: Vec<PendingEntry>) -> Vec<PendingEntry> {
@@ -426,7 +460,7 @@ impl FsSstWriter {
         let entry_type = Self::writable_entry_type(entry.op_type)?;
         let shared_len = Self::shared_prefix_len(previous_key, &entry.key);
         let key_delta = &entry.key[shared_len as usize..];
-        crate::sst::encoding::encode_v4(
+        crate::sst::encoding::encode_v5(
             key_delta,
             shared_len,
             entry.value.as_deref(),

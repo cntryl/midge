@@ -7,7 +7,9 @@ use crate::types::EntryType;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
+mod decoder_corpus;
 mod duplicate_successor;
+mod restart_v5;
 
 struct CountingFs {
     inner: crate::io::RealFs,
@@ -478,7 +480,7 @@ fn should_reject_legacy_v2_sst_without_falling_back_to_unchecksummed_blocks() ->
 
     // Act
     let Err(error) = SstFileIo::open(file_name, fs) else {
-        panic!("legacy SST must not open in a V4-only build");
+        panic!("legacy SST must not open in a V5-only build");
     };
 
     // Assert
@@ -752,7 +754,7 @@ fn should_reject_corrupt_sparse_index_given_nonmonotonic_offsets_when_opening() 
     assert_eq!(reader.index_kind, IndexKind::Sparse);
     let index = reader.index_entries()?;
     assert!(index.len() >= 2, "test SST must contain multiple blocks");
-    let index_handle = reader.footer.as_ref().expect("V4 footer").index_handle;
+    let index_handle = reader.footer.as_ref().expect("V5 footer").index_handle;
     let first_data_offset = index[0].1.offset;
 
     let mut bytes = std::fs::read(&path)?;
@@ -1266,7 +1268,7 @@ fn should_reject_oversized_block_handle_before_issuing_filesystem_read() -> Midg
 }
 
 #[test]
-fn should_reject_unreferenced_gap_between_v4_sst_blocks() {
+fn should_reject_unreferenced_gap_between_v5_sst_blocks() {
     // Arrange
     let mut reader = SstFileIo::new("gap.sst", Arc::new(crate::io::MockFs::new()));
     reader.block_region_end = 30;
@@ -1350,7 +1352,7 @@ fn should_reject_persisted_sst_range_when_it_hides_a_decoded_key() -> MidgeResul
     let fs: Arc<dyn Fs> =
         Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
     let reader = SstFileIo::open("narrow-range.sst", Arc::clone(&fs))?;
-    let handle = reader.footer.as_ref().expect("V4 footer").meta_index_handle;
+    let handle = reader.footer.as_ref().expect("V5 footer").meta_index_handle;
     let mut metadata = crate::sst::types::SstMetadata::decode(&reader.read_block(&handle)?)?;
     metadata
         .key_range

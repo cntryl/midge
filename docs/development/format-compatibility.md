@@ -108,11 +108,11 @@ migration: current binaries reject database FORMAT versions 1 through 8 with
 rejected the same way, because their hydrated metadata carries the marker,
 and a publication catalog of any other format version fails with
 `CompatibilityError` and neither catalog copy changes. FORMAT 9 requires SST
-V4; current binaries also reject SST versions 1 through 3 and unknown future
-versions. There is no legacy decoder or best-effort fallback in the V4
+V5; current binaries reject SST versions 1 through 4 and unknown future
+versions. There is no legacy decoder or best-effort fallback in the V5
 reader.
 
-SST V4 has the following integrity and compatibility boundaries:
+SST V5 has the following integrity and compatibility boundaries:
 
 - an 84-byte fixed footer containing its version, encoded footer length,
   self-identifying magic, and CRC32C
@@ -121,19 +121,32 @@ SST V4 has the following integrity and compatibility boundaries:
   persisted block
 - explicit TTL presence, so `None` and `Some(u64::MAX)` remain distinct
 - codec identifiers 0 through 3 only: raw, LZ4, Zstd level 3, and Zstd level 9
+- canonical unsigned varint shared-prefix, key-delta and value lengths, an
+  eight-byte sequence, and one type/TTL flag byte; an expiration contributes
+  eight bytes only when present
+- an independent key every 16 entries and a checked restart-offset directory
+  at the end of each data block; the high bit marks a continued user-key group
 
 Removed codec identifiers and malformed or unknown identifiers fail with
 corruption or compatibility errors. The reader never retries such bytes as an
 uncompressed block.
 
-New writes enforce a 64 MiB encoded-entry admission ceiling, including key and
-header bytes, and validate range-tombstone endpoints before staging. This does
-not change SST V4. Historical V4 raw blocks larger than that ceiling remain
-readable and can be rewritten by budgeted compaction; their output stays raw
-even if compression is configured. Compaction still requires enough memory for
-its reserved working buffers. Oversized compressed blocks remain corruption
-errors under the existing decoded-size limit. See the
-[PR #278 compatibility regressions](evidence/pr278-review-fixes.md).
+New writes enforce a 64 MiB complete single-entry block admission ceiling,
+including the key, worst-case TTL and restart trailer, and validate
+range-tombstone endpoints before staging. Compressed decode limits and
+compaction working-buffer admission remain enforced. V4 bytes require a
+logical export with a V4-capable binary and import into a fresh database.
+
+Point reads binary-search independent restart keys. For unique keys, decoding
+cost is at most the binary-search probes, one 16-entry interval and one
+lookahead entry. Equal keys can cross any number of restarts: search finds the
+first equal restart and its continuation bit includes the preceding interval
+when the group began there. The bound is therefore the search probes plus at
+most 16 preceding entries, all versions of that user key, and one lookahead;
+an older snapshot cannot skip a visible version. Reverse scans decode one
+restart interval at a time, retaining the existing snapshot, tombstone and TTL
+rules. Small entries without TTL use a 12-byte header instead of 26 bytes;
+the directory adds four bytes per 16 entries and a four-byte count per block.
 
 ## Required Rules For 1.0
 
@@ -242,14 +255,15 @@ new database, an older binary must not open it.
 
 ## Fixture Coverage
 
-Compatibility tests verify the checked-in populated FORMAT 9/SST V4 fixture
-at `tests/fixtures/compatibility/v9_populated_v4_sst_db`. They
+Compatibility tests verify the checked-in populated FORMAT 9/SST V5 fixture
+at `tests/fixtures/compatibility/v9_populated_v5_sst_db`. They
 also open a copy with strict recovery and read its persisted value across a
-shutdown and reopen. This fixture retains the prior fixture's SST bytes with
-binary manifest key bounds and per-family flush frontiers, and omits the
+shutdown and reopen. This fixture records new writer-produced SST bytes with
+their finalized size/CRC, binary key bounds and per-family frontiers, and omits the
 pre-ledger WAL.
 
-Repository tests reject the populated FORMAT 8 and FORMAT 3/SST V4 fixtures, a prior FORMAT 2
+Repository tests retain and reject the FORMAT 9/SST V4 fixture under strict
+and salvage recovery. They also reject the populated FORMAT 8 and FORMAT 3/SST V4 fixtures, a prior FORMAT 2
 fixture and a synthetic future FORMAT 10 fixture with `CompatibilityError`,
 without rewriting their markers. Format changes must update these fixtures and
 their CI assertions together.

@@ -35,6 +35,7 @@ impl SstFileIo {
         let mut best_state = KeyState::Absent;
         let index = self.index_entries()?;
         let mut blocks_read = 1u64;
+        let mut entries_decoded = 0_u64;
 
         let candidate_blocks = self.candidate_data_blocks(index.as_ref(), key);
         self.diagnostics
@@ -48,7 +49,9 @@ impl SstFileIo {
 
             blocks_read = blocks_read.saturating_add(1);
             let block_data = self.read_cached_data_block(&handle)?;
-            let candidate = self.key_state_from_encoded_block(&block_data, key, snapshot_seq)?;
+            let (candidate, decoded) =
+                self.key_state_from_encoded_block_with_stats(&block_data, key, snapshot_seq)?;
+            entries_decoded += decoded;
             Self::merge_newer_state(&mut best_state, candidate)?;
         }
 
@@ -57,6 +60,7 @@ impl SstFileIo {
             SstPointReadStats {
                 sst_touched: true,
                 blocks_read,
+                entries_decoded,
             },
         ))
     }

@@ -210,12 +210,12 @@ mod tests {
 
     #[test]
     fn should_reopen_populated_fixture_contents_when_encoded_as_format_nine() {
-        // Arrange: retain the historical SST bytes and logical metadata while
-        // creating a new-format database, rather than migrating an old marker.
+        // Arrange: the current compatibility cut has binary metadata and V5
+        // SST bytes. Re-encoding it must preserve its exact logical contents.
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/compatibility/v8_populated_v4_sst_db");
+            .join("tests/fixtures/compatibility/v9_populated_v5_sst_db");
         let manifest: crate::metadata::Manifest =
-            serde_json::from_slice(&std::fs::read(fixture.join("manifest.snapshot.json")).unwrap())
+            decode(MANIFEST, &std::fs::read(fixture.join("manifest.snapshot.json")).unwrap())
                 .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let fs = crate::io::real::test_root(directory.path());
