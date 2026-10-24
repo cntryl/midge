@@ -474,17 +474,48 @@ fn commit_metadata_generation(
     previous: Option<&CloudMetadataGeneration>,
     generation: CloudMetadataGeneration,
 ) -> MidgeResult<()> {
-    context
-        .authority
-        .store
-        .publish_committed_metadata(
+    loop {
+        DeadlineScope::new(*context.deadline).check("cloud metadata pointer publication")?;
+        match context.authority.store.publish_committed_metadata(
             context.authority.holder_id,
             context.authority.writer_epoch,
             previous,
             generation.clone(),
             context.deadline.remaining(),
-        )
-        .map_err(|error| error.into_validation_error("cloud metadata generation publication"))?;
+        ) {
+            Ok(()) => break,
+            Err(crate::lease::LeaseError::AcquisitionFailed(_)) => {
+                // A definite rejection has no unknown write to reconcile.
+                // Refresh both authority and identity before retrying the
+                // same immutable candidate within its original deadline.
+                context
+                    .authority
+                    .store
+                    .validate_epoch_with_timeout(
+                        context.authority.holder_id,
+                        context.authority.writer_epoch,
+                        context.deadline.remaining(),
+                    )
+                    .map_err(|error| error.into_validation_error("metadata collision lease"))?;
+                let current = context
+                    .authority
+                    .store
+                    .read_committed_metadata(context.deadline.remaining())
+                    .map_err(|error| error.into_validation_error("metadata collision pointer"))?;
+                let expected = previous.map_or(CloudMetadataHead::Uncommitted, |value| {
+                    CloudMetadataHead::Committed(value.clone())
+                });
+                if current != expected {
+                    return Err(MidgeError::Fenced(
+                        "shared metadata predecessor changed during publication".into(),
+                    ));
+                }
+            }
+            Err(error) => {
+                return Err(error.into_validation_error("cloud metadata generation publication"))
+            }
+        }
+    }
     let readback = context
         .authority
         .store
