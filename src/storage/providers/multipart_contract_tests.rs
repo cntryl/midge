@@ -160,7 +160,7 @@ fn serve_azure(state: &mut Uploaded, mut request: Request, corrupt: bool) -> Res
 
 fn serve_gcs(
     state: &mut Uploaded,
-    request: Request,
+    request: &Request,
     json: bool,
     endpoint: &str,
     corrupt: bool,
@@ -170,8 +170,8 @@ fn serve_gcs(
             assert!(request.path.contains("uploadType=resumable"));
             assert!(request.path.contains("ifGenerationMatch=0"));
         } else {
-            assert_eq!(header(&request, "x-goog-if-generation-match"), Some("0"));
-            assert_eq!(header(&request, "x-goog-resumable"), Some("start"));
+            assert_eq!(header(request, "x-goog-if-generation-match"), Some("0"));
+            assert_eq!(header(request, "x-goog-resumable"), Some("start"));
         }
         return response(
             201,
@@ -182,7 +182,7 @@ fn serve_gcs(
             )],
         );
     }
-    let range = header(&request, "content-range")
+    let range = header(request, "content-range")
         .unwrap()
         .strip_prefix("bytes ")
         .unwrap();
@@ -199,7 +199,7 @@ fn serve_gcs(
         state.bytes[0] ^= 1;
     }
     let checksum = encoded_crc(&state.bytes);
-    if header(&request, "x-goog-hash") != Some(format!("crc32c={checksum}").as_str()) {
+    if header(request, "x-goog-hash") != Some(format!("crc32c={checksum}").as_str()) {
         return response(
             400,
             b"{\"error\":{\"code\":400,\"message\":\"checksum mismatch\"}}".to_vec(),
@@ -279,10 +279,10 @@ fn upload_fixture(
             Protocol::S3 => serve_s3(&mut state, request, corrupt),
             Protocol::Azure => serve_azure(&mut state, request, corrupt),
             Protocol::GcsJson => {
-                serve_gcs(&mut state, request, true, origin.get().unwrap(), corrupt)
+                serve_gcs(&mut state, &request, true, origin.get().unwrap(), corrupt)
             }
             Protocol::GcsXml => {
-                serve_gcs(&mut state, request, false, origin.get().unwrap(), corrupt)
+                serve_gcs(&mut state, &request, false, origin.get().unwrap(), corrupt)
             }
         })
     });

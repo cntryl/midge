@@ -759,16 +759,7 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
         let input = "input.sst".to_string();
         let input_path = event_loop.state.host_sst_dir().join(&input);
         std::fs::write(&input_path, b"retained predecessor input")?;
-        event_loop.state.record_compaction_publication_intent(
-            0,
-            vec![input.clone()],
-            Vec::new(),
-        )?;
-        event_loop.state.transition_compaction_publication_intent(
-            std::slice::from_ref(&input),
-            &[],
-            crate::runtime::PublicationPhase::ManifestPublished,
-        )?;
+        record_published_empty_compaction(&mut event_loop, &input)?;
         let intent_path = directory.path().join(crate::metadata::files::INTENT_LOG);
         let before = std::fs::read(&intent_path)?;
         let epoch = event_loop.authority.fencing.writer_epoch;
@@ -860,6 +851,18 @@ fn expire_validity_at_publication_boundary(
         "midge::compaction::after_input_sst_gc"
     };
     fail::cfg_callback(boundary, move || validity.expire_for_test()).unwrap();
+}
+
+#[cfg(feature = "failpoints")]
+fn record_published_empty_compaction(event_loop: &mut EventLoop, input: &str) -> MidgeResult<()> {
+    event_loop
+        .state
+        .record_compaction_publication_intent(0, vec![input.to_owned()], Vec::new())?;
+    event_loop.state.transition_compaction_publication_intent(
+        &[input.to_owned()],
+        &[],
+        crate::runtime::PublicationPhase::ManifestPublished,
+    )
 }
 
 #[cfg(feature = "failpoints")]

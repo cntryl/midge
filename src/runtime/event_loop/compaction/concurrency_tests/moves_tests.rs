@@ -40,8 +40,10 @@ fn move_fixture() -> MidgeResult<(ConcurrentFixture, String)> {
         Arc::clone(&fixture.event_loop.state.fs),
         "sst",
     )));
-    let mut actor =
-        crate::runtime::actors::CompactionActor::new_with_config(factory, Default::default());
+    let mut actor = crate::runtime::actors::CompactionActor::new_with_config(
+        factory,
+        crate::compaction::LeveledCompactionConfig::default(),
+    );
     actor.set_execution_limits(64 * 1024, 16 * 1024 * 1024);
     actor.configure_concurrency(2)?;
     fixture.event_loop.actors.compaction_actor = actor;

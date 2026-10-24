@@ -12,8 +12,9 @@ struct ContendedFlush {
 
 impl ContendedFlush {
     fn new(timeout: Duration) -> MidgeResult<Self> {
-        let mut el =
-            crate::runtime::event_loop::tests::create_test_cloud_event_loop(Default::default())?;
+        let mut el = crate::runtime::event_loop::tests::create_test_cloud_event_loop(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        )?;
         el.prefetch_flush_sst_names_if_due();
         el.pipeline.inline_flush_worker = false;
         el.routing.runtime_response_timeout = timeout;

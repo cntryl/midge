@@ -27,13 +27,13 @@ fn should_bound_unique_key_point_decoding_by_binary_restart_search_and_one_inter
     assert_eq!(reader.index_entries()?.len(), 1);
     // Act and Assert
     for index in [0, 15, 16, 17, 255, 500, 511] {
-        let (state, stats) = reader
+        let (state, metrics) = reader
             .get_raw_state_at_with_stats(format!("restart/{index:04}").as_bytes(), u64::MAX)?;
         assert!(matches!(state, KeyState::Value(_, sequence, None, _) if sequence == index + 1));
         assert!(
-            stats.entries_decoded <= 16 + 7,
+            metrics.entries_decoded <= 16 + 7,
             "index={index} decoded={}",
-            stats.entries_decoded
+            metrics.entries_decoded
         );
     }
     Ok(())

@@ -146,7 +146,16 @@ impl ConcurrentFixture {
     }
 
     fn plan(&self, name: &str, source: u32, target: u32) -> crate::compaction::CompactionPlan {
-        let mut plan = crate::compaction::CompactionPlan::new(0, source, target);
+        let cf_id = self
+            .event_loop
+            .state
+            .manifest
+            .files
+            .iter()
+            .find(|file| file.name == name)
+            .expect("fixture source metadata")
+            .cf_id;
+        let mut plan = crate::compaction::CompactionPlan::new(cf_id, source, target);
         plan.input_files.push(name.into());
         plan.source_files.push(name.into());
         plan
@@ -296,8 +305,7 @@ fn should_keep_older_overlapping_l0_sources_first_and_allow_only_one_l0_owner() 
     let competing = l0
         .iter()
         .find(|file| !selected.contains(&file.name))
-        .map(|file| file.name.clone())
-        .unwrap_or_else(|| plan.source_files[0].clone());
+        .map_or_else(|| plan.source_files[0].clone(), |file| file.name.clone());
     let held = HeldComputes::new();
     // Act
     fixture.event_loop.launch_compaction(plan)?;

@@ -37,7 +37,7 @@ fn add_seed_entries(writer: &mut dyn DynSstWriter, seed: u64) -> MidgeResult<()>
             key.clear();
         }
         let deleted = seed == 3 && index % 3 == 0;
-        let value = vec![u8::try_from(seed).unwrap(); ((seed + 1) * 13) as usize];
+        let value = vec![u8::try_from(seed).unwrap(); usize::try_from((seed + 1) * 13).unwrap()];
         writer.add_sorted_with_meta(
             &key,
             (!deleted).then_some(value.as_slice()),

@@ -95,7 +95,7 @@ fn should_retain_exact_compaction_name_and_deadline_when_reservation_completes_u
     // Arrange: reserve a real source's output generation with a held mirror.
     let mut event_loop =
         crate::runtime::event_loop::tests::create_test_cloud_event_loop_with_reserved_names(
-            Default::default(),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
             Some(100),
         )?;
     let source = seed_compaction_name_source(&mut event_loop)?;
@@ -174,7 +174,9 @@ fn should_complete_local_reads_and_best_effort_writes_while_metadata_provider_is
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
-    let mut event_loop = create_test_cloud_event_loop(Default::default())?;
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
     event_loop.pipeline.inline_flush_worker = false;
     let held = HeldMirror::new("midge::metadata_mirror::before_provider");
     let persisted = event_loop
@@ -258,7 +260,9 @@ fn should_retain_uncovered_names_when_a_completed_metadata_mirror_loses_authorit
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
-    let mut event_loop = create_test_cloud_event_loop(Default::default())?;
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
     event_loop.pipeline.inline_flush_worker = false;
     let healthy = Arc::new(AtomicBool::new(true));
     event_loop.authority.fencing.lease_healthy = Some(Arc::clone(&healthy));
@@ -293,7 +297,9 @@ fn should_keep_flush_waiters_and_the_original_name_while_reservation_is_pending(
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
-    let mut event_loop = create_test_cloud_event_loop(Default::default())?;
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
     event_loop.pipeline.inline_flush_worker = false;
     event_loop.state.get_cf(0).unwrap().memtable.put_with_seq(
         b"pending-name".to_vec(),
@@ -334,7 +340,9 @@ fn should_reconcile_an_admitted_mirror_once_when_its_caller_abandons_the_result(
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: a genuine journal edit makes this a new shared generation.
-    let mut event_loop = create_test_cloud_event_loop(Default::default())?;
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
     event_loop.pipeline.inline_flush_worker = false;
     let edit = crate::metadata::ManifestEdit::BumpNextSstSeq {
         cf_id: 0,
@@ -398,7 +406,9 @@ fn should_fail_the_original_flush_attempt_when_name_publication_loses_authority(
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
-    let mut event_loop = create_test_cloud_event_loop(Default::default())?;
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
     event_loop.pipeline.inline_flush_worker = false;
     let healthy = Arc::new(AtomicBool::new(true));
     event_loop.authority.fencing.lease_healthy = Some(Arc::clone(&healthy));
@@ -427,12 +437,7 @@ fn should_fail_the_original_flush_attempt_when_name_publication_loses_authority(
         flush.phase,
         crate::runtime::state::ImmutableFlushPhase::RetryPending
     );
-    assert!(event_loop
-        .state
-        .sst_names
-        .reserved_through
-        .get(&0)
-        .is_none());
+    assert!(!event_loop.state.sst_names.reserved_through.contains_key(&0));
     event_loop.complete_metadata_mirror(1, event_loop.state.writer_epoch);
     assert_eq!(
         event_loop

@@ -115,15 +115,15 @@ fn should_retain_cf_owner_until_exact_physical_phase_and_epoch_complete() -> Mid
     let memtable = Arc::new(crate::memtable::SkipListMemtable::new());
     memtable.put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
     // Act and Assert: only the exact completed physical phase can settle.
-    let built = complete_build(&mut actor, &results, identity, memtable)?;
-    let FlushWorkerResult::Build(build) = &built else {
+    let completion = complete_build(&mut actor, &results, identity, memtable)?;
+    let FlushWorkerResult::Build(output) = &completion else {
         panic!("build result");
     };
     let publish_hold = HeldStage::new("midge::flush_worker::before_publication");
-    actor.submit_publish(publication_task(fs, build))?;
+    actor.submit_publish(publication_task(fs, output))?;
     publish_hold.entered();
     assert!(
-        !actor.take_completion(&built),
+        !actor.take_completion(&completion),
         "old phase cannot complete new physical work"
     );
     assert!(!actor.take_completion(&false_publish(identity)));
