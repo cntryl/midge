@@ -308,6 +308,11 @@ pub(crate) fn visit_intent_sources(
 ) {
     use crate::runtime::IntentLogEntry;
     match intent {
+        IntentLogEntry::MoveSstsPublish { captured, .. } => {
+            for file in captured {
+                visit(&file.name);
+            }
+        }
         IntentLogEntry::CompactionPlanned { input_files, .. } => {
             for name in input_files {
                 visit(name);

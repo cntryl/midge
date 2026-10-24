@@ -60,6 +60,11 @@ impl IntentPersistence {
                         validate(name, "compaction plan input")?;
                     }
                 }
+                IntentLogEntry::MoveSstsPublish { captured, .. } => {
+                    for file in captured {
+                        validate(&file.name, "logical move")?;
+                    }
+                }
                 IntentLogEntry::FlushPublish { file_meta, .. }
                 | IntentLogEntry::SstAdded { file_meta } => {
                     validate_meta(file_meta, "intent")?;

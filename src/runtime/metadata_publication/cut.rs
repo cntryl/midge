@@ -243,7 +243,8 @@ fn publication_intents(fs: &Arc<dyn Fs>) -> MidgeResult<BTreeSet<[u8; 32]>> {
         .into_iter()
         .filter_map(|mut intent| match &mut intent {
             IntentLogEntry::FlushPublish { phase, .. }
-            | IntentLogEntry::CompactionPublish { phase, .. } => {
+            | IntentLogEntry::CompactionPublish { phase, .. }
+            | IntentLogEntry::MoveSstsPublish { phase, .. } => {
                 *phase = PublicationPhase::OutputDurable;
                 Some(
                     crate::metadata::codec::encode(crate::metadata::codec::INTENT, &intent)

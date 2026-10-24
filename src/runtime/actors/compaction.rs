@@ -21,6 +21,7 @@ use std::sync::Arc;
 /// its inputs, outputs and repair scratch relative to it; outputs land at its
 /// top level.
 const OUTPUT_DIR: &str = "";
+mod moves;
 
 #[cfg(test)]
 #[path = "compaction/publication_tests.rs"]
@@ -37,11 +38,11 @@ mod publication_error_tests;
 #[path = "compaction/publication.rs"]
 pub(crate) mod publication;
 
+mod concurrent;
 #[path = "compaction/jobs.rs"]
 mod jobs;
 #[path = "compaction/pool.rs"]
 mod pool;
-mod concurrent;
 pub use concurrent::CompactionActor;
 
 /// A finished compaction partition, summarized where it was written.
@@ -350,6 +351,7 @@ pub struct CompactionJobActor {
     active_input_ssts: Vec<String>,
     active_input_metadata: Vec<crate::metadata::FileMeta>,
     active_same_level_repair: bool,
+    active_trivial_move: bool,
     active_source_fragmentation: Option<Vec<u8>>,
     /// Kept through completion so failed publication can charge its residue.
     active_output_generation: Option<(u32, u32, u64)>,
@@ -435,6 +437,7 @@ impl CompactionJobActor {
             active_input_ssts: Vec::new(),
             active_input_metadata: Vec::new(),
             active_same_level_repair: false,
+            active_trivial_move: false,
             active_source_fragmentation: None,
             active_output_generation: None,
             active_started_at: None,
@@ -555,7 +558,9 @@ impl CompactionJobActor {
                 .compactor
                 .pick_repair_compaction(&state.manifest.files, *cf_id)?
             {
-                if self.jobs.available(&plan, &state.manifest.files) { return Ok(Some(self.record_scheduled_plan(plan))); }
+                if self.jobs.available(&plan, &state.manifest.files) {
+                    return Ok(Some(self.record_scheduled_plan(plan)));
+                }
             }
         }
 
@@ -567,7 +572,9 @@ impl CompactionJobActor {
                     self.compactor
                         .pick_l0_compaction(&state.manifest.files, *cf_id, true)?
                 {
-                    if self.jobs.available(&plan, &state.manifest.files) { return Ok(Some(self.record_scheduled_plan(plan))); }
+                    if self.jobs.available(&plan, &state.manifest.files) {
+                        return Ok(Some(self.record_scheduled_plan(plan)));
+                    }
                 }
             }
         }
@@ -577,7 +584,8 @@ impl CompactionJobActor {
         let mut deepest_plan: Option<crate::compaction::CompactionPlan> = None;
         for cf_id in &cf_ids {
             let candidate = self.compactor.pick_available_inner_compaction(
-                &state.manifest.files, *cf_id,
+                &state.manifest.files,
+                *cf_id,
                 |file, target| self.jobs.source_available(file, target),
                 |plan| self.jobs.available(plan, &state.manifest.files),
             )?;
@@ -602,12 +610,16 @@ impl CompactionJobActor {
                 self.compactor
                     .pick_l0_compaction(&state.manifest.files, *cf_id, force_l0)?
             {
-                if self.jobs.available(&plan, &state.manifest.files) { return Ok(Some(self.record_scheduled_plan(plan))); }
+                if self.jobs.available(&plan, &state.manifest.files) {
+                    return Ok(Some(self.record_scheduled_plan(plan)));
+                }
             }
         }
 
         if !respect_background_enabled {
-            if self.jobs.active_count() > 0 { return Ok(None); }
+            if self.jobs.active_count() > 0 {
+                return Ok(None);
+            }
             for cf_id in cf_ids {
                 if self
                     .compactor
@@ -621,13 +633,22 @@ impl CompactionJobActor {
             }
         }
 
+        self.check_expired_compaction(state)
+    }
+
+    fn check_expired_compaction(
+        &mut self,
+        state: &RuntimeState,
+    ) -> MidgeResult<Option<crate::compaction::CompactionPlan>> {
         for cf_id in self.round_robin_cf_ids(state) {
             if let Some(plan) = self.compactor.pick_expired_compaction(
                 &state.manifest.files,
                 cf_id,
                 state.observed_time_millis(),
             )? {
-                if self.jobs.available(&plan, &state.manifest.files) { return Ok(Some(self.record_scheduled_plan(plan))); }
+                if self.jobs.available(&plan, &state.manifest.files) {
+                    return Ok(Some(self.record_scheduled_plan(plan)));
+                }
             }
         }
 
@@ -677,7 +698,12 @@ impl CompactionJobActor {
             }
             plan.target_sst_size = plan.target_sst_size.min(target_limit);
         }
-        self.prepare_compaction(state, &plan, sba)?;
+        self.active_trivial_move = moves::eligible(&plan, &state.manifest.files);
+        self.prepare_compaction(
+            state,
+            &plan,
+            if self.active_trivial_move { None } else { sba },
+        )?;
         self.active_manual_deadline = manual_deadline;
         if let Err(error) = check_manual_deadline(manual_deadline, "after actor preparation") {
             self.abort_compaction(state, &plan, sba, Some(&error));
@@ -865,6 +891,10 @@ impl CompactionJobActor {
         self.active_same_level_repair
     }
 
+    pub(crate) fn active_trivial_move(&self) -> bool {
+        self.active_trivial_move
+    }
+
     pub(crate) fn active_source_fragmentation(&self) -> Option<&[u8]> {
         self.active_source_fragmentation.as_deref()
     }
@@ -1005,7 +1035,9 @@ impl CompactionJobActor {
     }
 
     fn join_worker(&mut self) -> Vec<String> {
-        if let Some(outputs) = self.completed_outputs.take() { return outputs; }
+        if let Some(outputs) = self.completed_outputs.take() {
+            return outputs;
+        }
         let Some(handle) = self.worker_handle.take() else {
             return Vec::new();
         };
@@ -1048,6 +1080,7 @@ impl CompactionJobActor {
         self.active_job_reservation = None;
         self.active_job_id = None;
         self.active_same_level_repair = false;
+        self.active_trivial_move = false;
         self.active_source_fragmentation = None;
         self.active_manual_deadline = None;
         self.active_started_at = None;
@@ -1181,6 +1214,11 @@ impl CompactionJobActor {
         plan: &crate::compaction::CompactionPlan,
         sba: Option<&Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<Vec<String>> {
+        if self.active_trivial_move {
+            let mut names = plan.input_files.clone();
+            names.sort_unstable();
+            return Ok(names);
+        }
         let output_ssts = Self::execute_with_storage(
             plan,
             self.compactor.config.max_compaction_input_files,
@@ -1251,9 +1289,11 @@ impl CompactionJobActor {
             crate::compaction::CompactionResources {
                 target_sst_size: target,
                 source_fan_in,
-                budget: work.budget.cloned().or_else(|| storage
-                    .and_then(|storage| storage.maintenance_memory())
-                    ).unwrap_or_else(|| {
+                budget: work
+                    .budget
+                    .cloned()
+                    .or_else(|| storage.and_then(|storage| storage.maintenance_memory()))
+                    .unwrap_or_else(|| {
                         crate::common::resource_budget::ResourceBudget::new(
                             plan.compaction_memory_limit,
                         )
@@ -1294,6 +1334,7 @@ impl CompactionJobActor {
         let worker_error = Arc::clone(&self.worker_error);
         let prepared_outputs = Arc::clone(&self.prepared_outputs);
         let memory_budget = self.memory_budget.clone();
+        let trivial_move = self.active_trivial_move;
         let manual_deadline = self.active_manual_deadline;
         let source_fan_in = self.compactor.config.max_compaction_input_files;
         store_compaction_worker_error(&worker_error, None);
@@ -1319,7 +1360,9 @@ impl CompactionJobActor {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::failpoints::fail_point!("midge::compaction::before_compute");
                 let abort_check = || worker_cancel.load(Ordering::Acquire);
-                let result = Self::execute_with_storage(
+                let result = if trivial_move {
+                    let mut names = plan_clone.input_files.clone(); names.sort_unstable(); Ok(names)
+                } else { Self::execute_with_storage(
                     &plan_clone,
                     source_fan_in,
                     sst_factory.as_ref(),
@@ -1327,7 +1370,7 @@ impl CompactionJobActor {
                     Some(&abort_check),
                     hybrid_storage.as_ref(),
                     CompactionOutputWork { prepared: &prepared_outputs, manual_deadline, budget: memory_budget.as_ref() },
-                );
+                ) };
 
                 let (output_ssts, error) = match result {
                     Ok(v) => (v, None),

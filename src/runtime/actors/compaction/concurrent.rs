@@ -212,7 +212,7 @@ impl CompactionActor {
             if self.pool.is_none() {
                 self.pool = Some(pool::CompactionPool::new(self.slots.len())?);
             }
-            self.slots[index].worker_pool = self.pool.clone();
+            self.slots[index].worker_pool.clone_from(&self.pool);
         }
         self.slots[index].run_compaction(state, plan, storage, tx, deadline)
     }
@@ -397,15 +397,14 @@ impl CompactionJobActor {
             return false;
         };
         self.worker_handle = None;
-        let outputs = match result {
-            Ok(outputs) => outputs,
-            Err(_) => {
-                super::store_compaction_worker_error(
-                    &self.worker_error,
-                    Some(&super::compaction_worker_panic_error()),
-                );
-                Vec::new()
-            }
+        let outputs = if let Ok(outputs) = result {
+            outputs
+        } else {
+            super::store_compaction_worker_error(
+                &self.worker_error,
+                Some(&super::compaction_worker_panic_error()),
+            );
+            Vec::new()
         };
         self.worker_succeeded = Some(
             self.worker_error

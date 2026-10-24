@@ -1237,6 +1237,24 @@ impl RuntimeState {
 
     /// Replay intent log to recover incomplete mutations
     /// Called during startup to apply any interrupted manifest or durability changes
+    fn replay_sst_move_intent(
+        &self,
+        phase: PublicationPhase,
+        captured: &[crate::metadata::FileMeta],
+        target: u32,
+    ) -> MidgeResult<()> {
+        // The journal alone changes authority. A pre-edit intent retains all
+        // sources; a published intent must already be fully reflected.
+        let reflected =
+            crate::metadata::manifest::validate_sst_move(&self.manifest.files, captured, target)?;
+        if phase == PublicationPhase::ManifestPublished && !reflected {
+            return Err(MidgeError::RecoveryFailed(
+                "published logical SST move has no matching durable edit".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn replay_intent_log(&mut self) -> MidgeResult<()> {
         self.check_startup_scope("intent replay")?;
         if self.intent_log.is_empty() {
@@ -1291,6 +1309,13 @@ impl RuntimeState {
                     manifest_changed |=
                         self.replay_compaction_publish_intent(*phase, removed, added)?;
                 }
+                crate::runtime::IntentLogEntry::MoveSstsPublish {
+                    phase,
+                    captured,
+                    target_level,
+                } => {
+                    self.replay_sst_move_intent(*phase, captured, *target_level)?;
+                }
                 crate::runtime::IntentLogEntry::CompactionApplied { removed, added } => {
                     manifest_changed |= self.replay_compaction_publish_intent(
                         PublicationPhase::ManifestPublished,
@@ -1311,6 +1336,10 @@ impl RuntimeState {
             }
         }
 
+        self.finish_intent_replay(manifest_changed)
+    }
+
+    fn finish_intent_replay(&mut self, manifest_changed: bool) -> MidgeResult<()> {
         if manifest_changed {
             if let Err(error) = self.persist_manifest_checkpoint() {
                 if matches!(error, MidgeError::Timeout(_)) {

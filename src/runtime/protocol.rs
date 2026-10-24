@@ -293,6 +293,13 @@ pub enum IntentLogEntry {
         removed: Vec<String>,
         added: Vec<FileMeta>,
     },
+    /// Logical promotion of the exact existing immutable objects. No member
+    /// is a newly created output or a physical deletion obligation.
+    MoveSstsPublish {
+        phase: PublicationPhase,
+        captured: Vec<crate::metadata::FileMeta>,
+        target_level: u32,
+    },
     /// Manifest updated with new SST
     SstAdded { file_meta: FileMeta },
     /// Manifest updated after compaction

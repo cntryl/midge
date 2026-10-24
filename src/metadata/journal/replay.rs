@@ -335,7 +335,7 @@ fn contains_verified_fsync_marker(bytes: &[u8]) -> bool {
 }
 
 fn validate_journal_record_type(record_type: u8, record_start: u64) -> MidgeResult<()> {
-    if matches!(record_type, 1 | 2 | 3 | 6 | 8 | 9 | 10 | 11 | 12 | 13) {
+    if matches!(record_type, 1 | 2 | 3 | 6 | 8 | 9 | 10 | 11 | 12 | 13 | 14) {
         return Ok(());
     }
 
@@ -406,7 +406,7 @@ fn handle_manifest_edit_record(
     record: &JournalRecord,
     state: &mut JournalReplayState,
 ) -> MidgeResult<()> {
-    let is_single_edit_record = matches!(record.typ, 1 | 2 | 3 | 6)
+    let is_single_edit_record = matches!(record.typ, 1 | 2 | 3 | 6 | 14)
         || matches!(
             record.typ,
             DROP_COLUMN_FAMILY_AT_RECORD_TYPE

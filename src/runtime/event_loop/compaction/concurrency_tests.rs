@@ -6,6 +6,7 @@ use crate::sst::{FsSstFactoryIo, SstFactory as _};
 use crate::types::EntryType;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
+mod moves_tests;
 
 struct ConcurrentFixture {
     event_loop: EventLoop,
@@ -58,7 +59,9 @@ impl ConcurrentFixture {
             config.level_multiplier = 1;
         }
         let mut actor = crate::runtime::actors::CompactionActor::new_with_config(factory, config);
-        actor.set_execution_limits(64 * 1024, memory);
+        // These fixtures exercise physical compute rather than a legal
+        // metadata-only move of their tiny disjoint immutable sources.
+        actor.set_execution_limits(128, memory);
         actor.configure_concurrency(2)?;
         actor.configure_work_target(None);
         event_loop.actors.compaction_actor = actor;
@@ -147,6 +150,24 @@ impl ConcurrentFixture {
         plan
     }
 
+    fn assert_rows(&mut self, rows: &[(&[u8], &[u8])]) -> MidgeResult<()> {
+        let snapshot = self
+            .event_loop
+            .create_read_snapshot(0)
+            .expect("default family snapshot");
+        let sequence = self.event_loop.state.applied_sequence;
+        for &(key, value) in rows {
+            assert_eq!(snapshot.get(key, sequence)?.as_deref(), Some(value));
+        }
+        let mut expected: Vec<_> = rows
+            .iter()
+            .map(|(key, value)| (key.to_vec(), value.to_vec()))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(snapshot.range_scan(b"", b"", sequence)?, expected);
+        Ok(())
+    }
+
     fn progress(&mut self) {
         while let Ok(message) = self.workers.try_recv() {
             self.event_loop.process_one(message, &self.requests);
@@ -209,6 +230,19 @@ impl ConcurrentFixture {
         for &(key, value) in rows {
             assert_eq!(transaction.get(key)?.as_deref(), Some(value));
         }
+        let scanned = transaction.scan(&crate::Query::new())?.try_collect()?;
+        let mut expected: Vec<_> = rows
+            .iter()
+            .map(|(key, value)| (key.to_vec(), value.to_vec()))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(
+            scanned
+                .into_iter()
+                .map(|(key, value)| (key.to_vec(), value.to_vec()))
+                .collect::<Vec<_>>(),
+            expected
+        );
         drop(transaction);
         reopened.shutdown(Duration::from_secs(5))?;
         Ok(())

@@ -2,6 +2,7 @@
 
 use super::{MidgeResult, PublicationPhase, RuntimeState};
 use crate::metadata::accounting::Origin;
+mod moves;
 
 #[derive(Clone, Copy)]
 pub(crate) struct FlushManifestPublication<'a> {

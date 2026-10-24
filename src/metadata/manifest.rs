@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+mod moves;
 mod transitions;
+pub(crate) use moves::validate_sst_move;
 pub use transitions::PreparedManifestEdit;
 pub(crate) use transitions::{apply_column_family_lifecycle, FamilyLifecycleEdit};
 use transitions::{invalid_transition, EditValidator};

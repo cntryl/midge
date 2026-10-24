@@ -66,6 +66,10 @@ impl GrandparentOverlap {
         u64::try_from(started - ended + self.unknown_bytes).unwrap_or(u64::MAX)
     }
 
+    pub(crate) fn permits_whole_file(&self, lower: &[u8], upper: &[u8]) -> bool {
+        self.max_bytes == 0 || self.bytes_between(lower, upper) <= self.max_bytes
+    }
+
     pub(super) fn boundary_cursor(
         &self,
         budget: &ResourceBudget,

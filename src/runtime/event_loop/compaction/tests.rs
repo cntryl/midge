@@ -47,6 +47,7 @@ fn should_retain_current_intent_and_files_when_another_job_reports_publication_f
         &event_loop.publication.publication_gate,
         owner.clone(),
         PendingCompactionPublication {
+            move_sources: Vec::new(),
             manual_deadline: None,
             token: token.clone(),
             outputs: Vec::new(),
@@ -779,6 +780,7 @@ fn should_retain_compaction_intent_when_validity_expires_before_gc() -> MidgeRes
             .unwrap();
         event_loop.authority.fencing.lease_validity = Some(Arc::clone(&validity));
         let pending = PendingCompactionPublication {
+            move_sources: Vec::new(),
             manual_deadline: None,
             token: CompactionPublicationToken {
                 request_id: 1,

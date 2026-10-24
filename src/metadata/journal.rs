@@ -80,6 +80,11 @@ pub enum ManifestEdit {
     RemoveSst {
         name: String,
     },
+    /// Reclassify existing immutable objects without retiring their names.
+    MoveSsts {
+        captured: Vec<FileMeta>,
+        target_level: u32,
+    },
     /// The pinned retired identity has been physically deleted (or proven
     /// absent). A failed callback must never emit this acknowledgement.
     CompleteSstDelete {
@@ -142,6 +147,7 @@ impl ManifestEdit {
             ManifestEdit::AddSst(_) => 1,
             ManifestEdit::RemoveSst { .. } => 2,
             ManifestEdit::CompleteSstDelete { .. } => 13,
+            ManifestEdit::MoveSsts { .. } => 14,
             ManifestEdit::CreateColumnFamily { .. } => 3,
             ManifestEdit::AdvanceFlushFrontier { .. } => 12,
             ManifestEdit::BumpNextSstSeq { .. } => 6,
@@ -161,6 +167,12 @@ impl ManifestEdit {
                 validate(&meta.name)
             }
             ManifestEdit::RemoveSst { name } => validate(name),
+            ManifestEdit::MoveSsts { captured, .. } => {
+                for file in captured {
+                    validate(&file.name)?;
+                }
+                Ok(())
+            }
             ManifestEdit::DropColumnFamilyAt {
                 dropped_sst_names, ..
             }
