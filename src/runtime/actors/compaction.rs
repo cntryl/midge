@@ -323,6 +323,13 @@ fn record_staged_output_partition(
 }
 
 /// Actor handling SST compaction
+#[derive(Clone, Copy)]
+enum ActiveCompactionOperation {
+    Rewrite,
+    Repair,
+    Move,
+}
+
 pub struct CompactionJobActor {
     active_job_id: Option<u64>,
     completed_outputs: Option<Vec<String>>,
@@ -350,8 +357,7 @@ pub struct CompactionJobActor {
     /// Exact manifest inputs owned by the active operation.
     active_input_ssts: Vec<String>,
     active_input_metadata: Vec<crate::metadata::FileMeta>,
-    active_same_level_repair: bool,
-    active_trivial_move: bool,
+    active_operation: ActiveCompactionOperation,
     active_source_fragmentation: Option<Vec<u8>>,
     /// Kept through completion so failed publication can charge its residue.
     active_output_generation: Option<(u32, u32, u64)>,
@@ -436,8 +442,7 @@ impl CompactionJobActor {
             storage_reservation: None,
             active_input_ssts: Vec::new(),
             active_input_metadata: Vec::new(),
-            active_same_level_repair: false,
-            active_trivial_move: false,
+            active_operation: ActiveCompactionOperation::Rewrite,
             active_source_fragmentation: None,
             active_output_generation: None,
             active_started_at: None,
@@ -698,12 +703,11 @@ impl CompactionJobActor {
             }
             plan.target_sst_size = plan.target_sst_size.min(target_limit);
         }
-        self.active_trivial_move = moves::eligible(&plan, &state.manifest.files);
-        self.prepare_compaction(
-            state,
-            &plan,
-            if self.active_trivial_move { None } else { sba },
-        )?;
+        let trivial_move = moves::eligible(&plan, &state.manifest.files);
+        self.prepare_compaction(state, &plan, if trivial_move { None } else { sba })?;
+        if trivial_move {
+            self.active_operation = ActiveCompactionOperation::Move;
+        }
         self.active_manual_deadline = manual_deadline;
         if let Err(error) = check_manual_deadline(manual_deadline, "after actor preparation") {
             self.abort_compaction(state, &plan, sba, Some(&error));
@@ -888,11 +892,11 @@ impl CompactionJobActor {
     }
 
     pub(crate) fn active_same_level_repair(&self) -> bool {
-        self.active_same_level_repair
+        matches!(self.active_operation, ActiveCompactionOperation::Repair)
     }
 
     pub(crate) fn active_trivial_move(&self) -> bool {
-        self.active_trivial_move
+        matches!(self.active_operation, ActiveCompactionOperation::Move)
     }
 
     pub(crate) fn active_source_fragmentation(&self) -> Option<&[u8]> {
@@ -1079,8 +1083,7 @@ impl CompactionJobActor {
         self.active_input_metadata.clear();
         self.active_job_reservation = None;
         self.active_job_id = None;
-        self.active_same_level_repair = false;
-        self.active_trivial_move = false;
+        self.active_operation = ActiveCompactionOperation::Rewrite;
         self.active_source_fragmentation = None;
         self.active_manual_deadline = None;
         self.active_started_at = None;
@@ -1132,10 +1135,14 @@ impl CompactionJobActor {
             .filter(|file| plan.input_files.contains(&file.name))
             .cloned()
             .collect();
-        self.active_same_level_repair = matches!(
+        self.active_operation = if matches!(
             plan.purpose,
             crate::compaction::strategy::CompactionPurpose::Repair
-        );
+        ) {
+            ActiveCompactionOperation::Repair
+        } else {
+            ActiveCompactionOperation::Rewrite
+        };
         self.active_source_fragmentation = match &plan.purpose {
             crate::compaction::strategy::CompactionPurpose::Fragment { split_key } => {
                 Some(split_key.clone())
@@ -1214,7 +1221,7 @@ impl CompactionJobActor {
         plan: &crate::compaction::CompactionPlan,
         sba: Option<&Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<Vec<String>> {
-        if self.active_trivial_move {
+        if self.active_trivial_move() {
             let mut names = plan.input_files.clone();
             names.sort_unstable();
             return Ok(names);
@@ -1334,7 +1341,7 @@ impl CompactionJobActor {
         let worker_error = Arc::clone(&self.worker_error);
         let prepared_outputs = Arc::clone(&self.prepared_outputs);
         let memory_budget = self.memory_budget.clone();
-        let trivial_move = self.active_trivial_move;
+        let trivial_move = self.active_trivial_move();
         let manual_deadline = self.active_manual_deadline;
         let source_fan_in = self.compactor.config.max_compaction_input_files;
         store_compaction_worker_error(&worker_error, None);
