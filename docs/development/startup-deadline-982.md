@@ -11,7 +11,7 @@ The fixture requires the existing `MIDGE_SQRZL_ENDPOINT` and local emulator
 credential configuration. It forwards signed S3 requests and real responses;
 it does not qualify a live cloud account or other providers.
 
-Two separate schedules prove different boundaries for #982:
+These schedules prove different boundaries for #982:
 
 | Schedule | Clock and control | Required outcome |
 | --- | --- | --- |

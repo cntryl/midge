@@ -457,6 +457,7 @@ fn should_keep_startup_deadline_when_mandatory_native_catalog_read_follows_acqui
     assert_fast_same_path_reopens(&fixture);
 }
 
+#[cfg(feature = "failpoints")]
 fn seed_preparation_fixture(fixture: &Fixture) {
     let mut seeded = Engine::open(fixture.options(None, fixture.trace()))
         .expect("defaultNone native bootstrap before preparation hold");
@@ -464,6 +465,7 @@ fn seed_preparation_fixture(fixture: &Fixture) {
     seeded.shutdown(Duration::from_secs(5)).unwrap();
 }
 
+#[cfg(feature = "failpoints")]
 fn recover_preparation_seed(fixture: &Fixture) {
     // Check the acknowledged seed before the healthy helper writes these keys.
     let mut recovered = Engine::open(fixture.options(None, fixture.trace()))
