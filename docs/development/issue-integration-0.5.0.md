@@ -1481,3 +1481,26 @@ test and all five recovery-progress tests passed. This closes #979 AC1; the
 previously recorded map refresh and test-symbol resolution satisfy AC2. The
 mutation checks establish only the named regressions' detection of these
 specific defects.
+
+## Cloud publication and reclamation follow-up (2026-10-25)
+
+Local branch `work/cloud-publication-reclamation` groups #907, #916, #913 and
+#943 behind their shared cloud authority/ownership path. The first #916 commit
+adds a four-segment event-loop regression: a transient failure leaves the
+prefix closed while later ACKs arrive in reverse order; the test reads the
+authoritative remote catalog to verify no later segment is published, then
+checks all four entries after the retry ACK. The focused test passes. Existing
+worker callback reordering and provider-cloud retry/recovery tests remain
+separate complementary layers.
+
+The public #943 scheduled-sweep snapshot regression now cold-reopens after the
+old SST is reclaimed and verifies the selected metadata still recovers the
+current value. It passes on CloudSimulated. The metadata retention suite (7
+tests), orphan suites (18 tests), hybrid-persistence suite (108 tests),
+four-ACK prefix test, retry campaign, and focused failpoint authority tests
+also pass. `cargo fmt --check` passes.
+
+These checks do not complete #907's injected-latency/A-B gates or #916's cost
+and catalog-size measurements. The cold reopen is not a process-crash
+campaign: #913's GC-enabled crash acceptance and #943's sweep-enabled crash
+budget acceptance remain open. No live-provider qualification is claimed.
