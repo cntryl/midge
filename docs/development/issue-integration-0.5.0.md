@@ -12,6 +12,7 @@ cover these slices:
 | `8e8230c6` | #915 covers lost completion reconciliation at the same immutable upload key | Focused CloudStorage → HybridStorage production-path test passed (1/1) | Provider-specific checksum/multipart qualification and performance evidence |
 | `4e0499f2` | #940 routes Strict spilled transactions through ticketed asynchronous fsync and ordered apply | Held-fsync progress/visibility, post-sync recovery and sync-failure tests passed (3/3); spill workspace has its own retained bounded budget | Crash campaign, stale/duplicate receipt and rotation/spill/shutdown cases, and performance measurement |
 | `4cfbacb3` | #918 directly checks the legacy SST rejection boundary | Focused V4 fixture reader test passed (1/1) | Tier 4 footprint and #935 decode measurements |
+| `f8c14a1c` | #914 removes hidden reads from the metadata request-count test double | The zero-read/two-PUT test was red on two inner GETs, then passed (1/1) with actual mock GET/range history and conditional-header assertions; Jev favored the test design (0.98) | Cold-start before/after and #937/#935 performance evidence |
 
 Jev judgments informed the design reviews; implementation source and behavior
 tests remain the correctness evidence. The #926 implementation was already
