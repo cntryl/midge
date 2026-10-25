@@ -4,9 +4,76 @@ use crate::runtime::TestRuntimeMsg;
 use crate::wal::DurabilityPolicy;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod compaction_deadline_tests;
+
+#[test]
+fn should_slow_commit_inside_l0_soft_band_without_hard_stall() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let state = RuntimeState::new(directory.path().to_path_buf(), false);
+    let (runtime, _) = Runtime::new();
+    let delay = Duration::from_millis(30);
+    let config = RuntimeConfig {
+        runtime_response_timeout: Duration::from_secs(2),
+        write_backpressure: crate::config::WriteBackpressureConfig {
+            l0_soft_limit: Some(1),
+            max_admission_delay: delay,
+            ..Default::default()
+        },
+        ..RuntimeConfig::default()
+    };
+    let (mut runtime, handle) = runtime.start_with_config(state, config)?;
+    let submission = |key: &'static [u8]| TransactionSubmission {
+        ops: vec![TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(key),
+            value: bytes::Bytes::from_static(b"value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: Some(DurabilityPolicy::Strict),
+        start_sequence: None,
+        conflict_policy: crate::types::ConflictPolicy::LastWriteWins,
+    };
+    assert!(matches!(
+        handle.send_apply_transaction_and_wait(730_001, submission(b"seed"))?,
+        RuntimeResponse::TransactionApplied { .. }
+    ));
+
+    // Act: the first write leaves one active L0 generation, inside the soft
+    // band and below the configured hard ceiling.
+    let started = Instant::now();
+    let response = handle.send_apply_transaction_and_wait(730_002, submission(b"slow"));
+    let elapsed = started.elapsed();
+
+    // Assert: caller-side slowdown is observed, but the real event loop still
+    // commits the write instead of returning WriteStall.
+    assert!(matches!(
+        response?,
+        RuntimeResponse::TransactionApplied { .. }
+    ));
+    assert!(elapsed >= delay);
+    assert_eq!(
+        handle
+            .write_admission
+            .slowdown_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert!(
+        handle
+            .write_admission
+            .slowdown_ns
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= delay.as_nanos() as u64
+    );
+    handle.shutdown(Duration::from_secs(2))?;
+    assert!(runtime.wait_for_exit(Duration::from_secs(2)));
+    Ok(())
+}
 
 #[cfg(feature = "failpoints")]
 struct HeldSync {
