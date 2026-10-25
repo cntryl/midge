@@ -15,12 +15,13 @@ currently cover these slices:
 | `f8c14a1c` | #914 removes hidden reads from the metadata request-count test double | The zero-read/two-PUT test was red on two inner GETs, then passed (1/1) with actual mock GET/range history and conditional-header assertions; Jev favored the test design (0.98) | Cold-start before/after and #937/#935 performance evidence |
 | `19926136` | #978 asserts the spill-specific global applied cut after partial apply | Cross-family rejection plus fresh snapshot cut/key assertions passed (1/1); whole-spill restart recovery passed (1/1) | Pipeline/rotation matrices, AC1–3, crash and performance evidence |
 | `a08f0616` | #905 covers a conflicting follower queued behind held Strict fsync | The follower waits without append or visibility, then conflicts after predecessor apply with no partial effects (1/1); Jev favored the evidence (0.65) | Hot-key throughput target and records-per-append/group-window measurements |
-| `4d7a429f`, `d3ccdd33` | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; timeout-after-catalog-CAS test proves frontier remains behind until worker completion, advances once, and ignores duplicate completion (1/1); formatting and diff checks passed | Injected-provider latency/A-B evidence and completion ordering/reconciliation campaigns (#935/#937) |
+| `4d7a429f`, `d3ccdd33`, `49dcfd50` | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; timeout-after-catalog-CAS proves frontier waits for completion and advances once (1/1); matching operation ID with stale epoch is ignored before the valid completion advances once (1/1); formatting and diff checks passed | AC1 injected-provider progress, AC2 mirror completion after lease loss, AC3 provider-latency A/B, AC4 publication crash campaigns, and broader AC5 reorder/duplicate matrix |
 | `83f705bb`, `1b49519a`, `6c7bc9af` | #904 pins intact synced-tail replay, bounds the floor while later Strict appends queue, and classifies damage around the floor | Post-fsync/pre-frontier Strict reopen regression passed (1/1); adjacent WAL recovery-floor tests passed (2/2); two-held-fsync event-loop floor-bound regression passed (1/1); floor-aware damage regression proves strict failure below the floor and physical truncation above it, including later valid frames (1/1); formatting and diff checks passed | Separate fsync/A-B accounting and explicit cadence sign-off |
 | `fd5fd954`, `6f981118`, `6599aa13`, `4d570061` | #909 proves two-worker publication/restart, immediate re-picking, concurrent publication crash recovery, distinct-input L0 conflict rejection, and exposes compaction concurrency as a Tier 4 benchmark parameter | AC1 simultaneous workers both publish and recover (1/1); AC2 immediate re-pick consumes the just-published output (1/1); AC4 child-process crash asserts both jobs active at output-durable/before-manifest, then verifies both families, healthy layout and manifest/SST ownership after restart (1/1); AC6 distinct-input L0 ordering, conflicting reservations, shared-memory failure and fairness tests passed; `cargo check --locked --bench tier4_system_compaction_backpressure` passed; `MIDGE_COMPACTION_CONCURRENCY` is recorded in the benchmark output; Jev favored the crash proof (1.0) and distinct-input assertion (0.95) | AC3 sustained-workload throughput and stall-count A/B evidence; alternating baseline/candidate measurements remain unrun |
 | `508df52b`, `de14efc6` | #916 proves catalog storage tracks the unretired backlog and preserves publication authority through ambiguous mirror responses and lease loss during mirror completion | 10,000/5,000/1,000-entry catalog-size regression and catalog module (23/23); AC1 out-of-order four-upload failure/retry proofs; AC3 local #808 before/after-retirement crash tests, lost mirror-answer retry and takeover during committed mirror callback; AC5 receipt/fallback/fenced-ACK tests passed; takeover regression was red on `control CAS readback differs`, then passed with old writer Fenced and successor epoch/member retained; `control_io` and catalog modules passed (9/9 each); formatting and diff checks passed | AC2 cloud-strict A/B/provider evidence, Sqrzl-specific takeover qualification, and #935/#937 target/interval decision |
 | `efc76aa4`, `82598feb` | #923 proves production orphan GC protects one SST shared across two pinned snapshot generations until the final release, and read authority fences every outcome when a storage fetch is blocked across lease expiry | Real CloudSimulated compaction and scheduled sweeps preserved both snapshot values and the shared SST after first release, then deleted it after final release; cold reopen and focused test passed (1/1, 91.02 s). The blocked-read regression expires authority while fetch is held and checks value, end-of-range, and NotFound outcomes are all fenced (1/1); Jev favored this barrier-based test (0.98); `cargo fmt --check` and `git diff --check` passed | AC1 latency pairs and AC4 measured 10,000-snapshot unpin work |
-| `2fb18822` | #924 adds CF drop/recreation coverage while an old read snapshot retains its published SST source | Public Engine regression flushes the original family, holds its snapshot across drop/recreation and a new-family flush, then verifies old and new readers see their own values and the old SST remains pinned (1/1); Jev selected this lifecycle test (probability 0.72) | AC1 allocation count, AC3 three-pair A/B, concurrent coherent snapshot capture portion of AC4, and AC5 grouped accounting |
+| `2fb18822`, `692cf672` | #924 covers CF drop/recreation while an old read snapshot retains its published SST source, and counts per-family snapshot materialization for a 100-family commit | Public Engine regressions pass (2/2): the one-family commit builds exactly one shallow TTL-time wrapper, while event-loop publication builds zero replacement snapshots and keeps all 100 source Arcs identical; the drop/recreate test retains the old pin/value while the new generation reads its own value; `ReadSnapshot` constructor and clone materializations are counted in the test configuration; Jev favored the bounded count contract (probability 0.97) | AC3 three-pair A/B, concurrent coherent snapshot capture portion of AC4, and AC5 grouped accounting |
+| `6c62b5c7` | #946 adds an earlier-pending-Strict-group range-delete validation regression | Failpoint test pauses the old empty-range proof, holds an in-range Strict write at fsync, then verifies the range request waits, revalidates after apply and returns `WriteConflict` without partial deletion or sequence advance (1/1) | AC1 zero event-loop SST opens, AC2 unchanged transaction conflict suite, AC3 three-pair A/B, and remaining AC4 interleavings |
 | `f37cc4b1` | #927 proves a failed SST inventory probe retained under salvage does not advance the watchdog's `sst_inventory` progress | Jev selected the failed-probe regression (0.74); corrected stage-specific progress test passed (1/1); `cargo fmt --check` and `git diff --check` passed | 10,000-SST cold-start A/B, late/unknown mutation and identity/provider qualification |
 | `58926c85`, `79391d6d` | #927 verifies salvage reconciliation when inventory results arrive in C/A/B order and conditional DELETE is not replayed after a lost successful response | Jev selected direct C/A/B completion-iterator coverage over a test-only worker hook (confidence 1.0); only missing B is removed and A/C order/identity are preserved; full `cloud_startup::cloud_recovery::tests` module passed (4/4). The HTTP regression applies conditional DELETE then drops the response; exact If-Match, ambiguous error, and one request despite retry budget passed (1/1); Jev favored adding this case (0.48) | 10,000-SST cold-start A/B, late/unknown mutation and identity/provider qualification |
 
@@ -771,11 +772,12 @@ full family scan after every operation. Delete-range tracking and generation
 start mutation still run exclusively on the event loop. An active regression
 uses 100 families, verifies source Arc retention and visible data at the
 published cut, and reconciles incremental memory accounting against a full sum.
-A focused public Engine test also passed for the flush/drop/recreate snapshot
-lifecycle: the old generation kept its pinned source and value while the new
-generation published and read its own value. The code compiles with failpoint
-test targets; allocation counting, concurrent capture interleavings, and A/B
-targets remain for qualification.
+A public Engine AC1 test with 100 families passed: one commit materialized one
+shallow TTL-time wrapper, while publication constructed no replacement
+snapshots and preserved all family source Arcs. The flush/drop/recreate test
+also passed: the old generation kept its pinned source and value while the new
+generation published and read its own value. Concurrent capture interleavings
+and A/B targets remain for qualification.
 
 ### #978: applied-cut prerequisite implemented; pipeline remainder pending
 
@@ -839,8 +841,10 @@ handles and borrowed preflight/deduplication keys. Blind overlapping writes can
 share one append/sync; mixed operation-ordering barriers are preserved.
 Active tests cover overlapping strict units across restart, write conflicts,
 staged range deletion and insert-only, and require coalescing while retaining
-failure outcomes. Failpoint test targets compile; no tests or A/B runs have
-executed for this candidate.
+failure outcomes. A new failpoint regression also passed for an earlier
+pending Strict group: the stale range proof waits, retries after apply, and
+returns `WriteConflict` without partial deletion. Other AC4 interleavings and
+the transaction suite remain to execute; no A/B results are claimed.
 
 Off-loop snapshot validation with intervening-write revalidation, earlier
 in-flight groups, pipeline receipts, parked roots and concurrent apply remain
@@ -947,11 +951,12 @@ are acquired before reading, and backend requests retain their admission.
 
 Active regressions hold the publication worker while local writes/read progress,
 fence stale completion, reorder four upload acknowledgements, and exercise
-pool failures/retries and memory bounds. Combined failpoint test targets compile
-without warnings; execution and provider/crash qualification are pending.
-Metadata mirror and remaining seal-provider offload are still required by #907.
-No publication batching interval is selected before #916's measurements justify
-one. Mirror authority/repair semantics remain synchronous and unchanged.
+pool failures/retries and memory bounds. New focused tests passed for caller
+timeout after catalog CAS and wrong-epoch completion while the matching
+operation remains active. Metadata mirror and CloudAsync seal use owned worker
+paths; the injected-provider delay, mirror takeover, A/B and crash-campaign
+gates remain open. No publication batching interval is selected before #916's
+measurements justify one. Mirror authority/repair semantics remain unchanged.
 
 The next #946 slice moves resident conflict/assertion/insert-only SST queries
 to a fixed worker with bounded pending jobs and retained memory. Captured source
