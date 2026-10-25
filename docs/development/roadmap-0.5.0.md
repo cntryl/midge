@@ -42,8 +42,10 @@ The read-path work has since merged; the status below is recorded at
   they do not wait for an absolute baseline. Assurance targets specify
   detection power and compute budget. #929 still owes the committed evidence
   matrix; it supplies absolute context, not the performance PR pass/fail gate.
-- **One purpose per issue, one PR per issue.** Issues that bundled several
-  changes were split; each has one failure scenario and one proof.
+- **One purpose per issue, one milestone delivery PR.** Issues that bundled
+  several changes were split; each has one failure scenario and one proof.
+  The 0.5.0 issue work is tracked as issue-scoped commits on one integration
+  branch and will be submitted in one PR after the milestone issues are ready.
 - **Formats are unstable on `develop` between releases.** Each
   format-changing PR lands independently, bumps its own rejection test, and
   updates [format-compatibility.md](format-compatibility.md). No coordination
