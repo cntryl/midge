@@ -15,7 +15,8 @@ currently cover these slices:
 | `f8c14a1c` | #914 removes hidden reads from the metadata request-count test double | The zero-read/two-PUT test was red on two inner GETs, then passed (1/1) with actual mock GET/range history and conditional-header assertions; Jev favored the test design (0.98) | Cold-start before/after and #937/#935 performance evidence |
 | `19926136` | #978 asserts the spill-specific global applied cut after partial apply | Cross-family rejection plus fresh snapshot cut/key assertions passed (1/1); whole-spill restart recovery passed (1/1) | Pipeline/rotation matrices, AC1–3, crash and performance evidence |
 | `a08f0616` | #905 covers a conflicting follower queued behind held Strict fsync | The follower waits without append or visibility, then conflicts after predecessor apply with no partial effects (1/1); Jev favored the evidence (0.65) | Hot-key throughput target and records-per-append/group-window measurements |
-| pending | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; `cargo fmt --check` and `git diff --check` passed | Injected-provider latency/A-B evidence and completion ordering/reconciliation cases (#935/#937); no full suite or benchmark run yet |
+| `4d7a429f` | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; `cargo fmt --check` and `git diff --check` passed | Injected-provider latency/A-B evidence and completion ordering/reconciliation cases (#935/#937); no full suite or benchmark run yet |
+| `be40e70e` | #904 pins replay of intact WAL bytes synced before their exact SyncOpen floor was recorded | New post-fsync/pre-frontier failpoint regression passed on the public Strict reopen path (1/1); adjacent WAL recovery-floor tests passed (2/2); `cargo fmt --check` and `git diff --check` passed | Damage classification on both sides of the floor, queued-append floor bound, separate fsync/A-B accounting, and explicit cadence sign-off |
 
 Jev judgments informed the design reviews; implementation source and behavior
 tests remain the correctness evidence. Parallel Jev-reviewed slices found
@@ -42,6 +43,14 @@ deferred to preserve clock-correction recovery. No issue is closed by these
 local commits, and no aggregate gate, benchmark campaign, PR or merge is
 claimed at this checkpoint. The historical checkpoints below describe earlier
 branches and qualifications; this section is the current local status.
+
+For #904, Jev returned the choice field without selecting among the bounded
+options on two code-grounded prompts (confidence 0.78 and 0.80); that output is
+not a design decision. The issue explicitly requires implementation sign-off
+before weakening exact SyncOpen cadence, so this branch preserves the exact
+floor contract. The new AC3 regression exercises an intact synced tail after
+the post-fsync/pre-frontier failure point and proves Strict recovery replays
+the value. It does not qualify AC4/AC5 or authorize cadence changes.
 
 The user requested this workflow on 2026-10-24: one local branch,
 `work/0.5.0-issue-integration`, with small commits for the issues and one PR
@@ -1378,10 +1387,12 @@ syncs and an explicitly scoped accounted sum in runtime metrics and existing
 Strict/rotation rows. Segment initialization/repair and other filesystem work
 are excluded from that sum; it is not a complete physical-device count.
 Active regressions cover ledger checkpoints, failed/after-effect syncs and a
-public Strict commit/reopen. Exact floors, encoding and recovery semantics stay
-unchanged. All-target compilation passes; behavior and measurements remain
-pending. The metric builder uses conservative empty defaults while always
-installing actual runtime health; focused helpers keep hard function limits.
+public Strict commit/reopen. The focused post-fsync/pre-frontier test now also
+proves intact synced bytes replay when the exact floor update fails. Exact
+floors, encoding and recovery semantics stay unchanged. The focused test passes;
+separate fsync measurements and remaining recovery-window cases are pending.
+The metric builder uses conservative empty defaults while always installing
+actual runtime health; focused helpers keep hard function limits.
 
 #978/#906 now fence the global applied prefix after partial legacy/spilled
 apply as well as concurrent apply. The aggregate loop-owned bit makes admission

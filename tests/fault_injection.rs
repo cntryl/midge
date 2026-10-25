@@ -139,6 +139,63 @@ mod failure_injection {
     }
 
     #[test]
+    fn should_replay_intact_synced_tail_when_frontier_recording_fails() {
+        // Arrange: preserve the current exact-floor contract. The injected
+        // failure is after the WAL fsync but before its SyncOpen ledger edit.
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temporary database directory");
+        let db_path = temp_dir.path();
+        let mut engine = open_local_engine(db_path);
+        let cf = default_cf(&engine);
+        let scenario = fail::FailScenario::setup();
+        let point = "midge::wal::after_fsync_before_durable_frontier";
+        fail::cfg(point, "return").expect("configure post-fsync frontier failure");
+        let mut transaction = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin strict transaction");
+        transaction
+            .put(b"synced-before-frontier".to_vec(), b"value".to_vec(), None)
+            .expect("stage value");
+
+        // Act: the sync completed, but no caller acknowledgment may claim the
+        // logical frontier update succeeded.
+        let commit = transaction.commit(WriteOptions::sync());
+        fail::remove(point);
+        scenario.teardown();
+        assert!(commit.is_err(), "frontier failure must fail the commit");
+        assert!(matches!(
+            engine.shutdown(std::time::Duration::from_secs(5)),
+            Err(MidgeError::RecoveryFailed(_))
+        ));
+        drop(engine);
+
+        // Assert: a fresh strict recovery replays intact valid frames beyond
+        // the previously recorded floor instead of discarding synced data.
+        let reopened = Engine::open(
+            OpenOptions::local(db_path)
+                .recovery_policy(RecoveryPolicy::Strict)
+                .background_compaction(false)
+                .build()
+                .expect("build strict recovery options"),
+        )
+        .expect("intact synced tail must replay beyond the prior floor");
+        let cf = default_cf(&reopened);
+        let read = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin recovered read transaction");
+        assert_eq!(
+            read.get(b"synced-before-frontier")
+                .expect("read recovered value")
+                .as_deref(),
+            Some(&b"value"[..])
+        );
+        drop(read);
+        shutdown_engine(reopened);
+    }
+
+    #[test]
     fn should_reject_column_family_drop_when_wal_sync_fails() {
         // Arrange
         let _guard = failpoint_test_lock()
