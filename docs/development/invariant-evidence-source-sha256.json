@@ -98,7 +98,7 @@
   "src/runtime/ddl.rs": "fe5d18bee7d1eb2a2d5f92edd4205a172ed803a2c1eb926ca74760eaa9151eed",
   "src/runtime/event_loop/cloud_integration/tests.rs": "78434d32fc1bf7a90d57e4833c02a55b61042c95e37ae119e0ac33ef8e18efd4",
   "src/runtime/event_loop/cloud_integration/tests/maintenance_tests/manual_flush_tests/cloud_fragmentation_tests.rs": "a06d5477ae71cab85534db18f60b80607ee3df60529e9ea7ed396e69b069015f",
-  "src/runtime/event_loop/cloud_integration/tests/maintenance_tests/manual_flush_tests/compaction_budget_tests.rs": "e85f908febcd90b81735118a6fdde38951cec23f7006585c2c0de35139b34f13",
+  "src/runtime/event_loop/cloud_integration/tests/maintenance_tests/manual_flush_tests/compaction_budget_tests.rs": "5c503d8d7a0ff47eb7626332fdb995c41df788007de28155c8b08eb0373af83f",
   "src/runtime/event_loop/cloud_integration/tests/maintenance_tests/manual_flush_tests/compaction_budget_tests/authority_timeout_tests.rs": "6ebf0a97c1899c8eb97589e19e4d61fbdb1c7ecf2984e1db9607ed729e7bd995",
   "src/runtime/event_loop/cloud_integration/tests/maintenance_tests/manual_flush_tests/compaction_budget_tests/deadline_owner_tests.rs": "0e20bf1c6fd993ffa664b744f794c28169b4063758e96599aa4a13ba06e41065",
   "src/runtime/event_loop/cloud_integration/tests/maintenance_tests/manual_flush_tests/compaction_budget_tests/queued_phase_tests.rs": "55f40ed977007d747fb76ffad550db1c8dfc57b07e9b4629827b3680f2498375",

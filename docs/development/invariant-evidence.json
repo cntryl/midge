@@ -1,6 +1,6 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "812900422b207cd5adcd41b23c17bcd59b416a31",
+  "source_revision": "ad89586cc0cab8199c4faa1ecee6ebe241224a3e",
   "source_revision_status": "Production/test symbols and exact assertion or behavior-helper call markers resolve at the frozen code checkpoint in source_revision. SHA256 postimages identify all referenced source and supporting documentation; refreshed documentation postimages follow the code checkpoint. This is a reference audit only: this refresh ran no Rust behavior tests or mutation experiments. Historical qualification objects remain unchanged and scoped to their recorded revisions.",
   "qualification": {
     "reference_lint_only": true,
@@ -351,7 +351,7 @@
     "unresolved_historical_test_names_removed": 13,
     "test_reference_count": 397,
     "test_symbols_renamed": 51,
-    "previous_reference_checkpoint": "ca5608695457780be0570c7877f7176950a27e09",
+    "previous_reference_checkpoint": "812900422b207cd5adcd41b23c17bcd59b416a31",
     "obsolete_reference_removed": {
       "id": "SST-4",
       "reason": "Former global provider-gate schedule was replaced by independently owned captured-cut publication schedules; it is not surviving evidence."

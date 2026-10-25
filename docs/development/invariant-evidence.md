@@ -2,7 +2,7 @@
 
 This reference inventory covers all 65 IDs in the [invariant catalog](invariant-catalog.md). It indexes production symbols, active Rust regressions, actual assertion or behavior-helper call markers, fixture assumptions and explicit gaps.
 
-The frozen code reference checkpoint is `812900422b207cd5adcd41b23c17bcd59b416a31`, with exact [source postimages](invariant-evidence-source-sha256.json). Referenced production and test bytes match that checkpoint; supporting documentation has its own recorded postimages. The inventory contains 358 unique active test symbols across 397 row references, 277 production references and 2760 assertion/helper anchors.
+The frozen code reference checkpoint is `ad89586cc0cab8199c4faa1ecee6ebe241224a3e`, with exact [source postimages](invariant-evidence-source-sha256.json). Referenced production and test bytes match that checkpoint; supporting documentation has its own recorded postimages. The inventory contains 358 unique active test symbols across 397 row references, 277 production references and 2760 assertion/helper anchors.
 
 This is a construction and reference audit. This refresh did not run the linked regressions or mutation experiments, and it makes no crash-campaign, benchmark, native-provider or release qualification claim. The [JSON inventory](invariant-evidence.json) retains historical qualification objects unchanged and scoped to their recorded revisions; those outcomes do not qualify the current branch. Unsupported references to removed targets were removed. Test renames preserve the protected behavior rather than inventing replacement results.
 
