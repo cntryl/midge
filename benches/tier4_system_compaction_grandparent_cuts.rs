@@ -19,7 +19,7 @@ use std::time::Instant;
 const BENCHMARK: &str = "tier4_system_compaction_grandparent_cuts";
 const SEED: u64 = 0x9480_2026_1006;
 const BASE_KEYS: usize = 2_500_000;
-const UPDATE_KEYS: usize = 500_000;
+const UPDATE_KEYS: usize = 550_000;
 const KEY_BYTES: usize = 16;
 const VALUE_BYTES: usize = 128;
 const LOGICAL_BYTES_PER_KEY: u64 = (KEY_BYTES + VALUE_BYTES) as u64;
