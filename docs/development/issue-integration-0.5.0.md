@@ -1320,6 +1320,14 @@ regressions cover pre-admission expiry and shared real-writer rate/identity.
 The latest shared check is in concurrent #909/#906 declarations; execution and
 sustainable-load A/B qualification remain pending.
 
+Jev selected a bounded-latency target for AC1: on
+`tier4_system_compaction_backpressure` local with soft limits enabled under a
+preregistered sustainable workload, median of three alternating pair deltas
+for p50 and p99 end-to-end commit latency each must be no worse than +5%.
+Admission delay is reported separately and zero hard stalls remains an
+independent gate. This target does not claim that the slowdown improves
+isolated latency or handles arbitrary overload. The exact A/B remains pending.
+
 #906 uses a bounded two-worker pool for captured memtable effects within one
 synced resident group. Runtime bookkeeping, source-size accounting, range
 tracking and one whole-group applied cut remain loop-owned. Reads/control stay
