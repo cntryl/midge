@@ -49,6 +49,8 @@ fn setup_db() -> Engine {
         memory_budget: memory_budget_bytes(),
         cloud_write_policy: None,
         simulated_cloud_overrides: None,
+        #[cfg(feature = "candidate-write-backpressure-bench")]
+        write_backpressure: None,
     };
 
     Engine::open(opts.to_open_options()).unwrap()

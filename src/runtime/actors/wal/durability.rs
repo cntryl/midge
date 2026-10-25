@@ -444,7 +444,7 @@ impl WalActor {
         Ok(open_max_sequence)
     }
 
-    /// Submit the CloudAsync seal barrier to the WAL writer without waiting on
+    /// Submit the `CloudAsync` seal barrier to the WAL writer without waiting on
     /// the event-loop thread. The returned prefix is the authority the caller
     /// must match before rotating the segment.
     pub(crate) fn submit_cloud_upload_flush(
@@ -505,7 +505,7 @@ impl WalActor {
         }
     }
 
-    /// Validate the completion of an admitted CloudAsync seal barrier. The
+    /// Validate the completion of an admitted `CloudAsync` seal barrier. The
     /// event loop performs lease revalidation before rotating.
     pub(crate) fn finish_cloud_upload_flush(
         &mut self,

@@ -198,7 +198,7 @@ pub(crate) fn execute_compaction_at_target(
         output_dir,
         inputs,
         &budget,
-        executor::PartitionOutputConfig {
+        &executor::PartitionOutputConfig {
             cf_id: plan.cf_id,
             target_level: plan.target_level,
             generation: plan.output_seq,
@@ -2657,7 +2657,7 @@ mod tests {
             temp_dir.path(),
             inputs,
             &budget,
-            executor::PartitionOutputConfig {
+            &executor::PartitionOutputConfig {
                 cf_id: 0,
                 target_level: 1,
                 generation: 54,

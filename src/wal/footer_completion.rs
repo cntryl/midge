@@ -67,12 +67,12 @@ impl WalPendingFooter {
         }
         result.map(|completion| {
             completion.and_then(|completion| {
-                if completion.prefix != self.expected {
+                if completion.prefix == self.expected {
+                    Ok(completion)
+                } else {
                     Err(MidgeError::Internal(
                         "WAL footer completion did not match its admitted identity".into(),
                     ))
-                } else {
-                    Ok(completion)
                 }
             })
         })

@@ -249,6 +249,20 @@ pub fn write_coordination_opts_for_mode(mode: &str) -> MidgeOptions {
     opts
 }
 
+fn mode_directory(mode: &str, unique_id: u64) -> PathBuf {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let directory = PathBuf::from(format!(
+        "target/tmp/midge_test_{mode}_{}_{}_{}",
+        std::process::id(),
+        unique_id,
+        timestamp
+    ));
+    let _ = std::fs::create_dir_all(&directory);
+    directory
+}
+
 /// Generate appropriate `MidgeOptions` for the given storage mode (lowercase convention).
 ///
 /// # Arguments
@@ -279,16 +293,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             write_backpressure: None,
         },
         "local" => {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos());
-            let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_local_{}_{}_{}",
-                std::process::id(),
-                unique_id,
-                timestamp
-            ));
-            let _ = std::fs::create_dir_all(&test_dir);
+            let test_dir = mode_directory("local", unique_id);
             MidgeOptions {
                 storage_mode: StorageMode::LocalDisk { db_path: test_dir },
                 wal_sync: false,
@@ -304,16 +309,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             }
         }
         "cloud" => {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos());
-            let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_cloud_{}_{}_{}",
-                std::process::id(),
-                unique_id,
-                timestamp
-            ));
-            let _ = std::fs::create_dir_all(&test_dir);
+            let test_dir = mode_directory("cloud", unique_id);
             MidgeOptions {
                 storage_mode: StorageMode::CloudBacked {
                     local_cache_path: test_dir,
@@ -335,16 +331,7 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             }
         }
         "hybrid" => {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos());
-            let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_hybrid_{}_{}_{}",
-                std::process::id(),
-                unique_id,
-                timestamp
-            ));
-            let _ = std::fs::create_dir_all(&test_dir);
+            let test_dir = mode_directory("hybrid", unique_id);
             let local_storage_budget_bytes = std::env::var("MIDGE_BENCH_HYBRID_LOCAL_BUDGET_BYTES")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())

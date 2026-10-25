@@ -1165,7 +1165,7 @@ pub(crate) fn write_partitioned_compaction_outputs(
     output_dir: &Path,
     inputs: CompactionStreamInputs<'_>,
     budget: &crate::common::resource_budget::ResourceBudget,
-    config: PartitionOutputConfig<'_>,
+    config: &PartitionOutputConfig<'_>,
     abort_check: Option<&dyn Fn() -> bool>,
     output_sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
 ) -> MidgeResult<Vec<String>> {
@@ -1213,19 +1213,8 @@ pub(crate) fn write_partitioned_compaction_outputs(
             abort_check,
         )?;
 
-        tombstones.advance_to_key(key_events.iter().map(|event| &event.event));
-
-        let selected_version = select_newest_version(key_events.iter().map(|event| &event.event))?;
-
-        let starts = range_starts(&key_events);
-        let selected_version = selected_version.filter(|version| {
-            survives_tombstone_gc(
-                version,
-                tombstones.highest_obsolete_cover(),
-                starts.clone(),
-                config.tombstone_gc,
-            )
-        });
+        let (selected_version, starts) =
+            select_partition_key_output(&key_events, &mut tombstones, config.tombstone_gc)?;
 
         let has_output = roller.partition_point_count > 0 || tombstones.has_partition_tombstones();
         let grandparent_roll = has_output && overlap.should_roll(&event_key);
@@ -1280,6 +1269,28 @@ pub(crate) fn write_partitioned_compaction_outputs(
         abort_check,
         output_sink,
     )
+}
+
+fn select_partition_key_output<'a>(
+    key_events: &'a [BudgetedEvent],
+    tombstones: &mut RangeTombstoneTracker,
+    tombstone_gc: TombstoneGcPolicy,
+) -> MidgeResult<(
+    Option<&'a CompactionVersion>,
+    impl Iterator<Item = &'a RangeTombstone> + Clone,
+)> {
+    tombstones.advance_to_key(key_events.iter().map(|event| &event.event));
+    let selected_version = select_newest_version(key_events.iter().map(|event| &event.event))?;
+    let starts = range_starts(key_events);
+    let selected_version = selected_version.filter(|version| {
+        survives_tombstone_gc(
+            version,
+            tombstones.highest_obsolete_cover(),
+            starts.clone(),
+            tombstone_gc,
+        )
+    });
+    Ok((selected_version, starts))
 }
 
 fn finish_partitioned_outputs(

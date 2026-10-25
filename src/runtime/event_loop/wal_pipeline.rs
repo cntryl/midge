@@ -381,8 +381,8 @@ impl EventLoop {
         &mut self,
         request_id: u64,
         source: crate::runtime::transaction_spill::TransactionOpSource,
-        params: crate::runtime::actors::wal::SpilledTransactionAppendParams,
-        proof: Option<std::sync::Arc<crate::runtime::actors::wal::SpilledValidationProof>>,
+        params: &crate::runtime::actors::wal::SpilledTransactionAppendParams,
+        proof: Option<&std::sync::Arc<crate::runtime::actors::wal::SpilledValidationProof>>,
         touched_cfs: Vec<crate::types::ColumnFamilyId>,
     ) {
         let workspace = match source.streaming_memory_bound() {
@@ -431,8 +431,8 @@ impl EventLoop {
         let submission = self.actors.wal_actor.begin_spilled_strict_group_submission(
             &mut self.state,
             &source,
-            &params,
-            proof.as_deref(),
+            params,
+            proof.map(AsRef::as_ref),
             &ticket,
             &workspace,
         );

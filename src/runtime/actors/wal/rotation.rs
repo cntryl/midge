@@ -59,12 +59,9 @@ impl WalActor {
             self.fence_transition(state, error.to_string());
             return Err(error);
         }
-        let first_seq = match state.sequence.checked_add(1) {
-            Some(first_seq) => first_seq,
-            None => {
-                self.cancel_reversible_cloud_flush(ticket)?;
-                return Err(MidgeError::ResourceLimit("sequence space exhausted".into()));
-            }
+        let Some(first_seq) = state.sequence.checked_add(1) else {
+            self.cancel_reversible_cloud_flush(ticket)?;
+            return Err(MidgeError::ResourceLimit("sequence space exhausted".into()));
         };
         self.begin_io_transition(WalTransitionOperation::Rotate)?;
         let facts = match self.seal_facts() {
@@ -88,9 +85,7 @@ impl WalActor {
             }
             Err(error) => return Err(self.roll_back_rotation(state, error)),
         };
-        if let Err(error) = self.ensure_transition_authority(state) {
-            return Err(error);
-        }
+        self.ensure_transition_authority(state)?;
         let Some(io_timeout) = deadline.clamp_nonzero(self.storage_io_timeout) else {
             return Err(self.roll_back_rotation(
                 state,

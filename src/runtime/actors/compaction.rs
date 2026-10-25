@@ -86,6 +86,7 @@ struct CompactionOutputWork<'a> {
     prepared: &'a PreparedCompactionOutputs,
     manual_deadline: Option<OperationDeadline>,
     budget: Option<&'a crate::common::resource_budget::ResourceBudget>,
+    grandparent_overlap_rolls: &'a Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1291,11 +1292,11 @@ impl CompactionJobActor {
             Path::new(OUTPUT_DIR),
             None,
             sba,
-            Arc::clone(&self.grandparent_overlap_rolls),
             CompactionOutputWork {
                 prepared: &self.prepared_outputs,
                 manual_deadline: self.active_manual_deadline,
                 budget: self.memory_budget.as_ref(),
+                grandparent_overlap_rolls: &self.grandparent_overlap_rolls,
             },
         )
         .inspect_err(|_| cleanup_failed_prepared_outputs(&self.prepared_outputs, sba))?;
@@ -1315,7 +1316,6 @@ impl CompactionJobActor {
         output_dir: &std::path::Path,
         abort_check: Option<&dyn Fn() -> bool>,
         storage: Option<&Arc<dyn CompactionStorage>>,
-        grandparent_overlap_rolls: Arc<std::sync::atomic::AtomicU64>,
         work: CompactionOutputWork<'_>,
     ) -> MidgeResult<Vec<String>> {
         check_manual_deadline(work.manual_deadline, "before compute")?;
@@ -1366,7 +1366,7 @@ impl CompactionJobActor {
                             plan.compaction_memory_limit,
                         )
                     }),
-                grandparent_overlap_rolls: Some(Arc::clone(&grandparent_overlap_rolls)),
+                grandparent_overlap_rolls: Some(Arc::clone(work.grandparent_overlap_rolls)),
             },
             factory,
             output_dir,
@@ -1439,8 +1439,12 @@ impl CompactionJobActor {
                     output_dir,
                     Some(&abort_check),
                     hybrid_storage.as_ref(),
-                    Arc::clone(&grandparent_overlap_rolls),
-                    CompactionOutputWork { prepared: &prepared_outputs, manual_deadline, budget: memory_budget.as_ref() },
+                    CompactionOutputWork {
+                        prepared: &prepared_outputs,
+                        manual_deadline,
+                        budget: memory_budget.as_ref(),
+                        grandparent_overlap_rolls: &grandparent_overlap_rolls,
+                    },
                 ) };
 
                 let (output_ssts, error) = match result {

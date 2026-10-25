@@ -93,7 +93,7 @@ impl EventLoop {
             ticket,
             stage: Some(CloudSealStage::PrefixSync { physical, expected }),
             plan,
-            deadline: deadline.clone(),
+            deadline: *deadline,
             started: Instant::now(),
             failed: false,
             waiters: Vec::new(),
@@ -165,10 +165,10 @@ impl EventLoop {
         };
         match stage {
             CloudSealStage::PrefixSync { physical, expected } => {
-                self.progress_cloud_seal_prefix(pending, physical, expected)
+                self.progress_cloud_seal_prefix(pending, physical, expected);
             }
             CloudSealStage::FooterAppend { physical, prepared } => {
-                self.progress_cloud_seal_footer_append(pending, physical, prepared)
+                self.progress_cloud_seal_footer_append(pending, physical, prepared);
             }
             CloudSealStage::FooterSync {
                 physical,
@@ -223,9 +223,8 @@ impl EventLoop {
             return;
         }
         if let Err(error) = Self::after_cloud_flush_boundary() {
-            let error = match self.cancel_reversible_cloud_seal(pending.ticket, error) {
-                Ok(_) => unreachable!("a failed cloud flush boundary cannot succeed"),
-                Err(error) => error,
+            let Err(error) = self.cancel_reversible_cloud_seal(pending.ticket, error) else {
+                unreachable!("a failed cloud flush boundary cannot succeed");
             };
             self.fail_cloud_seal_waiters(pending.waiters, &error);
             return;
@@ -356,7 +355,7 @@ impl EventLoop {
             self.fail_cloud_seal_waiters(waiters, &error);
             return;
         }
-        self.finish_cloud_seal_upload(plan, deadline, started, waiters);
+        self.finish_cloud_seal_upload(&plan, deadline, started, waiters);
     }
 
     fn fail_cloud_seal_waiters(
@@ -377,7 +376,7 @@ impl EventLoop {
 
     fn finish_cloud_seal_upload(
         &mut self,
-        plan: CloudSealPlan,
+        plan: &CloudSealPlan,
         deadline: crate::common::OperationDeadline,
         started: Instant,
         waiters: Vec<CloudSealWaiter>,

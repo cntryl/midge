@@ -73,25 +73,14 @@ impl WalCoordinator {
             return HandleOutcome::Continue;
         }
 
-        let touched_cfs = match request.source.touched_cf_ids() {
-            Ok(cfs) => cfs,
+        let prepared = Self::prepare_spilled_transaction(event_loop, request);
+        let (request, touched_cfs) = match prepared {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => return HandleOutcome::Continue,
             Err(error) => {
                 event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
                 return HandleOutcome::Continue;
             }
-        };
-        if let Err(error) = event_loop.ensure_l0_write_admission(&touched_cfs) {
-            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
-            return HandleOutcome::Continue;
-        }
-        if let Err(error) = event_loop.prepare_cloud_spilled_transaction_memtables(&request.source)
-        {
-            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
-            return HandleOutcome::Continue;
-        }
-        let Some(request) = event_loop.prepare_detached_spilled_validation(request, &touched_cfs)
-        else {
-            return HandleOutcome::Continue;
         };
         let SpilledTransactionRequest {
             source,
@@ -117,8 +106,8 @@ impl WalCoordinator {
             event_loop.start_spilled_strict_pipeline(
                 request_id,
                 source,
-                params,
-                validation,
+                &params,
+                validation.as_ref(),
                 touched_cfs,
             );
         } else {
@@ -149,6 +138,11 @@ impl WalCoordinator {
             }
         }
 
+        Self::finish_spilled_transaction_turn(event_loop, msg_rx);
+        HandleOutcome::Continue
+    }
+
+    fn finish_spilled_transaction_turn(event_loop: &mut EventLoop, msg_rx: &Receiver<RuntimeMsg>) {
         if !event_loop.actors.wal_actor.is_cloud_async() {
             const MAX_DRAIN_WRITES_AFTER_BATCH: usize = 1024;
             let _ = event_loop.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_AFTER_BATCH);
@@ -156,7 +150,20 @@ impl WalCoordinator {
         }
         event_loop.maybe_flush_cloud_async_wal();
         event_loop.drain_auto_flush_memtables();
-        HandleOutcome::Continue
+    }
+
+    fn prepare_spilled_transaction(
+        event_loop: &mut EventLoop,
+        request: SpilledTransactionRequest,
+    ) -> crate::common::MidgeResult<
+        Option<(SpilledTransactionRequest, Vec<crate::types::ColumnFamilyId>)>,
+    > {
+        let touched_cfs = request.source.touched_cf_ids()?;
+        event_loop.ensure_l0_write_admission(&touched_cfs)?;
+        event_loop.prepare_cloud_spilled_transaction_memtables(&request.source)?;
+        Ok(event_loop
+            .prepare_detached_spilled_validation(request, &touched_cfs)
+            .map(|request| (request, touched_cfs)))
     }
 
     pub(super) fn apply_transaction(

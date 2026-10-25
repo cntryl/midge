@@ -80,7 +80,7 @@ impl ReadSnapshot {
         );
         #[cfg(any(test, feature = "internal-testing"))]
         diagnostics.record_read_snapshot_build();
-        let snapshot = Self {
+        Self {
             read_time_millis,
             sources: Arc::new(super::ReadSnapshotSources {
                 cf_id,
@@ -93,8 +93,7 @@ impl ReadSnapshot {
                 read_resources,
                 diagnostics,
             }),
-        };
-        snapshot
+        }
     }
 
     pub(crate) fn has_sources(

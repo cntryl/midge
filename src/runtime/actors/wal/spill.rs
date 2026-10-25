@@ -9,6 +9,14 @@ use crate::wal::{WalOpKind, WalRecord};
 use bytes::Bytes;
 use std::time::Instant;
 
+struct SpilledTransactionContext<'a> {
+    source: &'a crate::runtime::transaction_spill::TransactionOpSource,
+    sequence_plan: &'a TxnSequencePlan,
+    effective_durability: DurabilityPolicy,
+    commit_time_millis: u64,
+    memory: Option<&'a crate::common::resource_budget::ResourceBudget>,
+}
+
 impl WalActor {
     /// Replay buffer bytes a split-marker transaction needs, charged with the
     /// same accounting streaming replay uses.
@@ -99,12 +107,14 @@ impl WalActor {
         let mut wal_may_have_changed = false;
         let append_result = self.append_spilled_wal_records(
             request_id,
-            source,
-            &sequence_plan,
-            effective_durability,
-            commit_time_millis,
+            &SpilledTransactionContext {
+                source,
+                sequence_plan: &sequence_plan,
+                effective_durability,
+                commit_time_millis,
+                memory: None,
+            },
             &mut wal_may_have_changed,
-            None,
             None,
         );
         // An ambiguous writer failure may still land bytes after it returns.
@@ -213,13 +223,15 @@ impl WalActor {
         let mut wal_may_have_changed = false;
         let append_result = self.append_spilled_wal_records(
             request_id,
-            source,
-            &sequence_plan,
-            effective_durability,
-            commit_time_millis,
+            &SpilledTransactionContext {
+                source,
+                sequence_plan: &sequence_plan,
+                effective_durability,
+                commit_time_millis,
+                memory: Some(memory),
+            },
             &mut wal_may_have_changed,
             group,
-            Some(memory),
         );
         if append_result.is_ok() || !wal_may_have_changed {
             self.settle_wal_append(admitted, previous_position);
@@ -265,17 +277,17 @@ impl WalActor {
         memory: &crate::common::resource_budget::ResourceBudget,
     ) -> MidgeResult<(u64, usize, Vec<crate::types::ColumnFamilyId>)> {
         let mut applied_ops = 0_usize;
-        if let Err(error) = self.ensure_lease_validity().and_then(|()| {
-            self.apply_spilled_transaction_ops(
-                state,
-                source,
-                &prepared.sequence_plan,
-                prepared.effective_durability,
-                prepared.commit_time_millis,
-                &mut applied_ops,
-                Some(memory),
-            )
-        }) {
+        let context = SpilledTransactionContext {
+            source,
+            sequence_plan: &prepared.sequence_plan,
+            effective_durability: prepared.effective_durability,
+            commit_time_millis: prepared.commit_time_millis,
+            memory: Some(memory),
+        };
+        if let Err(error) = self
+            .ensure_lease_validity()
+            .and_then(|()| self.apply_spilled_transaction_ops(state, &context, &mut applied_ops))
+        {
             return Err(self.fail_unapplied_transactions(
                 state,
                 &[&prepared.sequence_plan],
@@ -340,17 +352,17 @@ impl WalActor {
         // The WAL now holds the unit and `state.sequence` is past its commit.
         // A lease that lapsed since is a failed apply.
         let mut applied_ops = 0_usize;
-        if let Err(error) = self.ensure_lease_validity().and_then(|()| {
-            self.apply_spilled_transaction_ops(
-                state,
-                source,
-                sequence_plan,
-                effective_durability,
-                commit_time_millis,
-                &mut applied_ops,
-                None,
-            )
-        }) {
+        let context = SpilledTransactionContext {
+            source,
+            sequence_plan,
+            effective_durability,
+            commit_time_millis,
+            memory: None,
+        };
+        if let Err(error) = self
+            .ensure_lease_validity()
+            .and_then(|()| self.apply_spilled_transaction_ops(state, &context, &mut applied_ops))
+        {
             return Err(self.fail_unapplied_transactions(
                 state,
                 &[sequence_plan],
@@ -557,44 +569,44 @@ impl WalActor {
     fn append_spilled_wal_records(
         &mut self,
         request_id: u64,
-        source: &crate::runtime::transaction_spill::TransactionOpSource,
-        sequence_plan: &TxnSequencePlan,
-        effective_durability: DurabilityPolicy,
-        commit_time_millis: u64,
+        context: &SpilledTransactionContext<'_>,
         wal_may_have_changed: &mut bool,
         group: Option<&crate::lease::WriterEffectGroup>,
-        memory: Option<&crate::common::resource_budget::ResourceBudget>,
     ) -> MidgeResult<(usize, usize)> {
-        if matches!(effective_durability, DurabilityPolicy::BestEffort) {
+        if matches!(context.effective_durability, DurabilityPolicy::BestEffort) {
             return Ok((0, 0));
         }
 
         let mut begin = WalRecord::new_cf(
-            sequence_plan.cf_id,
+            context.sequence_plan.cf_id,
             WalOpKind::TxnBegin,
             Bytes::from_static(b"txn"),
             None,
-            sequence_plan.begin_seq,
+            context.sequence_plan.begin_seq,
         );
-        begin.txn_id = Some(sequence_plan.txn_id);
+        begin.txn_id = Some(context.sequence_plan.txn_id);
         let mut total_bytes = begin.estimated_size();
         let append_started_at = Instant::now();
         self.append_spilled_record(&begin, wal_may_have_changed, group)?;
 
-        source.for_each_bounded(memory, |ordinal, op| {
-            let sequence = sequence_plan
-                .first_op_seq
-                .checked_add(ordinal)
-                .ok_or_else(|| {
-                    MidgeError::ResourceLimit(
-                        "transaction spill sequence allocation overflow".to_string(),
-                    )
-                })?;
-            let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
-            let record = apply_op.wal_record(sequence_plan.txn_id);
-            total_bytes = total_bytes.saturating_add(record.estimated_size());
-            self.append_spilled_record(&record, wal_may_have_changed, group)
-        })?;
+        context
+            .source
+            .for_each_bounded(context.memory, |ordinal, op| {
+                let sequence = context
+                    .sequence_plan
+                    .first_op_seq
+                    .checked_add(ordinal)
+                    .ok_or_else(|| {
+                        MidgeError::ResourceLimit(
+                            "transaction spill sequence allocation overflow".to_string(),
+                        )
+                    })?;
+                let apply_op =
+                    TransactionApplyOp::from_source(op, sequence, context.commit_time_millis);
+                let record = apply_op.wal_record(context.sequence_plan.txn_id);
+                total_bytes = total_bytes.saturating_add(record.estimated_size());
+                self.append_spilled_record(&record, wal_may_have_changed, group)
+            })?;
 
         crate::failpoints::fail_point!("midge::wal::spilled_txn_after_ops_append_before_commit");
         crate::failpoints::fail_point!(
@@ -604,13 +616,13 @@ impl WalActor {
             ))
         );
         let mut commit = WalRecord::new_cf(
-            sequence_plan.cf_id,
+            context.sequence_plan.cf_id,
             WalOpKind::TxnCommit,
             Bytes::from_static(b"txn"),
             None,
-            sequence_plan.commit_seq,
+            context.sequence_plan.commit_seq,
         );
-        commit.txn_id = Some(sequence_plan.txn_id);
+        commit.txn_id = Some(context.sequence_plan.txn_id);
         total_bytes = total_bytes.saturating_add(commit.estimated_size());
         self.append_spilled_record(&commit, wal_may_have_changed, group)?;
         self.finish_append_instrumentation(total_bytes as u64, append_started_at.elapsed());
@@ -619,7 +631,7 @@ impl WalActor {
         }
         crate::failpoints::fail_point!("midge::wal::spilled_after_append_batch_before_sync");
         tracing::trace!(request_id, "appended split transaction WAL frames");
-        Ok((total_bytes, source.len().saturating_add(2)))
+        Ok((total_bytes, context.source.len().saturating_add(2)))
     }
 
     fn append_spilled_record(
@@ -656,30 +668,29 @@ impl WalActor {
     fn apply_spilled_transaction_ops(
         &self,
         state: &mut RuntimeState,
-        source: &crate::runtime::transaction_spill::TransactionOpSource,
-        sequence_plan: &TxnSequencePlan,
-        effective_durability: DurabilityPolicy,
-        commit_time_millis: u64,
+        context: &SpilledTransactionContext<'_>,
         applied_ops: &mut usize,
-        memory: Option<&crate::common::resource_budget::ResourceBudget>,
     ) -> MidgeResult<()> {
-        source.for_each_bounded(memory, |ordinal, op| {
-            crate::failpoints::fail_point!("midge::wal::spilled_apply_op", |_| Err(
-                MidgeError::Io(std::io::Error::other(
-                    "failpoint: spilled transaction apply read failed"
-                ))
-            ));
-            let sequence = sequence_plan.first_op_seq.saturating_add(ordinal);
-            let apply_op = TransactionApplyOp::from_source(op, sequence, commit_time_millis);
-            self.ensure_lease_validity()?;
-            Self::apply_transaction_op_to_memtable(state, apply_op)?;
-            *applied_ops += 1;
-            Ok(())
-        })?;
+        context
+            .source
+            .for_each_bounded(context.memory, |ordinal, op| {
+                crate::failpoints::fail_point!("midge::wal::spilled_apply_op", |_| Err(
+                    MidgeError::Io(std::io::Error::other(
+                        "failpoint: spilled transaction apply read failed"
+                    ))
+                ));
+                let sequence = context.sequence_plan.first_op_seq.saturating_add(ordinal);
+                let apply_op =
+                    TransactionApplyOp::from_source(op, sequence, context.commit_time_millis);
+                self.ensure_lease_validity()?;
+                Self::apply_transaction_op_to_memtable(state, apply_op)?;
+                *applied_ops += 1;
+                Ok(())
+            })?;
         tracing::trace!(
-            commit_sequence = sequence_plan.commit_seq,
-            apply_op_count = source.len(),
-            ?effective_durability,
+            commit_sequence = context.sequence_plan.commit_seq,
+            apply_op_count = context.source.len(),
+            ?context.effective_durability,
             "applied streamed transaction to memtables"
         );
         Ok(())

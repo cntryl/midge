@@ -15,6 +15,25 @@ use tempfile::TempDir;
 const UNIQUE_KEYS: u64 = 8_192;
 const REPEATED_VERSIONS: usize = 128;
 const VALUE_BYTES: usize = 32;
+const MAX_EXACT_F64_INTEGER: u64 = 1_u64 << 53;
+
+struct PreparedFixture {
+    _directory: TempDir,
+    engine: Engine,
+    files_count: usize,
+    total_sst_bytes: u64,
+    target: [u8; 16],
+    repeated_key: [u8; 16],
+    unique_reader: PointLookupReaderForBenchmarks,
+    repeated_reader: PointLookupReaderForBenchmarks,
+    old_snapshot: u64,
+}
+
+struct ReadMetrics {
+    unique: u64,
+    repeated: u64,
+    old_snapshot: u64,
+}
 
 fn key(index: u64) -> [u8; 16] {
     let mut key = *b"sst-v5-bench0000";
@@ -25,7 +44,9 @@ fn key(index: u64) -> [u8; 16] {
 fn value(seed: u64) -> [u8; VALUE_BYTES] {
     let mut state = seed ^ 0x9180_2026_1006;
     let mut value = [0; VALUE_BYTES];
-    for chunk in value.chunks_exact_mut(8) {
+    // VALUE_BYTES is fixed at 48, so the 8-byte view has no remainder.
+    let chunks = value.as_chunks_mut::<8>().0;
+    for chunk in chunks {
         state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut word = state;
         word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -45,9 +66,24 @@ fn put(engine: &Engine, cf_id: u32, key: &[u8], value: &[u8]) {
         .expect("commit SST V5 fixture value");
 }
 
-fn run(ctx: &mut StressContext) {
+fn write_fixture(engine: &Engine, cf_id: u32) {
+    for index in 0..UNIQUE_KEYS {
+        put(engine, cf_id, &key(index), &value(index));
+    }
+    let repeated_key = key(UNIQUE_KEYS);
+    for version in 0..REPEATED_VERSIONS {
+        put(
+            engine,
+            cf_id,
+            &repeated_key,
+            &value(UNIQUE_KEYS + u64::try_from(version).expect("version fits in u64")),
+        );
+    }
+}
+
+fn prepare_fixture() -> PreparedFixture {
     let directory = TempDir::new().expect("create SST V5 database");
-    let mut engine = Engine::open(
+    let engine = Engine::open(
         OpenOptions::local(directory.path())
             .build()
             .expect("build SST V5 benchmark options"),
@@ -56,19 +92,8 @@ fn run(ctx: &mut StressContext) {
     let cf = engine
         .create_column_family("sst-v5-qualification")
         .expect("create SST V5 benchmark column family");
-
-    for index in 0..UNIQUE_KEYS {
-        put(&engine, cf.id(), &key(index), &value(index));
-    }
+    write_fixture(&engine, cf.id());
     let repeated_key = key(UNIQUE_KEYS);
-    for version in 0..REPEATED_VERSIONS {
-        put(
-            &engine,
-            cf.id(),
-            &repeated_key,
-            &value(UNIQUE_KEYS + u64::try_from(version).expect("version fits in u64")),
-        );
-    }
     engine.flush_cf(&cf).expect("flush SST V5 fixture");
 
     let layout = engine
@@ -121,20 +146,37 @@ fn run(ctx: &mut StressContext) {
     let old_snapshot = latest_sequence
         .checked_sub(u64::try_from(REPEATED_VERSIONS / 2).expect("version count fits in u64"))
         .expect("old snapshot remains nonnegative");
+    PreparedFixture {
+        _directory: directory,
+        engine,
+        files_count: files.len(),
+        total_sst_bytes,
+        target,
+        repeated_key,
+        unique_reader,
+        repeated_reader,
+        old_snapshot,
+    }
+}
+
+fn measure_reads(ctx: &mut StressContext, fixture: &PreparedFixture) -> ReadMetrics {
     let unique_decoded = ctx.measure("unique_key_point_lookup", || {
-        unique_reader
-            .entries_decoded(&target, u64::MAX)
+        fixture
+            .unique_reader
+            .entries_decoded(&fixture.target, u64::MAX)
             .expect("measure unique-key decoder work")
     });
     let repeated_decoded = ctx.measure("repeated_version_point_lookup", || {
-        repeated_reader
-            .entries_decoded(&repeated_key, u64::MAX)
+        fixture
+            .repeated_reader
+            .entries_decoded(&fixture.repeated_key, u64::MAX)
             .expect("measure repeated-version decoder work")
     });
     let repeated_old_snapshot_decoded =
         ctx.measure("repeated_version_old_snapshot_point_lookup", || {
-            repeated_reader
-                .entries_decoded(&repeated_key, old_snapshot)
+            fixture
+                .repeated_reader
+                .entries_decoded(&fixture.repeated_key, fixture.old_snapshot)
                 .expect("measure old-snapshot decoder work")
         });
     assert!(
@@ -149,7 +191,28 @@ fn run(ctx: &mut StressContext) {
         repeated_old_snapshot_decoded <= 150,
         "old-snapshot lookup decoded {repeated_old_snapshot_decoded} entries"
     );
+    ReadMetrics {
+        unique: unique_decoded,
+        repeated: repeated_decoded,
+        old_snapshot: repeated_old_snapshot_decoded,
+    }
+}
 
+fn exact_metric_value(value: u64) -> f64 {
+    assert!(
+        value <= MAX_EXACT_F64_INTEGER,
+        "metric value {value} exceeds exact f64 integer range"
+    );
+    let high = u32::try_from(value >> 32).expect("high metric word fits in u32");
+    let low = u32::try_from(value & u64::from(u32::MAX)).expect("low metric word fits in u32");
+    f64::from(high) * 4_294_967_296.0 + f64::from(low)
+}
+
+fn exact_metric_count(value: usize) -> f64 {
+    exact_metric_value(u64::try_from(value).expect("metric count fits in u64"))
+}
+
+fn record_metrics(ctx: &mut StressContext, fixture: &PreparedFixture, reads: &ReadMetrics) {
     ctx.parameter("format", "SST_V5");
     ctx.parameter("unique_keys", UNIQUE_KEYS);
     ctx.parameter("repeated_versions", REPEATED_VERSIONS);
@@ -157,36 +220,42 @@ fn run(ctx: &mut StressContext) {
     ctx.parameter("value_bytes", VALUE_BYTES);
     ctx.record_observation(
         "sst_files",
-        files.len() as f64,
+        exact_metric_count(fixture.files_count),
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );
     ctx.record_observation(
         "sst_footprint_bytes",
-        total_sst_bytes as f64,
+        exact_metric_value(fixture.total_sst_bytes),
         ObservationUnit::Bytes,
         ObservationDirection::Informational,
     );
     ctx.record_observation(
         "unique_key_entries_decoded",
-        unique_decoded as f64,
+        exact_metric_value(reads.unique),
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );
     ctx.record_observation(
         "repeated_version_entries_decoded",
-        repeated_decoded as f64,
+        exact_metric_value(reads.repeated),
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );
     ctx.record_observation(
         "repeated_old_snapshot_entries_decoded",
-        repeated_old_snapshot_decoded as f64,
+        exact_metric_value(reads.old_snapshot),
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );
+}
 
-    engine
+fn run(ctx: &mut StressContext) {
+    let mut fixture = prepare_fixture();
+    let reads = measure_reads(ctx, &fixture);
+    record_metrics(ctx, &fixture, &reads);
+    fixture
+        .engine
         .shutdown(Duration::from_secs(30))
         .expect("shutdown SST V5 benchmark database");
 }

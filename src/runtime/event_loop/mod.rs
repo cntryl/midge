@@ -277,9 +277,7 @@ impl EventLoop {
         config: super::RuntimeConfig,
         flush_worker_mode: FlushWorkerMode,
     ) -> crate::common::MidgeResult<Self> {
-        // Before anything reads the ledger or admits work (#843): the
-        // recovered tail is sealed durably, and sequences an earlier process
-        // reserved are never handed out again.
+        // Seal the recovered tail before admission so reserved sequences are never reused (#843).
         let sealed_tail = state.begin_wal_epoch(config.writer_epoch)?;
         let (inline_flush_worker, worker_msg_tx) = (
             flush_worker_mode.is_inline(),
@@ -312,15 +310,8 @@ impl EventLoop {
             state.write_pressure.admission.limiter().as_ref(),
             config.flush_concurrency,
         )?;
-        let mut wal_actor = WalActor::open(
-            &state,
-            config.wal_durability_policy,
-            config.wal_batch_config,
-            config.writer_epoch,
-            config.storage_io_timeout,
-        )?;
-
-        Self::configure_wal_actor(&state, &mut wal_actor, &config, read_resources.as_ref());
+        let wal_actor =
+            Self::open_and_configure_wal_actor(&state, &config, read_resources.as_ref())?;
 
         // CloudAsync waiters are keyed by segment id. Local waiters start at
         // generation zero; the durability coordinator is the sole owner of
@@ -483,6 +474,22 @@ impl EventLoop {
         if let Some(store) = config.leader_store.clone() {
             wal_actor.set_leader_store(store, config.leader_holder_id.clone().unwrap_or_default());
         }
+    }
+
+    fn open_and_configure_wal_actor(
+        state: &RuntimeState,
+        config: &super::RuntimeConfig,
+        read_resources: Option<&Arc<ReadResources>>,
+    ) -> crate::common::MidgeResult<WalActor> {
+        let mut wal_actor = WalActor::open(
+            state,
+            config.wal_durability_policy,
+            config.wal_batch_config,
+            config.writer_epoch,
+            config.storage_io_timeout,
+        )?;
+        Self::configure_wal_actor(state, &mut wal_actor, config, read_resources);
+        Ok(wal_actor)
     }
 
     fn apply_runtime_state_config(

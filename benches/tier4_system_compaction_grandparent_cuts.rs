@@ -6,7 +6,9 @@
 //! counter delta only; it excludes flush bytes and is not total physical write
 //! amplification.
 
-use cntryl_midge::{Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{
+    ColumnFamilyHandle, Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions,
+};
 use cntryl_stress::{
     stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
     StressContext,
@@ -44,12 +46,12 @@ fn key(id: u64) -> [u8; KEY_BYTES] {
 fn value(id: u64, generation: u64) -> [u8; VALUE_BYTES] {
     let mut value = [0; VALUE_BYTES];
     let mut state = id ^ generation.rotate_left(23) ^ SEED;
-    for chunk in value.chunks_exact_mut(8) {
+    for chunk in value.as_chunks_mut::<8>().0 {
         state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut word = state;
         word = (word ^ (word >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         word = (word ^ (word >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        chunk.copy_from_slice(&(word ^ (word >> 31)).to_le_bytes());
+        *chunk = (word ^ (word >> 31)).to_le_bytes();
     }
     value
 }
@@ -157,26 +159,13 @@ fn overlapping_l2(engine: &Engine, cf_id: u32, lower: &[u8], upper: &[u8]) -> L2
         })
 }
 
-fn run(ctx: &mut StressContext) {
-    let path = data_path();
-    if path.exists() {
-        std::fs::remove_dir_all(&path).expect("remove previous benchmark database");
-    }
-    let mut engine = Engine::open(
-        OpenOptions::local(&path)
-            .build()
-            .expect("build default options"),
-    )
-    .expect("open local benchmark engine with default production settings");
-    let cf = engine
-        .create_column_family("grandparent-cuts")
-        .expect("create benchmark column family");
+fn prepare_fixture(engine: &Engine, cf: &ColumnFamilyHandle) -> (Vec<u32>, L2Overlap) {
     let ids = shuffled_ids();
 
     // Populate and compact the base outside the measured window.
-    write_keys(&engine, cf.id(), &ids, 0);
-    engine.flush_cf(&cf).expect("flush base dataset");
-    compact_to_stable_layout(&engine);
+    write_keys(engine, cf.id(), &ids, 0);
+    engine.flush_cf(cf).expect("flush base dataset");
+    compact_to_stable_layout(engine);
 
     let update_ids = &ids[..UPDATE_KEYS];
     let lower = key(u64::from(
@@ -185,23 +174,30 @@ fn run(ctx: &mut StressContext) {
     let upper = key(u64::from(
         *update_ids.iter().max().expect("nonempty updates"),
     ));
-    let l2_overlap = overlapping_l2(&engine, cf.id(), &lower, &upper);
+    let l2_overlap = overlapping_l2(engine, cf.id(), &lower, &upper);
     assert!(
         l2_overlap.bytes > MIN_GRANDPARENT_OVERLAP_BYTES
             && l2_overlap.files >= 2
             && l2_overlap.largest_file_bytes < MIN_GRANDPARENT_OVERLAP_BYTES,
         "workload invalid: update span must overlap more than 320 MiB across at least two individually smaller L2 files; observed {l2_overlap:?}"
     );
+    (ids, l2_overlap)
+}
 
+fn measure_updates(
+    engine: &Engine,
+    cf: &ColumnFamilyHandle,
+    update_ids: &[u32],
+) -> (std::time::Duration, u64) {
     let metrics_before = engine
         .metrics()
         .get_runtime_metrics()
         .expect("read metrics before measured compaction");
     let measured_started = Instant::now();
 
-    write_keys(&engine, cf.id(), update_ids, 1);
-    engine.flush_cf(&cf).expect("flush measured updates");
-    compact_to_stable_layout(&engine);
+    write_keys(engine, cf.id(), update_ids, 1);
+    engine.flush_cf(cf).expect("flush measured updates");
+    compact_to_stable_layout(engine);
 
     let elapsed = measured_started.elapsed();
     let metrics_after = engine
@@ -211,10 +207,30 @@ fn run(ctx: &mut StressContext) {
     let compaction_output_bytes = metrics_after
         .compaction_bytes_rewritten
         .saturating_sub(metrics_before.compaction_bytes_rewritten);
+    (elapsed, compaction_output_bytes)
+}
+
+fn u64_as_f64(value: u64) -> f64 {
+    let upper = u32::try_from(value >> u32::BITS).expect("upper half fits in u32");
+    let lower = u32::try_from(value & u64::from(u32::MAX)).expect("lower half fits in u32");
+    f64::from(upper) * 4_294_967_296.0 + f64::from(lower)
+}
+
+fn usize_as_f64(value: usize) -> f64 {
+    u64_as_f64(u64::try_from(value).expect("benchmark observation fits in u64"))
+}
+
+fn record_measurement(
+    ctx: &mut StressContext,
+    l2_overlap: &L2Overlap,
+    elapsed: std::time::Duration,
+    compaction_output_bytes: u64,
+) {
     let logical_input_bytes = u64::try_from(UPDATE_KEYS)
         .expect("update count fits in u64")
         .saturating_mul(LOGICAL_BYTES_PER_KEY);
-    let output_bytes_per_input_byte = compaction_output_bytes as f64 / logical_input_bytes as f64;
+    let output_bytes_per_input_byte =
+        u64_as_f64(compaction_output_bytes) / u64_as_f64(logical_input_bytes);
 
     ctx.parameter("storage", "local");
     ctx.parameter("production_defaults", "true");
@@ -230,19 +246,19 @@ fn run(ctx: &mut StressContext) {
     );
     ctx.record_observation(
         "pre_measurement_l2_overlap_bytes",
-        l2_overlap.bytes as f64,
+        u64_as_f64(l2_overlap.bytes),
         ObservationUnit::Bytes,
         ObservationDirection::Informational,
     );
     ctx.record_observation(
         "pre_measurement_l2_overlap_files",
-        l2_overlap.files as f64,
+        usize_as_f64(l2_overlap.files),
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );
     ctx.record_observation(
         "largest_pre_measurement_l2_overlap_file_bytes",
-        l2_overlap.largest_file_bytes as f64,
+        u64_as_f64(l2_overlap.largest_file_bytes),
         ObservationUnit::Bytes,
         ObservationDirection::Informational,
     );
@@ -256,7 +272,7 @@ fn run(ctx: &mut StressContext) {
     );
     ctx.record_observation(
         "compaction_output_bytes",
-        compaction_output_bytes as f64,
+        u64_as_f64(compaction_output_bytes),
         ObservationUnit::Bytes,
         ObservationDirection::Informational,
     );
@@ -266,6 +282,25 @@ fn run(ctx: &mut StressContext) {
         ObservationUnit::Ratio,
         ObservationDirection::Informational,
     );
+}
+
+fn run(ctx: &mut StressContext) {
+    let path = data_path();
+    if path.exists() {
+        std::fs::remove_dir_all(&path).expect("remove previous benchmark database");
+    }
+    let mut engine = Engine::open(
+        OpenOptions::local(&path)
+            .build()
+            .expect("build default options"),
+    )
+    .expect("open local benchmark engine with default production settings");
+    let cf = engine
+        .create_column_family("grandparent-cuts")
+        .expect("create benchmark column family");
+    let (ids, l2_overlap) = prepare_fixture(&engine, &cf);
+    let (elapsed, compaction_output_bytes) = measure_updates(&engine, &cf, &ids[..UPDATE_KEYS]);
+    record_measurement(ctx, &l2_overlap, elapsed, compaction_output_bytes);
     engine
         .shutdown(std::time::Duration::from_secs(60))
         .expect("shutdown compaction benchmark engine");
