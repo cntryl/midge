@@ -67,6 +67,11 @@ fn run_snapshot_reader(reader: SnapshotReader<'_>) {
                     reported_rejection = true;
                 }
             }
+            Err(MidgeError::WriteStall(message))
+                if message == "runtime request queue is full" =>
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             Err(error) => panic!("unexpected snapshot capture error: {error:?}"),
         }
         std::thread::yield_now();
