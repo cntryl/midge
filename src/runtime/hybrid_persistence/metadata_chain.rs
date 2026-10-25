@@ -469,3 +469,102 @@ mod decoder_tests {
         assert_eq!(accepted.changes.len(), files::CLOUD_MIRRORED.len());
     }
 }
+
+#[cfg(test)]
+mod publish_tests {
+    use super::*;
+    use crate::storage::cloud::{
+        CloudBackend, CloudCallback, CloudEvent, CloudHeadCapability, CloudListCapability,
+        CloudReadCapability, CloudWriteCapability, MockCloudBackend,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct LostConditionalPut {
+        inner: MockCloudBackend,
+        puts: AtomicUsize,
+        gets: AtomicUsize,
+    }
+
+    impl CloudReadCapability for LostConditionalPut {
+        fn submit_get(&self, key: &str, callback: CloudCallback) {
+            self.gets.fetch_add(1, Ordering::Relaxed);
+            self.inner.submit_get(key, callback);
+        }
+
+        crate::storage::cloud::forward_cloud_backend!(inner;
+            submit_get_with_metadata,
+            submit_get_range,
+            submit_get_range_with_identity,
+        );
+    }
+
+    impl CloudWriteCapability for LostConditionalPut {
+        fn submit_put(
+            &self,
+            key: &str,
+            bytes: Vec<u8>,
+            headers: Vec<(String, String)>,
+            callback: CloudCallback,
+        ) {
+            self.puts.fetch_add(1, Ordering::Relaxed);
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.inner.submit_put(key, bytes, headers, tx);
+            assert!(matches!(
+                rx.recv().expect("conditional catalog PUT completion"),
+                CloudEvent::Put { result: Ok(()), .. }
+            ));
+            callback
+                .send(CloudEvent::Put {
+                    key: key.into(),
+                    result: Err(crate::storage::cloud::CloudError::Transport(
+                        "injected lost conditional catalog PUT response".into(),
+                    )),
+                })
+                .expect("deliver ambiguous PUT outcome");
+        }
+    }
+
+    impl crate::storage::cloud::CloudDeleteCapability for LostConditionalPut {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+    }
+
+    impl CloudListCapability for LostConditionalPut {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+    }
+
+    impl CloudHeadCapability for LostConditionalPut {
+        crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+    }
+
+    impl CloudBackend for LostConditionalPut {}
+
+    #[test]
+    fn should_reconcile_lost_conditional_catalog_put_without_replaying_mutation() -> MidgeResult<()>
+    {
+        // Arrange: the mock commits the first conditional PUT, then only its
+        // response is lost. Publication must read back the exact immutable key.
+        let backend = std::sync::Arc::new(LostConditionalPut {
+            inner: MockCloudBackend::new(),
+            puts: AtomicUsize::new(0),
+            gets: AtomicUsize::new(0),
+        });
+        let cloud = CloudStorage::new(backend.clone(), String::new());
+        let key = "metadata/chains/generation-17";
+        let bytes = b"exact immutable catalog body";
+        let deadline = OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+
+        // Act
+        publish_bytes(&cloud, key, bytes, &deadline, None)?;
+
+        // Assert: caller reconciliation proves the exact body with one PUT;
+        // the conditional mutation is never blindly replayed.
+        assert_eq!(backend.puts.load(Ordering::Relaxed), 1);
+        assert_eq!(backend.gets.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            backend.inner.get_uploads(),
+            [(key.to_string(), bytes.len() as u64)]
+        );
+        assert_eq!(backend.inner.get_downloads(), [key.to_string()]);
+        Ok(())
+    }
+}
