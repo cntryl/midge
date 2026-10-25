@@ -750,6 +750,46 @@ mod tests {
     }
 
     #[test]
+    fn should_bound_ten_thousand_segment_catalog_size_by_unretired_backlog() {
+        // Arrange: encode the full history, then measure independent clones
+        // after retiring prefixes that leave half and one tenth unretired.
+        let (full, entries) = published(8, 10_000);
+        let full_size = full.encode().unwrap().len();
+        let full_head = full.head();
+        let next_segment_id = full.next_segment_id();
+        let mut half = full.clone();
+        half.retire_prefix(8, &entries[..5_000], SharedGenerationId::new(1).unwrap())
+            .unwrap();
+        let half_size = half.encode().unwrap().len();
+        let mut small = full;
+        small
+            .retire_prefix(8, &entries[..9_000], SharedGenerationId::new(2).unwrap())
+            .unwrap();
+        let small_size = small.encode().unwrap().len();
+
+        // Assert: serialized size tracks the unretired entry count. Retirement
+        // preserves the chain head and allocation floor while advancing the
+        // anchor to the last removed segment.
+        assert!(
+            full_size > half_size && half_size > small_size,
+            "catalog byte sizes must fall with backlog: full={full_size}, half={half_size}, small={small_size}"
+        );
+        for (catalog, retired, remaining) in [(&half, 5_000, 5_000), (&small, 9_000, 1_000)] {
+            assert_eq!(catalog.entries().len(), remaining);
+            assert_eq!(catalog.anchor(), entries[retired - 1].link());
+            assert_eq!(catalog.head(), full_head);
+            assert_eq!(catalog.next_segment_id(), next_segment_id);
+            assert!(catalog
+                .entries()
+                .iter()
+                .enumerate()
+                .all(|(index, entry)| entry.id() == retired as u64 + index as u64 + 1));
+            let reopened = WalPublicationCatalog::decode(&catalog.encode().unwrap()).unwrap();
+            assert_eq!(reopened, *catalog);
+        }
+    }
+
+    #[test]
     fn should_refuse_older_generation_without_changing_catalog_authority() {
         // Arrange
         let (mut catalog, entries) = published(8, 2);
