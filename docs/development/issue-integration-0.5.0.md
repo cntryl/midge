@@ -1484,9 +1484,11 @@ specific defects.
 
 ## Cloud publication and reclamation follow-up (2026-10-25)
 
-Local branch `work/cloud-publication-reclamation` groups #907, #916, #913 and
-#943 behind their shared cloud authority/ownership path. The first #916 commit
-adds a four-segment event-loop regression: a transient failure leaves the
+Local branch `work/cloud-publication-reclamation` groups #916, #913 and #943
+under the cloud publication/reclamation work, with #907 as the related
+publication prerequisite. This patch adds tests and evidence only; it does not
+claim #907's remaining performance gates. The first #916 commit adds a
+four-segment event-loop regression: a transient failure leaves the
 prefix closed while later ACKs arrive in reverse order; the test reads the
 authoritative remote catalog to verify no later segment is published, then
 checks all four entries after the retry ACK. The focused test passes. Existing
