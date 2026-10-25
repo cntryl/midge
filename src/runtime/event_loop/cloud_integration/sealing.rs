@@ -560,6 +560,12 @@ impl EventLoop {
         if !self.actors.wal_actor.is_cloud_async() {
             return Ok(None);
         }
+        if self.wal_group_in_flight() && !self.pipeline.wal_transition.is_fenced() {
+            self.pipeline.durability.mark_cloud_seal_retry_needed();
+            return Err(crate::common::MidgeError::WriteStall(
+                "CloudAsync WAL sealing is deferred while WAL work is in flight".into(),
+            ));
+        }
         // A fenced protocol refuses before reading the ledger, which may
         // already have recorded the rotation that fenced it.
         self.pipeline.wal_transition.ensure_ready()?;
