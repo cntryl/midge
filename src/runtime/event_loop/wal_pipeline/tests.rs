@@ -158,6 +158,96 @@ fn should_preserve_ordered_visibility_when_writer_encoding_is_held() -> MidgeRes
     Ok(())
 }
 
+#[test]
+fn should_reject_conflicting_follower_after_held_strict_group_applies() -> MidgeResult<()> {
+    // Arrange: a follower observes the original cut and conflicts with a
+    // point write whose strict group is still waiting for physical fsync.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let first = event_loop
+        .routing
+        .router
+        .register(94_005, "first strict group");
+    let follower = event_loop
+        .routing
+        .router
+        .register(94_006, "conflicting strict follower");
+    let empty = crossbeam::channel::never();
+    let observed_cut = event_loop.state.applied_sequence;
+
+    // Act: queue the overlapping AbortOnWriteConflict transaction while the
+    // first group is durable only in the future, but not yet applied.
+    event_loop.process_one(write(94_005, &[b"held-conflict"], true), &empty);
+    wait_for_hold(&mut event_loop, &held);
+    event_loop.process_one(
+        RuntimeMsg::ApplyTransaction {
+            request_id: 94_006,
+            ops: vec![
+                TransactionOp::Put {
+                    cf_id: 0,
+                    key: Bytes::from_static(b"held-conflict"),
+                    value: Bytes::from_static(b"follower-value"),
+                    ttl_seconds: None,
+                    insert_only: false,
+                },
+                TransactionOp::Put {
+                    cf_id: 0,
+                    key: Bytes::from_static(b"follower-only"),
+                    value: Bytes::from_static(b"must-not-apply"),
+                    ttl_seconds: None,
+                    insert_only: false,
+                },
+            ],
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+            start_sequence: Some(observed_cut),
+            conflict_policy: ConflictPolicy::AbortOnWriteConflict,
+            response_tx: None,
+        },
+        &empty,
+    );
+
+    // Assert the follower is retained before the prefix owner settles it.
+    assert_eq!(event_loop.state.applied_sequence, observed_cut);
+    assert_eq!(event_loop.actors.wal_actor.append_calls(), 1);
+    assert!(first.try_recv().is_err());
+    assert!(follower.try_recv().is_err());
+    let before_apply = event_loop
+        .create_read_snapshot(0)
+        .expect("pre-apply snapshot");
+    assert_eq!(before_apply.get(b"held-conflict", observed_cut)?, None);
+    assert_eq!(before_apply.get(b"follower-only", observed_cut)?, None);
+
+    held.release.send(()).expect("release first sync");
+    let first_cut = applied_cut(&mut event_loop, &first);
+    assert!(first_cut > observed_cut);
+    let follower_result = settle(&mut event_loop, &follower);
+    assert!(matches!(
+        follower_result,
+        RuntimeResponse::Error {
+            request_id: 94_006,
+            error: crate::common::MidgeError::WriteConflict(_),
+        }
+    ));
+
+    // The rejected whole transaction contributes neither an overwrite nor
+    // its unrelated second operation to the newly published read cut.
+    assert_eq!(event_loop.state.applied_sequence, first_cut);
+    assert_eq!(event_loop.state.sequence, first_cut);
+    assert_eq!(event_loop.actors.wal_actor.append_calls(), 1);
+    let after_apply = event_loop
+        .create_read_snapshot(0)
+        .expect("post-apply snapshot");
+    assert_eq!(
+        after_apply.get(b"held-conflict", first_cut)?,
+        Some(b"value".to_vec())
+    );
+    assert_eq!(after_apply.get(b"follower-only", first_cut)?, None);
+    Ok(())
+}
+
 fn wait_for_hold(event_loop: &mut EventLoop, held: &HeldSync) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
