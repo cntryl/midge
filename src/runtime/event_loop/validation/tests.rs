@@ -400,7 +400,8 @@ fn should_retry_detached_validation_after_earlier_pending_group_becomes_visible(
     // Arrange
     let checked = request(94_601, b"conflict", true);
 
-    // Act and Assert
+    // Act
+    // Assert: the shared helper checks that the earlier pending write wins.
     assert_pending_group_validation_rejects(checked, |error| {
         matches!(error, MidgeError::WriteConflict(_))
     })
@@ -415,7 +416,8 @@ fn should_retry_detached_insert_only_check_after_earlier_pending_group_becomes_v
         *insert_only = true;
     }
 
-    // Act and Assert
+    // Act
+    // Assert: the shared helper checks insert-only behavior after visibility.
     assert_pending_group_validation_rejects(
         checked,
         |error| matches!(error, MidgeError::InvalidArgument(message) if message == "key already exists"),
@@ -432,7 +434,8 @@ fn should_retry_detached_assertion_after_earlier_pending_group_becomes_visible()
         key: Bytes::from_static(b"conflict"),
     });
 
-    // Act and Assert
+    // Act
+    // Assert: the shared helper checks the detached assertion after visibility.
     assert_pending_group_validation_rejects(checked, |error| {
         matches!(error, MidgeError::WriteConflict(_))
     })

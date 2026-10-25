@@ -114,8 +114,8 @@ fn expire_crashed_process_lease(path: &Path) {
 }
 
 #[test]
-fn should_recover_both_families_when_two_compactions_abort_before_manifest_publish(
-) -> MidgeResult<()> {
+fn should_recover_after_concurrent_compaction_publication_crash() -> MidgeResult<()> {
+    // Arrange
     let directory = tempfile::tempdir()?;
     let path = directory.path();
     let mut engine = open_engine(path)?;
@@ -136,6 +136,7 @@ fn should_recover_both_families_when_two_compactions_abort_before_manifest_publi
     engine.shutdown(Duration::from_secs(10))?;
     drop(engine);
 
+    // Act: terminate the child after both compactions durably write outputs.
     let mut child = Command::new(std::env::current_exe()?);
     child
         .args(["--exact", CHILD_TEST, "--nocapture", "--test-threads=1"])
@@ -143,6 +144,7 @@ fn should_recover_both_families_when_two_compactions_abort_before_manifest_publi
     crate::common::crash::run_child_expect_abort(&mut child, SCENARIO, PUBLICATION_HOOK, path);
     expire_crashed_process_lease(path);
 
+    // Assert: recovery retains each family and publishes no unreferenced output.
     let mut reopened = open_engine(path)?;
     let recovered_first = reopened.get_column_family("first").unwrap();
     let recovered_second = reopened.get_column_family("second").unwrap();
@@ -159,7 +161,8 @@ fn should_recover_both_families_when_two_compactions_abort_before_manifest_publi
 }
 
 #[test]
-fn should_abort_child_when_two_compactions_are_active() {
+fn should_abort_child_at_concurrent_compaction_publication_boundary() {
+    // Arrange: this test is a child process invoked by the parent scenario.
     let Some(path) = std::env::var_os(CHILD_ENV) else {
         return;
     };
@@ -180,8 +183,10 @@ fn should_abort_child_when_two_compactions_are_active() {
     .expect("configure crash at durable-output boundary");
     std::mem::forget(fail_scenario);
 
+    // Act: trigger the publication crash hook while both compactions are active.
     engine
         .compact_all()
         .expect("compaction should abort at configured publication boundary");
+    // Assert: reaching this point means the named crash boundary did not fire.
     panic!("named concurrent-compaction crash boundary was not reached");
 }

@@ -61,10 +61,11 @@ fn should_reject_incorrect_azure_shared_key_for_conditional_write_against_sqrzl(
 
 #[test]
 fn should_validate_streamed_multipart_receipt_from_sqrzl_azure() {
-    assert_sqrzl_streamed_receipt(
-        "sqrzl-azure-receipt",
-        &CloudProviderConfig::sqrzl_azure("midge-sqrzl-receipt-azure"),
-    );
+    // Arrange
+    let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-receipt-azure");
+    // Act
+    assert_sqrzl_streamed_receipt("sqrzl-azure-receipt", &provider);
+    // Assert: the helper verifies exact receipt identity and size.
 }
 
 fn assert_sqrzl_streamed_receipt(label: &str, provider: &CloudProviderConfig) {
@@ -75,6 +76,7 @@ fn assert_sqrzl_streamed_receipt(label: &str, provider: &CloudProviderConfig) {
     };
     use std::sync::Arc;
 
+    // Arrange: prepare an authenticated namespace and a payload spanning two parts.
     require_sqrzl(label);
     ensure_sqrzl_namespace(provider).unwrap_or_else(|error| {
         panic!("{label}: failed to prepare Sqrzl namespace: {error}");
@@ -94,6 +96,7 @@ fn assert_sqrzl_streamed_receipt(label: &str, provider: &CloudProviderConfig) {
     let file: Arc<dyn File> = Arc::from(file);
     let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(60));
     let (tx, rx) = std::sync::mpsc::channel();
+    // Act: stream the file through the provider receipt API.
     backend.submit_file_write_receipt_request(
         StorageRequest::new(
             format!("{prefix}object.sst"),
@@ -114,6 +117,7 @@ fn assert_sqrzl_streamed_receipt(label: &str, provider: &CloudProviderConfig) {
         .expect("wait for Sqrzl streamed upload receipt")
         .unwrap_or_else(|error| panic!("{label}: streamed upload failed: {error}"))
         .unwrap_or_else(|| panic!("{label}: provider omitted its checksum receipt"));
+    // Assert: the receipt covers the exact multipart payload and byte length.
     assert_eq!(receipt.metadata.size, size as u64, "{label}: receipt size");
     assert!(
         receipt.matches(&bytes),

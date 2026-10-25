@@ -67,9 +67,7 @@ fn run_snapshot_reader(reader: SnapshotReader<'_>) {
                     reported_rejection = true;
                 }
             }
-            Err(MidgeError::WriteStall(message))
-                if message == "runtime request queue is full" =>
-            {
+            Err(MidgeError::WriteStall(message)) if message == "runtime request queue is full" => {
                 std::thread::sleep(Duration::from_millis(1));
             }
             Err(error) => panic!("unexpected snapshot capture error: {error:?}"),
@@ -207,8 +205,7 @@ fn should_allocate_one_read_snapshot_when_committing_one_of_one_hundred_families
 }
 
 #[test]
-fn should_capture_only_the_live_generation_while_family_is_dropped_and_recreated() -> MidgeResult<()>
-{
+fn should_capture_only_the_live_generation_during_family_recreation() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let mut engine = Engine::open(
@@ -285,7 +282,7 @@ fn should_capture_only_the_live_generation_while_family_is_dropped_and_recreated
 }
 
 #[test]
-fn should_keep_captured_family_snapshot_and_pin_across_drop_recreation() -> MidgeResult<()> {
+fn should_keep_retired_family_snapshot_pinned_after_recreation() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let mut engine = Engine::open(

@@ -751,9 +751,9 @@ mod tests {
 
     #[test]
     fn should_bound_ten_thousand_segment_catalog_size_by_unretired_backlog() {
-        // Arrange: encode the full history, then measure independent clones
-        // after retiring prefixes that leave half and one tenth unretired.
+        // Arrange
         let (full, entries) = published(8, 10_000);
+        // Act: encode the full history and retire prefixes from independent clones.
         let full_size = full.encode().unwrap().len();
         let full_head = full.head();
         let next_segment_id = full.next_segment_id();

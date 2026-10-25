@@ -263,8 +263,7 @@ fn window_damage_fixture(include_damaged_frame_in_floor: bool) -> MidgeResult<Wi
 }
 
 #[test]
-fn should_fail_damage_below_sync_floor_and_truncate_window_damage_with_later_frames(
-) -> MidgeResult<()> {
+fn should_enforce_sync_floor_recovery_policy_for_window_damage() -> MidgeResult<()> {
     // Arrange: the later valid record is synced after the retained floor.
     let above_floor = window_damage_fixture(false)?;
     let below_floor = window_damage_fixture(true)?;
