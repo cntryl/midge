@@ -9638,7 +9638,7 @@ fn should_reconcile_cloud_publication_only_under_current_authority(
 }
 
 #[test]
-fn should_keep_catalog_authority_contiguous_when_four_worker_acknowledgements_reorder(
+fn should_keep_catalog_prefix_when_four_upload_acks_reorder_after_transient_failure(
 ) -> crate::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
@@ -9654,7 +9654,14 @@ fn should_keep_catalog_authority_contiguous_when_four_worker_acknowledgements_re
     el.pipeline.inline_flush_worker = false;
     let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
 
-    // Act: later verified uploads cannot bridge the first missing acknowledgement.
+    // Act: later verified uploads cannot bridge a transient failure's gap;
+    // the final ACK models the failed segment's successful retry completion.
+    el.handle_storage_event(crate::storage::StorageEvent::CloudFail {
+        segment_id: segments[0].0,
+        error: "injected transient upload failure".to_owned(),
+        failures: 1,
+        failure_kind: crate::storage::CloudUploadFailureKind::Other,
+    });
     for &(segment_id, max_sequence) in segments[1..].iter().rev() {
         el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
             segment_id,
@@ -9665,6 +9672,21 @@ fn should_keep_catalog_authority_contiguous_when_four_worker_acknowledgements_re
 
     // Assert
     assert!(el.state.wal.frontiers.cloud_durable() < segments[0].1);
+    let storage = Arc::clone(
+        el.actors
+            .cloud_coordinator
+            .hybrid_storage
+            .as_ref()
+            .expect("hybrid storage"),
+    );
+    for &(segment_id, _) in &segments[1..] {
+        assert!(
+            crate::runtime::hybrid_persistence::authoritative_wal_entry(&storage, segment_id)
+                .is_err(),
+            "later segment {segment_id} must not appear in the authoritative catalog"
+        );
+    }
+
     let (segment_id, max_sequence) = segments[0];
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
         segment_id,
@@ -9672,5 +9694,12 @@ fn should_keep_catalog_authority_contiguous_when_four_worker_acknowledgements_re
     });
     el.drain_cloud_publication_within(&deadline)?;
     assert!(el.state.wal.frontiers.cloud_durable() >= segments[3].1);
+    for &(segment_id, _) in &segments {
+        assert!(
+            crate::runtime::hybrid_persistence::authoritative_wal_entry(&storage, segment_id)
+                .is_ok(),
+            "contiguous segment {segment_id} must be present in the authoritative catalog"
+        );
+    }
     Ok(())
 }
