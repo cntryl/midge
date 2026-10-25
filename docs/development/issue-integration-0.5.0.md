@@ -882,12 +882,24 @@ Active tests cover feasible point layouts, repeated-key reduction, adjacent
 inclusive grandparent bounds around one indivisible key, contiguous range
 coverage, and one oversized grandparent. Focused work-partition, picker,
 production execute, cloud fragmentation/recovery, and overlap-repair tests have
-passed in the integration work. The remaining owning gate is AC2: a uniform-
-random A/B row reporting compaction-output bytes per logical input byte. The
-metric excludes flush bytes; the preregistered target makes no minimum byte
-improvement claim and keeps the Tier 4 15% throughput guardrail. The legacy
-fallback remains for disabled policy or layouts the overlap budget cannot
-repair.
+passed in the integration work. The candidate records exact output rolls from
+the `has_output && overlap.should_roll(&event_key)` path; the focused executor
+regression asserts two rolls for a three-grandparent fixture. The named
+`tier4_system_compaction_grandparent_cuts` row uses 2.5M base keys and 500K
+uniformly sampled updates (seed `0x948020261006`, 16-byte keys, 128-byte
+deterministic high-entropy values) under default production options. Before
+measurement it requires the update span to overlap at least 320 MiB of actual
+L2 SST bytes. The common row calls no candidate-only API, so it compiles at the
+base SHA; the focused executor regression separately asserts two real output
+rolls for the candidate path.
+
+The remaining owning gate is AC2's three alternating A/B pairs. Its byte metric
+is published compaction output SST bytes per logical update byte; it excludes
+flush bytes and is not total physical write amplification. The preregistered
+target makes no minimum byte improvement claim and keeps the Tier 4 15%
+throughput guardrail. No byte improvement claim is made until those pairs are
+complete. The legacy fallback remains for disabled policy or layouts the
+overlap budget cannot repair.
 
 ### #927 and #915 receipt slice: implemented candidates
 

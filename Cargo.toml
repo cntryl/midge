@@ -388,6 +388,11 @@ path = "benches/tier4_system_compaction_backpressure.rs"
 harness = false
 
 [[bench]]
+name = "tier4_system_compaction_grandparent_cuts"
+path = "benches/tier4_system_compaction_grandparent_cuts.rs"
+harness = false
+
+[[bench]]
 name = "tier4_ycsb_workload_b"
 path = "benches/tier4_ycsb_workload_b.rs"
 harness = false
