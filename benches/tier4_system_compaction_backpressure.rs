@@ -37,11 +37,23 @@ fn make_value(fill: u8) -> [u8; VALUE_SIZE] {
 const WRITERS: usize = 1;
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(8);
+const COMPACTION_CONCURRENCY_ENV: &str = "MIDGE_COMPACTION_CONCURRENCY";
 
-fn open_compaction_engine(mut opts: MidgeOptions) -> Engine {
+fn compaction_concurrency() -> usize {
+    std::env::var(COMPACTION_CONCURRENCY_ENV)
+        .map(|value| {
+            value.parse().unwrap_or_else(|error| {
+                panic!("{COMPACTION_CONCURRENCY_ENV} must be an integer: {error}")
+            })
+        })
+        .unwrap_or(1)
+}
+
+fn open_compaction_engine(mut opts: MidgeOptions, compaction_concurrency: usize) -> Engine {
     opts.enable_compaction = true;
     opts.memtable_size = COMPACTION_MEMTABLE_SIZE_BYTES;
-    Engine::open(opts.to_open_options()).expect("open compaction backpressure engine")
+    Engine::open(opts.to_open_options_with_compaction_concurrency(compaction_concurrency))
+        .expect("open compaction backpressure engine")
 }
 
 fn run_write_phase(
@@ -137,7 +149,8 @@ fn run_compaction_backpressure_case(
 
     let measured_duration = stress_config::tier4_measured_duration(MEASURED);
     let opts = stress_config::opts_for_mode(mode);
-    let engine = Arc::new(open_compaction_engine(opts));
+    let compaction_concurrency = compaction_concurrency();
+    let engine = Arc::new(open_compaction_engine(opts, compaction_concurrency));
     let cf = engine
         .create_column_family("cf1")
         .expect("create compaction pressure column family");
@@ -186,6 +199,7 @@ fn run_compaction_backpressure_case(
     );
     ctx.parameter("measurement_window_shape", "continuous_same_owner");
     ctx.parameter("writers", WRITERS);
+    ctx.parameter("compaction_concurrency", compaction_concurrency);
     ctx.parameter("write_batch_size", WRITE_BATCH_SIZE);
     ctx.parameter("value_size_bytes", VALUE_SIZE);
     ctx.parameter("memtable_size_bytes", COMPACTION_MEMTABLE_SIZE_BYTES);

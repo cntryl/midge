@@ -95,6 +95,15 @@ impl MidgeOptions {
     /// Convert `MidgeOptions` to `OpenOptions` for use with `Engine::open`.
     #[must_use]
     pub fn to_open_options(&self) -> cntryl_midge::OpenOptions {
+        self.to_open_options_with_compaction_concurrency(1)
+    }
+
+    /// Convert `MidgeOptions` to `OpenOptions` with an explicit compaction worker count.
+    #[must_use]
+    pub fn to_open_options_with_compaction_concurrency(
+        &self,
+        workers: usize,
+    ) -> cntryl_midge::OpenOptions {
         let storage = match &self.storage_mode {
             StorageMode::Memory => cntryl_midge::Storage::InMemory,
             StorageMode::LocalDisk { db_path } => cntryl_midge::Storage::Local {
@@ -129,6 +138,7 @@ impl MidgeOptions {
             .workload(cntryl_midge::WorkloadProfile::default())
             .goal(cntryl_midge::Goal::default())
             .background_compaction(self.enable_compaction)
+            .compaction_concurrency(workers)
             .with_memtable_size_limit(self.memtable_size)
             .with_memtable_flush_threshold(self.memtable_size);
 
