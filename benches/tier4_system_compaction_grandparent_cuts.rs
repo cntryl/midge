@@ -1,6 +1,6 @@
 //! Tier 4 - production-default grandparent overlap compaction workload.
 //!
-//! Setup compacts a deterministic 364 MiB logical dataset into the default
+//! Setup compacts a deterministic 371 MiB logical dataset into the default
 //! L2 target. The measured phase overwrites a fixed uniform-random sample,
 //! flushes, and compacts it. The output-byte metric is the compaction output
 //! counter delta only; it excludes flush bytes and is not total physical write
@@ -18,7 +18,7 @@ use std::time::Instant;
 
 const BENCHMARK: &str = "tier4_system_compaction_grandparent_cuts";
 const SEED: u64 = 0x9480_2026_1006;
-const BASE_KEYS: usize = 2_650_000;
+const BASE_KEYS: usize = 2_700_000;
 const UPDATE_KEYS: usize = 550_000;
 const KEY_BYTES: usize = 16;
 const VALUE_BYTES: usize = 128;
@@ -88,39 +88,38 @@ fn write_keys(engine: &Engine, cf_id: u32, ids: &[u32], generation: u64) {
     }
 }
 
-fn compact_to_level_two(engine: &Engine, cf_id: u32) {
-    for _ in 0..MAX_SETUP_COMPACTION_PASSES {
-        let lower_level_files = engine
-            .metrics()
-            .get_storage_layout()
-            .expect("read benchmark layout while compacting")
-            .levels
-            .into_iter()
-            .filter(|level| level.level < 2)
-            .flat_map(|level| level.files)
-            .filter(|file| file.cf_id == cf_id)
-            .count();
-        if lower_level_files == 0 {
-            return;
-        }
-        engine
-            .compact_all()
-            .expect("compact benchmark data through L2");
-    }
-    let remaining = engine
+fn layout_fingerprint(engine: &Engine) -> Vec<(u32, u32, String, u64)> {
+    let mut files: Vec<_> = engine
         .metrics()
         .get_storage_layout()
-        .expect("read benchmark layout after compaction passes")
+        .expect("read benchmark storage layout")
         .levels
         .into_iter()
-        .filter(|level| level.level < 2)
-        .flat_map(|level| level.files)
-        .filter(|file| file.cf_id == cf_id)
-        .count();
-    assert_eq!(
-        remaining, 0,
-        "benchmark setup must drain all L0/L1 files before measurement"
-    );
+        .flat_map(|level| {
+            level
+                .files
+                .into_iter()
+                .map(move |file| (level.level, file.cf_id, file.name, file.size_bytes))
+        })
+        .collect();
+    files.sort_unstable();
+    files
+}
+
+fn compact_to_stable_layout(engine: &Engine) {
+    for _ in 0..MAX_SETUP_COMPACTION_PASSES {
+        let before = layout_fingerprint(engine);
+        engine.compact_all().expect("compact benchmark data");
+        let after = layout_fingerprint(engine);
+        if before == after {
+            assert!(
+                after.iter().all(|(level, _, _, _)| *level != 0),
+                "stable benchmark layout must not retain L0 files"
+            );
+            return;
+        }
+    }
+    panic!("benchmark storage layout did not stabilize after compaction passes");
 }
 
 #[derive(Debug, Default)]
@@ -177,7 +176,7 @@ fn run(ctx: &mut StressContext) {
     // Populate and compact the base outside the measured window.
     write_keys(&engine, cf.id(), &ids, 0);
     engine.flush_cf(&cf).expect("flush base dataset");
-    compact_to_level_two(&engine, cf.id());
+    compact_to_stable_layout(&engine);
 
     let update_ids = &ids[..UPDATE_KEYS];
     let lower = key(u64::from(
@@ -202,7 +201,7 @@ fn run(ctx: &mut StressContext) {
 
     write_keys(&engine, cf.id(), update_ids, 1);
     engine.flush_cf(&cf).expect("flush measured updates");
-    compact_to_level_two(&engine, cf.id());
+    compact_to_stable_layout(&engine);
 
     let elapsed = measured_started.elapsed();
     let metrics_after = engine
