@@ -5,6 +5,7 @@ use crate::types::EntryType;
 mod cloud_read_fencing;
 mod drop_reaper;
 mod range_tombstone_gc;
+mod snapshot_publication;
 
 #[cfg(feature = "internal-testing")]
 mod checkpoint_origins;
