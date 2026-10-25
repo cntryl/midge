@@ -1502,7 +1502,35 @@ tests), orphan suites (18 tests), hybrid-persistence suite (108 tests),
 four-ACK prefix test, retry campaign, and focused failpoint authority tests
 also pass. `cargo fmt --check` passes.
 
+Branch `work/cloud-reclamation-crash-campaigns` adds a sweep-specific crash
+campaign for #943 AC6. It compacts a real SST, copies those bytes to a valid
+unselected sequence-zero SST identity, and aborts a child process immediately
+before the scheduled sweep's identity-conditional delete. The orphan remains
+after the crash; a cold successor reads the selected value, retries the sweep,
+and reclaims the orphan. The test observes positive LIST/probe/delete metrics
+within the shared SST/WAL per-turn budgets. A generic delete failpoint first
+proved too broad because startup cleanup could fire it; the dedicated sweep
+boundary removed that false positive. The focused failpoint test passes.
+
+The same branch adds a #913 AC3 checkpoint-retention crash slice. A real
+CloudSimulated engine publishes 20 strict, flushed metadata versions; a child
+process reaches the validated identity-conditional delete boundary for the
+oldest version and aborts. The object remains after the crash. The successor
+recovers and reads every committed key, resumes collection, removes the old
+version, and reads every key again. Jev scored this evidence strong for the
+deletion-interruption slice; existing unit tests separately cover pointer
+change before delete and replacement identity. Pointer-advance checkpoint
+selection is implicit in the published history and production collector path,
+not asserted as a generation identifier. This does not cover publication racing
+collection, uncertain authority reads in a crash campaign, or ambiguous delete
+responses. Two focused collector regressions additionally hold a real pending
+metadata capture and corrupt the selected pointer: retention performs no
+deletes while capture ownership is pending or the authority read is uncertain,
+and the exact committed pointer restores readable history. Removing both
+pending-capture guards makes the capture regression fail because the candidate
+is deleted. These unit checks complement but do not replace the remaining AC3
+process-crash cases; #913 remains open.
+
 These checks do not complete #907's injected-latency/A-B gates or #916's cost
-and catalog-size measurements. The cold reopen is not a process-crash
-campaign: #913's GC-enabled crash acceptance and #943's sweep-enabled crash
-budget acceptance remain open. No live-provider qualification is claimed.
+and catalog-size measurements. #913's metadata-generation GC crash acceptance
+remains open. No live-provider qualification is claimed.

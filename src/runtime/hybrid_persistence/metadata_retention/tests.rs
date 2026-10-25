@@ -13,7 +13,7 @@ use crate::storage::cloud::{CloudStorage, MockCloudBackend};
 use std::sync::Arc;
 
 struct Fixture {
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     fs: Arc<dyn Fs>,
     backend: Arc<MockCloudBackend>,
     cloud: Arc<CloudStorage>,
@@ -35,7 +35,7 @@ impl Fixture {
         let backend = Arc::new(MockCloudBackend::new());
         let cloud = Arc::new(CloudStorage::new(backend.clone(), "retention".into()));
         Self {
-            _directory: directory,
+            directory,
             fs,
             backend,
             cloud,
@@ -254,6 +254,74 @@ fn should_retain_candidate_when_pointer_changes_before_final_delete_check() {
         .get_optional(&candidate.object_key)
         .unwrap()
         .is_some());
+}
+
+#[test]
+fn should_skip_metadata_collection_while_an_owned_capture_is_pending() {
+    // Arrange
+    let fixture = Fixture::new();
+    let first = fixture.publish(1, true);
+    let mut head = first.clone();
+    for sequence in 2..=10 {
+        head = fixture.publish(sequence, true);
+    }
+    let candidate_key = first.objects[0].object_key.clone();
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    let pending = fixture
+        .lock
+        .capture_control_cut(&fixture.fs, 1, &deadline)
+        .unwrap();
+    assert_eq!(fixture.lock.pending_captures(), 1);
+    fixture.lock.lock().retention.interval = Duration::ZERO;
+
+    // Act
+    collect_selected_metadata_within(&fixture.context(&deadline), |_| Ok(())).unwrap();
+
+    // Assert: the admitted capture may still become selected, so even an
+    // otherwise reclaimable predecessor remains until that ownership settles.
+    assert_eq!(fixture.lock.pending_captures(), 1);
+    assert!(BlockingCloud::new(&fixture.cloud, &deadline)
+        .get_optional(&candidate_key)
+        .unwrap()
+        .is_some());
+    assert!(head.id.get() > first.id.get());
+    drop(pending);
+}
+
+#[test]
+fn should_retain_metadata_when_selected_authority_read_is_uncertain() {
+    // Arrange
+    let fixture = Fixture::new();
+    let first = fixture.publish(1, true);
+    for sequence in 2..=10 {
+        fixture.publish(sequence, true);
+    }
+    let candidate_key = first.objects[0].object_key.clone();
+    let pointer_path = fixture.directory.path().join(".midge_shared_metadata");
+    let committed_pointer = std::fs::read(&pointer_path).unwrap();
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    fixture.lock.lock().retention.interval = Duration::ZERO;
+    std::fs::write(&pointer_path, b"uncertain selected pointer").unwrap();
+
+    // Act
+    let result = collect_selected_metadata_within(&fixture.context(&deadline), |_| Ok(()));
+
+    // Assert: malformed authority cannot authorize deletion; after restoring
+    // the exact committed pointer the selected chain remains readable.
+    assert!(result.is_err());
+    assert!(BlockingCloud::new(&fixture.cloud, &deadline)
+        .get_optional(&candidate_key)
+        .unwrap()
+        .is_some());
+    std::fs::write(&pointer_path, committed_pointer).unwrap();
+    let CloudMetadataHead::Committed(generation) = fixture
+        .store
+        .read_committed_metadata(deadline.remaining())
+        .unwrap()
+    else {
+        panic!("restored committed metadata pointer required")
+    };
+    read_committed_metadata_bodies_within(&fixture.cloud, &generation, &deadline).unwrap();
 }
 
 #[test]
