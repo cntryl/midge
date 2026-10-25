@@ -161,6 +161,16 @@ impl EventLoop {
         !self.pipeline.wal_commits.deferred.is_empty()
     }
 
+    #[cfg(test)]
+    pub(crate) fn deferred_wal_request_ids(&self) -> Vec<u64> {
+        self.pipeline
+            .wal_commits
+            .deferred
+            .iter()
+            .filter_map(|pending| pending.message.request_id())
+            .collect()
+    }
+
     /// Take only leading resident transactions. A spill or layout/control
     /// barrier stays in place and prevents collection from the newer inbox.
     pub(super) fn take_deferred_transaction_for_wal_group(&mut self) -> Option<RuntimeMsg> {

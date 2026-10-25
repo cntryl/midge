@@ -49,6 +49,17 @@ impl EventLoop {
         &mut self,
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<bool> {
+        let result = self.try_start_cloud_seal_within(deadline);
+        if result.is_err() && self.pipeline.durability.cloud_seal_retry_needed() {
+            self.pipeline.durability.defer_cloud_seal_retry();
+        }
+        result
+    }
+
+    fn try_start_cloud_seal_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<bool> {
         if self.pipeline.pending_cloud_seal.is_some() {
             return Ok(true);
         }
@@ -108,6 +119,21 @@ impl EventLoop {
             }
         }
         Ok(started)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_cloud_seal_waiter_request_ids(&self) -> Vec<u64> {
+        self.pipeline
+            .pending_cloud_seal
+            .as_ref()
+            .map(|pending| {
+                pending
+                    .waiters
+                    .iter()
+                    .map(|waiter| waiter.request_id)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(in crate::runtime::event_loop) fn progress_cloud_seal(&mut self) {

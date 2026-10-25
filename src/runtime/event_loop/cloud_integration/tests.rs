@@ -1404,6 +1404,122 @@ fn seal_segment_owned_by_runtime_backlog_for_test(
     Ok((segment_id, max_sequence))
 }
 
+fn progress_cloud_seal_until_inflight(
+    el: &mut EventLoop,
+    sequence: u64,
+) -> crate::common::MidgeResult<u64> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(segment_id) = el
+            .pipeline
+            .durability
+            .inflight_segment_for_sequence(sequence)
+        {
+            return Ok(segment_id);
+        }
+        if Instant::now() >= deadline {
+            return Err(crate::common::MidgeError::Timeout(format!(
+                "CloudAsync seal did not register sequence {sequence} in-flight"
+            )));
+        }
+        el.progress_cloud_seal();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn progress_cloud_seal_with_waiters_until_inflight(
+    el: &mut EventLoop,
+    sequence: u64,
+    expected_waiter_ids: &[u64],
+    expected_deferred_ids: &[u64],
+) -> crate::common::MidgeResult<u64> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut expected_waiter_ids = expected_waiter_ids.to_vec();
+    expected_waiter_ids.sort_unstable();
+    let mut expected_deferred_ids = expected_deferred_ids.to_vec();
+    expected_deferred_ids.sort_unstable();
+    let mut progress_step = 0;
+    loop {
+        let mut pending_waiter_ids = el.pending_cloud_seal_waiter_request_ids();
+        let mut deferred_ids = el.deferred_wal_request_ids();
+        deferred_ids.sort_unstable();
+        assert_eq!(
+            deferred_ids, expected_deferred_ids,
+            "deferred request IDs changed before progress step {progress_step}"
+        );
+        if !pending_waiter_ids.is_empty() {
+            pending_waiter_ids.sort_unstable();
+            assert_eq!(
+                pending_waiter_ids, expected_waiter_ids,
+                "pending seal waiter IDs changed before progress step {progress_step}"
+            );
+        }
+        if let Some(segment_id) = el
+            .pipeline
+            .durability
+            .inflight_segment_for_sequence(sequence)
+        {
+            let mut registered_waiter_ids = el
+                .pipeline
+                .durability
+                .cloud_durability_request_ids_at(segment_id);
+            registered_waiter_ids.sort_unstable();
+            assert_eq!(registered_waiter_ids, expected_waiter_ids);
+            assert_eq!(deferred_ids, expected_deferred_ids);
+            return Ok(segment_id);
+        }
+        if Instant::now() >= deadline {
+            return Err(crate::common::MidgeError::Timeout(format!(
+                "CloudAsync seal did not register sequence {sequence} in-flight"
+            )));
+        }
+        if pending_waiter_ids.is_empty() {
+            return Err(crate::common::MidgeError::Internal(format!(
+                "pending CloudAsync seal disappeared before sequence {sequence} became in-flight"
+            )));
+        }
+        el.progress_cloud_seal();
+        progress_step += 1;
+        let mut pending_waiter_ids = el.pending_cloud_seal_waiter_request_ids();
+        let mut deferred_ids = el.deferred_wal_request_ids();
+        deferred_ids.sort_unstable();
+        assert_eq!(
+            deferred_ids, expected_deferred_ids,
+            "deferred request IDs changed after progress step {progress_step}"
+        );
+        if !pending_waiter_ids.is_empty() {
+            pending_waiter_ids.sort_unstable();
+            assert_eq!(
+                pending_waiter_ids, expected_waiter_ids,
+                "pending seal waiter IDs changed after progress step {progress_step}"
+            );
+        }
+        if let Some(segment_id) = el
+            .pipeline
+            .durability
+            .inflight_segment_for_sequence(sequence)
+        {
+            let mut registered_waiter_ids = el
+                .pipeline
+                .durability
+                .cloud_durability_request_ids_at(segment_id);
+            registered_waiter_ids.sort_unstable();
+            assert_eq!(
+                registered_waiter_ids, expected_waiter_ids,
+                "seal waiter IDs were not transferred at progress step {progress_step}"
+            );
+            assert_eq!(deferred_ids, expected_deferred_ids);
+            return Ok(segment_id);
+        }
+        if pending_waiter_ids.is_empty() {
+            return Err(crate::common::MidgeError::Internal(format!(
+                "pending CloudAsync seal disappeared after progress step {progress_step} before sequence {sequence} became in-flight"
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 #[test]
 fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment(
 ) -> crate::common::MidgeResult<()> {
@@ -1432,11 +1548,60 @@ fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment
             super::super::HandleOutcome::Continue
         );
     }
-    let segment_id = el
+    assert!(matches!(
+        second_rx.try_recv(),
+        Err(crossbeam::channel::TryRecvError::Empty)
+    ));
+    assert!(el.pipeline.pending_cloud_seal.is_some());
+    assert!(
+        el.state.wal.pending_writes > 0 || el.state.wal.frontiers.local_durable() < sequence,
+        "the second request must still take the pending-seal admission path"
+    );
+    assert!(el
         .pipeline
         .durability
         .inflight_segment_for_sequence(sequence)
-        .expect("shared inflight segment");
+        .is_none());
+    let pending_ids = el.pending_cloud_seal_waiter_request_ids();
+    let deferred_ids = el.deferred_wal_request_ids();
+    let mut accounted_ids = pending_ids.clone();
+    accounted_ids.extend(deferred_ids.iter().copied());
+    accounted_ids.sort_unstable();
+    assert_eq!(
+        accounted_ids,
+        [first_id, second_id],
+        "the second accepted request must remain represented while the seal is pending"
+    );
+    assert_eq!(pending_ids, [first_id]);
+    assert_eq!(deferred_ids, [second_id]);
+    let segment_id = progress_cloud_seal_with_waiters_until_inflight(
+        &mut el,
+        sequence,
+        &[first_id],
+        &[second_id],
+    )?;
+    assert_eq!(
+        el.pipeline
+            .durability
+            .cloud_durability_request_ids_at(segment_id),
+        [first_id]
+    );
+    el.progress_wal_pipeline();
+    assert_eq!(
+        el.process_pending_message(&msg_rx),
+        Some(super::super::HandleOutcome::Continue)
+    );
+    assert!(el.deferred_wal_request_ids().is_empty());
+    let mut waiter_ids = el
+        .pipeline
+        .durability
+        .cloud_durability_request_ids_at(segment_id);
+    waiter_ids.sort_unstable();
+    assert_eq!(waiter_ids, [first_id, second_id]);
+    assert!(matches!(
+        second_rx.try_recv(),
+        Err(crossbeam::channel::TryRecvError::Empty)
+    ));
     copy_local_segment_to_remote_wal_for_test(&el, segment_id);
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
         segment_id,
@@ -1446,7 +1611,9 @@ fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment
     // Assert
     for (request_id, receiver) in [(first_id, first_rx), (second_id, second_rx)] {
         assert!(matches!(
-            receiver.recv().expect("cloud durability response"),
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("cloud durability response"),
             RuntimeResponse::Ok { request_id: actual } if actual == request_id
         ));
     }
@@ -1458,8 +1625,9 @@ fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment
         },
         &msg_rx,
     );
-    let RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. } =
-        metrics_rx.recv().expect("runtime metrics response")
+    let RuntimeResponse::RuntimeMetricsSnapshot { snapshot, .. } = metrics_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("runtime metrics response")
     else {
         panic!("unexpected runtime metrics response");
     };
@@ -6920,11 +7088,7 @@ fn should_derive_ack_deadline_from_waiting_caller_when_verifying_remote_segment(
         ),
         super::super::HandleOutcome::Continue
     );
-    let segment_id = el
-        .pipeline
-        .durability
-        .inflight_segment_for_sequence(sequence)
-        .expect("inflight segment");
+    let segment_id = progress_cloud_seal_until_inflight(&mut el, sequence)?;
 
     // Act
     let request_ids = el
@@ -6968,17 +7132,15 @@ fn should_complete_accepted_wal_publication_given_abandoned_caller_when_every_wa
         ),
         super::super::HandleOutcome::Continue
     );
-    let segment_id = el
-        .pipeline
-        .durability
-        .inflight_segment_for_sequence(sequence)
-        .expect("inflight segment");
-    copy_local_segment_to_remote_wal_for_test(&el, segment_id);
-
-    // Act: the caller times out and abandons before the upload is acked.
+    // The caller may abandon after admission; the event loop still owns the
+    // accepted seal and must finish registering its segment before the ack.
     el.routing
         .router
         .abandon(request_id, Duration::from_millis(20));
+    let segment_id = progress_cloud_seal_until_inflight(&mut el, sequence)?;
+    copy_local_segment_to_remote_wal_for_test(&el, segment_id);
+
+    // Act: caller abandonment stops response delivery before upload ack.
     el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
         segment_id,
         max_sequence: sequence,
@@ -7258,11 +7420,10 @@ fn should_bound_strict_seal_lease_validation_given_request_deadline_is_exhausted
 }
 
 #[test]
-fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
+fn should_admit_async_cloud_flush_with_nonzero_remaining_caller_budget(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange: the first provider lease read consumes enough of the shared
-    // caller deadline that a WAL flush with its configured I/O timeout can no
-    // longer safely begin.
+    // Arrange: the first provider lease read leaves less than the configured
+    // I/O timeout, but enough caller budget for a bounded asynchronous flush.
     let tmp = tempfile::tempdir().expect("create bounded strict-seal directory");
     let state = RuntimeState::new(tmp.path().to_path_buf(), false);
     let cloud = Arc::new(
@@ -7306,23 +7467,32 @@ fn should_not_start_wal_flush_when_lease_check_leaves_less_than_storage_budget(
     let local_durable_seq = el.state.wal.frontiers.local_durable();
 
     // Act
-    el.handle_runtime_msg(
-        RuntimeMsg::SealWalForCloud {
-            request_id,
-            sequence,
-            wait_for_ack: true,
-        },
-        &msg_rx,
+    assert_eq!(
+        el.handle_runtime_msg(
+            RuntimeMsg::SealWalForCloud {
+                request_id,
+                sequence,
+                wait_for_ack: true,
+            },
+            &msg_rx,
+        ),
+        super::super::HandleOutcome::Continue
     );
 
-    // Assert
-    assert!(matches!(
-        response_rx.try_recv(),
-        Ok(RuntimeResponse::Error {
-            error: crate::common::MidgeError::Timeout(_),
-            ..
-        })
-    ));
+    // Assert: the per-I/O timeout is capped to the remaining nonzero caller
+    // budget. The accepted worker-owned sync remains pending until progress
+    // consumes its completion.
+    assert!(
+        matches!(
+            response_rx.try_recv(),
+            Err(crossbeam::channel::TryRecvError::Empty)
+        ),
+        "the caller remains pending after async seal admission"
+    );
+    assert!(
+        el.pipeline.pending_cloud_seal.is_some(),
+        "a nonzero remaining deadline must admit the worker-backed WAL flush"
+    );
     assert_eq!(
         el.state.wal.open_segment(),
         active_segment,
