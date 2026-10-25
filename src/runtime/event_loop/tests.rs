@@ -1127,68 +1127,60 @@ fn should_schedule_recovery_compaction_above_hard_l0_ceiling_when_background_dis
 
 #[test]
 fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled() {
-    // Arrange
-    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
-    event_loop.pipeline.worker_msg_tx = Some(worker_tx);
-    event_loop.state.set_compaction_enabled(false);
-    event_loop.state.limits.l0_compaction_trigger = 2;
-    event_loop.state.limits.max_immutable_memtables = 0;
-    event_loop
-        .actors
-        .compaction_actor
-        .set_l0_file_count_threshold(2);
-    for sequence in 1..=3 {
-        let name = format!("live-ceiling-{sequence}.sst");
-        let _ = write_runtime_l0_sst_for_test(&event_loop, &name, sequence);
+    crate::failpoints::with_read_gate(|| {
+        // Arrange
+        let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+        let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
+        event_loop.pipeline.worker_msg_tx = Some(worker_tx);
+        event_loop.state.set_compaction_enabled(false);
+        event_loop.state.limits.l0_compaction_trigger = 2;
+        event_loop.state.limits.max_immutable_memtables = 0;
         event_loop
-            .state
-            .manifest
-            .test_mut()
-            .files
-            .push(test_manifest_l0_file_meta(&name, sequence));
-    }
-    assert!(event_loop.state.l0_write_slot_unavailable(0));
-    event_loop
-        .pipeline
-        .background_compaction_schedule
-        .mark_due();
-    // Act
-    event_loop.run_background_compaction_maintenance_if_due();
-    for _ in 0..16 {
-        let completion = worker_rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("pressure compaction must complete");
-        assert!(matches!(
-            completion,
-            RuntimeMsg::CompactionComplete {
-                succeeded: true,
-                ..
-            }
-        ));
-        event_loop.process_one(completion, &worker_rx);
-        if event_loop
-            .state
-            .active_compactions
-            .load(std::sync::atomic::Ordering::SeqCst)
-            == 0
-        {
-            break;
+            .actors
+            .compaction_actor
+            .set_l0_file_count_threshold(2);
+        for sequence in 1..=3 {
+            let name = format!("live-ceiling-{sequence}.sst");
+            let _ = write_runtime_l0_sst_for_test(&event_loop, &name, sequence);
+            event_loop
+                .state
+                .manifest
+                .test_mut()
+                .files
+                .push(test_manifest_l0_file_meta(&name, sequence));
         }
-    }
-    // Assert
-    assert_eq!(
+        persist_pressure_input_layout(&event_loop);
+        assert!(event_loop.state.l0_write_slot_unavailable(0));
         event_loop
-            .state
-            .active_compactions
-            .load(std::sync::atomic::Ordering::SeqCst),
-        0
-    );
-    assert!(
-        !event_loop.state.l0_write_slot_unavailable(0),
-        "live publication must restore admission without reopening"
-    );
-    assert_eq!(
+            .pipeline
+            .background_compaction_schedule
+            .mark_due();
+        // Act
+        event_loop.run_background_compaction_maintenance_if_due();
+        for _ in 0..16 {
+            publish_one_pressure_compaction(&mut event_loop, &worker_rx);
+            if event_loop
+                .state
+                .active_compactions
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 0
+            {
+                break;
+            }
+        }
+        // Assert
+        assert_eq!(
+            event_loop
+                .state
+                .active_compactions
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(
+            !event_loop.state.l0_write_slot_unavailable(0),
+            "live publication must restore admission without reopening"
+        );
+        assert_eq!(
         event_loop
             .state
             .manifest
@@ -1199,100 +1191,149 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
         1,
         "pressure recovery must stop after restoring admission; disabled background work does not force a manual drain"
     );
-    assert!(!event_loop
-        .schedule_one_background_compaction_if_needed("restored local admission")
-        .expect("check ordinary background policy"));
-    assert!(
-        !event_loop.state.compaction_enabled(),
-        "pressure recovery must preserve the configured background policy"
-    );
+        assert!(!event_loop
+            .schedule_one_background_compaction_if_needed("restored local admission")
+            .expect("check ordinary background policy"));
+        assert!(
+            !event_loop.state.compaction_enabled(),
+            "pressure recovery must preserve the configured background policy"
+        );
+    });
 }
 
 #[test]
 fn should_continue_pressure_compaction_when_one_publication_leaves_l0_at_hard_ceiling() {
-    // Arrange
-    let mut event_loop = create_test_local_event_loop().expect("create local event loop");
-    let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
-    event_loop.pipeline.worker_msg_tx = Some(worker_tx);
-    event_loop.state.set_compaction_enabled(false);
-    event_loop.state.limits.l0_compaction_trigger = 2;
-    event_loop.state.limits.max_immutable_memtables = 0;
-    event_loop
-        .actors
-        .compaction_actor
-        .set_l0_file_count_threshold(2);
-    for sequence in 1..=5 {
-        let name = format!("pressure-followup-{sequence}.sst");
-        let _ = write_runtime_l0_sst_for_test(&event_loop, &name, sequence);
+    crate::failpoints::with_read_gate(|| {
+        // Arrange
+        let mut event_loop = create_test_local_event_loop().expect("create local event loop");
+        let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
+        event_loop.pipeline.worker_msg_tx = Some(worker_tx);
+        event_loop.state.set_compaction_enabled(false);
+        event_loop.state.limits.l0_compaction_trigger = 2;
+        event_loop.state.limits.max_immutable_memtables = 0;
         event_loop
-            .state
-            .manifest
-            .test_mut()
-            .files
-            .push(test_manifest_l0_file_meta(&name, sequence));
-    }
-    assert!(event_loop.state.l0_write_slot_unavailable(0));
-    assert!(event_loop.state.pending_compaction_waits.is_empty());
-    event_loop
-        .pipeline
-        .background_compaction_schedule
-        .mark_due();
-
-    // Act
-    event_loop.run_background_compaction_maintenance_if_due();
-    for publication in 1..=2 {
-        let completion = worker_rx
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("critical L0 debt must launch the next worker without a periodic delay");
-        assert!(matches!(
-            completion,
-            RuntimeMsg::CompactionComplete {
-                succeeded: true,
-                ..
-            }
-        ));
-        event_loop.process_one(completion, &worker_rx);
-        assert_eq!(
-            event_loop.state.runtime_metrics_snapshot().compactions_run,
-            publication,
-            "each worker completion must publish its replacement"
-        );
-        if publication == 1 {
-            assert!(
-                event_loop.state.l0_write_slot_unavailable(0),
-                "the first publication must leave debt requiring another compaction"
-            );
-            event_loop.run_request_fairness_slot();
-            assert_eq!(
-                event_loop.state.active_compactions.load(Ordering::SeqCst),
-                1,
-                "the next fair turn must admit another compaction while L0 remains critical"
-            );
+            .actors
+            .compaction_actor
+            .set_l0_file_count_threshold(2);
+        for sequence in 1..=5 {
+            let name = format!("pressure-followup-{sequence}.sst");
+            let _ = write_runtime_l0_sst_for_test(&event_loop, &name, sequence);
+            event_loop
+                .state
+                .manifest
+                .test_mut()
+                .files
+                .push(test_manifest_l0_file_meta(&name, sequence));
         }
-    }
-
-    // Assert
-    assert!(!event_loop.state.l0_write_slot_unavailable(0));
-    assert_eq!(
+        persist_pressure_input_layout(&event_loop);
+        assert!(event_loop.state.l0_write_slot_unavailable(0));
+        assert!(event_loop.state.pending_compaction_waits.is_empty());
         event_loop
+            .pipeline
+            .background_compaction_schedule
+            .mark_due();
+
+        // Act
+        event_loop.run_background_compaction_maintenance_if_due();
+        for publication in 1..=2 {
+            publish_one_pressure_compaction(&mut event_loop, &worker_rx);
+            assert_eq!(
+                event_loop.state.runtime_metrics_snapshot().compactions_run,
+                publication,
+                "each worker completion must publish its replacement"
+            );
+            if publication == 1 {
+                assert!(
+                    event_loop.state.l0_write_slot_unavailable(0),
+                    "the first publication must leave debt requiring another compaction"
+                );
+                event_loop.run_request_fairness_slot();
+                assert_eq!(
+                    event_loop.state.active_compactions.load(Ordering::SeqCst),
+                    1,
+                    "the next fair turn must admit another compaction while L0 remains critical"
+                );
+            }
+        }
+
+        // Assert
+        assert!(!event_loop.state.l0_write_slot_unavailable(0));
+        assert_eq!(
+            event_loop
+                .state
+                .manifest
+                .files
+                .iter()
+                .filter(|file| file.level == 0)
+                .count(),
+            1,
+            "pressure recovery must stop after restoring admission"
+        );
+        assert_eq!(
+            event_loop.state.active_compactions.load(Ordering::SeqCst),
+            0
+        );
+        assert!(!event_loop
+            .schedule_one_background_compaction_if_needed(
+                "restored admission after pressure followup"
+            )
+            .expect("check ordinary background policy"));
+        assert!(!event_loop.state.compaction_enabled());
+        assert!(event_loop.state.pending_compaction_waits.is_empty());
+    });
+}
+
+fn persist_pressure_input_layout(event_loop: &EventLoop) {
+    event_loop
+        .state
+        .manifest_store
+        .save_snapshot_for(
+            crate::metadata::accounting::Origin::Unclassified,
+            &event_loop.state.manifest,
+        )
+        .expect("persist the recovered pressure input layout");
+    let persisted = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+        &event_loop.state.fs,
+        crate::RecoveryPolicy::Strict,
+    )
+    .expect("read the durable pressure input layout");
+    assert_eq!(persisted.files.len(), event_loop.state.manifest.files.len());
+    for (file, expected) in persisted.files.iter().zip(&event_loop.state.manifest.files) {
+        assert!(file.same_identity(expected));
+        assert!(event_loop
             .state
-            .manifest
-            .files
-            .iter()
-            .filter(|file| file.level == 0)
-            .count(),
-        1,
-        "pressure recovery must stop after restoring admission"
-    );
-    assert_eq!(
-        event_loop.state.active_compactions.load(Ordering::SeqCst),
-        0
-    );
-    assert!(!event_loop
-        .schedule_one_background_compaction_if_needed("restored admission after pressure followup")
-        .expect("check ordinary background policy"));
-    assert!(!event_loop.state.compaction_enabled());
-    assert!(event_loop.state.pending_compaction_waits.is_empty());
+            .fs
+            .exists(&crate::sst::fs::sst_key(&file.name))
+            .expect("check the persisted pressure input"));
+    }
+}
+
+fn publish_one_pressure_compaction(
+    event_loop: &mut EventLoop,
+    worker: &crossbeam::channel::Receiver<RuntimeMsg>,
+) {
+    let wait = std::time::Duration::from_secs(10);
+    let deadline = Instant::now() + wait;
+    let completion = worker
+        .recv_timeout(wait)
+        .expect("critical L0 debt must complete without a periodic delay");
+    assert!(matches!(
+        completion,
+        RuntimeMsg::CompactionComplete {
+            succeeded: true,
+            ..
+        }
+    ));
+    // The wakeup precedes the owned ticket. Settle this one job without a
+    // fairness turn that could consume its successor before intermediate checks.
+    while !event_loop.actors.compaction_actor.has_ready_compute() {
+        assert!(
+            Instant::now() < deadline,
+            "pressure compute ticket must settle"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    event_loop.handle_runtime_msg(completion, worker);
 }
 
 #[test]
