@@ -11,6 +11,7 @@ struct HeldCallback {
     release: Sender<()>,
     reached: Receiver<()>,
     calls: Arc<AtomicUsize>,
+    worker_thread: Arc<std::sync::Mutex<Option<std::thread::ThreadId>>>,
     hook: &'static str,
 }
 
@@ -20,8 +21,13 @@ impl HeldCallback {
         let (release, released) = crossbeam::channel::unbounded();
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&calls);
+        let worker_thread = Arc::new(std::sync::Mutex::new(None));
+        let observed_thread = Arc::clone(&worker_thread);
         fail::cfg_callback(hook, move || {
             if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                *observed_thread
+                    .lock()
+                    .expect("validation worker thread lock") = Some(std::thread::current().id());
                 let _ = entered.send(());
                 released
                     .recv_timeout(Duration::from_secs(30))
@@ -33,8 +39,16 @@ impl HeldCallback {
             release,
             reached,
             calls,
+            worker_thread,
             hook,
         }
+    }
+
+    fn worker_thread(&self) -> std::thread::ThreadId {
+        self.worker_thread
+            .lock()
+            .expect("validation worker thread lock")
+            .expect("validation failpoint records its worker thread")
     }
 }
 
@@ -83,11 +97,161 @@ fn apply_and_flush(event_loop: &mut EventLoop, request: ApplyTransactionRequest)
         .router
         .register(request_id + 100, "validation fixture flush");
     FlushCoordinator::flush_memtable(event_loop, request_id + 100, 0);
-    assert!(matches!(
-        flush.recv_timeout(Duration::from_secs(10)),
-        Ok(RuntimeResponse::Ok { .. })
-    ));
+    let flush_result = flush.recv_timeout(Duration::from_secs(10));
+    assert!(
+        matches!(flush_result, Ok(RuntimeResponse::Ok { .. })),
+        "unexpected validation fixture flush result: {flush_result:?}"
+    );
     assert!(!event_loop.state.manifest.files.is_empty());
+}
+
+struct SstReadOpenCounter {
+    inner: crate::io::RealFs,
+    event_loop_thread: std::thread::ThreadId,
+    validation_worker_thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    event_loop_opens: AtomicUsize,
+    worker_opens: AtomicUsize,
+    unrelated_opens: AtomicUsize,
+}
+
+impl crate::io::ReadFs for SstReadOpenCounter {
+    fn open_read(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn crate::io::ReadFile>)
+    }
+
+    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
+impl SstReadOpenCounter {
+    fn record_read_open(&self, path: &crate::io::FsPath, options: crate::io::OpenOptions) {
+        if options.mode == crate::io::OpenMode::ReadOnly
+            && std::path::Path::new(&path.0)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
+        {
+            let current_thread = std::thread::current().id();
+            let opens = if current_thread == self.event_loop_thread {
+                &self.event_loop_opens
+            } else if self
+                .validation_worker_thread
+                .lock()
+                .expect("validation worker thread lock")
+                .is_some_and(|worker| worker == current_thread)
+            {
+                &self.worker_opens
+            } else {
+                &self.unrelated_opens
+            };
+            opens.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl crate::io::Fs for SstReadOpenCounter {
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        Some(self)
+    }
+
+    fn try_lock_exclusive(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        self.inner.try_lock_exclusive(path)
+    }
+
+    fn open(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        self.record_read_open(path, options);
+        self.inner.open(path, options)
+    }
+
+    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_dir_all(path)
+    }
+
+    fn sync_dir(
+        &self,
+        path: &crate::io::FsPath,
+        durability: crate::io::Durability,
+    ) -> crate::io::FsResult<()> {
+        self.inner.sync_dir(path, durability)
+    }
+
+    fn rename_atomic(
+        &self,
+        from: &crate::io::FsPath,
+        to: &crate::io::FsPath,
+    ) -> crate::io::FsResult<()> {
+        self.inner.rename_atomic(from, to)
+    }
+}
+
+impl crate::io::PersistentHandleFs for SstReadOpenCounter {
+    fn open_persistent(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+        self.record_read_open(path, options);
+        crate::io::PersistentHandleFs::open_persistent(&self.inner, path, options)
+    }
+}
+
+fn create_counted_event_loop(
+) -> crate::common::MidgeResult<(tempfile::TempDir, EventLoop, Arc<SstReadOpenCounter>)> {
+    let directory = tempfile::tempdir()?;
+    let fs = Arc::new(SstReadOpenCounter {
+        inner: crate::io::RealFs::new(directory.path()).map_err(crate::io::FsError::into_midge)?,
+        event_loop_thread: std::thread::current().id(),
+        validation_worker_thread: std::sync::Mutex::new(None),
+        event_loop_opens: AtomicUsize::new(0),
+        worker_opens: AtomicUsize::new(0),
+        unrelated_opens: AtomicUsize::new(0),
+    });
+    let mut state = crate::runtime::RuntimeState::new(directory.path().to_path_buf(), false);
+    state.fs = fs.clone();
+    let event_loop = EventLoop::new(
+        state,
+        false,
+        Arc::new(crate::runtime::ResponseRouter::new()),
+        crate::runtime::RuntimeConfig {
+            retry_policy: crate::runtime::RuntimeRetryPolicy::fast_for_testing(),
+            ..crate::runtime::RuntimeConfig::default()
+        },
+        crate::runtime::event_loop::FlushWorkerMode::Inline,
+    )?;
+    Ok((directory, event_loop, fs))
 }
 
 #[test]
@@ -160,9 +324,11 @@ fn assert_intervening_flushed_write_is_seen(
 ) -> MidgeResult<()> {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
-    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    let (_directory, mut event_loop, sst_opens) = create_counted_event_loop()?;
     apply_and_flush(&mut event_loop, request(94_600, b"seed", false));
     checked.start_sequence = Some(event_loop.state.applied_sequence);
+    sst_opens.event_loop_opens.store(0, Ordering::SeqCst);
+    sst_opens.worker_opens.store(0, Ordering::SeqCst);
     let diagnostics = Arc::clone(&event_loop.state.diagnostics);
     let initial_opens = diagnostics.sst_metrics().reader_cache_misses();
     let held = HeldCallback::first("midge::validation::before_snapshot_reads");
@@ -177,6 +343,20 @@ fn assert_intervening_flushed_write_is_seen(
     held.reached
         .recv_timeout(Duration::from_secs(10))
         .expect("read worker reached hold");
+    *sst_opens
+        .validation_worker_thread
+        .lock()
+        .expect("validation worker thread lock") = Some(held.worker_thread());
+    assert_eq!(
+        sst_opens.event_loop_opens.load(Ordering::SeqCst),
+        0,
+        "conflict-checked dispatch must not open an SST on the event loop"
+    );
+    assert_eq!(
+        sst_opens.worker_opens.load(Ordering::SeqCst),
+        0,
+        "the held validation worker has not started SST reads"
+    );
     apply_and_flush(&mut event_loop, request(94_602, b"conflict", false));
     assert_eq!(
         diagnostics.sst_metrics().reader_cache_misses(),
@@ -201,6 +381,10 @@ fn assert_intervening_flushed_write_is_seen(
     );
     assert!(held.calls.load(Ordering::SeqCst) >= 2);
     assert!(diagnostics.sst_metrics().reader_cache_misses() > initial_opens);
+    assert!(
+        sst_opens.worker_opens.load(Ordering::SeqCst) > 0,
+        "the detached read worker should open the SST after release"
+    );
     assert_eq!(event_loop.state.applied_sequence, 6);
     assert_eq!(event_loop.state.sequence, 6);
     let snapshot = event_loop.create_read_snapshot(0).expect("current family");
