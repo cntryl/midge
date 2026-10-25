@@ -31,7 +31,7 @@ boundaries with the final outcome.
 
 The implementation-pass runtime/test source checkpoint was
 `0bb7f09df6eaadd92ebba6870434acc30ba3a69d`. Its initial evidence map and checks
-are historical; the final reference map is pinned to `ca560869`, after the
+are historical; the final reference map is pinned to `81290042`, after the
 review fixes recorded below.
 Validation at that historical source checkpoint:
 
@@ -366,7 +366,18 @@ cleanup (2/2, 3.85 s). These repairs do not alter runtime behavior or move/repla
 validation. Their preceding failed local aggregates retain their source/log
 boundaries; the final full-suite result belongs to hosted exact-head CI.
 
-The final production and code/reference checkpoint is `ca560869`. Final
+The final production checkpoint is `ca560869`. The later test-only checkpoint
+`812900422b207cd5adcd41b23c17bcd59b416a31` also repairs two pressure scenarios
+that treated a compute notification as an already available native ticket.
+They wait for that same owned ticket under the original combined 10 s budget,
+then dispatch without an implicit fairness turn before the intermediate
+publication assertions. The original explicit next fair turn still admits
+the second job. Exact one/two publication counts, critical intermediate L0,
+active successor and final admission/policy assertions remain unchanged.
+Both persisted seed layouts are positively reloaded before launch. Target and
+neighbor tests pass 1/1 each; Jev evaluated the ownership/observation ordering.
+This is the final code/reference checkpoint; production bytes remain at
+`ca560869`. Final
 aggregate, serial fault and complete hosted native results, including the
 observed Sqrzl image digest, are recorded on PR #983. Earlier successful
 campaigns remain attributed to their actual sources.
