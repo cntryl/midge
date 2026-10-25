@@ -208,6 +208,44 @@ fn should_preserve_ordered_visibility_when_writer_encoding_is_held() -> MidgeRes
 }
 
 #[test]
+fn should_drain_in_flight_group_before_rotate_given_pending_group() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let response = event_loop
+        .routing
+        .router
+        .register(97_801, "pending strict group before WAL rotation");
+    let segment = event_loop.state.wal.open_segment();
+    event_loop.process_one(
+        write(97_801, &[b"rotation-barrier"], true),
+        &crossbeam::channel::never(),
+    );
+    wait_for_hold(&mut event_loop, &held);
+
+    // Act: defer local pruning instead of entering the seal protocol while
+    // the earlier group owns the writer root and sync transition.
+    assert!(event_loop.wal_group_in_flight());
+    held.release.send(()).expect("release pending strict sync");
+    let rotated = event_loop.seal_active_wal_for_prune();
+
+    // Assert: the pending group remains the only owner until its whole prefix
+    // is visible; a later maintenance pass can then rotate safely.
+    assert!(!rotated);
+    assert_eq!(event_loop.state.wal.open_segment(), segment);
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    assert!(response.try_recv().is_err());
+    let applied = applied_cut(&mut event_loop, &response);
+    assert_eq!(event_loop.state.applied_sequence, applied);
+    assert!(event_loop.seal_active_wal_for_prune());
+    assert_eq!(event_loop.state.wal.open_segment(), segment + 1);
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    Ok(())
+}
+
+#[test]
 fn should_reject_conflicting_follower_after_held_strict_group_applies() -> MidgeResult<()> {
     // Arrange: a follower observes the original cut and conflicts with a
     // point write whose strict group is still waiting for physical fsync.

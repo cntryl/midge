@@ -83,6 +83,13 @@ impl EventLoop {
     /// appends run on this thread, so none is in flight here. Returns false
     /// when pruning must stop.
     pub(super) fn seal_active_wal_for_prune(&mut self) -> bool {
+        // The strict pipeline owns the writer root until its sync and whole
+        // memtable apply settle. A local prune tick is best-effort; defer it
+        // to the next maintenance pass instead of entering a seal transition
+        // that would block on the event loop's own parked group.
+        if self.wal_group_in_flight() {
+            return false;
+        }
         if self.actors.wal_actor.open_tail().record_count == 0 {
             return true;
         }
