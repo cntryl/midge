@@ -10,16 +10,17 @@ currently cover these slices:
 | --- | --- | --- | --- |
 | `a53da5fc` | #948 narrows Fragment fallback to enabled grandparent output cuts | Regression was red before the fix; work partition 11/11 and picker 2/2 passed; Jev favored the change (0.82) | Tier 2 write-amplification measurement |
 | `8e8230c6`, `d8b7cf37`, `dcc394c5`, `8f5bc021` | #915 covers lost completion at the same immutable upload key, rejects a corrupted streamed SST before manifest publication, and bounds 64 MiB HybridStorage request and memory use | Lost-completion and corrupt-part production-path regressions passed (1/1 each); the 64 MiB path through HybridStorage passed across S3, Azure and both GCS protocols with zero range GETs, the request bound and a part-derived ResourceBudget peak bound (1/1); formatting and diff checks passed | AC5 live provider/Sqrzl checksum/fallback qualification plus #937/A-B deltas |
-| `4e0499f2` | #940 routes Strict spilled transactions through ticketed asynchronous fsync and ordered apply | Held-fsync progress/visibility, post-sync recovery and sync-failure tests passed (3/3); spill workspace has its own retained bounded budget | Crash campaign, stale/duplicate receipt and rotation/spill/shutdown cases, and performance measurement |
+| `4e0499f2`, `0ee0603c` | #940 routes Strict spilled transactions through ticketed asynchronous fsync and ordered apply, and drains admitted Strict WAL groups before shutdown's final sync | Held-fsync progress/visibility, post-sync recovery and sync-failure tests passed (3/3); shutdown regression was red when the accepted commit remained unsettled, then passed after the drain; reopened under strict recovery and read the value (1/1); spill workspace has its own retained bounded budget; formatting and diff checks passed | Broader crash campaign, stale/duplicate receipt, rotation/spill/shutdown matrices, and performance measurement |
 | `4cfbacb3` | #918 directly checks the legacy SST rejection boundary | Focused V4 fixture reader test passed (1/1) | Tier 4 footprint and #935 decode measurements |
 | `f8c14a1c` | #914 removes hidden reads from the metadata request-count test double | The zero-read/two-PUT test was red on two inner GETs, then passed (1/1) with actual mock GET/range history and conditional-header assertions; Jev favored the test design (0.98) | Cold-start before/after and #937/#935 performance evidence |
 | `19926136` | #978 asserts the spill-specific global applied cut after partial apply | Cross-family rejection plus fresh snapshot cut/key assertions passed (1/1); whole-spill restart recovery passed (1/1) | Pipeline/rotation matrices, AC1–3, crash and performance evidence |
 | `a08f0616` | #905 covers a conflicting follower queued behind held Strict fsync | The follower waits without append or visibility, then conflicts after predecessor apply with no partial effects (1/1); Jev favored the evidence (0.65) | Hot-key throughput target and records-per-append/group-window measurements |
-| `4d7a429f` | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; `cargo fmt --check` and `git diff --check` passed | Injected-provider latency/A-B evidence and completion ordering/reconciliation cases (#935/#937); no full suite or benchmark run yet |
+| `4d7a429f`, `d3ccdd33` | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; timeout-after-catalog-CAS test proves frontier remains behind until worker completion, advances once, and ignores duplicate completion (1/1); formatting and diff checks passed | Injected-provider latency/A-B evidence and completion ordering/reconciliation campaigns (#935/#937) |
 | `83f705bb`, `1b49519a`, `6c7bc9af` | #904 pins intact synced-tail replay, bounds the floor while later Strict appends queue, and classifies damage around the floor | Post-fsync/pre-frontier Strict reopen regression passed (1/1); adjacent WAL recovery-floor tests passed (2/2); two-held-fsync event-loop floor-bound regression passed (1/1); floor-aware damage regression proves strict failure below the floor and physical truncation above it, including later valid frames (1/1); formatting and diff checks passed | Separate fsync/A-B accounting and explicit cadence sign-off |
 | `fd5fd954`, `6f981118`, `6599aa13`, `4d570061` | #909 proves two-worker publication/restart, immediate re-picking, concurrent publication crash recovery, distinct-input L0 conflict rejection, and exposes compaction concurrency as a Tier 4 benchmark parameter | AC1 simultaneous workers both publish and recover (1/1); AC2 immediate re-pick consumes the just-published output (1/1); AC4 child-process crash asserts both jobs active at output-durable/before-manifest, then verifies both families, healthy layout and manifest/SST ownership after restart (1/1); AC6 distinct-input L0 ordering, conflicting reservations, shared-memory failure and fairness tests passed; `cargo check --locked --bench tier4_system_compaction_backpressure` passed; `MIDGE_COMPACTION_CONCURRENCY` is recorded in the benchmark output; Jev favored the crash proof (1.0) and distinct-input assertion (0.95) | AC3 sustained-workload throughput and stall-count A/B evidence; alternating baseline/candidate measurements remain unrun |
 | `508df52b`, `de14efc6` | #916 proves catalog storage tracks the unretired backlog and preserves publication authority through ambiguous mirror responses and lease loss during mirror completion | 10,000/5,000/1,000-entry catalog-size regression and catalog module (23/23); AC1 out-of-order four-upload failure/retry proofs; AC3 local #808 before/after-retirement crash tests, lost mirror-answer retry and takeover during committed mirror callback; AC5 receipt/fallback/fenced-ACK tests passed; takeover regression was red on `control CAS readback differs`, then passed with old writer Fenced and successor epoch/member retained; `control_io` and catalog modules passed (9/9 each); formatting and diff checks passed | AC2 cloud-strict A/B/provider evidence, Sqrzl-specific takeover qualification, and #935/#937 target/interval decision |
 | `efc76aa4`, `82598feb` | #923 proves production orphan GC protects one SST shared across two pinned snapshot generations until the final release, and read authority fences every outcome when a storage fetch is blocked across lease expiry | Real CloudSimulated compaction and scheduled sweeps preserved both snapshot values and the shared SST after first release, then deleted it after final release; cold reopen and focused test passed (1/1, 91.02 s). The blocked-read regression expires authority while fetch is held and checks value, end-of-range, and NotFound outcomes are all fenced (1/1); Jev favored this barrier-based test (0.98); `cargo fmt --check` and `git diff --check` passed | AC1 latency pairs and AC4 measured 10,000-snapshot unpin work |
+| `2fb18822` | #924 adds CF drop/recreation coverage while an old read snapshot retains its published SST source | Public Engine regression flushes the original family, holds its snapshot across drop/recreation and a new-family flush, then verifies old and new readers see their own values and the old SST remains pinned (1/1); Jev selected this lifecycle test (probability 0.72) | AC1 allocation count, AC3 three-pair A/B, concurrent coherent snapshot capture portion of AC4, and AC5 grouped accounting |
 | `f37cc4b1` | #927 proves a failed SST inventory probe retained under salvage does not advance the watchdog's `sst_inventory` progress | Jev selected the failed-probe regression (0.74); corrected stage-specific progress test passed (1/1); `cargo fmt --check` and `git diff --check` passed | 10,000-SST cold-start A/B, late/unknown mutation and identity/provider qualification |
 | `58926c85`, `79391d6d` | #927 verifies salvage reconciliation when inventory results arrive in C/A/B order and conditional DELETE is not replayed after a lost successful response | Jev selected direct C/A/B completion-iterator coverage over a test-only worker hook (confidence 1.0); only missing B is removed and A/C order/identity are preserved; full `cloud_startup::cloud_recovery::tests` module passed (4/4). The HTTP regression applies conditional DELETE then drops the response; exact If-Match, ambiguous error, and one request despite retry budget passed (1/1); Jev favored adding this case (0.48) | 10,000-SST cold-start A/B, late/unknown mutation and identity/provider qualification |
 
@@ -50,8 +51,9 @@ claimed at this checkpoint. The historical checkpoints below describe earlier
 branches and qualifications; this section is the current local status.
 
 The workspace failpoints run surfaced multiple test failures and then made no
-progress while another Cargo test process was active. It was interrupted and
-is incomplete; none of its output is treated as aggregate passing evidence.
+progress for over a minute. A separate Cargo test was active in the Cassie
+workspace; the Midge run was interrupted and is incomplete, so none of its
+output is treated as aggregate passing evidence.
 
 The #916/#923/#927 acceptance audits found testable correctness gaps separate
 from their remaining measurements. The new catalog history test measures
@@ -769,8 +771,11 @@ full family scan after every operation. Delete-range tracking and generation
 start mutation still run exclusively on the event loop. An active regression
 uses 100 families, verifies source Arc retention and visible data at the
 published cut, and reconciles incremental memory accounting against a full sum.
-The code compiles with failpoint test targets; the regression, lifecycle
-interleavings and A/B targets remain for qualification.
+A focused public Engine test also passed for the flush/drop/recreate snapshot
+lifecycle: the old generation kept its pinned source and value while the new
+generation published and read its own value. The code compiles with failpoint
+test targets; allocation counting, concurrent capture interleavings, and A/B
+targets remain for qualification.
 
 ### #978: applied-cut prerequisite implemented; pipeline remainder pending
 
@@ -903,8 +908,9 @@ this codec commit.
 ### #912: destructive TTL reclamation deferred
 
 The user chose to preserve recovery after correcting an erroneously advanced
-clock. #912 remains open for the next batch. This PR removes its destructive
-expired-value drop, captured compaction-clock/source-retention capabilities,
+clock. #912 remains open pending a recovery-safe reclamation design. The earlier
+PR removed its destructive expired-value drop, captured
+compaction-clock/source-retention capabilities,
 expiration-driven picker, early maintenance timer and TTL exception to trivial
 moves. Point/range tombstone GC and the post-start conflict-history horizon
 remain independent and active.
@@ -923,6 +929,10 @@ field avoids an unrelated binary layout change. The two new physical/idle
 reclamation candidate tests are removed with the explicitly excluded feature.
 Future destructive reclamation requires a recovery-safe retention design or
 an explicitly approved contract change before implementation and measurement.
+Jev's current bounded design review selected retaining raw TTL values
+(probability 0.70) over a durable time floor (0.29) or process-local pins alone
+(0.01), consistent with the chosen clock-correction contract. This judgment
+does not close AC1-AC3 or replace the needed recovery design.
 
 ### #907/#916: WAL publication worker and upload pool implemented candidates
 
