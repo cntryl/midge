@@ -181,3 +181,44 @@ fn should_fence_receipt_commit_when_barrier_generation_or_writer_identity_mismat
     }
     Ok(())
 }
+
+#[test]
+fn should_fence_duplicate_valid_sync_receipt_without_advancing_frontier_twice() -> MidgeResult<()> {
+    // Arrange: retain the exact receipt after its first valid commit.
+    let directory = tempfile::tempdir()?;
+    let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
+    let mut actor = WalActor::open(
+        &state,
+        DurabilityPolicy::Strict,
+        BatchConfig::default(),
+        1,
+        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+    )?;
+    let unit = prepare_put_transaction(
+        &mut actor,
+        &mut state,
+        9782,
+        b"duplicate-receipt",
+        b"value",
+        DurabilityPolicy::Strict,
+    )?;
+    let expected_sequence = unit.sequence_plan.commit_seq;
+    actor.preflight_prepared_group(&mut state, std::slice::from_ref(&unit))?;
+    actor.append_prepared_transaction_batches(&mut state, std::slice::from_ref(&unit), None)?;
+    assert!(state.wal.pending_writes > 0);
+    let ticket = WalSyncTicket::for_test(9);
+    let receipt = actor.begin_sync_transition(&mut state, &ticket)?;
+    actor.commit_sync_transition(&mut state, receipt, &ticket)?;
+    assert_eq!(state.wal.frontiers.last_synced(), expected_sequence);
+    assert_eq!(state.wal.pending_writes, 0);
+
+    // Act: replay the same valid, copyable receipt.
+    let duplicate = actor.commit_sync_transition(&mut state, receipt, &ticket);
+
+    // Assert: the consumed receipt is rejected and cannot move the frontier.
+    assert!(matches!(duplicate, Err(MidgeError::Internal(_))));
+    assert!(actor.is_fenced());
+    assert_eq!(state.wal.frontiers.last_synced(), expected_sequence);
+    assert_eq!(state.wal.pending_writes, 0);
+    Ok(())
+}

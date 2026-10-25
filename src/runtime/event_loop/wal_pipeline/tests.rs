@@ -569,8 +569,22 @@ fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group
     assert_eq!(durable_bytes, Some(first_sync_end));
     assert!(durable_bytes.is_some_and(|durable| durable < writer_end));
 
-    held.release(1);
+    // Complete group k while k+1 remains held at its own fsync boundary.
+    // Its acknowledgement, applied cut, and visibility must stop at k.
     let first_cut = applied_cut(&mut event_loop, &first);
+    assert_eq!(event_loop.state.wal.frontiers.last_synced(), first_cut);
+    assert_eq!(event_loop.state.applied_sequence, first_cut);
+    assert!(second.try_recv().is_err());
+    assert!(third.try_recv().is_err());
+    let first_snapshot = event_loop.create_read_snapshot(0).unwrap();
+    assert_eq!(
+        first_snapshot.get(b"first-group", first_cut)?,
+        Some(b"value".to_vec())
+    );
+    assert_eq!(first_snapshot.get(b"next-a", first_cut)?, None);
+    assert_eq!(first_snapshot.get(b"next-b", first_cut)?, None);
+
+    held.release(1);
     let second_cut = applied_cut(&mut event_loop, &second);
     let third_cut = applied_cut(&mut event_loop, &third);
 
