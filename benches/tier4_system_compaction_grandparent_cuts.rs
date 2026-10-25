@@ -26,6 +26,7 @@ const LOGICAL_BYTES_PER_KEY: u64 = (KEY_BYTES + VALUE_BYTES) as u64;
 const WRITE_BATCH: usize = 2_000;
 const MIN_GRANDPARENT_OVERLAP_BYTES: u64 = 320 * 1024 * 1024;
 const WRITE_STALL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const MAX_SETUP_COMPACTION_PASSES: usize = 8;
 
 fn data_path() -> PathBuf {
     let root = PathBuf::from("target/tmp");
@@ -87,6 +88,41 @@ fn write_keys(engine: &Engine, cf_id: u32, ids: &[u32], generation: u64) {
     }
 }
 
+fn compact_to_level_two(engine: &Engine, cf_id: u32) {
+    for _ in 0..MAX_SETUP_COMPACTION_PASSES {
+        let lower_level_files = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("read benchmark layout while compacting")
+            .levels
+            .into_iter()
+            .filter(|level| level.level < 2)
+            .flat_map(|level| level.files)
+            .filter(|file| file.cf_id == cf_id)
+            .count();
+        if lower_level_files == 0 {
+            return;
+        }
+        engine
+            .compact_all()
+            .expect("compact benchmark data through L2");
+    }
+    let remaining = engine
+        .metrics()
+        .get_storage_layout()
+        .expect("read benchmark layout after compaction passes")
+        .levels
+        .into_iter()
+        .filter(|level| level.level < 2)
+        .flat_map(|level| level.files)
+        .filter(|file| file.cf_id == cf_id)
+        .count();
+    assert_eq!(
+        remaining, 0,
+        "benchmark setup must drain all L0/L1 files before measurement"
+    );
+}
+
 #[derive(Debug, Default)]
 struct L2Overlap {
     bytes: u64,
@@ -141,7 +177,7 @@ fn run(ctx: &mut StressContext) {
     // Populate and compact the base outside the measured window.
     write_keys(&engine, cf.id(), &ids, 0);
     engine.flush_cf(&cf).expect("flush base dataset");
-    engine.compact_all().expect("compact base dataset");
+    compact_to_level_two(&engine, cf.id());
 
     let update_ids = &ids[..UPDATE_KEYS];
     let lower = key(u64::from(
@@ -166,7 +202,7 @@ fn run(ctx: &mut StressContext) {
 
     write_keys(&engine, cf.id(), update_ids, 1);
     engine.flush_cf(&cf).expect("flush measured updates");
-    engine.compact_all().expect("compact measured updates");
+    compact_to_level_two(&engine, cf.id());
 
     let elapsed = measured_started.elapsed();
     let metrics_after = engine
