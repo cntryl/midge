@@ -57,9 +57,9 @@ fn broad_source_layout() -> Vec<FileMeta> {
 }
 
 #[test]
-fn should_fragment_source_when_single_file_overlaps_excessive_target_bytes() {
-    // Arrange: the retained failing layout has one broad 128MiB source whose
-    // complete target span alone is 768MiB; shrinking the source batch is not enough.
+fn should_not_fragment_source_when_grandparent_output_policy_is_enabled() {
+    // Arrange: the complete target span is large, but its bytes are not the
+    // level+2 overlap measured by the output partitioner.
     let compactor = bounded_compactor();
     let files = broad_source_layout();
 
@@ -69,20 +69,15 @@ fn should_fragment_source_when_single_file_overlaps_excessive_target_bytes() {
         .expect("valid complete metadata")
         .expect("overfull source level");
 
-    // Assert: preparation replaces only the source and preserves its level.
+    // Assert: publish the complete overlap and let output-time grandparent
+    // boundaries control overlap instead of rewriting the source first.
+    assert_eq!(plan.purpose, CompactionPurpose::Merge);
     assert_eq!(plan.source_level, 2);
-    assert_eq!(plan.target_level, 2);
-    assert_eq!(plan.input_files, vec!["source-0".to_string()]);
-    assert_eq!(plan.source_files, plan.input_files);
-    assert_eq!(plan.target_files, [] as [String; 0]);
-    assert!(!plan.point_tombstone_gc_eligible);
-    assert!(!plan.range_tombstone_gc_eligible);
-    assert_eq!(
-        plan.purpose,
-        CompactionPurpose::Fragment {
-            split_key: b"m".to_vec()
-        }
-    );
+    assert_eq!(plan.target_level, 3);
+    assert_eq!(plan.source_files, vec!["source-0".to_string()]);
+    assert_eq!(plan.target_files.len(), 6);
+    assert_eq!(plan.input_files.len(), 7);
+    assert_eq!(selected_bytes(&plan, &files), 896 * MIB);
 }
 
 #[test]
@@ -212,7 +207,8 @@ fn should_preserve_complete_closure_when_fragmentation_bounds_are_unproven() {
 #[test]
 fn should_advance_fragmentation_when_prior_cut_remains_an_inclusive_bound() {
     // Arrange: clipped range markers can leave the prior split as largest_key.
-    let compactor = bounded_compactor();
+    let mut compactor = bounded_compactor();
+    compactor.config.max_grandparent_overlap_bytes = 0;
     let mut files = broad_source_layout();
     files[3].size_bytes = 128 * MIB;
     files[0].largest_key = Some(b"m".to_vec());
