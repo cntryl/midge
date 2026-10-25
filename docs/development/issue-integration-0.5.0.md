@@ -20,8 +20,11 @@ present, so its eight focused ordering, proof, replay and recovery tests were
 executed and passed without a code change. #949's implementation was likewise
 already present; its focused writer/merge coverage is recorded in its issue,
 while the compaction CPU-per-MB comparison remains open. #907 was previously
-blocked on the async WAL ownership seam; it is being re-evaluated against
-`4e0499f2`.
+blocked on the async WAL ownership seam. Re-evaluation against `4e0499f2`
+confirmed cloud seal also needs a `WalSealTicket`-aware worker handoff and
+loop-owned rotation. A direct threaded event-loop test hung and was stopped;
+that attempt is inconclusive and no #907 code change was made. The issue stays
+open while the whole-prefix failure regression from #978 is investigated.
 
 The live 0.5.0 milestone still has 28 open issues. #912 remains deliberately
 deferred to preserve clock-correction recovery. No issue is closed by these
