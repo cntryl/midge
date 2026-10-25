@@ -16,6 +16,48 @@ const MANUAL_VALUE: &[u8] = b"acknowledged-value";
 const TEST_WAIT: Duration = Duration::from_secs(3);
 
 fn acknowledge_put(el: &mut EventLoop, cf_id: u32, request_id: u64) -> MidgeResult<u64> {
+    let response = submit_acknowledge_put(el, cf_id, request_id);
+    decode_acknowledged_put(response.recv_timeout(TEST_WAIT).map_err(|error| {
+        MidgeError::Internal(format!(
+            "expected actual transaction acknowledgement: {error:?}"
+        ))
+    })?)
+}
+
+fn acknowledge_put_with_progress(
+    el: &mut EventLoop,
+    cf_id: u32,
+    request_id: u64,
+) -> MidgeResult<u64> {
+    let response = submit_acknowledge_put(el, cf_id, request_id);
+    let (_, messages) = crossbeam::channel::unbounded();
+    let deadline = Instant::now() + TEST_WAIT;
+    loop {
+        match response.try_recv() {
+            Ok(response) => return decode_acknowledged_put(response),
+            Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                return Err(MidgeError::Internal(
+                    "transaction acknowledgement route disconnected".into(),
+                ));
+            }
+            Err(crossbeam::channel::TryRecvError::Empty) => {}
+        }
+
+        el.background_progress(Some(&messages));
+        let _ = el.process_pending_message(&messages);
+        assert!(
+            Instant::now() < deadline,
+            "expected transaction acknowledgement while driving runtime progress"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn submit_acknowledge_put(
+    el: &mut EventLoop,
+    cf_id: u32,
+    request_id: u64,
+) -> crossbeam::channel::Receiver<RuntimeResponse> {
     let response = el.routing.router.register(request_id, "ApplyTransaction");
     let (_, messages) = crossbeam::channel::unbounded();
     el.handle_runtime_msg(
@@ -36,12 +78,16 @@ fn acknowledge_put(el: &mut EventLoop, cf_id: u32, request_id: u64) -> MidgeResu
         },
         &messages,
     );
-    match response.recv_timeout(TEST_WAIT) {
-        Ok(RuntimeResponse::TransactionApplied {
+    response
+}
+
+fn decode_acknowledged_put(response: RuntimeResponse) -> MidgeResult<u64> {
+    match response {
+        RuntimeResponse::TransactionApplied {
             last_sequence,
             op_count: 1,
             ..
-        }) => {
+        } => {
             // The acknowledged sequence names TxnCommit. This single Put's
             // operation sequence immediately precedes that marker.
             last_sequence.checked_sub(1).ok_or_else(|| {
@@ -50,7 +96,7 @@ fn acknowledge_put(el: &mut EventLoop, cf_id: u32, request_id: u64) -> MidgeResu
                 )
             })
         }
-        Ok(RuntimeResponse::Error { error, .. }) => Err(error),
+        RuntimeResponse::Error { error, .. } => Err(error),
         actual => Err(MidgeError::Internal(format!(
             "expected actual transaction acknowledgement: {actual:?}"
         ))),

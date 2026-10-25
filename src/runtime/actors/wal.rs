@@ -401,6 +401,62 @@ pub(crate) use validation_proof::CommitValidationProof;
 
 impl WalActor {
     #[cfg(test)]
+    pub(crate) fn reopen_empty_writer_from_state_for_test(
+        &mut self,
+        state: &RuntimeState,
+    ) -> crate::common::MidgeResult<()> {
+        if self.pending_sync_count != 0
+            || self.bytes_since_sync != 0
+            || state.wal.pending_writes != 0
+        {
+            return Err(crate::common::MidgeError::Internal(
+                "cannot realign WAL fixture with pending writes or syncs".into(),
+            ));
+        }
+        let fs = state.wal.history.segment_files().ok_or_else(|| {
+            crate::common::MidgeError::Internal(
+                "cannot realign a memory-mode WAL fixture writer".into(),
+            )
+        })?;
+        let writer = match &self.io {
+            WalIoState::Open { writer, .. }
+                if writer.tail().first_seq.is_none()
+                    && writer.tail().last_seq.is_none()
+                    && writer.current_pos() == crate::wal::format::HEADER_LEN as u64 =>
+            {
+                FsWalFactoryIo::new(Arc::clone(&fs))
+                    .with_io_timeout(self.storage_io_timeout)
+                    .with_counters(self.counters.clone())
+                    .with_write_authority(self.write_authority())
+                    .open_segment(state.wal.open_segment())?
+            }
+            WalIoState::Open { .. } => {
+                return Err(crate::common::MidgeError::Internal(
+                    "cannot realign WAL fixture after the writer has accepted records".into(),
+                ));
+            }
+            _ => {
+                return Err(crate::common::MidgeError::Internal(
+                    "cannot realign WAL fixture while the actor is not open".into(),
+                ));
+            }
+        };
+        match &mut self.io {
+            WalIoState::Open {
+                fs: current_fs,
+                writer: current_writer,
+            } => {
+                *current_fs = fs;
+                *current_writer = writer;
+                Ok(())
+            }
+            _ => Err(crate::common::MidgeError::Internal(
+                "WAL actor changed state while realigning fixture writer".into(),
+            )),
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn replace_writer_for_test(&mut self, writer: Box<dyn WalWriter>) {
         writer.set_write_authority(self.write_authority());
         match &mut self.io {
