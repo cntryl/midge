@@ -350,12 +350,34 @@ fn should_reuse_free_compute_slot_immediately_when_publication_leaves_level_debt
         .event_loop
         .launch_compaction(fixture.plan(&second, 3, 4))?;
     let workers = [held.enter(), held.enter()];
+    let initial_file_levels: std::collections::HashMap<_, _> = fixture
+        .event_loop
+        .state
+        .manifest
+        .files
+        .iter()
+        .map(|file| (file.name.clone(), file.level))
+        .collect();
     // Act: one owner completes while the other remains physically held.
     held.release.send(()).unwrap();
     let replacement = fixture.next_compute(&held);
     // Assert: a reused fixed worker starts existing debt within five seconds;
     // the periodic idle timer is thirty seconds and no write or flush occurs.
     assert!(workers.contains(&replacement));
+    let state = &fixture.event_loop.state;
+    let next_job_uses_published_output = state.compaction.compacting_ssts.iter().any(|active| {
+        state.manifest.files.iter().any(|file| {
+            file.name == *active
+                && matches!(file.level, 2 | 4)
+                && initial_file_levels
+                    .get(active)
+                    .is_none_or(|initial_level| *initial_level != file.level)
+        })
+    });
+    assert!(
+        next_job_uses_published_output,
+        "the next job must consume the just-published over-target output"
+    );
     assert_eq!(fixture.event_loop.actors.compaction_actor.active_count(), 2);
     fixture.event_loop.state.set_compaction_enabled(false);
     held.release.send(()).unwrap();
