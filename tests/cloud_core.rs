@@ -1161,6 +1161,28 @@ mod cloud_snapshot_orphan_sweep {
         }
     }
 
+    fn assert_cold_reopen_after_reclaim(options: OpenOptions, root: &Path, old_sst: &str) {
+        let mut reopened = Engine::open(options).expect("reopen after scheduled sweep");
+        let cf = reopened
+            .get_column_family("default")
+            .expect("default CF after reopen");
+        let read = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin recovery read");
+        assert_eq!(
+            read.get(b"snapshot-key").expect("read recovered value"),
+            Some(bytes::Bytes::from_static(b"after"))
+        );
+        drop(read);
+        assert!(
+            !root.join("cloud_store/sst").join(old_sst).exists(),
+            "cold reopen must not restore the reclaimed predecessor SST"
+        );
+        reopened
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown reopened engine");
+    }
+
     #[test]
     fn should_keep_public_snapshot_source_until_scheduled_sweep_after_release() {
         // Arrange: predecessor epoch publishes an SST that the successor may sweep.
@@ -1192,7 +1214,7 @@ mod cloud_snapshot_orphan_sweep {
         drop(predecessor);
 
         // Act: successor compacts while a public transaction holds the old view.
-        let mut successor = Engine::open(options).expect("open successor");
+        let mut successor = Engine::open(options.clone()).expect("open successor");
         let cf = successor.get_column_family("default").expect("default CF");
         let snapshot = successor
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -1260,6 +1282,11 @@ mod cloud_snapshot_orphan_sweep {
         successor
             .shutdown(Duration::from_secs(30))
             .expect("shutdown successor");
+        drop(successor);
+
+        // Reopen from the selected cloud metadata after both collectors have
+        // run; the reclaimed predecessor must not be needed for current data.
+        assert_cold_reopen_after_reclaim(options, root, &old_sst);
     }
 }
 

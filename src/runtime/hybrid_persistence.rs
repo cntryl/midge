@@ -529,7 +529,7 @@ impl CloudPersistence {
 }
 
 #[cfg(test)]
-fn authoritative_wal_entry(
+pub(crate) fn authoritative_wal_entry(
     storage: &HybridStorage,
     segment_id: u64,
 ) -> Result<CatalogEntry, String> {
