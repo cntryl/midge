@@ -7292,7 +7292,7 @@ mod cloud_crash_recovery {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn should_recover_selected_sst_and_retry_orphan_sweep_after_child_abort() {
+    fn should_reclaim_orphan_after_sweep_process_abort() {
         // Arrange: retire a real predecessor SST, then restore its exact remote
         // bytes to model a delete obligation lost with the prior process.
         let temp_dir = TempDir::new().expect("temp dir");
@@ -7391,7 +7391,7 @@ mod cloud_crash_recovery {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn should_recover_selected_checkpoint_and_resume_metadata_retention_after_child_abort() {
+    fn should_reclaim_metadata_after_retention_process_abort() {
         // Arrange: publish more versions than the chain limit and capture an
         // old version that the next collector pass can safely reclaim.
         let temp_dir = TempDir::new().expect("temp dir");
