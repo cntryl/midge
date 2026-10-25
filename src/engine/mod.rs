@@ -486,6 +486,16 @@ impl Engine {
         self.runtime_handle.read_path_diagnostics_snapshot()
     }
 
+    /// Count production grandparent-overlap output rolls for one engine.
+    #[cfg(feature = "internal-testing")]
+    #[must_use]
+    #[doc(hidden)]
+    pub fn compaction_grandparent_overlap_roll_count_for_benchmarks(&self) -> u64 {
+        self.runtime_handle
+            .diagnostics
+            .grandparent_overlap_roll_count()
+    }
+
     #[cfg(feature = "internal-testing")]
     pub(crate) fn write_admission_snapshot(&self) -> crate::diagnostics::WriteAdmissionSnapshot {
         self.runtime_handle.diagnostics.write_admission_snapshot()

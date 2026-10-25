@@ -48,10 +48,17 @@ fn should_bound_grandparent_overlap_when_complete_disjoint_spans_are_feasible(
     plan.grandparent_overlap = GrandparentOverlap::from_files(parents.iter(), 10);
 
     // Act
-    let outputs = execute_compaction(&plan, &factory, Path::new(""), None)?;
+    let overlap_rolls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let outputs = execute_compaction_with_overlap_roll_counter(
+        &plan,
+        &factory,
+        Path::new(""),
+        Arc::clone(&overlap_rolls),
+    )?;
 
     // Assert
     assert_eq!(outputs.len(), 3);
+    assert_eq!(overlap_rolls.load(std::sync::atomic::Ordering::Relaxed), 2);
     let mut keys_seen = Vec::new();
     for name in outputs {
         let summary = crate::sst::fs::SstFileIo::summarize_with_fs(&name, factory.output_fs())?;

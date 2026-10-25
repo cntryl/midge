@@ -512,6 +512,7 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
             directory.path(),
             None,
             Some(&compaction_storage),
+            Arc::new(std::sync::atomic::AtomicU64::default()),
             CompactionOutputWork {
                 prepared: &prepared,
                 manual_deadline: None,

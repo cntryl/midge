@@ -1149,7 +1149,6 @@ fn range_starts(events: &[BudgetedEvent]) -> impl Iterator<Item = &RangeTombston
     })
 }
 
-#[derive(Clone, Copy)]
 pub(crate) struct PartitionOutputConfig<'a> {
     pub cf_id: u32,
     pub target_level: u32,
@@ -1158,6 +1157,7 @@ pub(crate) struct PartitionOutputConfig<'a> {
     pub tombstone_gc: TombstoneGcPolicy,
     pub output_size_limit: Option<usize>,
     pub grandparent_overlap: &'a super::GrandparentOverlap,
+    pub grandparent_overlap_rolls: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 pub(crate) fn write_partitioned_compaction_outputs(
@@ -1228,13 +1228,19 @@ pub(crate) fn write_partitioned_compaction_outputs(
         });
 
         let has_output = roller.partition_point_count > 0 || tombstones.has_partition_tombstones();
+        let grandparent_roll = has_output && overlap.should_roll(&event_key);
         if roller.should_roll(
             selected_version,
             starts.clone(),
             &tombstones,
             config.tombstone_gc,
-        )? || (has_output && overlap.should_roll(&event_key))
+        )? || grandparent_roll
         {
+            if grandparent_roll {
+                if let Some(counter) = &config.grandparent_overlap_rolls {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             let (finished, boundary_reservation) =
                 roller.finish_for_roll(&event_key, &tombstones, abort_check)?;
             let partition_emitted = finished.is_some();

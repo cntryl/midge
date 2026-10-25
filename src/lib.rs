@@ -126,6 +126,11 @@ pub mod __internal {
             engine.write_admission_snapshot()
         }
 
+        #[must_use]
+        pub fn compaction_grandparent_overlap_roll_count(engine: &crate::Engine) -> u64 {
+            engine.compaction_grandparent_overlap_roll_count_for_benchmarks()
+        }
+
         pub use crate::diagnostics::{
             disable_transaction_commit_timing_for_benchmarks,
             drain_transaction_commit_timings_for_benchmarks,

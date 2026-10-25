@@ -335,11 +335,16 @@ impl EventLoop {
         );
         background_compaction_schedule.defer();
 
+        let grandparent_overlap_rolls = state.diagnostics.grandparent_overlap_roll_counter();
         let mut event_loop = Self {
             state,
             actors: EventLoopActors {
                 flush_actor,
-                compaction_actor: Self::create_compaction_actor(sst_factory, &config)?,
+                compaction_actor: Self::create_compaction_actor(
+                    sst_factory,
+                    &config,
+                    grandparent_overlap_rolls,
+                )?,
                 compaction_publish_actor,
                 wal_actor,
                 gc_actor,
@@ -447,12 +452,14 @@ impl EventLoop {
     fn create_compaction_actor(
         sst_factory: Arc<dyn crate::sst::SstFactory>,
         config: &super::RuntimeConfig,
+        grandparent_overlap_rolls: Arc<std::sync::atomic::AtomicU64>,
     ) -> crate::common::MidgeResult<CompactionActor> {
         let compaction_config = crate::compaction::LeveledCompactionConfig {
             l0_file_count_threshold: config.l0_compaction_trigger.max(1),
             ..Default::default()
         };
         let mut actor = CompactionActor::new_with_config(sst_factory, compaction_config);
+        actor.set_grandparent_overlap_roll_counter(grandparent_overlap_rolls);
         actor.set_execution_limits(config.target_sst_size, config.compaction_memory_limit);
         actor.configure_concurrency(config.compaction_concurrency)?;
         actor.configure_work_target(config.hybrid_storage.as_ref().map(|storage| {

@@ -108,6 +108,7 @@ pub(crate) struct RuntimeDiagnostics {
     #[cfg(any(test, feature = "internal-testing"))]
     read_snapshot_builds: AtomicU64,
     counters: EngineCounters,
+    grandparent_overlap_rolls: Arc<AtomicU64>,
     read_only_begin_tx_count: AtomicU64,
     read_only_snapshot_cache_hits: AtomicU64,
     read_only_snapshot_cache_misses: AtomicU64,
@@ -151,6 +152,15 @@ impl Default for EngineCounters {
 }
 
 impl RuntimeDiagnostics {
+    pub(crate) fn grandparent_overlap_roll_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.grandparent_overlap_rolls)
+    }
+
+    #[cfg(feature = "internal-testing")]
+    pub(crate) fn grandparent_overlap_roll_count(&self) -> u64 {
+        self.grandparent_overlap_rolls.load(Ordering::Relaxed)
+    }
+
     #[cfg(any(test, feature = "internal-testing"))]
     pub(crate) fn record_read_snapshot_build(&self) {
         self.read_snapshot_builds.fetch_add(1, Ordering::Relaxed);
