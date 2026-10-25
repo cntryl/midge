@@ -216,6 +216,54 @@ fn should_probe_manifest_ssts_with_bounded_concurrency_when_opening_cloud_state(
     Ok(())
 }
 
+#[test]
+fn should_preserve_manifest_order_when_salvage_reconciles_out_of_order_results() -> MidgeResult<()>
+{
+    // Arrange: salvage receives C/A/B results, and B is definitively missing.
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::try_new(temp.path(), true, RecoveryPolicy::Salvage)?;
+    let files = ["000001.sst", "000002.sst", "000003.sst"]
+        .into_iter()
+        .map(|name| crate::metadata::FileMeta {
+            name: name.into(),
+            size_bytes: 64,
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    state.manifest.replace_files(files.clone());
+
+    let missing = Err(SstLoss::Definitive(MidgeError::RecoveryFailed(
+        "authoritative cloud SST '000002.sst' is missing".into(),
+    )));
+    let results = vec![
+        (files[2].clone(), Ok(64)),
+        (files[0].clone(), Ok(64)),
+        (files[1].clone(), missing),
+    ];
+
+    // Act
+    CloudStartupRecovery::reconcile_manifest_ssts(&mut state, results.into_iter())?;
+
+    // Assert
+    assert_eq!(
+        state
+            .manifest
+            .files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect::<Vec<_>>(),
+        ["000001.sst", "000003.sst"],
+        "salvage must remove only the missing SST and restore retained manifest order"
+    );
+    assert!(state
+        .manifest
+        .files
+        .iter()
+        .zip([&files[0], &files[2]])
+        .all(|(actual, expected)| actual.same_identity(expected)));
+    Ok(())
+}
+
 struct FailedInventoryProbe;
 
 impl crate::storage::inventory::ObjectInventory for FailedInventoryProbe {
