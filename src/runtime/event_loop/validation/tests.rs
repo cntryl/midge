@@ -469,6 +469,94 @@ fn should_retry_detached_validation_after_earlier_pending_group_becomes_visible(
     Ok(())
 }
 
+#[test]
+fn should_retry_detached_range_validation_after_earlier_pending_group_becomes_visible(
+) -> MidgeResult<()> {
+    // Arrange: the range proof starts at the applied seed cut and sees no later key.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    apply_and_flush(&mut event_loop, request(94_610, b"seed", false));
+    event_loop.pipeline.inline_flush_worker = false;
+    let validation = HeldCallback::first("midge::validation::before_snapshot_reads");
+    let sync = HeldCallback::first("midge::wal::before_physical_sync");
+    let checked_response = event_loop
+        .routing
+        .router
+        .register(94_611, "pending range check");
+    let mut checked = request(94_611, b"unused", true);
+    checked.start_sequence = Some(3);
+    checked.ops = vec![TransactionOp::DeleteRange {
+        cf_id: 0,
+        start_key: Bytes::from_static(b"a"),
+        end_key: Bytes::from_static(b"z"),
+    }];
+    WalCoordinator::apply_transaction(&mut event_loop, &crossbeam::channel::never(), checked, None);
+    validation
+        .reached
+        .recv_timeout(Duration::from_secs(10))
+        .expect("held range validation");
+    let writer_response = event_loop
+        .routing
+        .router
+        .register(94_612, "earlier in-range write");
+
+    // Act: allocate the earlier conflicting write, hold its sync, then finish
+    // the stale empty-range proof against the still-applied seed cut.
+    WalCoordinator::apply_transaction(
+        &mut event_loop,
+        &crossbeam::channel::never(),
+        request(94_612, b"inside", false),
+        None,
+    );
+    wait_for_stage(&mut event_loop, &sync.reached);
+    validation
+        .release
+        .send(())
+        .expect("release old range proof");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !event_loop.pipeline.validation.has_ready_result() {
+        assert!(Instant::now() < deadline, "range proof did not finish");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    event_loop.drain_validation_results(&crossbeam::channel::never());
+    assert!(checked_response.try_recv().is_err());
+    assert!(writer_response.try_recv().is_err());
+    assert_eq!(event_loop.state.applied_sequence, 3);
+    let old = event_loop.create_read_snapshot(0).expect("old family view");
+    assert_eq!(old.get(b"inside", 3)?, None);
+
+    sync.release.send(()).expect("release earlier strict group");
+    let writer = settle_validation_request(&mut event_loop, &writer_response);
+    let checked = settle_validation_request(&mut event_loop, &checked_response);
+
+    // Assert: refreshed range validation rejects the whole delete without
+    // allocating any sequence after the earlier write.
+    assert!(matches!(
+        writer,
+        RuntimeResponse::TransactionApplied {
+            last_sequence: 6,
+            ..
+        }
+    ));
+    assert!(matches!(
+        checked,
+        RuntimeResponse::Error {
+            error: MidgeError::WriteConflict(_),
+            ..
+        }
+    ));
+    assert!(validation.calls.load(Ordering::SeqCst) >= 2);
+    assert_eq!(event_loop.state.applied_sequence, 6);
+    assert_eq!(event_loop.state.sequence, 6);
+    assert_eq!(old.get(b"inside", 3)?, None);
+    let current = event_loop
+        .create_read_snapshot(0)
+        .expect("current family view");
+    assert_eq!(current.get(b"inside", 6)?, Some(b"value".to_vec()));
+    assert_eq!(current.get(b"seed", 6)?, Some(b"value".to_vec()));
+    Ok(())
+}
+
 fn wait_for_stage(event_loop: &mut EventLoop, reached: &Receiver<()>) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
