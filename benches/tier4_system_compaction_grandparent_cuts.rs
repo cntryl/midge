@@ -228,11 +228,23 @@ fn run(ctx: &mut StressContext) {
         "level2_grandparent_limit_bytes",
         MIN_GRANDPARENT_OVERLAP_BYTES,
     );
-    ctx.parameter("pre_measurement_l2_overlap_bytes", l2_overlap.bytes);
-    ctx.parameter("pre_measurement_l2_overlap_files", l2_overlap.files);
-    ctx.parameter(
+    ctx.record_observation(
+        "pre_measurement_l2_overlap_bytes",
+        l2_overlap.bytes as f64,
+        ObservationUnit::Bytes,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "pre_measurement_l2_overlap_files",
+        l2_overlap.files as f64,
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
         "largest_pre_measurement_l2_overlap_file_bytes",
-        l2_overlap.largest_file_bytes,
+        l2_overlap.largest_file_bytes as f64,
+        ObservationUnit::Bytes,
+        ObservationDirection::Informational,
     );
     ctx.parameter("compaction_metric", "published compaction output SST bytes");
     ctx.parameter("flush_bytes_in_compaction_metric", "false");
