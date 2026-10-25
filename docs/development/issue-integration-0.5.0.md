@@ -1529,7 +1529,18 @@ deletes while capture ownership is pending or the authority read is uncertain,
 and the exact committed pointer restores readable history. Removing both
 pending-capture guards makes the capture regression fail because the candidate
 is deleted. These unit checks complement but do not replace the remaining AC3
-process-crash cases; #913 remains open.
+process-crash cases.
+
+Branch `work/metadata-retention-crash-acceptance` completes those AC3 cases.
+One child aborts after immutable chain upload but before pointer CAS; restart
+reads the last committed checkpoint and keeps the higher unselected object
+unselected. A second child injects an `Indeterminate` selected-authority read
+and aborts at the collector's error boundary; an eligible old version survives,
+then a successor reopens every committed value and resumes cleanup. Together
+with the merged post-pointer-advance delete crash, these tests cover in-flight
+publication, checkpoint recovery, uncertain authority and safe reclamation.
+Jev favored closing #913 against its written AC1-AC3. This branch is not yet
+merged; issue closure is pending its exact-head gates.
 
 These checks do not complete #907's injected-latency/A-B gates or #916's cost
 and catalog-size measurements. #913's metadata-generation GC crash acceptance

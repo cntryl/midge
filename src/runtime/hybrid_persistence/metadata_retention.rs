@@ -39,11 +39,28 @@ pub(crate) fn collect_selected_metadata_within(
             context.deadline.remaining(),
         )
         .map_err(|error| error.into_validation_error("metadata retention authority"))?;
-    if let CloudMetadataHead::Committed(generation) = context
-        .authority
-        .store
-        .read_committed_metadata(context.deadline.remaining())?
-    {
+    let head = if crate::failpoints::is_active(
+        "midge::cloud::inject_metadata_retention_authority_read_failure",
+    ) {
+        Err(crate::lease::LeaseError::Indeterminate(
+            "injected uncertain metadata authority read".into(),
+        ))
+    } else {
+        context
+            .authority
+            .store
+            .read_committed_metadata(context.deadline.remaining())
+    };
+    let head = match head {
+        Ok(head) => head,
+        Err(error) => {
+            crate::failpoints::fail_point!(
+                "midge::cloud::metadata_retention_authority_read_failed"
+            );
+            return Err(error.into());
+        }
+    };
+    if let CloudMetadataHead::Committed(generation) = head {
         collect_after_commit(context, &generation, &mut guard.retention);
     }
     Ok(())

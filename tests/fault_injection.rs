@@ -7038,6 +7038,14 @@ mod cloud_crash_recovery {
             "cloud_metadata_retention_before_delete" => {
                 child_cloud_metadata_retention_before_delete(&db_path);
             }
+            #[cfg(feature = "failpoints")]
+            "cloud_metadata_publication_before_pointer_cas" => {
+                child_cloud_metadata_publication_before_pointer_cas(&db_path);
+            }
+            #[cfg(feature = "failpoints")]
+            "cloud_metadata_retention_authority_read_failed" => {
+                child_cloud_metadata_retention_authority_read_failed(&db_path);
+            }
             "buffered_eventual_flush_after_publish" => {
                 child_buffered_eventual_flush_after_publish(&db_path);
             }
@@ -7431,6 +7439,100 @@ mod cloud_crash_recovery {
         }
     }
 
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_recover_committed_metadata_after_publication_process_abort() {
+        // Arrange: establish a selected checkpoint and remember its immutable
+        // history before a child starts a new, uncommitted metadata generation.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        let mut engine = open_cloud_engine(db_path, None);
+        let values = create_checkpointed_metadata_history(&mut engine, db_path);
+        engine
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown before publication crash");
+        let versions_before = remote_manifest_paths(db_path);
+
+        // Act: the child aborts after uploading the new chain object but
+        // before committing its pointer.
+        run_child_expect_abort("cloud_metadata_publication_before_pointer_cas", db_path);
+        let versions_after = remote_manifest_paths(db_path);
+        let unpublished = versions_after
+            .iter()
+            .find(|path| !versions_before.contains(path))
+            .expect("the in-flight publication uploaded an immutable version")
+            .clone();
+        assert!(unpublished.exists());
+        reset_dir(&db_path.join("wal"));
+        reset_dir(&db_path.join("sst"));
+        expire_crashed_process_lease(db_path);
+
+        // Assert: recovery reads the last committed checkpoint, replays the
+        // strict child write, and never selects the uploaded object by LIST.
+        let reopened = open_cloud_engine(db_path, None);
+        for (key, value) in &values {
+            assert_value_visible(&reopened, key, value);
+        }
+        assert!(
+            unpublished.exists(),
+            "an unselected version above the committed pointer is retained"
+        );
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_retain_metadata_after_uncertain_authority_read_process_abort() {
+        // Arrange: publish enough versions for the child collector to have an
+        // otherwise reclaimable candidate.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        let mut engine = open_cloud_engine(db_path, None);
+        let values = create_checkpointed_metadata_history(&mut engine, db_path);
+        let old_version = remote_manifest_paths(db_path)
+            .first()
+            .expect("old metadata version")
+            .clone();
+        let old_version_bytes = std::fs::read(&old_version).expect("read old metadata version");
+        let old_version_key = old_version
+            .strip_prefix(db_path)
+            .expect("old metadata version is in cloud store");
+        std::fs::write(
+            db_path.join("metadata-retention-candidate-key"),
+            old_version_key.to_string_lossy().as_bytes(),
+        )
+        .expect("save old metadata object key");
+        std::fs::write(
+            db_path.join("metadata-retention-candidate-bytes"),
+            old_version_bytes,
+        )
+        .expect("save old metadata object bytes");
+        engine
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown before authority-read crash");
+
+        // Act: collection sees an injected indeterminate authority read and
+        // crashes at the error boundary before any version can be deleted.
+        run_child_expect_abort("cloud_metadata_retention_authority_read_failed", db_path);
+        assert!(
+            old_version.exists(),
+            "uncertain authority cannot authorize metadata deletion"
+        );
+        reset_dir(&db_path.join("wal"));
+        reset_dir(&db_path.join("sst"));
+        expire_crashed_process_lease(db_path);
+
+        // Assert: the restored selected chain opens, and a successor resumes
+        // interrupted metadata retention without losing any value.
+        let reopened = open_cloud_engine(db_path, None);
+        for (key, value) in &values {
+            assert_value_visible(&reopened, key, value);
+        }
+        wait_for_remote_file_removal(&reopened, &old_version);
+        for (key, value) in &values {
+            assert_value_visible(&reopened, key, value);
+        }
+    }
+
     fn child_cloud_strict_after_ack(db_path: &Path) {
         let engine = open_cloud_engine(db_path, None);
         commit_value(
@@ -7473,6 +7575,47 @@ mod cloud_crash_recovery {
         );
         let engine = open_cloud_engine(db_path, None);
         wait_for_configured_crash(&engine, "metadata retention delete");
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn child_cloud_metadata_publication_before_pointer_cas(db_path: &Path) {
+        crash::configure_abort_failpoint(
+            "midge::cloud::after_metadata_chain_upload_before_pointer_cas",
+            "cloud_metadata_publication_before_pointer_cas",
+        );
+        let engine = open_cloud_engine(db_path, None);
+        commit_value(
+            &engine,
+            b"metadata-publication-crash-key",
+            b"durable-before-flush-publication",
+            WriteOptions::cloud_strict(),
+        );
+        engine
+            .flush_cf(&default_cf(&engine))
+            .expect("flush should reach in-flight metadata publication");
+        wait_for_configured_crash(&engine, "metadata chain upload before pointer CAS");
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn child_cloud_metadata_retention_authority_read_failed(db_path: &Path) {
+        crash::configure_abort_failpoint(
+            "midge::cloud::metadata_retention_authority_read_failed",
+            "cloud_metadata_retention_authority_read_failed",
+        );
+        let engine = open_cloud_engine(db_path, None);
+        let candidate_key =
+            std::fs::read_to_string(db_path.join("metadata-retention-candidate-key"))
+                .expect("read saved metadata object key");
+        let candidate_bytes = std::fs::read(db_path.join("metadata-retention-candidate-bytes"))
+            .expect("read saved metadata object bytes");
+        std::fs::write(db_path.join(candidate_key), candidate_bytes)
+            .expect("restore an eligible old metadata candidate after startup");
+        fail::cfg(
+            "midge::cloud::inject_metadata_retention_authority_read_failure",
+            "return",
+        )
+        .expect("inject an uncertain selected-authority read");
+        wait_for_configured_crash(&engine, "metadata retention authority read failure");
     }
 
     #[cfg(feature = "failpoints")]
@@ -7760,6 +7903,12 @@ mod cloud_crash_recovery {
             "cloud_orphan_sweep_before_delete" => "midge::cloud::before_orphan_sweep_delete",
             "cloud_metadata_retention_before_delete" => {
                 "midge::cloud::before_metadata_retention_delete"
+            }
+            "cloud_metadata_publication_before_pointer_cas" => {
+                "midge::cloud::after_metadata_chain_upload_before_pointer_cas"
+            }
+            "cloud_metadata_retention_authority_read_failed" => {
+                "midge::cloud::metadata_retention_authority_read_failed"
             }
             other => panic!("unknown cloud crash scenario: {other}"),
         }
