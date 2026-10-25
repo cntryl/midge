@@ -248,6 +248,21 @@ The configured local emulator credential is omitted here.
 | `cargo test --locked --test fault_injection --features sqrzl-tests,failpoints wal_authority_regressions::should_preserve_successor_strict_commits_when_predecessor_reopens_old_cache -- --exact` | 1 passed, 18.72 s. |
 | `MIDGE_DISCOVERY_PROFILE=sqrzl cargo test --locked --test discovery_model --features sqrzl-tests` | 6 passed, 177.09 s; 128 resident/spilled histories across the configured protocol front doors. |
 
+### Focused Sqrzl provider contracts at `162205a2`
+
+The authenticated provider contract suite was rerun against the current local
+integration source with `SQRZL_SECRET_ACCESS_KEY` set from the local Compose
+configuration:
+`cargo test --locked --lib --features sqrzl-tests storage::providers::qualification
+-- --test-threads=1` — 8 passed in 0.70 s.
+This exercises actual Sqrzl S3-compatible, Azure, GCS XML/JSON and OCI request
+contracts, including conditional identities and rejection of an incorrect
+Azure key. The optional real-S3 test returned without a configured endpoint.
+This verifies provider authentication and conditional-operation behavior; it
+does not establish SST checksum-receipt validation, readback fallback behavior,
+or any issue-specific performance target. #915 AC5 and the remaining #914
+provider/recovery/performance criteria stay open.
+
 The engine campaign retained original memory/disk limits and verified all
 762 and 1,523 records in its two complete-local-disk-loss profiles. Its actual
 receipt files identify the production revision and `verification_complete`.
