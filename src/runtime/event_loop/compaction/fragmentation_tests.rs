@@ -261,6 +261,19 @@ fn should_recover_fragmented_source_when_critical_l0_work_interrupts_promotion()
             let key = format!("z{index}");
             fixture.seed(0, 100 + index, &[key.as_bytes()], 128)?;
         }
+        // These fixture ingests must be durable inputs before real moves can
+        // journal their promotion. A later compaction checkpoint is optional.
+        fixture.persist()?;
+        let durable = crate::metadata::ManifestPersistence::load(&fixture.el.state.db_path)
+            .map_err(MidgeError::Internal)?;
+        assert!(fixture
+            .el
+            .state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| file.level == 0)
+            .all(|file| durable.files.iter().any(|saved| saved.same_identity(file))));
         assert!(fixture.el.state.has_critical_l0_debt(0));
         let names = fixture
             .el

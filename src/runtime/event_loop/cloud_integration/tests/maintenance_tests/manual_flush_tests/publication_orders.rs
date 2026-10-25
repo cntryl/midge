@@ -300,129 +300,133 @@ fn assert_committed_files(
 #[test]
 fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_race(
 ) -> MidgeResult<()> {
-    // Arrange: force a genuine durable name-block mirror before building.
-    let (mut el, worker, _) = cloud_debt(4)?;
-    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
-    let mut metadata = metadata_fixture(&mut el)?;
-    let (mut compute_release, finalized) = paused_compactor::install(&mut el);
-    let plan = el
-        .actors
-        .compaction_actor
-        .check_manual_compaction(&el.state)?
-        .expect("real cloud plan");
-    let cf_id = plan.cf_id;
-    let inputs = plan.input_files.clone();
-    el.launch_compaction(plan)?;
-    finalized
-        .recv_timeout(TEST_WAIT)
-        .expect("compute pause after real finalization");
-    el.state.set_compaction_enabled(false);
-    force_next_reservation_block(&mut el, cf_id);
-    let bound_before = el.state.sst_names.reserved_through[&cf_id];
-    let sequence = acknowledge_put(&mut el, cf_id, 91_311)?;
+    crate::failpoints::with_read_gate(|| {
+        // Arrange: force a genuine durable name-block mirror before building.
+        let (mut el, worker, _) = cloud_debt(4)?;
+        el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
+        let mut metadata = metadata_fixture(&mut el)?;
+        let (mut compute_release, finalized) = paused_compactor::install(&mut el);
+        let plan = el
+            .actors
+            .compaction_actor
+            .check_manual_compaction(&el.state)?
+            .expect("real cloud plan");
+        let cf_id = plan.cf_id;
+        let inputs = plan.input_files.clone();
+        el.launch_compaction(plan)?;
+        finalized
+            .recv_timeout(TEST_WAIT)
+            .expect("compute pause after real finalization");
+        el.state.set_compaction_enabled(false);
+        force_next_reservation_block(&mut el, cf_id);
+        let bound_before = el.state.sst_names.reserved_through[&cf_id];
+        let sequence = acknowledge_put(&mut el, cf_id, 91_311)?;
 
-    // Act: the event loop owns name reservation before the worker's result.
-    let response = submit_manual_flush(&mut el, cf_id, 91_312);
-    let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
-    let (name, sst_seq, build) = receive_named_build(&mut el, flush_id);
-    metadata.backend.armed.store(true, Ordering::Release);
-    compute_release.release();
-    complete_compaction(&mut el, &worker);
-    metadata
-        .reached
-        .recv_timeout(TEST_WAIT)
-        .expect("actual publisher GET held");
-    let names_before = name_work_snapshot(&el, &metadata, cf_id)?;
-    el.handle_flush_worker_result(build);
-    let independently_publishing =
-        el.state
-            .immutable_flush_by_id(flush_id)
-            .is_some_and(|(_, flush)| {
-                flush.phase == crate::runtime::state::ImmutableFlushPhase::Publishing
-                    && flush.failures == 0
-            });
-    let identity_unchanged = assigned_name(&el, flush_id) == Some((name.clone(), sst_seq));
-    let names_after = name_work_snapshot(&el, &metadata, cf_id)?;
-    let inputs_retained = inputs
-        .iter()
-        .all(|input| remote_sst_path_for_test(&el, input).exists());
-    let no_early_ok = response.try_recv().is_err();
-    metadata.release.release();
-    settle_owned_work(&mut el, &worker);
+        // Act: the event loop owns name reservation before the worker's result.
+        let response = submit_manual_flush(&mut el, cf_id, 91_312);
+        let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
+        let (name, sst_seq, build) = receive_named_build(&mut el, flush_id);
+        metadata.backend.armed.store(true, Ordering::Release);
+        compute_release.release();
+        complete_compaction(&mut el, &worker);
+        metadata
+            .reached
+            .recv_timeout(TEST_WAIT)
+            .expect("actual publisher GET held");
+        let names_before = name_work_snapshot(&el, &metadata, cf_id)?;
+        el.handle_flush_worker_result(build);
+        let independently_publishing =
+            el.state
+                .immutable_flush_by_id(flush_id)
+                .is_some_and(|(_, flush)| {
+                    flush.phase == crate::runtime::state::ImmutableFlushPhase::Publishing
+                        && flush.failures == 0
+                });
+        let identity_unchanged = assigned_name(&el, flush_id) == Some((name.clone(), sst_seq));
+        let names_after = name_work_snapshot(&el, &metadata, cf_id)?;
+        let inputs_retained = inputs
+            .iter()
+            .all(|input| remote_sst_path_for_test(&el, input).exists());
+        let no_early_ok = response.try_recv().is_err();
+        metadata.release.release();
+        settle_owned_work(&mut el, &worker);
 
-    // Assert: all actual workers were released before the safety assertions.
-    assert!(names_before.bound > bound_before && sst_seq == bound_before);
-    assert_eq!(names_after, names_before);
-    assert!(independently_publishing && identity_unchanged && inputs_retained && no_early_ok);
-    assert!(matches!(
-        response.recv_timeout(TEST_WAIT),
-        Ok(RuntimeResponse::Ok { request_id: 91_312 })
-    ));
-    assert_acknowledged_and_recovered_rows(&el, cf_id, sequence);
-    assert_eq!(el.state.flush_metrics.publish_count, 1);
-    assert_committed_files(&el, &metadata, cf_id, &name)
+        // Assert: all actual workers were released before the safety assertions.
+        assert!(names_before.bound > bound_before && sst_seq == bound_before);
+        assert_eq!(names_after, names_before);
+        assert!(independently_publishing && identity_unchanged && inputs_retained && no_early_ok);
+        assert!(matches!(
+            response.recv_timeout(TEST_WAIT),
+            Ok(RuntimeResponse::Ok { request_id: 91_312 })
+        ));
+        assert_acknowledged_and_recovered_rows(&el, cf_id, sequence);
+        assert_eq!(el.state.flush_metrics.publish_count, 1);
+        assert_committed_files(&el, &metadata, cf_id, &name)
+    })
 }
 
 #[test]
 fn should_admit_compaction_completion_while_manual_flush_provider_task_is_owned() -> MidgeResult<()>
 {
-    // Arrange
-    let (mut el, worker, _) = cloud_debt(4)?;
-    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
-    let metadata = metadata_fixture(&mut el)?;
-    let (mut compute_release, finalized) = paused_compactor::install(&mut el);
-    let plan = el
-        .actors
-        .compaction_actor
-        .check_manual_compaction(&el.state)?
-        .expect("real cloud plan");
-    let cf_id = plan.cf_id;
-    let inputs = plan.input_files.clone();
-    el.launch_compaction(plan)?;
-    finalized
-        .recv_timeout(TEST_WAIT)
-        .expect("real compute pause");
-    el.state.set_compaction_enabled(false);
-    let sequence = acknowledge_put(&mut el, cf_id, 91_313)?;
+    crate::failpoints::with_read_gate(|| {
+        // Arrange
+        let (mut el, worker, _) = cloud_debt(4)?;
+        el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
+        let metadata = metadata_fixture(&mut el)?;
+        let (mut compute_release, finalized) = paused_compactor::install(&mut el);
+        let plan = el
+            .actors
+            .compaction_actor
+            .check_manual_compaction(&el.state)?
+            .expect("real cloud plan");
+        let cf_id = plan.cf_id;
+        let inputs = plan.input_files.clone();
+        el.launch_compaction(plan)?;
+        finalized
+            .recv_timeout(TEST_WAIT)
+            .expect("real compute pause");
+        el.state.set_compaction_enabled(false);
+        let sequence = acknowledge_put(&mut el, cf_id, 91_313)?;
 
-    // Act: the flush keeps its upload owner after releasing its local turn.
-    let response = submit_manual_flush(&mut el, cf_id, 91_314);
-    let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
-    let (name, _) = assigned_name(&el, flush_id).expect("canonical identity before build");
-    let build = el
-        .pipeline
-        .flush_worker_result_rx
-        .recv_timeout(TEST_WAIT)
-        .expect("actual Build");
-    assert!(matches!(build, FlushWorkerResult::Build(_)));
-    el.handle_flush_worker_result(build);
-    let flush_owner = ManifestPublicationOwner::Flush { flush_id };
-    let local_turn_released = !el.publication.publication_gate.is_owned_by(&flush_owner);
-    compute_release.release();
-    complete_compaction(&mut el, &worker);
-    let completion_admitted = el.publication.publication_gate.deferred_messages_len() == 0;
-    let compaction_publication = el.publication.compaction_publication.get().is_some();
-    let inputs_retained = inputs
-        .iter()
-        .all(|input| remote_sst_path_for_test(&el, input).exists());
-    let no_early_ok = response.try_recv().is_err();
-    settle_owned_work(&mut el, &worker);
+        // Act: the flush keeps its upload owner after releasing its local turn.
+        let response = submit_manual_flush(&mut el, cf_id, 91_314);
+        let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
+        let (name, _) = assigned_name(&el, flush_id).expect("canonical identity before build");
+        let build = el
+            .pipeline
+            .flush_worker_result_rx
+            .recv_timeout(TEST_WAIT)
+            .expect("actual Build");
+        assert!(matches!(build, FlushWorkerResult::Build(_)));
+        el.handle_flush_worker_result(build);
+        let flush_owner = ManifestPublicationOwner::Flush { flush_id };
+        let local_turn_released = !el.publication.publication_gate.is_owned_by(&flush_owner);
+        compute_release.release();
+        complete_compaction(&mut el, &worker);
+        let completion_admitted = el.publication.publication_gate.deferred_messages_len() == 0;
+        let compaction_publication = el.publication.compaction_publication.get().is_some();
+        let inputs_retained = inputs
+            .iter()
+            .all(|input| remote_sst_path_for_test(&el, input).exists());
+        let no_early_ok = response.try_recv().is_err();
+        settle_owned_work(&mut el, &worker);
 
-    // Assert
-    assert!(
-        local_turn_released
-            && completion_admitted
-            && compaction_publication
-            && inputs_retained
-            && no_early_ok
-    );
-    assert!(matches!(
-        response.recv_timeout(TEST_WAIT),
-        Ok(RuntimeResponse::Ok { request_id: 91_314 })
-    ));
-    assert_acknowledged_and_recovered_rows(&el, cf_id, sequence);
-    assert_eq!(el.state.flush_metrics.publish_count, 1);
-    assert_committed_files(&el, &metadata, cf_id, &name)
+        // Assert
+        assert!(
+            local_turn_released
+                && completion_admitted
+                && compaction_publication
+                && inputs_retained
+                && no_early_ok
+        );
+        assert!(matches!(
+            response.recv_timeout(TEST_WAIT),
+            Ok(RuntimeResponse::Ok { request_id: 91_314 })
+        ));
+        assert_acknowledged_and_recovered_rows(&el, cf_id, sequence);
+        assert_eq!(el.state.flush_metrics.publish_count, 1);
+        assert_committed_files(&el, &metadata, cf_id, &name)
+    })
 }
 
 fn schedule_automatic_flush(el: &mut EventLoop, cf_id: u32) -> MidgeResult<u64> {
@@ -436,124 +440,130 @@ fn schedule_automatic_flush(el: &mut EventLoop, cf_id: u32) -> MidgeResult<u64> 
 #[test]
 fn should_reuse_automatic_flush_name_when_compaction_publication_wins_build_race() -> MidgeResult<()>
 {
-    // Arrange: ordinary flush debt must reserve its name beside a real compute owner.
-    let (mut el, worker, _) = cloud_debt(4)?;
-    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
-    let mut metadata = metadata_fixture(&mut el)?;
-    let (mut compute_release, finalized) = paused_compactor::install(&mut el);
-    let plan = el
-        .actors
-        .compaction_actor
-        .check_manual_compaction(&el.state)?
-        .expect("real cloud plan");
-    let cf_id = plan.cf_id;
-    let inputs = plan.input_files.clone();
-    el.launch_compaction(plan)?;
-    finalized
-        .recv_timeout(TEST_WAIT)
-        .expect("actual compute pause");
-    el.state.set_compaction_enabled(false);
-    force_next_reservation_block(&mut el, cf_id);
-    let bound_before = el.state.sst_names.reserved_through[&cf_id];
-    let sequence = acknowledge_put(&mut el, cf_id, 91_415)?;
+    crate::failpoints::with_read_gate(|| {
+        // Arrange: ordinary flush debt must reserve its name beside a real compute owner.
+        let (mut el, worker, _) = cloud_debt(4)?;
+        el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
+        let mut metadata = metadata_fixture(&mut el)?;
+        let (mut compute_release, finalized) = paused_compactor::install(&mut el);
+        let plan = el
+            .actors
+            .compaction_actor
+            .check_manual_compaction(&el.state)?
+            .expect("real cloud plan");
+        let cf_id = plan.cf_id;
+        let inputs = plan.input_files.clone();
+        el.launch_compaction(plan)?;
+        finalized
+            .recv_timeout(TEST_WAIT)
+            .expect("actual compute pause");
+        el.state.set_compaction_enabled(false);
+        force_next_reservation_block(&mut el, cf_id);
+        let bound_before = el.state.sst_names.reserved_through[&cf_id];
+        let sequence = acknowledge_put(&mut el, cf_id, 91_415)?;
 
-    // Act: hold the real conditional publisher before dispatching the flush build.
-    let flush_id = schedule_automatic_flush(&mut el, cf_id)?;
-    let (name, sst_seq, build) = receive_named_build(&mut el, flush_id);
-    metadata.backend.armed.store(true, Ordering::Release);
-    compute_release.release();
-    complete_compaction(&mut el, &worker);
-    metadata
-        .reached
-        .recv_timeout(TEST_WAIT)
-        .expect("actual publisher GET held");
-    let names_before = name_work_snapshot(&el, &metadata, cf_id)?;
-    el.handle_flush_worker_result(build);
-    let independently_publishing =
-        el.state
-            .immutable_flush_by_id(flush_id)
-            .is_some_and(|(_, flush)| {
-                flush.phase == crate::runtime::state::ImmutableFlushPhase::Publishing
-                    && flush.failures == 0
-            });
-    let identity_unchanged = assigned_name(&el, flush_id) == Some((name.clone(), sst_seq));
-    let names_after = name_work_snapshot(&el, &metadata, cf_id)?;
-    let inputs_retained = inputs
-        .iter()
-        .all(|input| remote_sst_path_for_test(&el, input).exists());
-    let no_early_release = el.state.get_cf(cf_id).unwrap().immutable_memtables.len() == 1;
-    let no_manual_waiter = el.publication.flush_barrier_waiters.is_empty();
-    metadata.release.release();
-    settle_owned_work(&mut el, &worker);
+        // Act: hold the real conditional publisher before dispatching the flush build.
+        let flush_id = schedule_automatic_flush(&mut el, cf_id)?;
+        let (name, sst_seq, build) = receive_named_build(&mut el, flush_id);
+        metadata.backend.armed.store(true, Ordering::Release);
+        compute_release.release();
+        complete_compaction(&mut el, &worker);
+        metadata
+            .reached
+            .recv_timeout(TEST_WAIT)
+            .expect("actual publisher GET held");
+        let names_before = name_work_snapshot(&el, &metadata, cf_id)?;
+        el.handle_flush_worker_result(build);
+        let independently_publishing =
+            el.state
+                .immutable_flush_by_id(flush_id)
+                .is_some_and(|(_, flush)| {
+                    flush.phase == crate::runtime::state::ImmutableFlushPhase::Publishing
+                        && flush.failures == 0
+                });
+        let identity_unchanged = assigned_name(&el, flush_id) == Some((name.clone(), sst_seq));
+        let names_after = name_work_snapshot(&el, &metadata, cf_id)?;
+        let inputs_retained = inputs
+            .iter()
+            .all(|input| remote_sst_path_for_test(&el, input).exists());
+        let no_early_release = el.state.get_cf(cf_id).unwrap().immutable_memtables.len() == 1;
+        let no_manual_waiter = el.publication.flush_barrier_waiters.is_empty();
+        metadata.release.release();
+        settle_owned_work(&mut el, &worker);
 
-    // Assert: the same automatic output survives both actual metadata publications.
-    assert!(names_before.bound > bound_before && sst_seq == bound_before);
-    assert_eq!(names_after, names_before);
-    assert!(independently_publishing && identity_unchanged && inputs_retained && no_early_release);
-    assert!(no_manual_waiter && el.publication.flush_barrier_waiters.is_empty());
-    assert!(el.state.immutable_flush_by_id(flush_id).is_none());
-    assert_acknowledged_and_recovered_rows(&el, cf_id, sequence);
-    assert_eq!(el.state.flush_metrics.publish_count, 1);
-    assert_committed_files(&el, &metadata, cf_id, &name)
+        // Assert: the same automatic output survives both actual metadata publications.
+        assert!(names_before.bound > bound_before && sst_seq == bound_before);
+        assert_eq!(names_after, names_before);
+        assert!(
+            independently_publishing && identity_unchanged && inputs_retained && no_early_release
+        );
+        assert!(no_manual_waiter && el.publication.flush_barrier_waiters.is_empty());
+        assert!(el.state.immutable_flush_by_id(flush_id).is_none());
+        assert_acknowledged_and_recovered_rows(&el, cf_id, sequence);
+        assert_eq!(el.state.flush_metrics.publish_count, 1);
+        assert_committed_files(&el, &metadata, cf_id, &name)
+    })
 }
 
 #[test]
 fn should_admit_compaction_completion_while_automatic_flush_provider_task_is_owned(
 ) -> MidgeResult<()> {
-    // Arrange: use actual compute and provider metadata, without a flush request.
-    let (mut el, worker, _) = cloud_debt(4)?;
-    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
-    let metadata = metadata_fixture(&mut el)?;
-    let (mut compute_release, finalized) = paused_compactor::install(&mut el);
-    let plan = el
-        .actors
-        .compaction_actor
-        .check_manual_compaction(&el.state)?
-        .expect("real cloud plan");
-    let cf_id = plan.cf_id;
-    let inputs = plan.input_files.clone();
-    el.launch_compaction(plan)?;
-    finalized
-        .recv_timeout(TEST_WAIT)
-        .expect("actual compute pause");
-    el.state.set_compaction_enabled(false);
-    let sequence = acknowledge_put(&mut el, cf_id, 91_416)?;
+    crate::failpoints::with_read_gate(|| {
+        // Arrange: use actual compute and provider metadata, without a flush request.
+        let (mut el, worker, _) = cloud_debt(4)?;
+        el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
+        let metadata = metadata_fixture(&mut el)?;
+        let (mut compute_release, finalized) = paused_compactor::install(&mut el);
+        let plan = el
+            .actors
+            .compaction_actor
+            .check_manual_compaction(&el.state)?
+            .expect("real cloud plan");
+        let cf_id = plan.cf_id;
+        let inputs = plan.input_files.clone();
+        el.launch_compaction(plan)?;
+        finalized
+            .recv_timeout(TEST_WAIT)
+            .expect("actual compute pause");
+        el.state.set_compaction_enabled(false);
+        let sequence = acknowledge_put(&mut el, cf_id, 91_416)?;
 
-    // Act: the automatic flush keeps its upload owner after its local turn.
-    let flush_id = schedule_automatic_flush(&mut el, cf_id)?;
-    let assigned = assigned_name(&el, flush_id);
-    if assigned.is_none() {
+        // Act: the automatic flush keeps its upload owner after its local turn.
+        let flush_id = schedule_automatic_flush(&mut el, cf_id)?;
+        let assigned = assigned_name(&el, flush_id);
+        if assigned.is_none() {
+            compute_release.release();
+            settle_owned_work(&mut el, &worker);
+            panic!("ordinary due flush must reserve its canonical identity during compute");
+        }
+        let (name, _) = assigned.expect("automatic identity before build");
+        let build = el
+            .pipeline
+            .flush_worker_result_rx
+            .recv_timeout(TEST_WAIT)
+            .expect("actual automatic flush Build");
+        assert!(matches!(build, FlushWorkerResult::Build(_)));
+        el.handle_flush_worker_result(build);
+        let flush_owner = ManifestPublicationOwner::Flush { flush_id };
+        let local_turn_released = !el.publication.publication_gate.is_owned_by(&flush_owner);
         compute_release.release();
+        complete_compaction(&mut el, &worker);
+        let completion_admitted = el.publication.publication_gate.deferred_messages_len() == 0;
+        let compaction_publication = el.publication.compaction_publication.get().is_some();
+        let inputs_retained = inputs
+            .iter()
+            .all(|input| remote_sst_path_for_test(&el, input).exists());
+        let no_early_release = el.state.get_cf(cf_id).unwrap().immutable_memtables.len() == 1;
+        let no_manual_waiter = el.publication.flush_barrier_waiters.is_empty();
         settle_owned_work(&mut el, &worker);
-        panic!("ordinary due flush must reserve its canonical identity during compute");
-    }
-    let (name, _) = assigned.expect("automatic identity before build");
-    let build = el
-        .pipeline
-        .flush_worker_result_rx
-        .recv_timeout(TEST_WAIT)
-        .expect("actual automatic flush Build");
-    assert!(matches!(build, FlushWorkerResult::Build(_)));
-    el.handle_flush_worker_result(build);
-    let flush_owner = ManifestPublicationOwner::Flush { flush_id };
-    let local_turn_released = !el.publication.publication_gate.is_owned_by(&flush_owner);
-    compute_release.release();
-    complete_compaction(&mut el, &worker);
-    let completion_admitted = el.publication.publication_gate.deferred_messages_len() == 0;
-    let compaction_publication = el.publication.compaction_publication.get().is_some();
-    let inputs_retained = inputs
-        .iter()
-        .all(|input| remote_sst_path_for_test(&el, input).exists());
-    let no_early_release = el.state.get_cf(cf_id).unwrap().immutable_memtables.len() == 1;
-    let no_manual_waiter = el.publication.flush_barrier_waiters.is_empty();
-    settle_owned_work(&mut el, &worker);
 
-    // Assert: independent captures retain both accepted rows and input proofs.
-    assert!(local_turn_released && completion_admitted && compaction_publication);
-    assert!(inputs_retained && no_early_release);
-    assert!(no_manual_waiter && el.publication.flush_barrier_waiters.is_empty());
-    assert!(el.state.immutable_flush_by_id(flush_id).is_none());
-    assert_acknowledged_and_recovered_rows(&el, cf_id, sequence);
-    assert_eq!(el.state.flush_metrics.publish_count, 1);
-    assert_committed_files(&el, &metadata, cf_id, &name)
+        // Assert: independent captures retain both accepted rows and input proofs.
+        assert!(local_turn_released && completion_admitted && compaction_publication);
+        assert!(inputs_retained && no_early_release);
+        assert!(no_manual_waiter && el.publication.flush_barrier_waiters.is_empty());
+        assert!(el.state.immutable_flush_by_id(flush_id).is_none());
+        assert_acknowledged_and_recovered_rows(&el, cf_id, sequence);
+        assert_eq!(el.state.flush_metrics.publish_count, 1);
+        assert_committed_files(&el, &metadata, cf_id, &name)
+    })
 }
