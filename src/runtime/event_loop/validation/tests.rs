@@ -397,18 +397,63 @@ fn assert_intervening_flushed_write_is_seen(
 #[test]
 fn should_retry_detached_validation_after_earlier_pending_group_becomes_visible() -> MidgeResult<()>
 {
+    // Arrange
+    let checked = request(94_601, b"conflict", true);
+
+    // Act and Assert
+    assert_pending_group_validation_rejects(checked, |error| {
+        matches!(error, MidgeError::WriteConflict(_))
+    })
+}
+
+#[test]
+fn should_retry_detached_insert_only_check_after_earlier_pending_group_becomes_visible(
+) -> MidgeResult<()> {
+    // Arrange
+    let mut checked = request(94_601, b"conflict", false);
+    if let TransactionOp::Put { insert_only, .. } = &mut checked.ops[0] {
+        *insert_only = true;
+    }
+
+    // Act and Assert
+    assert_pending_group_validation_rejects(
+        checked,
+        |error| matches!(error, MidgeError::InvalidArgument(message) if message == "key already exists"),
+    )
+}
+
+#[test]
+fn should_retry_detached_assertion_after_earlier_pending_group_becomes_visible() -> MidgeResult<()>
+{
+    // Arrange
+    let mut checked = request(94_601, b"unrelated", false);
+    checked.assertions.push(crate::runtime::KeyAssertion {
+        cf_id: 0,
+        key: Bytes::from_static(b"conflict"),
+    });
+
+    // Act and Assert
+    assert_pending_group_validation_rejects(checked, |error| {
+        matches!(error, MidgeError::WriteConflict(_))
+    })
+}
+
+fn assert_pending_group_validation_rejects(
+    mut checked: ApplyTransactionRequest,
+    expected_error: fn(&MidgeError) -> bool,
+) -> MidgeResult<()> {
     // Arrange: a caller's detached read starts at the fully applied seed cut.
     let _guard = crate::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
-    apply_and_flush(&mut event_loop, request(94_600, b"seed", false));
+    let checked_id = checked.request_id;
+    apply_and_flush(&mut event_loop, request(checked_id - 1, b"seed", false));
     event_loop.pipeline.inline_flush_worker = false;
     let validation = HeldCallback::first("midge::validation::before_snapshot_reads");
     let sync = HeldCallback::first("midge::wal::before_physical_sync");
     let checked_response = event_loop
         .routing
         .router
-        .register(94_601, "pending conflict check");
-    let mut checked = request(94_601, b"conflict", true);
+        .register(checked_id, "pending checked transaction");
     checked.start_sequence = Some(3);
     WalCoordinator::apply_transaction(&mut event_loop, &crossbeam::channel::never(), checked, None);
     validation
@@ -418,14 +463,14 @@ fn should_retry_detached_validation_after_earlier_pending_group_becomes_visible(
     let writer_response = event_loop
         .routing
         .router
-        .register(94_602, "earlier strict group");
+        .register(checked_id + 1, "earlier strict group");
 
     // Act: the blind writer allocates the earlier WAL unit and waits in sync.
     // The completed old proof must queue without acknowledging the caller.
     WalCoordinator::apply_transaction(
         &mut event_loop,
         &crossbeam::channel::never(),
-        request(94_602, b"conflict", false),
+        request(checked_id + 1, b"conflict", false),
         None,
     );
     wait_for_stage(&mut event_loop, &sync.reached);
@@ -445,8 +490,8 @@ fn should_retry_detached_validation_after_earlier_pending_group_becomes_visible(
     let writer = settle_validation_request(&mut event_loop, &writer_response);
     let checked = settle_validation_request(&mut event_loop, &checked_response);
 
-    // Assert: the actual earlier group is whole before the retry can reject
-    // the caller. Its rejected operation allocates no newer sequence.
+    // Assert: the earlier group is whole before retry; rejection allocates no
+    // later sequence and preserves the typed outcome for this check.
     assert!(matches!(
         writer,
         RuntimeResponse::TransactionApplied {
@@ -454,13 +499,10 @@ fn should_retry_detached_validation_after_earlier_pending_group_becomes_visible(
             ..
         }
     ));
-    assert!(matches!(
-        checked,
-        RuntimeResponse::Error {
-            error: MidgeError::WriteConflict(_),
-            ..
-        }
-    ));
+    assert!(
+        matches!(&checked, RuntimeResponse::Error { error, .. } if expected_error(error)),
+        "unexpected checked transaction response: {checked:?}"
+    );
     assert!(validation.calls.load(Ordering::SeqCst) >= 2);
     assert_eq!(event_loop.state.applied_sequence, 6);
     assert_eq!(event_loop.state.sequence, 6);
