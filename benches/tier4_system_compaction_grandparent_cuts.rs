@@ -1,6 +1,6 @@
 //! Tier 4 - production-default grandparent overlap compaction workload.
 //!
-//! Setup compacts a deterministic 343 MiB logical dataset into the default
+//! Setup compacts a deterministic 364 MiB logical dataset into the default
 //! L2 target. The measured phase overwrites a fixed uniform-random sample,
 //! flushes, and compacts it. The output-byte metric is the compaction output
 //! counter delta only; it excludes flush bytes and is not total physical write
@@ -18,7 +18,7 @@ use std::time::Instant;
 
 const BENCHMARK: &str = "tier4_system_compaction_grandparent_cuts";
 const SEED: u64 = 0x9480_2026_1006;
-const BASE_KEYS: usize = 2_500_000;
+const BASE_KEYS: usize = 2_650_000;
 const UPDATE_KEYS: usize = 550_000;
 const KEY_BYTES: usize = 16;
 const VALUE_BYTES: usize = 128;
