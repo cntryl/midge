@@ -995,7 +995,7 @@ fn test_manifest_l0_file_meta(name: &str, largest_seq: u64) -> crate::metadata::
     }
 }
 
-fn write_runtime_l0_sst_for_test(
+pub(super) fn write_runtime_l0_sst_for_test(
     event_loop: &EventLoop,
     name: &str,
     largest_seq: u64,

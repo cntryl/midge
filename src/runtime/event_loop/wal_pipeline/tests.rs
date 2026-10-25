@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::{ConflictPolicy, TestRuntimeMsg};
+use crate::sst::read_path_metrics::SstReadObserver as _;
 use bytes::Bytes;
 use crossbeam::channel::{Receiver, Sender};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -194,6 +195,64 @@ fn should_preserve_ordered_visibility_when_strict_fsync_is_held() -> MidgeResult
     // Act
     assert_ordered_progress_when_held(held_stage)?;
     // Assert: propagate the complete prefix-order fixture's assertions.
+    Ok(())
+}
+
+#[test]
+fn should_read_cold_sst_at_applied_cut_while_strict_fsync_is_held() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let seed =
+        super::super::tests::write_runtime_l0_sst_for_test(&event_loop, "held-sync-seed.sst", 1);
+    event_loop.publish_flushed_sst(0, "held-sync-seed.sst", 1, Some(seed), None)?;
+    event_loop.state.sequence = 1;
+    event_loop.state.applied_sequence = 1;
+    let initial_misses = event_loop
+        .state
+        .diagnostics
+        .sst_metrics()
+        .reader_cache_misses();
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let strict = event_loop.routing.router.register(94_010, "strict group");
+    let begin = event_loop.routing.router.register(94_011, "cold SST read");
+    let empty = crossbeam::channel::never();
+
+    // Act: begin a snapshot and perform a point read while the WAL writer is
+    // stopped in physical sync.
+    event_loop.process_one(write(94_010, &[b"strict-only"], true), &empty);
+    wait_for_hold(&mut event_loop, &held);
+    event_loop.process_one(
+        RuntimeMsg::BeginTransaction {
+            request_id: 94_011,
+            cf_id: 0,
+        },
+        &empty,
+    );
+    let (read_cut, snapshot) = begin_snapshot(&begin);
+    let seed_value = snapshot.get(b"key-0001", read_cut)?;
+    let strict_value = snapshot.get(b"strict-only", read_cut)?;
+
+    // Assert: the cold SST read completed against the last applied cut while
+    // the strict write remained unpublished.
+    assert_eq!(read_cut, 1);
+    assert_eq!(seed_value, Some(b"value".to_vec()));
+    assert_eq!(strict_value, None);
+    assert!(
+        event_loop
+            .state
+            .diagnostics
+            .sst_metrics()
+            .reader_cache_misses()
+            > initial_misses
+    );
+    assert_eq!(event_loop.state.applied_sequence, read_cut);
+    assert!(strict.try_recv().is_err());
+
+    held.release.send(()).expect("release held sync");
+    let applied = applied_cut(&mut event_loop, &strict);
+    assert!(applied > read_cut);
     Ok(())
 }
 
