@@ -87,6 +87,7 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
         match &error {
             CloudError::NotFound(_) => StorageErrorKind::NotFound,
             CloudError::PreconditionFailed(_) => StorageErrorKind::PreconditionFailed,
+            CloudError::LocalReadAdmission(_) => StorageErrorKind::ResourceLimit,
             #[cfg(any(test, feature = "cloud-common"))]
             CloudError::Unauthorized(_) => StorageErrorKind::Unauthorized,
             CloudError::Transport(_) => StorageErrorKind::Transport,

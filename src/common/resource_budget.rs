@@ -302,6 +302,13 @@ impl Drop for SharedReservationCredit {
 }
 
 impl ResourceReservation {
+    /// Whether this attempt was refused by a reservation in this same pool
+    /// hierarchy, even if that owner finished before error classification.
+    pub(crate) fn admission_retryable(&self, error: &MidgeError) -> bool {
+        ResourceContention::from_error(error)
+            .is_some_and(|contention| contention.is_for_pool(&self.budget))
+    }
+
     /// Transfer an existing charge without releasing or increasing any level
     /// of its pool hierarchy. The two resulting owners release independently.
     /// Borrowed credit stays with this source; it is never copied to the split.

@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
+#[path = "tests/adapter_admission.rs"]
+mod adapter_admission;
+
 struct HeldManifestBackend {
     inner: Arc<MockCloudBackend>,
     hold: AtomicBool,
@@ -242,7 +245,11 @@ fn should_resolve_successful_unknown_pointer_cas_in_small_pool_without_second_bo
     ));
     drop(store.occupied.lock().take());
     drop(cut);
-    assert_eq!(memory.used(), 0);
+    adapter_admission::wait_for_charge(
+        &memory,
+        0,
+        &OperationDeadline::from_budget(Duration::from_secs(5)),
+    );
 }
 
 impl Fixture {
@@ -347,13 +354,16 @@ fn should_account_owned_capture_bytes_until_the_source_owner_finishes() {
     assert!(source_charge > 4096);
     fixture.mirror(&cut).unwrap();
     assert_eq!(fixture.lock.pending_captures(), 0);
+    // Logical delivery can precede the adapter thread's actual owned tail.
+    let completion = OperationDeadline::from_budget(Duration::from_secs(5));
+    adapter_admission::wait_for_charge(&memory, source_charge, &completion);
     assert_eq!(
         memory.used(),
         source_charge,
         "a selected cut may still have a live source task"
     );
     drop(cut);
-    assert_eq!(memory.used(), 0);
+    adapter_admission::wait_for_charge(&memory, 0, &completion);
 }
 
 #[test]

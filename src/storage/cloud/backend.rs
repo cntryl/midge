@@ -102,6 +102,20 @@ fn operation_timeout_error(operation: &str) -> CloudError {
     CloudError::Timeout(format!("{operation} deadline exhausted"))
 }
 
+fn read_failure_event(key: &str, include_metadata: bool, error: CloudError) -> CloudEvent {
+    if include_metadata {
+        CloudEvent::GetWithMetadata {
+            key: key.into(),
+            result: Err(error),
+        }
+    } else {
+        CloudEvent::Get {
+            key: key.into(),
+            result: Err(error),
+        }
+    }
+}
+
 fn retain_read_callback(
     key: &str,
     include_metadata: bool,
@@ -114,19 +128,13 @@ fn retain_read_callback(
     match crate::storage::retained_callback::retain(callback.clone(), reservation) {
         Ok(retained) => Some(retained),
         Err(error) => {
-            let error = CloudError::Protocol(format!("retain cloud read completion: {error}"));
-            let event = if include_metadata {
-                CloudEvent::GetWithMetadata {
-                    key: key.into(),
-                    result: Err(error),
+            let error = match error {
+                crate::common::MidgeError::ResourceLimit(message) => {
+                    CloudError::LocalReadAdmission(message)
                 }
-            } else {
-                CloudEvent::Get {
-                    key: key.into(),
-                    result: Err(error),
-                }
+                error => CloudError::Protocol(format!("retain cloud read completion: {error}")),
             };
-            let _ = callback.send(event);
+            let _ = callback.send(read_failure_event(key, include_metadata, error));
             None
         }
     }
@@ -277,7 +285,6 @@ pub trait CloudReadCapability: Send + Sync {
             let _ = callback.send(event);
             return;
         }
-        let request_timeout = options.request.timeout();
         if let Some(range) = options.range {
             let Some(expected_identity) = options.expected_identity else {
                 let _ = callback.send(CloudEvent::GetRange {
@@ -319,11 +326,21 @@ pub trait CloudReadCapability: Send + Sync {
         let Some(callback) = retain_read_callback(
             key,
             options.include_metadata,
-            options.request.reservation,
+            options.request.reservation.take(),
             callback,
         ) else {
             return;
         };
+
+        let request_timeout = options.request.timeout();
+        if request_timeout.is_some_and(|timeout| timeout.is_zero()) {
+            let _ = callback.send(read_failure_event(
+                key,
+                options.include_metadata,
+                operation_timeout_error("GET admission"),
+            ));
+            return;
+        }
 
         self.submit_get_with_headers(
             key,
