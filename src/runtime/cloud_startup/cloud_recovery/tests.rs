@@ -1,6 +1,7 @@
 //! Focused cloud recovery tests.
 
 use super::*;
+use tracing_subscriber::layer::SubscriberExt;
 
 /// A real filesystem that refuses deletions, standing in for a disk that
 /// cannot discard a staged file.
@@ -212,5 +213,116 @@ fn should_probe_manifest_ssts_with_bounded_concurrency_when_opening_cloud_state(
         .iter()
         .zip(&files)
         .all(|(actual, expected)| actual.same_identity(expected)));
+    Ok(())
+}
+
+struct FailedInventoryProbe;
+
+impl crate::storage::inventory::ObjectInventory for FailedInventoryProbe {
+    fn object_size(&self, _key: &str, _scope: Option<&DeadlineScope>) -> MidgeResult<Option<u64>> {
+        Err(MidgeError::Internal(
+            "injected failed inventory probe".into(),
+        ))
+    }
+
+    fn keys_under(
+        &self,
+        _prefix: &str,
+        _scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Vec<String>> {
+        unreachable!("manifest inventory only probes referenced objects")
+    }
+}
+
+#[derive(Clone)]
+struct RecoveryWorkEventCounter(Arc<std::sync::atomic::AtomicUsize>);
+
+#[derive(Default)]
+struct RecoveryWorkStage(Option<String>);
+
+impl tracing::field::Visit for RecoveryWorkStage {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "stage" {
+            self.0 = Some(format!("{value:?}").trim_matches('"').to_owned());
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "stage" {
+            self.0 = Some(value.to_owned());
+        }
+    }
+}
+
+impl<S> tracing_subscriber::Layer<S> for RecoveryWorkEventCounter
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if event.metadata().target() != "midge::recovery::work" {
+            return;
+        }
+        let mut stage = RecoveryWorkStage::default();
+        event.record(&mut stage);
+        if stage.0.as_deref() == Some("sst_inventory") {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+}
+
+#[test]
+fn should_not_report_recovery_progress_when_salvage_retains_local_sst_after_failed_probe(
+) -> MidgeResult<()> {
+    // Arrange: salvage may retain a locally verified SST after an indeterminate
+    // cloud probe, but that failed probe is not completed recovery work.
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::try_new(temp.path(), false, RecoveryPolicy::Salvage)?;
+    let name = "000001.sst";
+    let path = crate::sst::fs::sst_key(name);
+    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&state.fs), 4096);
+    let mut writer = crate::sst::traits::SstFactory::create(&factory)?;
+    writer.add_with_meta(
+        b"key",
+        Some(b"value"),
+        7,
+        crate::types::EntryType::Put,
+        None,
+    )?;
+    crate::sst::fs::finish_writer_to_path(writer, std::path::Path::new(&path.0))?;
+    let bytes = crate::io::read_all(state.fs.as_ref(), &path)
+        .map_err(FsError::into_midge)?
+        .to_vec();
+    state
+        .manifest
+        .replace_files(vec![crate::metadata::FileMeta {
+            name: name.into(),
+            size_bytes: bytes.len() as u64,
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            ..Default::default()
+        }]);
+    let work_events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let subscriber =
+        tracing_subscriber::registry().with(RecoveryWorkEventCounter(Arc::clone(&work_events)));
+
+    // Act: the remote inventory fails, but salvage proves and retains the
+    // exact local SST. Observe only completed-work events from this call.
+    let result = tracing::subscriber::with_default(subscriber, || {
+        CloudStartupRecovery::validate_manifest_ssts_in_store(&mut state, &FailedInventoryProbe)
+    });
+
+    // Assert
+    result?;
+    assert!(state.opened_in_salvage_mode());
+    assert!(state.salvaged_local_ssts.contains(name));
+    assert_eq!(state.manifest.files.len(), 1);
+    assert_eq!(
+        work_events.load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "a failed inventory probe must not refresh recovery progress"
+    );
     Ok(())
 }
