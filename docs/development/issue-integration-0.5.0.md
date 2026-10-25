@@ -1,5 +1,33 @@
 # Local 0.5.0 issue integration
 
+## Current local follow-up checkpoint (2026-10-25)
+
+The active local integration branch is `work/0.5.0-issue-integration`, based
+on `b5d1bc7b38efea90bde2e243d49d2978e2dcdf7d`. Four small commits currently
+cover these slices:
+
+| Commit | Issue slice | Focused evidence | Remaining issue gates |
+| --- | --- | --- | --- |
+| `a53da5fc` | #948 narrows Fragment fallback to enabled grandparent output cuts | Regression was red before the fix; work partition 11/11 and picker 2/2 passed; Jev favored the change (0.82) | Tier 2 write-amplification measurement |
+| `8e8230c6` | #915 covers lost completion reconciliation at the same immutable upload key | Focused CloudStorage → HybridStorage production-path test passed (1/1) | Provider-specific checksum/multipart qualification and performance evidence |
+| `4e0499f2` | #940 routes Strict spilled transactions through ticketed asynchronous fsync and ordered apply | Held-fsync progress/visibility, post-sync recovery and sync-failure tests passed (3/3); spill workspace has its own retained bounded budget | Crash campaign, stale/duplicate receipt and rotation/spill/shutdown cases, and performance measurement |
+| `4cfbacb3` | #918 directly checks the legacy SST rejection boundary | Focused V4 fixture reader test passed (1/1) | Tier 4 footprint and #935 decode measurements |
+
+Jev judgments informed the design reviews; implementation source and behavior
+tests remain the correctness evidence. The #926 implementation was already
+present, so its eight focused ordering, proof, replay and recovery tests were
+executed and passed without a code change. #949's implementation was likewise
+already present; its focused writer/merge coverage is recorded in its issue,
+while the compaction CPU-per-MB comparison remains open. #907 was previously
+blocked on the async WAL ownership seam; it is being re-evaluated against
+`4e0499f2`.
+
+The live 0.5.0 milestone still has 28 open issues. #912 remains deliberately
+deferred to preserve clock-correction recovery. No issue is closed by these
+local commits, and no aggregate gate, benchmark campaign, PR or merge is
+claimed at this checkpoint. The historical checkpoints below describe earlier
+branches and qualifications; this section is the current local status.
+
 The user requested this workflow on 2026-10-24: one local branch,
 `work/0.5.0-issue-integration`, with small commits for the issues and one PR
 after the batch is complete. This supersedes the earlier per-issue PR train
