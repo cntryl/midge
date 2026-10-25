@@ -31,7 +31,7 @@ boundaries with the final outcome.
 
 The implementation-pass runtime/test source checkpoint was
 `0bb7f09df6eaadd92ebba6870434acc30ba3a69d`. Its initial evidence map and checks
-are historical; the final reference map is pinned to `4c7f25f6`, after the
+are historical; the final reference map is pinned to `ca560869`, after the
 review fixes recorded below.
 Validation at that historical source checkpoint:
 
@@ -318,7 +318,7 @@ Engine reopen. The original public retry/restart case passes unchanged
 (0.48 s), the flush pipeline group passes 40/40, and runtime state passes 86/86.
 Strict all-target/all-feature pedantic Clippy passes (19.86 s).
 
-This is the final code/reference checkpoint. Earlier local pinned-Sqrzl
+That is the FIFO code checkpoint. Earlier local pinned-Sqrzl
 campaigns remain attributed to `f27419f9` and their actual clean discovery
 head `9a87959f`; they are not relabeled as results for the FIFO correction.
 The existing hosted provider jobs each run provider contracts, full engine,
@@ -326,6 +326,50 @@ takeover and discovery commands against Sqrzl. Their final exact-head results
 and observed container digest are recorded on PR #983. The workflows are
 unchanged; their `latest` image and the separately pinned local campaign are
 distinct evidence boundaries.
+
+### Final callback-admission and fixture qualification
+
+At hosted head `b826de1d`, all three provider jobs passed their complete native
+campaigns for the FIFO runtime. Core passed 3,642 library tests and failed one
+128 KiB metadata capture accounting case. Its source charge was 6,586 bytes;
+the prior physical completion adapter still correctly owned another 65,536
+bytes when an exact GET needed its own adapter. The local admission refusal
+was incorrectly converted into a provider protocol error, losing the existing
+owning-pool contention identity. This confirmed liveness finding is tracked
+under #910; releasing the old charge early or enlarging the pool is invalid.
+
+Commit `ca5608695457780be0570c7877f7176950a27e09` preserves a typed, definitely
+unsubmitted local read admission error across cloud/storage boundaries.
+Only an exact GET blocked by its own reservation pool can retry, under the
+same absolute deadline. Its accepted provider timeout is sampled after actual
+adapter admission. Static oversize, foreign-pool and genuine protocol failures
+remain terminal; PUT/CAS and whole-publication retries are unchanged.
+
+The deterministic regression holds an actual generic completion adapter's
+64 KiB tail, reproducing the hosted refusal before the fix (RED, 0.06 s).
+After release, exactly one GET is accepted with a budget no greater than the
+original deadline's remaining allowance; no extra PUT occurs. The original
+128 KiB cap and physical ownership remain unchanged. Expiry, static oversize,
+same-pool release races and foreign/protocol classification are covered.
+Metadata-cut tests pass 17/17 (1.63 s), existing read-deadline tests pass 4/4
+(0.07 s), and strict all-target/all-feature pedantic Clippy passes (4.92 s).
+Accounting assertions boundedly observe the real final callback tail before
+requiring exact source-only or zero usage; they do not release that tail.
+Jev evaluated the narrow admission decision, followed by source/test review.
+
+Two additional fixture slices preserve their original bounds and assertions.
+`755c3a03` scopes all four fault-free publication-order scenarios before timed
+worker/provider waits and records/reloads three seeded L0 identities before
+real move journals reference them. Those groups pass 4/4 and 5/5.
+`8a22aa4b` similarly scopes the two direct manual-flush scenarios through owned
+cleanup (2/2, 3.85 s). These repairs do not alter runtime behavior or move/replay
+validation. Their preceding failed local aggregates retain their source/log
+boundaries; the final full-suite result belongs to hosted exact-head CI.
+
+The final production and code/reference checkpoint is `ca560869`. Final
+aggregate, serial fault and complete hosted native results, including the
+observed Sqrzl image digest, are recorded on PR #983. Earlier successful
+campaigns remain attributed to their actual sources.
 
 The implementation retains Midge's ordered whole-unit applied prefix, exact
 WAL durable floors, storage-enforced epoch fencing and conservative physical
