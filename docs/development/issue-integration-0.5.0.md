@@ -866,7 +866,7 @@ cut; the shared staged-write overlay also covers earlier in-flight groups.
 Pipeline receipts and parked roots preserve ordered strict admission. No
 performance result is claimed until the issue-specific A/B gates are run.
 
-### #948: overlap partition slice implemented; Fragment narrowing pending
+### #948: overlap partition and Fragment narrowing implemented; write-amplification qualification pending
 
 Plans capture level+2 bounds and a configurable soft overlap-byte target
 (default 320 MiB in LeveledCompactionConfig; zero disables). Output merging
@@ -878,12 +878,16 @@ unknown legacy bounds can exceed the soft target; the roller avoids splitting
 every key inside that same oversized span. Exclusive range ends may coincide
 with the following grandparent's first key without covering that key.
 
-Active tests cover feasible point layouts, repeated-key reduction, contiguous
-range coverage, and one oversized grandparent. Compilation reaches this code;
-the latest shared check stops in concurrent cloud-publication interface edits.
-Execution, A/B write amplification and narrowing the existing Fragment fallback
-remain pending. The fallback is retained conservatively for legacy or oversized
-source/target layouts while the new partition policy is qualified.
+Active tests cover feasible point layouts, repeated-key reduction, adjacent
+inclusive grandparent bounds around one indivisible key, contiguous range
+coverage, and one oversized grandparent. Focused work-partition, picker,
+production execute, cloud fragmentation/recovery, and overlap-repair tests have
+passed in the integration work. The remaining owning gate is AC2: a uniform-
+random A/B row reporting compaction-output bytes per logical input byte. The
+metric excludes flush bytes; the preregistered target makes no minimum byte
+improvement claim and keeps the Tier 4 15% throughput guardrail. The legacy
+fallback remains for disabled policy or layouts the overlap budget cannot
+repair.
 
 ### #927 and #915 receipt slice: implemented candidates
 
