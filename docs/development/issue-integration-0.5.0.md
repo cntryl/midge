@@ -1283,8 +1283,14 @@ campaign.
 removing the intermediate owned-value allocation/copy. Compressed values keep
 the existing owned LZ4 output. Active tests check borrowed pointer identity,
 reference LZ4 bytes/replay and a legacy-owned versus borrowed frame/CRC matrix.
-Test targets compile (the shared snapshot still reported unfinished #908
-warnings); these tests and allocation/A/B measurements have not executed.
+The focused `cargo test --locked --test wal_encoding_allocations
+--features internal-testing -- --nocapture` run passed. Its isolated test-binary
+allocator observes zero allocations across 16 preallocated production encoder
+calls and exactly one owned intermediate allocation per 4 KiB value in the
+legacy reference construction; emitted payload bytes match. This measures the
+encoder construction boundary, not full-commit allocations or copied-byte
+volume. Before/after per-commit measurements and all three A/B pair deltas
+remain unqualified.
 The preregistered construction target is one allocation and 4096 copied value
 bytes on the incompressible 4 KiB fixture; the existing rotation row is
 compressible and cannot establish that saving.
