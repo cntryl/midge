@@ -1445,3 +1445,22 @@ capture blocked by already-finished ownership. Two active tests cover capture
 and selected-body admission in exactly one-cut-sized pools. The invariant map
 refresh uses the final source checkpoint, including those tests and renamed
 proofs; its links and hashes establish source traceability, not execution.
+
+### #979: mutation evidence for added assurance regressions
+
+At source `736beb83391663eb154b69f53088c39d3e81215b`, each of the nine
+assurance regressions added for #979 failed under a relevant source mutant.
+The two WAL version tests rejected flipped header and payload version guards.
+The runtime-owner test rejected premature applied-cut publication; the live
+lease read test rejected unconditional cloud read fencing. Dropping positive
+recovery progress events independently failed the remote replay, inventory,
+journal replay and caller-scope tests. Crediting progress at range-read start
+failed the held-I/O test, and ignoring the phase-generation check failed the
+caller-scope isolation test. All mutants were reverted in an isolated
+temporary worktree.
+
+After restoration, the two version tests, runtime-owner test, live-lease read
+test and all five recovery-progress tests passed. This closes #979 AC1; the
+previously recorded map refresh and test-symbol resolution satisfy AC2. The
+mutation checks establish only the named regressions' detection of these
+specific defects.
