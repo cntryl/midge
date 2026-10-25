@@ -302,6 +302,87 @@ fn should_recover_exactly_once_when_append_races_paused_checkpoint_construction(
 
 #[cfg(feature = "failpoints")]
 #[test]
+fn should_recover_exactly_once_when_checkpoint_install_fails_after_concurrent_append(
+) -> MidgeResult<()> {
+    // Arrange: capture edit 1, pause after encoding, and commit edit 2 before
+    // injecting a failure before the snapshot's atomic rename.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let directory = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+    let store = Arc::new(ManifestStore::new(Arc::clone(&fs)));
+    let first = flush_edit(1);
+    let first_id = store.append(&first)?;
+    let mut captured = Manifest::default();
+    captured.apply_edit(&first)?;
+    assert!(captured.note_applied_journal_edit(first_id));
+
+    let (encoded_tx, encoded_rx) = crossbeam::channel::bounded(1);
+    let (release_tx, release_rx) = crossbeam::channel::bounded(1);
+    fail::cfg_callback(
+        "midge::manifest::after_captured_checkpoint_encoded",
+        move || {
+            encoded_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        },
+    )
+    .expect("pause after captured snapshot encoding");
+
+    let worker_store = Arc::clone(&store);
+    let worker_gate = crate::failpoints::worker_gate();
+    let worker = std::thread::spawn(move || {
+        worker_gate
+            .run(|| worker_store.save_captured_snapshot_for(Origin::CompactionBeforeGc, &captured))
+    });
+    encoded_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("checkpoint encoded captured bytes");
+    let second_id = store.append(&flush_edit(2))?;
+    fail::cfg(
+        "midge::manifest::inject_no_space_on_checkpoint_save",
+        "return",
+    )
+    .expect("fail snapshot staging before rename");
+
+    // Act: snapshot installation fails; the authoritative journal remains
+    // untouched and still contains both durable edits.
+    release_tx
+        .send(())
+        .expect("release checkpoint installation");
+    let checkpoint = worker.join().expect("join checkpoint worker");
+    fail::remove("midge::manifest::after_captured_checkpoint_encoded");
+    fail::remove("midge::manifest::inject_no_space_on_checkpoint_save");
+    scenario.teardown();
+
+    // Assert: strict cold recovery replays both committed edits exactly once.
+    let recovered =
+        ManifestPersistence::load_with_fs_and_policy(&fs, crate::config::RecoveryPolicy::Strict)
+            .map_err(MidgeError::RecoveryFailed)?;
+    assert!(checkpoint.is_err());
+    assert_eq!(recovered.edit_checkpoint_id, second_id);
+    assert_eq!(recovered.files.len(), 2);
+    assert_eq!(
+        recovered
+            .files
+            .iter()
+            .filter(|file| file.name == crate::cloud_layout::file_name(0, 0, 1))
+            .count(),
+        1
+    );
+    assert_eq!(
+        recovered
+            .files
+            .iter()
+            .filter(|file| file.name == crate::cloud_layout::file_name(0, 0, 2))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
 fn should_recover_exactly_once_when_tail_replacement_sync_fails_after_rename() -> MidgeResult<()> {
     // Arrange: append a newer committed edit while an immutable checkpoint is
     // paused, then fail the tail replacement's directory sync after rename.
