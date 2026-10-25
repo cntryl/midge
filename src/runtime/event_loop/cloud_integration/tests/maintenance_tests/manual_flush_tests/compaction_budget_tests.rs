@@ -431,9 +431,10 @@ impl BudgetFixture {
     }
 
     fn complete_actual_compute(&mut self) {
+        let observation = OperationDeadline::from_budget(FIXTURE_WAIT);
         let completion = self
             .compute
-            .recv_timeout(FIXTURE_WAIT)
+            .recv_timeout(observation.remaining())
             .expect("actual compute result");
         match &completion {
             RuntimeMsg::CompactionComplete {
@@ -448,6 +449,18 @@ impl BudgetFixture {
                 assert!(!self.outputs.is_empty(), "real finalized output identity");
             }
             actual => panic!("required successful real compute phase: {actual:?}"),
+        }
+        // The native wakeup precedes the pool's owned result ticket. The real
+        // loop polls that ticket; this phase fixture must await the same owner
+        // before dispatching once, without consuming any later publication.
+        // This fixture has one compute slot and only its first generation is
+        // accepted here, so any ready ticket belongs to this exact job.
+        while !self.el.actors.compaction_actor.has_ready_compute() {
+            assert!(
+                !observation.is_expired(),
+                "actual compute ticket must settle within its original observation bound"
+            );
+            std::thread::sleep(observation.remaining().min(Duration::from_millis(1)));
         }
         let (_, messages) = crossbeam::channel::unbounded();
         self.el.handle_runtime_msg(completion, &messages);
