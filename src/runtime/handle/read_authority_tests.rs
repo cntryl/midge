@@ -1,5 +1,6 @@
 use super::*;
 use std::sync::atomic::AtomicBool;
+use std::sync::Barrier;
 
 fn live_handle() -> (
     crate::runtime::Runtime,
@@ -44,6 +45,39 @@ fn should_discard_read_outcomes_when_lease_expires_during_the_read() {
             handle.ensure_read_authority(),
             Err(MidgeError::Fenced(_))
         ));
+    }
+}
+
+#[test]
+fn should_fence_read_when_authority_expires_while_fetch_is_blocked() {
+    // Arrange: keep the read inside its storage operation until another thread
+    // has expired its authority.
+    for outcome_kind in 0..3 {
+        let (_runtime, handle, validity, _) = live_handle();
+        let fetch_entered = Arc::new(Barrier::new(2));
+        let release_fetch = Arc::new(Barrier::new(2));
+        let worker_entered = Arc::clone(&fetch_entered);
+        let worker_release = Arc::clone(&release_fetch);
+
+        // Act: expiry happens concurrently while the fetch closure is blocked.
+        let read = std::thread::spawn(move || {
+            handle.read_with_authority(|| {
+                worker_entered.wait();
+                worker_release.wait();
+                match outcome_kind {
+                    0 => Ok(Some(42)),
+                    1 => Ok(None),
+                    _ => Err(MidgeError::NotFound),
+                }
+            })
+        });
+        fetch_entered.wait();
+        validity.expire_for_test();
+        release_fetch.wait();
+        let result = read.join().expect("blocked read thread should complete");
+
+        // Assert: stale rows, end-of-range and I/O errors are all suppressed.
+        assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
     }
 }
 
