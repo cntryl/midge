@@ -108,6 +108,53 @@ fn should_preserve_range_coverage_when_grandparent_boundaries_roll_outputs(
 }
 
 #[test]
+fn should_keep_indivisible_key_group_when_adjacent_grandparents_exceed_soft_limit(
+) -> crate::MidgeResult<()> {
+    // Arrange: both inclusive grandparent spans contain `d`, so even the
+    // smallest legal output for that key exceeds the configured soft limit.
+    let factory = source_factory(false)?;
+    let parents = [
+        parent("left", b"c", b"d", 10),
+        parent("right", b"d", b"e", 10),
+    ];
+    let mut plan = CompactionPlan::new(0, 0, 1).with_output_seq(951);
+    plan.add_test_source("source.sst");
+    plan.grandparent_overlap = GrandparentOverlap::from_files(parents.iter(), 10);
+
+    // Act
+    let outputs = execute_compaction(&plan, &factory, Path::new(""), None)?;
+
+    // Assert: the soft-limit exception does not split either version of `d`.
+    let mut d_outputs = Vec::new();
+    for name in &outputs {
+        let reader = factory.open(Path::new(name))?;
+        if let Some((_, state)) = reader
+            .scan_range_raw_state(Some(b"d"), Some(b"e"))?
+            .into_iter()
+            .find(|(key, _)| key.as_ref() == b"d")
+        {
+            d_outputs.push((name, state));
+        }
+    }
+    assert_eq!(d_outputs.len(), 1);
+    assert!(matches!(
+        &d_outputs[0].1,
+        crate::types::KeyState::Value(value, 2, _, _) if value.as_ref() == b"new"
+    ));
+    let d_overlap: u64 = parents
+        .iter()
+        .filter(|parent| {
+            parent.smallest_key.as_ref().unwrap().as_slice() <= b"d".as_slice()
+                && parent.largest_key.as_ref().unwrap().as_slice() >= b"d".as_slice()
+        })
+        .map(|parent| parent.size_bytes)
+        .sum();
+    assert_eq!(d_overlap, 20);
+    assert!(d_overlap > plan.grandparent_overlap.max_bytes);
+    Ok(())
+}
+
+#[test]
 fn should_allow_one_oversized_grandparent_without_splitting_every_key() -> crate::MidgeResult<()> {
     // Arrange
     let factory = source_factory(true)?;
