@@ -6,7 +6,7 @@
 //! counter delta only; it excludes flush bytes and is not total physical write
 //! amplification.
 
-use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions};
 use cntryl_stress::{
     stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
     StressContext,
@@ -25,6 +25,7 @@ const VALUE_BYTES: usize = 128;
 const LOGICAL_BYTES_PER_KEY: u64 = (KEY_BYTES + VALUE_BYTES) as u64;
 const WRITE_BATCH: usize = 2_000;
 const MIN_GRANDPARENT_OVERLAP_BYTES: u64 = 320 * 1024 * 1024;
+const WRITE_STALL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn data_path() -> PathBuf {
     let root = PathBuf::from("target/tmp");
@@ -63,18 +64,26 @@ fn shuffled_ids() -> Vec<u32> {
 
 fn write_keys(engine: &Engine, cf_id: u32, ids: &[u32], generation: u64) {
     for batch in ids.chunks(WRITE_BATCH) {
-        let mut transaction = engine
-            .begin_tx(cf_id, TransactionMode::ReadWrite)
-            .expect("begin benchmark write batch");
-        for id in batch {
-            let id = u64::from(*id);
-            transaction
-                .put(key(id).to_vec(), value(id, generation).to_vec(), None)
-                .expect("stage benchmark value");
+        loop {
+            let mut transaction = engine
+                .begin_tx(cf_id, TransactionMode::ReadWrite)
+                .expect("begin benchmark write batch");
+            for id in batch {
+                let id = u64::from(*id);
+                transaction
+                    .put(key(id).to_vec(), value(id, generation).to_vec(), None)
+                    .expect("stage benchmark value");
+            }
+            match transaction.commit(WriteOptions::buffered()) {
+                Ok(()) => break,
+                Err(MidgeError::WriteStall(_)) => {
+                    engine
+                        .wait_for_write_stall_clear(cf_id, WRITE_STALL_WAIT)
+                        .expect("wait for production write stall to clear");
+                }
+                Err(error) => panic!("commit benchmark write batch: {error}"),
+            }
         }
-        transaction
-            .commit(WriteOptions::buffered())
-            .expect("commit benchmark write batch");
     }
 }
 
