@@ -85,3 +85,86 @@ fn should_reconcile_catalog_effect_once_when_publication_drain_caller_times_out(
     scenario.teardown();
     Ok(())
 }
+
+#[test]
+fn should_ignore_stale_epoch_completion_for_active_publication_operation(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: route actual worker completion messages through a test receiver
+    // so a stale-epoch message can precede the valid completion.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let cloud_fs = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open cloud test backend"),
+    );
+    let cloud: Arc<dyn crate::storage::StorageBackend> = cloud_fs;
+    let (storage_event_tx, storage_event_rx) = crossbeam::channel::unbounded();
+    let storage = Arc::new(crate::storage::HybridStorage::new_with_event_sender(
+        cloud,
+        storage_event_tx,
+    ));
+    el.set_hybrid_storage(storage);
+    el.actors.cloud_coordinator.hybrid_storage_events = Some(storage_event_rx.clone());
+
+    let sequence = append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = el.seal_cloud_wal_without_enqueue_for_test()?;
+    assert_eq!(sequence, max_sequence);
+    copy_local_segment_to_remote_wal_for_test(&el, segment_id);
+    el.pipeline.inline_flush_worker = false;
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+
+    // Act: first accept the actual verification completion, then intercept
+    // the actual publication completion after its catalog CAS has finished.
+    let verify = storage_event_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("verification worker completion");
+    let (verify_id, verify_epoch) = match verify {
+        crate::storage::StorageEvent::CloudWalPublicationComplete {
+            operation_id,
+            writer_epoch,
+        } => (operation_id, writer_epoch),
+        other => panic!("unexpected verification event: {other:?}"),
+    };
+    assert_eq!(verify_id, 1);
+    assert_eq!(verify_epoch, el.state.writer_epoch);
+    el.handle_storage_event(crate::storage::StorageEvent::CloudWalPublicationComplete {
+        operation_id: verify_id,
+        writer_epoch: verify_epoch,
+    });
+
+    let publish = storage_event_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("catalog publication worker completion");
+    let (publish_id, publish_epoch) = match publish {
+        crate::storage::StorageEvent::CloudWalPublicationComplete {
+            operation_id,
+            writer_epoch,
+        } => (operation_id, writer_epoch),
+        other => panic!("unexpected publication event: {other:?}"),
+    };
+    assert_eq!(publish_id, 2);
+    assert_eq!(publish_epoch, el.state.writer_epoch);
+    assert_eq!(published_wal_segments_for_test(&el)?, vec![segment_id]);
+    assert!(el.state.wal.frontiers.cloud_durable() < max_sequence);
+
+    // The exact operation id is still active, but the old epoch must not own
+    // or consume its ready result.
+    el.handle_storage_event(crate::storage::StorageEvent::CloudWalPublicationComplete {
+        operation_id: publish_id,
+        writer_epoch: publish_epoch.wrapping_sub(1),
+    });
+
+    // Assert: the valid completion remains consumable and applies once.
+    assert!(el.state.wal.frontiers.cloud_durable() < max_sequence);
+    el.handle_storage_event(crate::storage::StorageEvent::CloudWalPublicationComplete {
+        operation_id: publish_id,
+        writer_epoch: publish_epoch,
+    });
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), max_sequence);
+    assert_eq!(published_wal_segments_for_test(&el)?, vec![segment_id]);
+    Ok(())
+}
