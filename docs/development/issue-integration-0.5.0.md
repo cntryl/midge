@@ -1331,7 +1331,8 @@ footprint qualification. Jev favored deterministic high-entropy values,
 numeric decode ceilings (23 and 150), and reporting footprint until a
 representative baseline supports a minimum reduction. Three alternating
 base/candidate pairs and exact baseline compatibility remain required. The
-artifact is `target/stress/midge918-sst-v5-final-smoke/tier4-system-sst-v5/latest.json`;
+exact `f659e903` source artifact is
+`target/stress/midge918-f659e903-smoke/tier4-system-sst-v5/latest.json`;
 the run used `cargo bench --locked --features internal-testing --bench
 tier4_system_sst_v5 -- --profile smoke --workload tier4_system_sst_v5 --json`.
 
