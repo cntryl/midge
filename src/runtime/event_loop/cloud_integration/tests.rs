@@ -776,6 +776,7 @@ struct ArmedDelayedHeadStorageBackend {
 struct CommitThenBlockCatalogCasCallbackBackend {
     inner: Arc<crate::storage::filesystem::FileSystem>,
     arm_catalog_write: AtomicBool,
+    arm_mirror_write: AtomicBool,
     retained_callbacks: Mutex<Vec<crate::storage::StorageCallback>>,
 }
 
@@ -847,12 +848,17 @@ impl CommitThenBlockCatalogCasCallbackBackend {
         Self {
             inner,
             arm_catalog_write: AtomicBool::new(false),
+            arm_mirror_write: AtomicBool::new(false),
             retained_callbacks: Mutex::new(Vec::new()),
         }
     }
 
     fn arm(&self) {
         self.arm_catalog_write.store(true, Ordering::SeqCst);
+    }
+
+    fn arm_mirror(&self) {
+        self.arm_mirror_write.store(true, Ordering::SeqCst);
     }
 }
 
@@ -975,9 +981,11 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
         data: Vec<u8>,
         callback: crate::storage::StorageCallback,
     ) {
-        if request.key == crate::wal::cloud_catalog::OBJECT_KEY
-            && self.arm_catalog_write.swap(false, Ordering::SeqCst)
-        {
+        let lose_answer = (request.key == crate::wal::cloud_catalog::OBJECT_KEY
+            && self.arm_catalog_write.swap(false, Ordering::SeqCst))
+            || (request.key == crate::wal::cloud_catalog::MIRROR_OBJECT_KEY
+                && self.arm_mirror_write.swap(false, Ordering::SeqCst));
+        if lose_answer {
             let (inner_tx, inner_rx) = std::sync::mpsc::channel();
             self.inner.submit_write_request(request, data, inner_tx);
             let event = inner_rx
@@ -9236,6 +9244,56 @@ fn should_advance_frontier_through_run_when_its_lost_catalog_answer_had_committe
     // Assert
     assert_eq!(published_wal_segments_for_test(&el)?, vec![first, second]);
     assert_eq!(el.state.wal.frontiers.cloud_durable(), second_max_sequence);
+    assert!(!el.pipeline.wal_transition.is_fenced());
+    Ok(())
+}
+
+#[test]
+fn should_reconcile_publication_when_mirror_commit_answer_is_lost() -> crate::common::MidgeResult<()>
+{
+    // Arrange: the primary publication succeeds; the mirror CAS commits but
+    // its provider response is withheld until the operation deadline.
+    let mut el = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    el.routing.runtime_response_timeout = Duration::from_millis(500);
+    let cloud_fs = Arc::new(
+        crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
+            .expect("open cloud store"),
+    );
+    let lost_answer = Arc::new(CommitThenBlockCatalogCasCallbackBackend::new(cloud_fs));
+    let backend: Arc<dyn crate::storage::StorageBackend> = lost_answer.clone();
+    let (storage_event_tx, storage_event_rx) = crossbeam::channel::unbounded();
+    el.set_hybrid_storage(Arc::new(
+        crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+            Arc::clone(&backend),
+            Arc::clone(&backend),
+            backend,
+            storage_event_tx,
+            Duration::from_millis(500),
+        ),
+    ));
+    el.actors.cloud_coordinator.hybrid_storage_events = Some(storage_event_rx);
+    append_cloud_async_put(&mut el)?;
+    let (segment_id, max_sequence) = seal_segment_without_remote_proof_for_test(&mut el)?;
+    lost_answer.arm_mirror();
+
+    // Act: publication times out after the mirror write has committed.
+    el.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+        segment_id,
+        max_sequence,
+    });
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), 0);
+    assert_eq!(
+        published_wal_segments_for_test(&el)?,
+        vec![segment_id],
+        "primary authority committed before the mirror answer was lost"
+    );
+
+    // Assert: retry reconciles the committed copies and advances the frontier.
+    drive_cloud_frontier_to_for_test(&mut el, max_sequence);
+    assert_eq!(published_wal_segments_for_test(&el)?, vec![segment_id]);
+    assert_eq!(el.state.wal.frontiers.cloud_durable(), max_sequence);
     assert!(!el.pipeline.wal_transition.is_fenced());
     Ok(())
 }
