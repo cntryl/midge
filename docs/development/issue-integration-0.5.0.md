@@ -902,6 +902,14 @@ throughput guardrail. No byte improvement claim is made until those pairs are
 complete. The legacy fallback remains for disabled policy or layouts the
 overlap budget cannot repair.
 
+One smoke diagnostic run passed the real-layout precondition: the update span
+overlapped 355,695,560 L2 bytes across three SSTs (largest 133,993,842 bytes),
+above the 320 MiB limit. It recorded 459,213,036 compaction-output bytes for
+72,000,000 logical update bytes (6.378 output bytes per input byte) and
+12,558,009 logical input bytes/s. The harness classified this one-sample run
+as diagnostic (`too few measured samples`); it proves fixture feasibility,
+not performance acceptance. No A/B delta is claimed.
+
 ### #927 and #915 receipt slice: implemented candidates
 
 Cold-start SST inventory uses a bounded group of concurrent probes, retains
