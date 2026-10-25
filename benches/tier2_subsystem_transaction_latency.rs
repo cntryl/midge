@@ -26,6 +26,9 @@ const LATENCY_READ_ONLY_TXNS: usize = 16_384;
 const LATENCY_SAMPLE_REPEATS: usize = 64;
 const READ_ONLY_BEGIN_TX_SAMPLE_REPEATS: usize = 64;
 const MIN_AVG_TXN_RECORDS_PER_APPEND: f64 = 7.0;
+const VALIDATION_SST_COUNT: usize = 8;
+const VALIDATION_KEYS_PER_SST: usize = 128;
+const VALIDATION_OPERATIONS_PER_SAMPLE: usize = 32;
 
 type LatencyClientWorkload = Vec<(Vec<u8>, Vec<u8>)>;
 
@@ -463,6 +466,77 @@ fn open_local_engine_with_cf(cf_name: &str) -> (Arc<Engine>, ColumnFamilyId) {
     (engine, cf.id())
 }
 
+struct SstBackedValidationFixture {
+    _directory: tempfile::TempDir,
+    engine: Engine,
+    cf_id: ColumnFamilyId,
+    keys: Vec<Vec<u8>>,
+    next_key: usize,
+}
+
+fn build_sst_backed_validation_fixture() -> SstBackedValidationFixture {
+    let directory = tempfile::tempdir().expect("create validation benchmark directory");
+    let engine = Engine::open(
+        cntryl_midge::OpenOptions::local(directory.path())
+            .background_compaction(false)
+            .with_memtable_size_limit(64 * 1024)
+            .build()
+            .expect("build validation benchmark options"),
+    )
+    .expect("open validation benchmark engine");
+    let cf = engine
+        .get_column_family("default")
+        .expect("default benchmark family");
+
+    let mut keys = Vec::with_capacity(VALIDATION_SST_COUNT * VALIDATION_KEYS_PER_SST);
+    for file_index in 0..VALIDATION_SST_COUNT {
+        let mut seed = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin SST seed transaction");
+        for key_index in 0..VALIDATION_KEYS_PER_SST {
+            let key = format!("validation-{file_index:02}-{key_index:04}").into_bytes();
+            keys.push(key.clone());
+            seed.put(key, b"old".to_vec(), None)
+                .expect("seed conflict validation key");
+        }
+        seed.commit(WriteOptions::buffered())
+            .expect("commit SST seed transaction");
+        engine
+            .flush_cf(&cf)
+            .expect("publish conflict validation SST");
+    }
+
+    SstBackedValidationFixture {
+        _directory: directory,
+        engine,
+        cf_id: cf.id(),
+        keys,
+        next_key: 0,
+    }
+}
+
+impl SstBackedValidationFixture {
+    fn commit_next_conflict_checked_update(&mut self) -> Duration {
+        let key = self
+            .keys
+            .get(self.next_key)
+            .expect("benchmark has a unique SST-backed key for each operation")
+            .clone();
+        self.next_key += 1;
+        let mut tx = self
+            .engine
+            .begin_tx(self.cf_id, TransactionMode::ReadWrite)
+            .expect("begin SST-backed conflict transaction");
+        tx.set_conflict_policy(cntryl_midge::ConflictPolicy::AbortOnWriteConflict);
+        tx.put(key, b"new".to_vec(), None)
+            .expect("update existing SST-backed key");
+        let start = Instant::now();
+        tx.commit(WriteOptions::buffered())
+            .expect("commit conflict-checked SST-backed update");
+        start.elapsed()
+    }
+}
+
 fn record_transaction_latency_breakdown(
     ctx: &mut StressContext,
     breakdown: TransactionLatencyBreakdown,
@@ -693,6 +767,38 @@ fn coalescing_signal(ctx: &mut StressContext) {
     let _ = ctx
         .correctness()
         .validation_errors(transaction_coalescing_guardrail_violations(observed));
+}
+
+#[stress(
+    tier = 2,
+    role = "diagnostic",
+    metadata(
+        component = "transaction_latency",
+        scenario = "abort_on_write_conflict_sst_backed"
+    )
+)]
+fn abort_on_write_conflict_sst_backed(ctx: &mut StressContext) {
+    init_benchmark_telemetry().expect("initialize benchmark telemetry");
+    let mut fixture = build_sst_backed_validation_fixture();
+    let mut commit_latencies = Vec::with_capacity(32 * VALIDATION_OPERATIONS_PER_SAMPLE);
+    ctx.benchmark("abort_on_write_conflict_sst_backed")
+        .samples(32)
+        .operations_per_sample(
+            u64::try_from(VALIDATION_OPERATIONS_PER_SAMPLE)
+                .expect("operations per sample fit in u64"),
+        )
+        .logical_unit(cntryl_stress::LogicalUnit::new("conflict_checked_commit"))
+        .parameter("sst_count", VALIDATION_SST_COUNT)
+        .parameter("keys_per_sst", VALIDATION_KEYS_PER_SST)
+        .parameter("operations_per_sample", VALIDATION_OPERATIONS_PER_SAMPLE)
+        .parameter("conflict_policy", "AbortOnWriteConflict")
+        .measure(|| {
+            let elapsed = fixture.commit_next_conflict_checked_update();
+            commit_latencies.push(elapsed);
+        });
+    for latency in commit_latencies {
+        ctx.record_latency(latency);
+    }
 }
 
 stress_main!();

@@ -34,8 +34,17 @@ production binary frames. Seed equality is checked during Cargo tests.
 The fuzz budget is a qualification gate, not a compile claim. Run each target
 for at least 60 seconds as a smoke gate, then 30 minutes for the release budget,
 using the existing `cargo fuzz run TARGET -- -max_total_time=SECONDS`
-facilities. No budget run is claimed by this implementation-first candidate.
+facilities. On 2026-10-25, `sst_data_block_decode`, `sst_index_decode` and
+`sst_filter_decode` each completed a 61-second smoke and a 1,800-second
+release-budget run with no crash artifacts. The smoke runs completed 171,570,
+278,614 and 284,689 executions respectively. Each used its eight checked-in
+real-file seeds; the longer runs also used temporary fuzz-generated corpus
+inputs. Runs used cargo-fuzz 0.13.2 and nightly rustc 1.101.0 because the
+installed stable compiler rejects the sanitizer flags. The release runs used
+temporary corpora and artifact directories under `/tmp`; corpus mutations from
+the initial data smoke were preserved under `/tmp` after the run.
 
 The redundant lease `unsafe impl Send/Sync` declarations are removed. Generic
 compile-time use sites require both concrete lease types to derive the auto
-traits from their fields.
+traits from their fields. The seed-equality and lease auto-trait tests both
+passed on 2026-10-25; `rg` found no remaining lease unsafe implementations.

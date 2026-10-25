@@ -666,9 +666,15 @@ SSTs and memtable Arcs, while GC remains excluded from the capture/register
 window. Standalone compaction plans retain the existing sequence-horizon
 behavior unless that source-retention proof is explicitly supplied.
 
-Added complete/disjoint and legacy/incomplete proof regressions. Compile
-check with failpoints passed; test execution, public snapshot/retirement
-qualification and performance evidence remain in the review pass.
+Added complete/disjoint and legacy/incomplete proof regressions. The public
+Engine snapshot/reclaim regression passed and inspects published SST contents
+before and after the old snapshot is released; it also verifies a disjoint SST
+remains selected and readable. The production planner plus real-SST execution
+test for incomplete unselected bounds passed. For mutation sensitivity, forcing
+range GC eligible despite incomplete bounds failed at the expected planner
+assertion; restored code passed. The required cloud WAL-retirement regression
+passed with failpoints enabled. These focused results cover AC1-AC4; performance
+evidence remains separate.
 
 ### #924: implemented candidate; qualification deferred
 
@@ -1106,10 +1112,11 @@ lock used from head capture through body decoding. The selected chain closure
 and current plus three older ordinals remain protected; every deletion checks
 decoded lineage, fresh lease/head authority and the original object identity.
 Each pass permits four LISTs and eight candidates. Active regressions cover
-snapshot retention/restart, required delta history, pointer replacement and
-capture exclusion. Shared test targets compile; these tests have not executed.
-An idle continuation is still required so the bounded cursor progresses after
-the final write or a cooldown, and is being implemented separately.
+snapshot retention/restart, required delta history, pointer replacement,
+capture exclusion, and predecessor fencing across a real lease takeover. The
+new AC2 regression failed when the epoch checks were removed, then passed with
+them restored. `cargo test --lib metadata_retention -- --nocapture` passes all
+seven tests; AC3's GC-enabled crash campaign remains open.
 
 #911 now prewarms ordinary flush-name blocks of sixteen and replenishes when
 eight remain. Only matching successful mirror completion admits the bound;
@@ -1131,8 +1138,8 @@ no gain or qualification is claimed by preregistration.
 seconds through the existing gate and worker. Idle wakeups drain the bounded
 retention cursor without another metadata mutation. An active 25-snapshot
 regression exercises cooldown and multiple idle batches with an injected short
-interval rather than resetting cooldown state. Failpoint test targets compile
-cleanly; execution remains pending.
+interval rather than resetting cooldown state; its execution is recorded in
+the focused retention test run above.
 
 #941 parks sequenced raw append, then exact append completion and Strict sync,
 before the existing ordered commit/apply handoff. The writer owns nested
@@ -1154,12 +1161,14 @@ versions spanning intervals, TTL/deletes, reverse bounds and malformed framing.
 Three production decoder fuzz targets each have eight real writer-produced
 seeds, with additional footer/range and binary metadata/journal seeds.
 
-The existing Cargo fixture/corpus tests passed 2/2 (latest 0.39s); the new
-FORMAT9/SSTV5 fixture verifies and Engine reads its data. All fuzz binaries
-compile through the existing fuzz package. Restart/conformance regressions,
-fuzz time budgets, performance and system footprint qualification remain
-pending. Redundant unsafe lease auto-trait declarations were removed and a
-compiler trait-bound assertion retains the requirement.
+The seed-equality test and FORMAT9/SSTV5 fixture verification pass, including
+Engine reads of fixture data. The three new decoder targets each passed a
+61-second smoke and the documented 1,800-second release fuzz budget with no
+crash artifacts. The seed-equality and lease auto-trait tests both passed on
+2026-10-25; no `unsafe impl` remains in `src/lease`. Restart/conformance,
+performance and system-footprint qualification remain pending. Existing
+footer/range and metadata/journal fuzz targets were not part of this budget
+campaign.
 
 #947 borrows passthrough and incompressible WAL values until final framing,
 removing the intermediate owned-value allocation/copy. Compressed values keep
@@ -1178,8 +1187,16 @@ writer authority and a conditional DELETE. Missing proof and replacement
 objects remain retained. Terminal confirmation journals the original identity
 and refuses active or replaced metadata. Active tests cover durable queue
 replay, cold hydration, replacement races, writer fencing and snapshot pins.
-Test targets compile; execution/crash qualification remains pending. General
-SST orphan and catalog-anchor WAL rediscovery are still separate code gaps.
+The public `cloud_core` held-snapshot regression now exercises the scheduled
+CloudSimulated sweep: after compaction retires the predecessor SST, the pinned
+snapshot continues reading it while a real sweep increments retained-object
+metrics without attempting DELETE; after releasing the final pin, a subsequent
+sweep reclaims the remote SST. Removing the sweep deletion gate makes this
+test fail (two DELETE attempts while pinned); restoring the gate passes in
+61.47 seconds. This supplies AC3's public read/sweep/reclaim evidence for
+CloudSimulated only. AC6's sweep-enabled crash campaign remains open, as do
+native-provider qualification and the general SST orphan and catalog-anchor
+WAL rediscovery evidence.
 
 #908 adds opt-in caller-side admission slowdown below existing L0/memory
 ceilings, an estimated pending-compaction byte band/hard limit and a shared
@@ -1445,3 +1462,22 @@ capture blocked by already-finished ownership. Two active tests cover capture
 and selected-body admission in exactly one-cut-sized pools. The invariant map
 refresh uses the final source checkpoint, including those tests and renamed
 proofs; its links and hashes establish source traceability, not execution.
+
+### #979: mutation evidence for added assurance regressions
+
+At source `736beb83391663eb154b69f53088c39d3e81215b`, each of the nine
+assurance regressions added for #979 failed under a relevant source mutant.
+The two WAL version tests rejected flipped header and payload version guards.
+The runtime-owner test rejected premature applied-cut publication; the live
+lease read test rejected unconditional cloud read fencing. Dropping positive
+recovery progress events independently failed the remote replay, inventory,
+journal replay and caller-scope tests. Crediting progress at range-read start
+failed the held-I/O test, and ignoring the phase-generation check failed the
+caller-scope isolation test. All mutants were reverted in an isolated
+temporary worktree.
+
+After restoration, the two version tests, runtime-owner test, live-lease read
+test and all five recovery-progress tests passed. This closes #979 AC1; the
+previously recorded map refresh and test-symbol resolution satisfy AC2. The
+mutation checks establish only the named regressions' detection of these
+specific defects.

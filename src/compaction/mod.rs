@@ -291,6 +291,113 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn should_retain_range_tombstone_when_planned_with_incomplete_unselected_bounds(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let directory = tempdir()?;
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        );
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let source_name = "source.sst";
+        let covered_name = "covered.sst";
+        let incomplete_name = "incomplete-disjoint.sst";
+        let mut source = factory.create()?;
+        source.add_range_tombstone(b"b", b"m", 2)?;
+        source.finish_to_path(&directory.path().join(source_name))?;
+        let mut covered = factory.create()?;
+        covered.add_with_meta(
+            b"h",
+            Some(b"covered"),
+            1,
+            crate::types::EntryType::Put,
+            None,
+        )?;
+        covered.finish_to_path(&directory.path().join(covered_name))?;
+        let mut incomplete = factory.create()?;
+        incomplete.add_with_meta(
+            b"z",
+            Some(b"outside"),
+            1,
+            crate::types::EntryType::Put,
+            None,
+        )?;
+        incomplete.finish_to_path(&directory.path().join(incomplete_name))?;
+        let files = vec![
+            test_file_meta(directory.path(), source_name, 0, (b"b", b"m"), (2, 2), true)?,
+            test_file_meta(
+                directory.path(),
+                covered_name,
+                1,
+                (b"h", b"h"),
+                (1, 1),
+                true,
+            )?,
+            test_file_meta(
+                directory.path(),
+                incomplete_name,
+                1,
+                (b"z", b"z"),
+                (1, 1),
+                false,
+            )?,
+        ];
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l0_compaction_threshold: 1,
+            ..LeveledCompactionConfig::default()
+        });
+        let mut plan = compactor
+            .pick_compaction(&files, 0)?
+            .expect("L0 range delete should produce compaction work");
+        plan.output_seq = 700;
+        assert!(plan.source_files.iter().any(|name| name == source_name));
+        assert!(plan.target_files.iter().any(|name| name == covered_name));
+        assert!(!plan.input_files.iter().any(|name| name == incomplete_name));
+        assert!(plan.point_tombstone_gc_eligible);
+        assert!(!plan.range_tombstone_gc_eligible);
+
+        // Act
+        let outputs = execute_compaction(&plan, &factory, directory.path(), None)?;
+
+        // Assert
+        assert_eq!(outputs.len(), 1);
+        let reader = factory.open(std::path::Path::new(&outputs[0]))?;
+        assert_eq!(reader.range_tombstones().len(), 1);
+        let versions = reader
+            .raw_version_cursor(None, None)?
+            .collect::<MidgeResult<Vec<_>>>()?;
+        assert!(versions.iter().any(|version| {
+            version.key == b"h" && version.value.as_deref() == Some(b"covered")
+        }));
+        assert!(directory.path().join(incomplete_name).exists());
+        Ok(())
+    }
+
+    fn test_file_meta(
+        directory: &std::path::Path,
+        name: &str,
+        level: u32,
+        key_bounds: (&[u8], &[u8]),
+        sequence_bounds: (u64, u64),
+        key_bounds_complete: bool,
+    ) -> MidgeResult<crate::metadata::FileMeta> {
+        let bytes = std::fs::read(directory.join(name))?;
+        Ok(crate::metadata::FileMeta {
+            name: name.to_string(),
+            level,
+            size_bytes: u64::try_from(bytes.len()).expect("SST size fits u64"),
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(key_bounds.0.to_vec()),
+            largest_key: Some(key_bounds.1.to_vec()),
+            smallest_seq: Some(sequence_bounds.0),
+            largest_seq: Some(sequence_bounds.1),
+            key_bounds_complete,
+            ..Default::default()
+        })
+    }
+
+    #[test]
     fn should_merge_repair_component_above_fan_in_without_losing_tombstone_or_ttl(
     ) -> MidgeResult<()> {
         // Arrange
