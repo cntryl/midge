@@ -7,6 +7,7 @@ use crate::wal::traits::WalWriter;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
+use std::time::Duration;
 
 struct RecoveryReadGate {
     entered: Barrier,
@@ -183,6 +184,138 @@ fn should_leave_wal_history_unchanged_when_salvage_lacks_family_authority() {
     // Assert
     assert!(matches!(result, Err(MidgeError::Corruption(_))));
     assert_eq!(crate::io::read_all(wal.as_ref(), &ledger).unwrap(), before);
+}
+
+struct WindowDamageFixture {
+    root: Arc<dyn Fs>,
+    wal: Arc<dyn Fs>,
+    history: crate::runtime::wal_history::WalHistory,
+    prefix_end: u64,
+    damaged_bytes: Vec<u8>,
+}
+
+fn window_damage_fixture(include_damaged_frame_in_floor: bool) -> MidgeResult<WindowDamageFixture> {
+    let root: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+    let wal = crate::io::subdirectory(Arc::clone(&root), crate::wal::WAL_DIR);
+    let mut history = crate::runtime::wal_history::WalHistory::open(Arc::clone(&wal), 1, 1)?;
+    let writer = crate::wal::FsWalFactoryIo::new(Arc::clone(&wal)).open_segment(1)?;
+    let record = |key: &'static [u8], sequence| {
+        crate::wal::WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            Bytes::from_static(key),
+            Some(Bytes::from_static(b"value")),
+            sequence,
+        )
+    };
+
+    writer
+        .append_record_accounted(&record(b"verified", 1))
+        .map_err(|failure| failure.error)?;
+    writer.sync_with_timeout(Duration::from_secs(2))?;
+    let prefix_end = writer.current_pos();
+    history.record_sync(prefix_end)?;
+
+    writer
+        .append_record_accounted(&record(b"damaged", 2))
+        .map_err(|failure| failure.error)?;
+    writer.sync_with_timeout(Duration::from_secs(2))?;
+    let damaged_end = writer.current_pos();
+    if include_damaged_frame_in_floor {
+        history.record_sync(damaged_end)?;
+    }
+    writer
+        .append_record_accounted(&record(b"later-acknowledged", 3))
+        .map_err(|failure| failure.error)?;
+    writer.sync_with_timeout(Duration::from_secs(2))?;
+    drop(writer);
+
+    let path = FsPath::new(crate::wal::segment_file_name(1));
+    let mut bytes = crate::io::read_all(wal.as_ref(), &path)
+        .map_err(FsError::into_midge)?
+        .to_vec();
+    let corrupt_at = prefix_end + crate::wal::frame::WAL_FRAME_HEADER_LEN as u64;
+    bytes[usize::try_from(corrupt_at).expect("frame offset fits usize")] ^= 0xff;
+    let original_len = bytes.len();
+    let mut file = wal
+        .open(
+            &path,
+            crate::io::OpenOptions {
+                mode: OpenMode::ReadWrite,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )
+        .map_err(FsError::into_midge)?;
+    file.write_at(0, Bytes::from(bytes.clone()))
+        .map_err(FsError::into_midge)?;
+    file.sync(Durability::Durable)
+        .map_err(FsError::into_midge)?;
+    drop(file);
+    bytes.truncate(original_len);
+    Ok(WindowDamageFixture {
+        root,
+        wal,
+        history,
+        prefix_end,
+        damaged_bytes: bytes,
+    })
+}
+
+#[test]
+fn should_fail_damage_below_sync_floor_and_truncate_window_damage_with_later_frames(
+) -> MidgeResult<()> {
+    // Arrange: the later valid record is synced after the retained floor.
+    let above_floor = window_damage_fixture(false)?;
+    let below_floor = window_damage_fixture(true)?;
+    let replay_dir = std::path::Path::new("wal");
+
+    // Act: corruption after the floor is treated as the open tail and cut to
+    // the verified prefix, even though a later valid frame follows it.
+    let recovered = RuntimeState::replay_wal_storage_within(
+        replay_dir,
+        &above_floor.root,
+        crate::config::RecoveryPolicy::Strict,
+        &Manifest::default(),
+        HashMap::new(),
+        None,
+        None,
+        above_floor.wal.as_ref(),
+        above_floor.history,
+    )?;
+
+    // Assert
+    assert_eq!(recovered.records_replayed, 1);
+    let path = FsPath::new(crate::wal::segment_file_name(1));
+    let bytes =
+        crate::io::read_all(above_floor.wal.as_ref(), &path).map_err(FsError::into_midge)?;
+    assert_eq!(bytes.len() as u64, above_floor.prefix_end);
+    assert_eq!(
+        &bytes[..],
+        &above_floor.damaged_bytes[..usize::try_from(above_floor.prefix_end).unwrap()]
+    );
+    drop(recovered);
+
+    let result = RuntimeState::replay_wal_storage_within(
+        replay_dir,
+        &below_floor.root,
+        crate::config::RecoveryPolicy::Strict,
+        &Manifest::default(),
+        HashMap::new(),
+        None,
+        None,
+        below_floor.wal.as_ref(),
+        below_floor.history,
+    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("strict recovery accepted damage below the retained floor"),
+    };
+    assert!(matches!(error, MidgeError::Corruption(_)), "{error:?}");
+    let bytes =
+        crate::io::read_all(below_floor.wal.as_ref(), &path).map_err(FsError::into_midge)?;
+    assert_eq!(bytes, below_floor.damaged_bytes);
+    Ok(())
 }
 
 fn write_torn_recovery_segment(wal: &Arc<dyn Fs>, segment_name: &str) -> MidgeResult<u64> {
