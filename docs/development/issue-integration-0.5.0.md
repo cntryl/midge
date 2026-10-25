@@ -150,9 +150,10 @@ No extra production GET, cache defeat or phase framework was introduced.
 ### Executed Sqrzl qualification
 
 Production source `1d1a2403ef3ef06ed90eaedca88d75a7b8f6b782` passed the
-following commands against the dedicated pinned Sqrzl container. Later changes
-are test-fixture and documentation refinements; exact-head CI remains a
-separate merge gate. The configured local emulator credential is omitted here.
+following commands against the dedicated pinned Sqrzl container. These results
+qualify that historical source only. Subsequent runtime fixes and renewed
+qualification are recorded below; exact-head CI remains a separate merge gate.
+The configured local emulator credential is omitted here.
 
 | Command | Result |
 | --- | --- |
