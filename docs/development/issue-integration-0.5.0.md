@@ -14,6 +14,7 @@ currently cover these slices:
 | `741b3d39` | #910 crashes with compaction output durable and a later flush edit uploaded but before pointer CAS | Process-abort regression passed (1/1): verifies new compaction SSTs are durable but unselected after cold recovery, prior inputs remain authoritative, and the strict flush write recovers; `rustfmt --check` and `git diff --check` passed | Hardware-bound AC1 and hybrid backpressure measurement AC4; prior PR #983 workspace run covers AC3 replay tests |
 | `4cfbacb3` | #918 directly checks the legacy SST rejection boundary | Focused V4 fixture reader test passed (1/1) | Tier 4 footprint and #935 decode measurements |
 | `f8c14a1c` | #914 removes hidden reads from the metadata request-count test double | The zero-read/two-PUT test was red on two inner GETs, then passed (1/1) with actual mock GET/range history and conditional-header assertions; Jev favored the test design (0.98) | Cold-start before/after and #937/#935 performance evidence |
+| `27fe25d0`, `8aacf76a` | #911 checks captured-checkpoint recovery across concurrent journal append and ambiguous journal-tail replacement | Both focused failpoint tests passed (1/1 each): cold strict recovery preserves both edits exactly once after failure before tail rewrite and after tail replacement rename; Jev favored the latter boundary (1.0) | AC2 pre-install failure and post-replacement bookkeeping boundaries; AC1 metadata-byte comparison; AC3 full-tail recovery throughput |
 | `19926136` | #978 asserts the spill-specific global applied cut after partial apply | Cross-family rejection plus fresh snapshot cut/key assertions passed (1/1); whole-spill restart recovery passed (1/1) | Pipeline/rotation matrices, AC1–3, crash and performance evidence |
 | `a08f0616` | #905 covers a conflicting follower queued behind held Strict fsync | The follower waits without append or visibility, then conflicts after predecessor apply with no partial effects (1/1); Jev favored the evidence (0.65) | Hot-key throughput target and records-per-append/group-window measurements |
 | `4d7a429f`, `d3ccdd33`, `49dcfd50` | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; timeout-after-catalog-CAS proves frontier waits for completion and advances once (1/1); matching operation ID with stale epoch is ignored before the valid completion advances once (1/1); formatting and diff checks passed | AC1 injected-provider progress, AC2 mirror completion after lease loss, AC3 provider-latency A/B, AC4 publication crash campaigns, and broader AC5 reorder/duplicate matrix |
@@ -830,11 +831,13 @@ Compaction publication now captures immutable manifest contents and the exact
 applied edit cut only when the existing byte/edit threshold requests a
 checkpoint. The existing publication worker encodes and installs it under the
 manifest writer lock; journal edits newer than the captured cut survive.
-Active recovery regressions cover a concurrent newer tail and a crash after
-snapshot rename before journal truncation. Test targets compile in the shared
-working tree; behavioral execution remains pending. Ahead-of-use name
-reservation and the remaining publication cadence paths still need review and
-implementation before the issue can be considered complete.
+Active recovery regressions cover a concurrent newer tail, failure after
+snapshot rename before journal truncation, and ambiguous directory-sync failure
+after the retained journal tail is atomically replaced. Both focused tests pass;
+strict cold recovery contains each committed edit exactly once. AC2 still lacks
+explicit failure-before-install and post-replacement bookkeeping boundaries.
+Ahead-of-use name reservation is implemented; AC1 metadata-byte comparison and
+AC3 full-tail recovery throughput remain measurement gates.
 
 ### #946/#905: same-group overlay implemented; asynchronous handoff pending
 
