@@ -1,7 +1,7 @@
 //! Native multipart/resumable requests, exact body digests and bounded reads.
 
 use crate::common::resource_budget::ResourceBudget;
-use crate::common::{MidgeResult, OperationDeadline};
+use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::io::{File, FsError, FsResult, ReadFile};
 use crate::storage::cloud::native_http::{NativeHttpServer, Request, Response};
 use crate::storage::cloud::{CloudBackend, CloudStorage};
@@ -50,6 +50,7 @@ struct Uploaded {
     parts: BTreeMap<String, Vec<u8>>,
     bytes: Vec<u8>,
     requests: usize,
+    range_gets: usize,
     committed: bool,
     aborted: bool,
 }
@@ -255,6 +256,7 @@ fn upload_fixture(
     corrupt: bool,
     mutate_source: bool,
     size: usize,
+    through_hybrid: bool,
 ) -> MidgeResult<()> {
     let directory = tempfile::tempdir()?;
     let bytes = vec![7; size];
@@ -271,6 +273,16 @@ fn upload_fixture(
     let server = NativeHttpServer::start(move |_, request| {
         let mut state = observed.lock().unwrap();
         state.requests += 1;
+        if request.method == "GET" && header(&request, "range").is_some() {
+            state.range_gets += 1;
+            return Some(response(500, Vec::new(), vec![]));
+        }
+        if request.method == "HEAD" || request.method == "GET" {
+            // HybridStorage probes the immutable key before upload. These
+            // fixtures start with an absent object; successful publication
+            // must rely on the returned receipt instead of a range readback.
+            return Some(response(404, Vec::new(), vec![]));
+        }
         if request.method == "DELETE" {
             state.aborted = true;
             return Some(response(204, Vec::new(), vec![]));
@@ -287,43 +299,84 @@ fn upload_fixture(
         })
     });
     endpoint.set(server.endpoint.clone()).unwrap();
-    let storage = CloudStorage::new(protocol.backend(server.endpoint.clone()), String::new());
-    let root = crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?;
-    let read = Arc::new(AtomicU64::new(0));
-    let maximum = Arc::new(AtomicU64::new(0));
-    let file = crate::io::open_persistent_handle(
-        &root,
-        &crate::io::FsPath::new("source"),
-        crate::io::OpenOptions::READ_ONLY,
-    )
-    .map_err(FsError::into_midge)?;
-    let file: Arc<dyn File> = Arc::new(CountedFile {
-        inner: file,
-        bytes: Arc::clone(&read),
-        maximum: Arc::clone(&maximum),
-    });
+    let storage: Arc<dyn StorageBackend> = Arc::new(CloudStorage::new(
+        protocol.backend(server.endpoint.clone()),
+        String::new(),
+    ));
     let budget = ResourceBudget::new(16 * 1024 * 1024);
-    let reservation = Arc::new(budget.reserve(11 * 1024 * 1024, "test upload parts")?);
-    let (tx, rx) = mpsc::channel();
-    storage.submit_file_write_receipt_request(
-        StorageRequest::new(
-            "object",
-            OperationDeadline::from_budget(Duration::from_secs(30)),
-            Duration::from_secs(30),
-        )
-        .with_precondition(StoragePrecondition::IfAbsent)
-        .with_reservation(reservation),
-        StorageFileUpload {
-            file,
-            size: size as u64,
-            content_crc32c: crc32c::crc32c(&bytes),
-            part_size: crate::storage::FILE_UPLOAD_PART_BYTES,
-        },
-        tx,
-    );
-    let result = rx
-        .recv_timeout(Duration::from_secs(30))
-        .expect("multipart completion");
+    let (result, bytes_read, maximum_read): (MidgeResult<()>, Option<u64>, Option<u64>) =
+        if through_hybrid {
+            let fs = crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?;
+            let hybrid = crate::storage::HybridStorage::with_policy(
+                Arc::clone(&storage),
+                crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            );
+            let proof = hybrid.publish_immutable_file(
+                crate::storage::hybrid::backend::ImmutableFileSource {
+                    key: "object",
+                    fs: &fs,
+                    path: &crate::io::FsPath::new("source"),
+                    size: size as u64,
+                    checksum: crc32c::crc32c(&bytes),
+                },
+                &budget,
+            );
+            (proof.map(drop), None, None)
+        } else {
+            let root = crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?;
+            let read = Arc::new(AtomicU64::new(0));
+            let maximum = Arc::new(AtomicU64::new(0));
+            let file = crate::io::open_persistent_handle(
+                &root,
+                &crate::io::FsPath::new("source"),
+                crate::io::OpenOptions::READ_ONLY,
+            )
+            .map_err(FsError::into_midge)?;
+            let file: Arc<dyn File> = Arc::new(CountedFile {
+                inner: file,
+                bytes: Arc::clone(&read),
+                maximum: Arc::clone(&maximum),
+            });
+            let reservation = Arc::new(budget.reserve(11 * 1024 * 1024, "test upload parts")?);
+            let (tx, rx) = mpsc::channel();
+            storage.submit_file_write_receipt_request(
+                StorageRequest::new(
+                    "object",
+                    OperationDeadline::from_budget(Duration::from_secs(30)),
+                    Duration::from_secs(30),
+                )
+                .with_precondition(StoragePrecondition::IfAbsent)
+                .with_reservation(reservation),
+                StorageFileUpload {
+                    file,
+                    size: size as u64,
+                    content_crc32c: crc32c::crc32c(&bytes),
+                    part_size: crate::storage::FILE_UPLOAD_PART_BYTES,
+                },
+                tx,
+            );
+            let provider_result = rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("multipart completion");
+            let result = match provider_result {
+                Ok(Some(receipt)) => {
+                    assert!(receipt.matches(&bytes));
+                    Ok(())
+                }
+                Ok(None) => Err(MidgeError::Corruption(
+                    "multipart provider omitted the checksum receipt".into(),
+                )),
+                Err(error) => Err(MidgeError::Internal(error.to_string())),
+            };
+            (
+                result,
+                Some(read.load(Ordering::Relaxed)),
+                Some(maximum.load(Ordering::Relaxed)),
+            )
+        };
+    if through_hybrid {
+        assert_eq!(budget.used(), 0);
+    }
     let state = uploaded.lock().unwrap();
     if corrupt || mutate_source {
         assert!(result.is_err());
@@ -332,15 +385,23 @@ fn upload_fixture(
             assert!(state.aborted);
         }
     } else {
-        let receipt = result
-            .expect("upload succeeds")
-            .expect("checksummed upload receipt");
-        assert!(receipt.matches(&bytes));
+        assert!(result.is_ok(), "upload failed: {result:?}");
         assert_eq!(state.bytes, bytes);
-        assert_eq!(read.load(Ordering::Relaxed), size as u64);
-        assert!(state.requests <= size.div_ceil(crate::storage::FILE_UPLOAD_PART_BYTES) + 2);
+        if let Some(bytes_read) = bytes_read {
+            assert_eq!(bytes_read, size as u64);
+        }
+        assert_eq!(state.range_gets, 0, "publication must not read back ranges");
+        let request_overhead = if through_hybrid { 3 } else { 2 };
+        assert!(
+            state.requests
+                <= size.div_ceil(crate::storage::FILE_UPLOAD_PART_BYTES) + request_overhead,
+            "unexpected provider request count: {}",
+            state.requests
+        );
     }
-    assert!(maximum.load(Ordering::Relaxed) <= crate::storage::FILE_UPLOAD_PART_BYTES as u64);
+    if let Some(maximum_read) = maximum_read {
+        assert!(maximum_read <= crate::storage::FILE_UPLOAD_PART_BYTES as u64);
+    }
     assert!(budget.peak() <= 16 * 1024 * 1024);
     Ok(())
 }
@@ -357,7 +418,7 @@ fn should_stream_exact_bytes_with_bounded_parts_when_native_providers_publish_la
     ] {
         // Act: run the production upload with bounded native parts.
         // Assert: the fixture checks exact committed bytes and peak admission.
-        upload_fixture(protocol, false, false, 64 * 1024 * 1024)?;
+        upload_fixture(protocol, false, false, 64 * 1024 * 1024, true)?;
     }
     Ok(())
 }
@@ -374,7 +435,7 @@ fn should_reject_corrupted_parts_before_commit_when_native_upload_integrity_fail
     ] {
         // Act: run the production upload after injecting a corrupt part.
         // Assert: the fixture requires rejection before remote commit.
-        upload_fixture(protocol, true, false, 12 * 1024 * 1024)?;
+        upload_fixture(protocol, true, false, 12 * 1024 * 1024, false)?;
     }
     Ok(())
 }
@@ -391,7 +452,7 @@ fn should_reject_changed_finalized_files_before_commit_when_streaming_upload_rea
     ] {
         // Act: run the production upload against the changed source bytes.
         // Assert: the fixture rejects committing an unproven immutable identity.
-        upload_fixture(protocol, false, true, 12 * 1024 * 1024)?;
+        upload_fixture(protocol, false, true, 12 * 1024 * 1024, false)?;
     }
     Ok(())
 }
