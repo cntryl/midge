@@ -1473,6 +1473,102 @@ mod tests {
     }
 
     #[test]
+    fn should_not_replay_conditional_create_put_given_lost_successful_response() {
+        // Arrange: the provider commits the immutable object but drops the
+        // success response. The caller must keep the outcome ambiguous.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure nonblocking test server");
+        let endpoint = format!(
+            "http://{}/sst",
+            listener.local_addr().expect("server address")
+        );
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let server_request_finished = Arc::clone(&request_finished);
+        let stored = Arc::new(Mutex::new(None::<Vec<u8>>));
+        let server_stored = Arc::clone(&stored);
+        let server = std::thread::spawn(move || {
+            let mut served = 0;
+            let mut last_request: Option<Instant> = None;
+            let mut conditional_create_seen = true;
+            while !server_request_finished.load(Ordering::Acquire)
+                || last_request.is_some_and(|last| last.elapsed() < Duration::from_millis(250))
+            {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_complete_http_request(&mut stream);
+                        let split = request
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .expect("request headers");
+                        let headers =
+                            String::from_utf8_lossy(&request[..split]).to_ascii_lowercase();
+                        let body = request[split + 4..].to_vec();
+                        conditional_create_seen &= headers.starts_with("put ")
+                            && headers.contains("if-none-match: *")
+                            && body == b"immutable-sst";
+                        let already_exists = {
+                            let mut object = server_stored.lock().expect("lock test object");
+                            if object.is_some() {
+                                true
+                            } else {
+                                *object = Some(body);
+                                false
+                            }
+                        };
+                        served += 1;
+                        last_request = Some(Instant::now());
+                        if already_exists {
+                            write!(
+                                stream,
+                                "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            )
+                            .expect("write duplicate-create response");
+                        }
+                        // First request has already committed; dropping its
+                        // response models a transport loss after success.
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept test request: {error}"),
+                }
+            }
+            (served, conditional_create_seen)
+        });
+        let request = CloudRequest::new(Method::PUT, endpoint)
+            .with_header("If-None-Match", "*")
+            .with_body(b"immutable-sst".to_vec())
+            .with_retry_policy(crate::storage::cloud::CloudRetryPolicy {
+                max_retries: 2,
+                base_delay: Duration::ZERO,
+            });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let result = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        request_finished.store(true, Ordering::Release);
+        let (request_count, conditional_create_seen) = server.join().expect("join test server");
+
+        // Assert: do not replay an ambiguous create. Higher-level immutable
+        // publication owns pinned readback reconciliation.
+        assert!(result.is_err(), "lost response must remain ambiguous");
+        assert!(
+            conditional_create_seen,
+            "the request must retain If-None-Match"
+        );
+        assert_eq!(request_count, 1, "ambiguous PUT must not be replayed");
+        assert_eq!(
+            *stored.lock().expect("lock final test object"),
+            Some(b"immutable-sst".to_vec())
+        );
+    }
+
+    #[test]
     fn should_preserve_replacement_when_conditional_mutation_has_stale_identity() {
         // Arrange: the object is replaced after the writer chose its identity
         // fence but before the provider evaluates the mutation.
