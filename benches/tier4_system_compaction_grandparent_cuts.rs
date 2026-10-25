@@ -78,7 +78,14 @@ fn write_keys(engine: &Engine, cf_id: u32, ids: &[u32], generation: u64) {
     }
 }
 
-fn overlapping_l2_bytes(engine: &Engine, cf_id: u32, lower: &[u8], upper: &[u8]) -> u64 {
+#[derive(Debug, Default)]
+struct L2Overlap {
+    bytes: u64,
+    files: usize,
+    largest_file_bytes: u64,
+}
+
+fn overlapping_l2(engine: &Engine, cf_id: u32, lower: &[u8], upper: &[u8]) -> L2Overlap {
     engine
         .metrics()
         .get_storage_layout()
@@ -98,8 +105,12 @@ fn overlapping_l2_bytes(engine: &Engine, cf_id: u32, lower: &[u8], upper: &[u8])
                     .as_deref()
                     .is_some_and(|largest| largest >= lower)
         })
-        .map(|file| file.size_bytes)
-        .sum()
+        .fold(L2Overlap::default(), |mut overlap, file| {
+            overlap.bytes = overlap.bytes.saturating_add(file.size_bytes);
+            overlap.files = overlap.files.saturating_add(1);
+            overlap.largest_file_bytes = overlap.largest_file_bytes.max(file.size_bytes);
+            overlap
+        })
 }
 
 fn run(ctx: &mut StressContext) {
@@ -107,7 +118,7 @@ fn run(ctx: &mut StressContext) {
     if path.exists() {
         std::fs::remove_dir_all(&path).expect("remove previous benchmark database");
     }
-    let engine = Engine::open(
+    let mut engine = Engine::open(
         OpenOptions::local(&path)
             .build()
             .expect("build default options"),
@@ -130,10 +141,12 @@ fn run(ctx: &mut StressContext) {
     let upper = key(u64::from(
         *update_ids.iter().max().expect("nonempty updates"),
     ));
-    let l2_overlap_bytes = overlapping_l2_bytes(&engine, cf.id(), &lower, &upper);
+    let l2_overlap = overlapping_l2(&engine, cf.id(), &lower, &upper);
     assert!(
-        l2_overlap_bytes >= MIN_GRANDPARENT_OVERLAP_BYTES,
-        "workload invalid: update span overlaps only {l2_overlap_bytes} L2 bytes, below the default 320 MiB grandparent limit"
+        l2_overlap.bytes > MIN_GRANDPARENT_OVERLAP_BYTES
+            && l2_overlap.files >= 2
+            && l2_overlap.largest_file_bytes < MIN_GRANDPARENT_OVERLAP_BYTES,
+        "workload invalid: update span must overlap more than 320 MiB across at least two individually smaller L2 files; observed {l2_overlap:?}"
     );
 
     let metrics_before = engine
@@ -171,7 +184,12 @@ fn run(ctx: &mut StressContext) {
         "level2_grandparent_limit_bytes",
         MIN_GRANDPARENT_OVERLAP_BYTES,
     );
-    ctx.parameter("pre_measurement_l2_overlap_bytes", l2_overlap_bytes);
+    ctx.parameter("pre_measurement_l2_overlap_bytes", l2_overlap.bytes);
+    ctx.parameter("pre_measurement_l2_overlap_files", l2_overlap.files);
+    ctx.parameter(
+        "largest_pre_measurement_l2_overlap_file_bytes",
+        l2_overlap.largest_file_bytes,
+    );
     ctx.parameter("compaction_metric", "published compaction output SST bytes");
     ctx.parameter("flush_bytes_in_compaction_metric", "false");
     ctx.record_external_outcome(
@@ -192,6 +210,9 @@ fn run(ctx: &mut StressContext) {
         ObservationUnit::Ratio,
         ObservationDirection::Informational,
     );
+    engine
+        .shutdown(std::time::Duration::from_secs(60))
+        .expect("shutdown compaction benchmark engine");
     drop(engine);
     std::fs::remove_dir_all(path).expect("remove benchmark database");
 }

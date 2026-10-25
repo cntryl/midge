@@ -888,10 +888,11 @@ regression asserts two rolls for a three-grandparent fixture. The named
 `tier4_system_compaction_grandparent_cuts` row uses 2.5M base keys and 500K
 uniformly sampled updates (seed `0x948020261006`, 16-byte keys, 128-byte
 deterministic high-entropy values) under default production options. Before
-measurement it requires the update span to overlap at least 320 MiB of actual
-L2 SST bytes. The common row calls no candidate-only API, so it compiles at the
-base SHA; the focused executor regression separately asserts two real output
-rolls for the candidate path.
+measurement it requires the update span to overlap more than 320 MiB across at
+least two L2 SSTs, with every intersecting SST individually smaller than the
+320 MiB limit. The common row calls no candidate-only API, so it compiles at
+the base SHA; the focused executor regression separately asserts two real
+output rolls for the candidate path.
 
 The remaining owning gate is AC2's three alternating A/B pairs. Its byte metric
 is published compaction output SST bytes per logical update byte; it excludes
