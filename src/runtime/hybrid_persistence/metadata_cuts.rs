@@ -315,6 +315,7 @@ fn stage_cut(
         id,
         Some(cut),
     )?;
+    crate::failpoints::fail_point!("midge::cloud::after_metadata_chain_upload_before_pointer_cas");
     Ok(CloudMetadataGeneration {
         id,
         manifest_horizon: candidate.edit_checkpoint_id,
