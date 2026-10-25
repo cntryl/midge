@@ -41,6 +41,55 @@ impl Drop for HeldSync {
     }
 }
 
+struct HeldSyncs {
+    reached: Receiver<usize>,
+    release: Sender<usize>,
+    released_calls: AtomicUsize,
+    hook: &'static str,
+}
+
+impl HeldSyncs {
+    fn first_two(hook: &'static str) -> Self {
+        let (entered, reached) = crossbeam::channel::bounded(2);
+        let (release, released) = crossbeam::channel::unbounded();
+        let calls = Arc::new(AtomicUsize::new(0));
+        fail::cfg_callback(hook, move || {
+            let call = calls.fetch_add(1, Ordering::SeqCst);
+            if call < 2 {
+                entered.send(call).expect("signal held physical sync");
+                let released_call = released
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("release held physical sync");
+                assert_eq!(released_call, call);
+            }
+        })
+        .expect("configure two physical sync holds");
+        Self {
+            reached,
+            release,
+            released_calls: AtomicUsize::new(0),
+            hook,
+        }
+    }
+
+    fn release(&self, call: usize) {
+        self.released_calls.fetch_or(1 << call, Ordering::SeqCst);
+        self.release.send(call).expect("send physical sync release");
+    }
+}
+
+impl Drop for HeldSyncs {
+    fn drop(&mut self) {
+        let released = self.released_calls.load(Ordering::SeqCst);
+        for call in 0..2 {
+            if released & (1 << call) == 0 {
+                let _ = self.release.try_send(call);
+            }
+        }
+        fail::remove(self.hook);
+    }
+}
+
 pub(in crate::runtime::event_loop) fn write(
     request_id: u64,
     keys: &[&'static [u8]],
@@ -260,6 +309,23 @@ fn wait_for_hold(event_loop: &mut EventLoop, held: &HeldSync) {
     }
 }
 
+fn wait_for_sync_hold(event_loop: &mut EventLoop, held: &HeldSyncs, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        event_loop.progress_wal_pipeline();
+        event_loop.process_pending_message(&crossbeam::channel::never());
+        if let Ok(call) = held.reached.try_recv() {
+            assert_eq!(call, expected, "unexpected physical sync hold order");
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "writer did not reach held sync {expected}"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn assert_ordered_progress_when_held(hook: &'static str) -> MidgeResult<()> {
     // Arrange: construct the !Send loop on its owning thread. The physical
     // writer inherits this test's failpoint gate and owns the native effect.
@@ -442,7 +508,7 @@ fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group
     let _guard = crate::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
-    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let held = HeldSyncs::first_two("midge::wal::before_physical_sync");
     let before = event_loop.state.diagnostics.counters().wal_fsync_count;
     let first = event_loop
         .routing
@@ -456,11 +522,18 @@ fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group
         .routing
         .router
         .register(94_022, "queued third unit");
+    let wal_path = crate::wal::segment_key(event_loop.state.wal.open_segment());
     event_loop.process_one(
         write(94_020, &[b"first-group"], true),
         &crossbeam::channel::never(),
     );
-    wait_for_hold(&mut event_loop, &held);
+    wait_for_sync_hold(&mut event_loop, &held, 0);
+    let first_sync_end = event_loop
+        .state
+        .fs
+        .metadata(&wal_path)
+        .map_err(crate::io::FsError::into_midge)?
+        .len;
 
     // Act: both later writers enter the bounded deferred queue before the
     // first receipt is released. They must be collected into the next group.
@@ -474,7 +547,29 @@ fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group
     );
     assert!(second.try_recv().is_err());
     assert!(third.try_recv().is_err());
-    held.release.send(()).expect("release first sync");
+    held.release(0);
+    wait_for_sync_hold(&mut event_loop, &held, 1);
+
+    // The next group's append is already in the writer tail while its fsync is
+    // held. The ledger must still record only the exact first sync prefix.
+    let writer_end = event_loop
+        .state
+        .fs
+        .metadata(&wal_path)
+        .map_err(crate::io::FsError::into_midge)?
+        .len;
+    let durable_bytes = event_loop
+        .state
+        .wal
+        .history
+        .ledger()
+        .open_member()
+        .durable_bytes;
+    assert!(writer_end > first_sync_end);
+    assert_eq!(durable_bytes, Some(first_sync_end));
+    assert!(durable_bytes.is_some_and(|durable| durable < writer_end));
+
+    held.release(1);
     let first_cut = applied_cut(&mut event_loop, &first);
     let second_cut = applied_cut(&mut event_loop, &second);
     let third_cut = applied_cut(&mut event_loop, &third);
@@ -487,6 +582,23 @@ fn should_share_next_sync_when_resident_writers_queue_behind_a_held_strict_group
     );
     assert!(first_cut < second_cut && second_cut < third_cut);
     assert_eq!(event_loop.state.applied_sequence, third_cut);
+    assert_eq!(
+        event_loop
+            .state
+            .wal
+            .history
+            .ledger()
+            .open_member()
+            .durable_bytes,
+        Some(
+            event_loop
+                .state
+                .fs
+                .metadata(&wal_path)
+                .map_err(crate::io::FsError::into_midge)?
+                .len
+        )
+    );
     let snapshot = event_loop.create_read_snapshot(0).unwrap();
     for key in [b"first-group".as_slice(), b"next-a", b"next-b"] {
         assert_eq!(snapshot.get(key, third_cut)?, Some(b"value".to_vec()));
