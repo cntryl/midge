@@ -1118,7 +1118,11 @@ mod cloud_snapshot_orphan_sweep {
                     .to_string_lossy()
                     .into_owned()
             })
-            .filter(|name| name.ends_with(".sst"))
+            .filter(|name| {
+                Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
+            })
             .collect::<Vec<_>>();
         names.sort();
         names
