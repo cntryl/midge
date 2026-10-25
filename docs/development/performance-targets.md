@@ -110,8 +110,9 @@ Hybrid:
 - `tier2_subsystem_transaction_latency` owns public transaction lifecycle
   latency, commit percentile reporting, and buffered coalescing.
 - `tier2_subsystem_durability_commit_latency` owns 1-, 16-, and 64-writer local
-  strict throughput, commit p50/p99, WAL append/fsync counts, and commits per
-  physical fsync.
+  strict throughput, commit p50/p99, WAL append/fsync counts, commits per
+  physical fsync, average transactions per append, and the 16-writer hot-key
+  comparison against the distinct-key row.
   [WAL sync accounting](wal-sync-accounting.md) distinguishes the writer-only
   metric from ledger file/directory calls and the explicitly scoped accounted
   sum; adding those counters does not approve amortized ledger floors.

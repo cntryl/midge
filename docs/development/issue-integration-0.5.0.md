@@ -16,7 +16,7 @@ currently cover these slices:
 | `f8c14a1c` | #914 removes hidden reads from the metadata request-count test double | The zero-read/two-PUT test was red on two inner GETs, then passed (1/1) with actual mock GET/range history and conditional-header assertions; Jev favored the test design (0.98) | Cold-start before/after and #937/#935 performance evidence |
 | `27fe25d0`, `8aacf76a`, `24b733de` | #911 checks captured-checkpoint recovery across concurrent journal append, pre-install failure, and ambiguous journal-tail replacement | Three focused failpoint tests passed (1/1 each): cold strict recovery preserves edits exactly once after failure before install, after snapshot rename before tail rewrite, and after tail-replacement rename with directory-sync failure; Jev judged a post-successful-replacement bookkeeping boundary redundant (confidence 0.58) because durable state is already complete | AC1 metadata-byte comparison; AC3 full-tail recovery throughput |
 | `19926136` | #978 asserts the spill-specific global applied cut after partial apply | Cross-family rejection plus fresh snapshot cut/key assertions passed (1/1); whole-spill restart recovery passed (1/1) | Pipeline/rotation matrices, AC1–3, crash and performance evidence |
-| `a08f0616` | #905 covers a conflicting follower queued behind held Strict fsync | The follower waits without append or visibility, then conflicts after predecessor apply with no partial effects (1/1); Jev favored the evidence (0.65) | Hot-key throughput target and records-per-append/group-window measurements |
+| `a08f0616` | #905 covers a conflicting follower queued behind held Strict fsync; the Tier 2 durability bench now compares 16-writer Strict distinct-key and shared-hot-key rows and records average transactions per WAL append | The follower waits without append or visibility, then conflicts after predecessor apply with no partial effects (1/1); Jev favored the evidence (0.65); focused bench check passed | Hot-key versus disjoint throughput target and measured average transactions per append/group-window remain pending |
 | `4d7a429f`, `d3ccdd33`, `49dcfd50` | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; timeout-after-catalog-CAS proves frontier waits for completion and advances once (1/1); matching operation ID with stale epoch is ignored before the valid completion advances once (1/1); formatting and diff checks passed | AC1 injected-provider progress, AC2 mirror completion after lease loss, AC3 provider-latency A/B, AC4 publication crash campaigns, and broader AC5 reorder/duplicate matrix |
 | `83f705bb`, `1b49519a`, `6c7bc9af` | #904 pins intact synced-tail replay, bounds the floor while later Strict appends queue, and classifies damage around the floor | Post-fsync/pre-frontier Strict reopen regression passed (1/1); adjacent WAL recovery-floor tests passed (2/2); two-held-fsync event-loop floor-bound regression passed (1/1); floor-aware damage regression proves strict failure below the floor and physical truncation above it, including later valid frames (1/1); formatting and diff checks passed | Separate fsync/A-B accounting and explicit cadence sign-off |
 | `fd5fd954`, `6f981118`, `6599aa13`, `4d570061` | #909 proves two-worker publication/restart, immediate re-picking, concurrent publication crash recovery, distinct-input L0 conflict rejection, and exposes compaction concurrency as a Tier 4 benchmark parameter | AC1 simultaneous workers both publish and recover (1/1); AC2 immediate re-pick consumes the just-published output (1/1); AC4 child-process crash asserts both jobs active at output-durable/before-manifest, then verifies both families, healthy layout and manifest/SST ownership after restart (1/1); AC6 distinct-input L0 ordering, conflicting reservations, shared-memory failure and fairness tests passed; `cargo check --locked --bench tier4_system_compaction_backpressure` passed; `MIDGE_COMPACTION_CONCURRENCY` is recorded in the benchmark output; Jev favored the crash proof (1.0) and distinct-input assertion (0.95) | AC3 sustained-workload throughput and stall-count A/B evidence; alternating baseline/candidate measurements remain unrun |
@@ -843,7 +843,7 @@ and is process-local, so a separate crash hook there would not add recovery
 coverage. Ahead-of-use name reservation is implemented; AC1 metadata-byte
 comparison and AC3 full-tail recovery throughput remain measurement gates.
 
-### #946/#905: same-group overlay implemented; asynchronous handoff pending
+### #946/#905: staged validation and overlapping strict groups implemented; qualification pending
 
 A sequenced staged-write overlay now supplies same-group point/range write
 conflicts, assertions and insert-only existence/TTL decisions. It retains Bytes
@@ -851,14 +851,17 @@ handles and borrowed preflight/deduplication keys. Blind overlapping writes can
 share one append/sync; mixed operation-ordering barriers are preserved.
 Active tests cover overlapping strict units across restart, write conflicts,
 staged range deletion and insert-only, and require coalescing while retaining
-failure outcomes. A new failpoint regression also passed for an earlier
-pending Strict group: the stale range proof waits, retries after apply, and
-returns `WriteConflict` without partial deletion. Other AC4 interleavings and
-the transaction suite remain to execute; no A/B results are claimed.
+failure outcomes. A held-fsync regression also proves an earlier pending Strict
+group invalidates a stale range proof after apply, without partial deletion.
+Detached SST validation has an event-loop open counter and a Tier 2
+SST-backed conflict row. The validation tests passed 27/27; remaining work is
+the exact-source A/B run and remaining AC4 interleavings. The #905 hot-key
+benchmark row is present but unmeasured.
 
-Off-loop snapshot validation with intervening-write revalidation, earlier
-in-flight groups, pipeline receipts, parked roots and concurrent apply remain
-pending. This slice does not enable an asynchronous pipeline.
+Off-loop snapshot validation rechecks intervening writes against the original
+cut; the shared staged-write overlay also covers earlier in-flight groups.
+Pipeline receipts and parked roots preserve ordered strict admission. No
+performance result is claimed until the issue-specific A/B gates are run.
 
 ### #948: overlap partition slice implemented; Fragment narrowing pending
 

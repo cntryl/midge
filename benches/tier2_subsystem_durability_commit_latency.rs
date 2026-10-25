@@ -22,6 +22,22 @@ const ROTATION_MEMTABLE_BYTES: usize = 128 * 1024;
 const ROTATION_WARMUP_TRANSACTIONS: usize = 64;
 const ROTATION_TRANSACTIONS_PER_RUN: usize = 512;
 const ROTATION_RUNS: usize = 5;
+const SHARED_HOT_KEY: &[u8; 16] = b"strict-hot-key01";
+
+#[derive(Clone, Copy)]
+enum StrictKeyDistribution {
+    Distinct,
+    SharedHotKey,
+}
+
+impl StrictKeyDistribution {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Distinct => "distinct",
+            Self::SharedHotKey => "single_shared_hot_key",
+        }
+    }
+}
 
 struct StrictCommitSample {
     ledger: LedgerSyncSample,
@@ -272,16 +288,20 @@ fn writer_workload(
     cf_id: ColumnFamilyId,
     writer: usize,
     transactions: usize,
+    key_distribution: StrictKeyDistribution,
     barrier: &Barrier,
 ) -> Vec<u64> {
     let mut commit_latencies_us = Vec::with_capacity(transactions);
     barrier.wait();
     for index in 0..transactions {
         let ordinal = writer * transactions + index;
-        let key = stress_config::bench_stress::key16_u64_be(
-            u64::try_from(ordinal).expect("transaction ordinal fits in u64"),
-        )
-        .to_vec();
+        let key = match key_distribution {
+            StrictKeyDistribution::Distinct => stress_config::bench_stress::key16_u64_be(
+                u64::try_from(ordinal).expect("transaction ordinal fits in u64"),
+            )
+            .to_vec(),
+            StrictKeyDistribution::SharedHotKey => SHARED_HOT_KEY.to_vec(),
+        };
         let value = vec![u8::try_from(ordinal % 251).expect("value byte fits in u8"); VALUE_SIZE];
         let mut tx = engine
             .begin_tx(cf_id, TransactionMode::ReadWrite)
@@ -297,7 +317,10 @@ fn writer_workload(
     commit_latencies_us
 }
 
-fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
+fn execute_strict_commit_case(
+    writers: usize,
+    key_distribution: StrictKeyDistribution,
+) -> StrictCommitSample {
     let transactions_per_sample: usize = match writers {
         1 => 2_048,
         16 => 8_192,
@@ -325,7 +348,14 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
         let engine = Arc::clone(&engine);
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
-            writer_workload(&engine, cf_id, writer, transactions_per_writer, &barrier)
+            writer_workload(
+                &engine,
+                cf_id,
+                writer,
+                transactions_per_writer,
+                key_distribution,
+                &barrier,
+            )
         }));
     }
 
@@ -360,7 +390,12 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
     }
 }
 
-fn run_strict_commit_case(ctx: &mut StressContext, scenario: &'static str, writers: usize) {
+fn run_strict_commit_case(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    writers: usize,
+    key_distribution: StrictKeyDistribution,
+) {
     let transactions = match writers {
         1 => 2_048,
         16 => 8_192,
@@ -373,8 +408,9 @@ fn run_strict_commit_case(ctx: &mut StressContext, scenario: &'static str, write
     ctx.parameter("commit_mode", "sync");
     ctx.parameter("writers", writers);
     ctx.parameter("value_size_bytes", VALUE_SIZE);
+    ctx.parameter("key_distribution", key_distribution.label());
     ctx.parameter("operation_surface", "single_put_single_commit");
-    let sample = execute_strict_commit_case(writers);
+    let sample = execute_strict_commit_case(writers, key_distribution);
     sample.ledger.record(ctx);
     record_success(
         ctx,
@@ -398,9 +434,19 @@ fn run_strict_commit_case(ctx: &mut StressContext, scenario: &'static str, write
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );
+    assert!(
+        sample.wal_appends > 0,
+        "strict transactions must produce at least one physical WAL append"
+    );
     ctx.record_observation(
         "commits_per_fsync",
         u64_to_f64(sample.completed) / u64_to_f64(sample.physical_fsyncs.max(1)),
+        ObservationUnit::Ratio,
+        ObservationDirection::HigherIsBetter,
+    );
+    ctx.record_observation(
+        "avg_txn_records_per_append",
+        u64_to_f64(sample.completed) / u64_to_f64(sample.wal_appends),
         ObservationUnit::Ratio,
         ObservationDirection::HigherIsBetter,
     );
@@ -554,17 +600,42 @@ fn tier2_durability_commit_sync_local_4k_rotation(ctx: &mut StressContext) {
 
 #[stress(tier = 2)]
 fn tier2_durability_commit_sync_local(ctx: &mut StressContext) {
-    run_strict_commit_case(ctx, "tier2_durability_commit_sync_local", 1);
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local",
+        1,
+        StrictKeyDistribution::Distinct,
+    );
 }
 
 #[stress(tier = 2)]
 fn tier2_durability_commit_sync_local_16_writers(ctx: &mut StressContext) {
-    run_strict_commit_case(ctx, "tier2_durability_commit_sync_local_16_writers", 16);
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local_16_writers",
+        16,
+        StrictKeyDistribution::Distinct,
+    );
+}
+
+#[stress(tier = 2)]
+fn tier2_durability_commit_sync_local_16_writers_hot_key(ctx: &mut StressContext) {
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local_16_writers_hot_key",
+        16,
+        StrictKeyDistribution::SharedHotKey,
+    );
 }
 
 #[stress(tier = 2)]
 fn tier2_durability_commit_sync_local_64_writers(ctx: &mut StressContext) {
-    run_strict_commit_case(ctx, "tier2_durability_commit_sync_local_64_writers", 64);
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local_64_writers",
+        64,
+        StrictKeyDistribution::Distinct,
+    );
 }
 
 stress_main!();
