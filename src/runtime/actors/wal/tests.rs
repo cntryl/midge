@@ -2643,9 +2643,16 @@ fn should_exit_after_writing_to_partly_applied_family_in_child() {
     );
     let sync_same = put_one(&engine, &family, b"sync", crate::WriteOptions::sync());
     let flushed = engine.flush_cf(&family);
+    let fresh = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadOnly)
+        .expect("read the global cut after rejected writes");
 
     // Assert: every later write must wait for restart. A cross-family write
     // would otherwise expose the first partial key through the global cut.
+    assert_eq!(fresh.start_sequence(), retained.start_sequence());
+    for key in [b"first".as_slice(), b"second"] {
+        assert_eq!(fresh.get(key).expect("fresh snapshot read"), None);
+    }
     assert!(
         matches!(best_effort_other, Err(MidgeError::Fenced(_))),
         "{best_effort_other:?}"
