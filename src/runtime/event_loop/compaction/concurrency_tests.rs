@@ -306,14 +306,19 @@ fn should_preserve_l0_level_order_when_an_overlapping_job_is_owned() -> MidgeRes
         .iter()
         .find(|file| !selected.contains(&file.name))
         .map_or_else(|| plan.source_files[0].clone(), |file| file.name.clone());
+    let competing_plan = fixture.plan(&competing, 0, 1);
+    assert!(
+        plan.input_files
+            .iter()
+            .all(|input| !competing_plan.input_files.contains(input)),
+        "the competing L0 request must use a distinct input identity"
+    );
     let held = HeldComputes::new();
     // Act
     fixture.event_loop.launch_compaction(plan)?;
     held.enter();
     assert!(matches!(
-        fixture
-            .event_loop
-            .launch_compaction(fixture.plan(&competing, 0, 1)),
+        fixture.event_loop.launch_compaction(competing_plan),
         Err(MidgeError::Busy(_))
     ));
     fixture
