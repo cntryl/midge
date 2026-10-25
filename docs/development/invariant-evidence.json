@@ -1,6 +1,6 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "1c74f03a818ba15611bce675e71a6e0811760d19",
+  "source_revision": "4c7f25f64d5adac54ace38deb4ac7f2061ee2220",
   "source_revision_status": "Production/test symbols and exact assertion or behavior-helper call markers resolve at the frozen code checkpoint in source_revision. SHA256 postimages identify all referenced source and supporting documentation; refreshed documentation postimages follow the code checkpoint. This is a reference audit only: this refresh ran no Rust behavior tests or mutation experiments. Historical qualification objects remain unchanged and scoped to their recorded revisions.",
   "qualification": {
     "reference_lint_only": true,
@@ -274,7 +274,7 @@
     "unresolved_test_references_removed": 30,
     "tests_executed": false,
     "mutation_experiments_executed": false,
-    "semantic_scope": "All 65 catalog IDs reviewed against the final frozen production/test source. Actual locations, assertion/helper markers, renamed tests, selected-proof and flush retry fixes, concrete typed decode admission, raw TTL preservation, conserved spill pressure, controlled startup cancellation and genuine takeover references are indexed without inferring behavioral, mutation, crash, benchmark, native-provider or release qualification. Historical hosted qualification remains scoped to its recorded source. The #910 overlap inventory separately names controlled-storage actual-response latency probes and real-filesystem held-publication recovery schedules; no real hardware latency result is inferred. The final source also indexes manifest-proven startup visibility after successful intent repair, original-identity unpublished-output cleanup, and retained writer ownership through actual failed-compute cleanup.",
+    "semantic_scope": "All 65 catalog IDs reviewed against the final frozen production/test source. Actual locations, assertion/helper markers, renamed tests, selected-proof and flush retry fixes, concrete typed decode admission, raw TTL preservation, conserved spill pressure, controlled startup cancellation and genuine takeover references are indexed without inferring behavioral, mutation, crash, benchmark, native-provider or release qualification. Historical hosted qualification remains scoped to its recorded source. The #910 overlap inventory separately names controlled-storage actual-response latency probes and real-filesystem held-publication recovery schedules; no real hardware latency result is inferred. The final source also indexes manifest-proven startup visibility after successful intent repair, original-identity unpublished-output cleanup, and retained writer ownership through actual failed-compute cleanup. The #987 retained-flush FIFO regression indexes per-family head selection before readiness, unchanged retry/caller clocks, independently progressing other families and exact restart values/identities. Prior f274 Sqrzl qualification remains historical to that production revision; exact-head hosted native qualification is tracked separately.",
     "base_source_revision": "0bb7f09df6eaadd92ebba6870434acc30ba3a69d",
     "source_postimages": "docs/development/invariant-evidence-source-sha256.json",
     "catalog_ids_reviewed": [
@@ -344,14 +344,14 @@
       "FORMAT-4",
       "FORMAT-5"
     ],
-    "active_test_symbol_count": 351,
-    "assertion_anchor_count": 2652,
+    "active_test_symbol_count": 353,
+    "assertion_anchor_count": 2688,
     "progress_regression_checkpoint": "fb06795f5224b3431b91c5ea3b37e547d2f663b0",
     "progress_regressions_are_ordinary_cargo_tests": true,
     "unresolved_historical_test_names_removed": 13,
-    "test_reference_count": 387,
+    "test_reference_count": 390,
     "test_symbols_renamed": 51,
-    "previous_reference_checkpoint": "1d1a2403ef3ef06ed90eaedca88d75a7b8f6b782",
+    "previous_reference_checkpoint": "1c74f03a818ba15611bce675e71a6e0811760d19",
     "obsolete_reference_removed": {
       "id": "SST-4",
       "reason": "Former global provider-gate schedule was replaced by independently owned captured-cut publication schedules; it is not surviving evidence."
@@ -368,15 +368,16 @@
     "review_followup_issues": [
       982,
       984,
-      986
+      986,
+      987
     ],
     "deferred_behavior": {
       "issue": 912,
       "scope": "Destructive TTL-driven SST reclamation is deferred; compaction preserves raw expiration metadata and the existing clock-correction behavior."
     },
-    "production_reference_count": 265,
+    "production_reference_count": 269,
     "test_symbols_renamed_since_base": 2,
-    "source_postimage_count": 222
+    "source_postimage_count": 224
   },
   "historical_reference_preparation": {
     "source_revision": "bab5b3ccdee16af9502cba4e032a41b6a0e69947",
@@ -6085,6 +6086,20 @@
           "symbol": "install_flush_publication",
           "kind": "function",
           "marker": "pub(super) fn install_flush_publication("
+        },
+        {
+          "path": "src/runtime/state/flush.rs",
+          "line": 60,
+          "symbol": "RuntimeState::begin_next_immutable_flush_matching",
+          "kind": "function",
+          "marker": "pub(crate) fn begin_next_immutable_flush_matching("
+        },
+        {
+          "path": "src/runtime/state/flush.rs",
+          "line": 99,
+          "symbol": "RuntimeState::immutable_flush_heads",
+          "kind": "function",
+          "marker": "fn immutable_flush_heads(&self) -> impl Iterator<Item = (u32, &ImmutableFlush)> {"
         }
       ],
       "tests": [
@@ -6188,9 +6203,107 @@
               "helper": "assert_family_value"
             }
           ]
+        },
+        {
+          "path": "src/runtime/event_loop/flush_pipeline/retry_order_tests.rs",
+          "line": 124,
+          "symbol": "should_keep_younger_family_flush_behind_retained_retry_while_other_family_publishes",
+          "claim": "Actual AddSst NoSpace retains the oldest immutable and original SST identity. While its existing retry clock is held, another family publishes and the younger same-family generation stays unassigned; advancing that same clock yields monotone frontiers, names1/2, the original caller deadline and exact oldest/younger/other point values after real Engine reopen.",
+          "scope": "Real local filesystem, Background flush worker threads through Inline loop progress, actual journal/intent/SST publication and public Engine reopen. Only the existing RetryClock is controlled. No generated successful completion, backoff reset, runtime budget change or native/performance qualification is inferred.",
+          "assertions": [
+            {
+              "line": 88,
+              "marker": "assert_eq!(retained.phase, ImmutableFlushPhase::RetryPending);",
+              "helper": "Fixture::fail_oldest"
+            },
+            {
+              "line": 89,
+              "marker": "assert_eq!(retained.failures, 1);",
+              "helper": "Fixture::fail_oldest"
+            },
+            {
+              "line": 115,
+              "marker": "assert_eq!(tx.get(key)?.as_deref(), Some(key));",
+              "helper": "Fixture::verify_recovery"
+            },
+            {
+              "line": 158,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 164,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 170,
+              "marker": "assert!(fixture"
+            },
+            {
+              "line": 178,
+              "marker": "assert!(!fixture.el.state.has_due_immutable_flush());"
+            },
+            {
+              "line": 179,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 183,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 191,
+              "marker": "assert!(response.try_recv().is_err());"
+            },
+            {
+              "line": 193,
+              "marker": "assert_eq!(retained.sst_name.as_ref(), Some(&original_name));"
+            },
+            {
+              "line": 194,
+              "marker": "assert_eq!(retained.sequence, 1);"
+            },
+            {
+              "line": 195,
+              "marker": "assert_eq!(retained.started_at, original_started);"
+            },
+            {
+              "line": 199,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 205,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 219,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 224,
+              "marker": "fixture.verify_recovery()",
+              "helper": "Fixture::verify_recovery call"
+            }
+          ]
+        },
+        {
+          "path": "tests/fault_injection.rs",
+          "line": 752,
+          "symbol": "should_preserve_flush_identity_order_when_oldest_publication_retries",
+          "claim": "The unchanged public API regression retains a failed oldest flush, accepts a younger512KiB write, then requires distinct original names1/2 and fresh name3 after actual snapshot+journal reopen.",
+          "scope": "Real local Engine transactions, sync WAL commits, actual AddSst NoSpace and same-path restart. This source assertion control remains unchanged from the hosted Ubuntu failure; deterministic scheduling is covered by the companion worker regression.",
+          "assertions": [
+            {
+              "line": 798,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 827,
+              "marker": "assert_eq!("
+            }
+          ]
         }
       ],
-      "preconditions": "Fault fixture uses local Fs; order fixtures use real CloudStorageLease/conditional mock storage, actual workers and cleanup joins. Independent flush/compaction tests use real captured control-file cuts and exact owner/phase receipts rather than the former globally serialized provider gate.",
+      "preconditions": "Fault fixture uses local Fs; order fixtures use real CloudStorageLease/conditional mock storage, actual workers and cleanup joins. Independent flush/compaction tests use real captured control-file cuts and exact owner/phase receipts rather than the former globally serialized provider gate. Per-family FIFO selects the oldest outstanding immutable before phase/readiness filtering, including retained retry backoff; unrelated family heads remain eligible. #987 uses a held existing RetryClock with actual AddSst failure and production worker publication, then public Engine recovery.",
       "uncovered": "The active schedules cover bounded publication orders and independent captured-cut ownership. They preserve conditional authority selection; they do not enumerate every concurrent compute, provider completion or crash ordering.",
       "catalog_review": {
         "reviewed": true,
@@ -13170,6 +13283,20 @@
           "symbol": "process_wal_upload",
           "kind": "function",
           "marker": "fn process_wal_upload("
+        },
+        {
+          "path": "src/runtime/state/flush.rs",
+          "line": 171,
+          "symbol": "RuntimeState::has_due_immutable_flush_matching",
+          "kind": "function",
+          "marker": "pub(crate) fn has_due_immutable_flush_matching("
+        },
+        {
+          "path": "src/runtime/state/flush.rs",
+          "line": 182,
+          "symbol": "RuntimeState::flush_retry_deadline_timeout",
+          "kind": "function",
+          "marker": "pub(crate) fn flush_retry_deadline_timeout(&self) -> Option<Duration> {"
         }
       ],
       "tests": [
@@ -13214,9 +13341,90 @@
               "marker": "assert_eq!("
             }
           ]
+        },
+        {
+          "path": "src/runtime/event_loop/flush_pipeline/retry_order_tests.rs",
+          "line": 124,
+          "symbol": "should_keep_younger_family_flush_behind_retained_retry_while_other_family_publishes",
+          "claim": "A retained family head preserves its original retry delay and caller deadline; younger queued work is not actionable before that head is ready, while another family physically publishes. The original clock subsequently permits ordered publication and exact recovery.",
+          "scope": "Actual worker/AddSst-failure schedule with the existing RetryClock. Readiness and retry-timeout assertions prove the scheduling signal, not a whole-process CPU or hardware latency benchmark. Original clocks, capacity and manifest frontier validation are retained.",
+          "assertions": [
+            {
+              "line": 88,
+              "marker": "assert_eq!(retained.phase, ImmutableFlushPhase::RetryPending);",
+              "helper": "Fixture::fail_oldest"
+            },
+            {
+              "line": 89,
+              "marker": "assert_eq!(retained.failures, 1);",
+              "helper": "Fixture::fail_oldest"
+            },
+            {
+              "line": 115,
+              "marker": "assert_eq!(tx.get(key)?.as_deref(), Some(key));",
+              "helper": "Fixture::verify_recovery"
+            },
+            {
+              "line": 158,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 164,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 170,
+              "marker": "assert!(fixture"
+            },
+            {
+              "line": 178,
+              "marker": "assert!(!fixture.el.state.has_due_immutable_flush());"
+            },
+            {
+              "line": 179,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 183,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 191,
+              "marker": "assert!(response.try_recv().is_err());"
+            },
+            {
+              "line": 193,
+              "marker": "assert_eq!(retained.sst_name.as_ref(), Some(&original_name));"
+            },
+            {
+              "line": 194,
+              "marker": "assert_eq!(retained.sequence, 1);"
+            },
+            {
+              "line": 195,
+              "marker": "assert_eq!(retained.started_at, original_started);"
+            },
+            {
+              "line": 199,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 205,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 219,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 224,
+              "marker": "fixture.verify_recovery()",
+              "helper": "Fixture::verify_recovery call"
+            }
+          ]
         }
       ],
-      "preconditions": "Backoff unit uses a controllable clock; actual upload-worker test uses an intentionally failing StorageBackend and finite polling/worker progression.",
+      "preconditions": "Backoff unit uses a controllable clock; actual upload-worker test uses an intentionally failing StorageBackend and finite polling/worker progression. The dispatch, due-work and retry-wakeup paths share the same per-family head selector; readiness cannot bypass a retained generation or globally block unrelated families.",
       "uncovered": "Attempt count/backoff assertions do not alone prove CPU utilization, fairness or every terminal error path under all fault schedules. Permanent provider failure can halt useful maintenance while retaining authoritative state.",
       "catalog_review": {
         "reviewed": true,
@@ -14450,14 +14658,14 @@
       "production": [
         {
           "path": "src/runtime/state/flush.rs",
-          "line": 242,
+          "line": 241,
           "symbol": "l0_slot_usage",
           "kind": "function",
           "marker": "pub(crate) fn l0_slot_usage(&self, cf_id: crate::types::ColumnFamilyId) -> usize {"
         },
         {
           "path": "src/runtime/state/flush.rs",
-          "line": 272,
+          "line": 271,
           "symbol": "l0_write_slot_unavailable",
           "kind": "function",
           "marker": "pub(crate) fn l0_write_slot_unavailable(&self, cf_id: crate::types::ColumnFamilyId) -> bool {"
@@ -14565,7 +14773,7 @@
         },
         {
           "path": "src/runtime/state/flush.rs",
-          "line": 242,
+          "line": 241,
           "symbol": "l0_slot_usage",
           "kind": "function",
           "marker": "pub(crate) fn l0_slot_usage(&self, cf_id: crate::types::ColumnFamilyId) -> usize {"
