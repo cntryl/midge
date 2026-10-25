@@ -13,7 +13,7 @@ use crate::storage::cloud::{CloudStorage, MockCloudBackend};
 use std::sync::Arc;
 
 struct Fixture {
-    _directory: tempfile::TempDir,
+    directory: tempfile::TempDir,
     fs: Arc<dyn Fs>,
     backend: Arc<MockCloudBackend>,
     cloud: Arc<CloudStorage>,
@@ -35,7 +35,7 @@ impl Fixture {
         let backend = Arc::new(MockCloudBackend::new());
         let cloud = Arc::new(CloudStorage::new(backend.clone(), "retention".into()));
         Self {
-            _directory: directory,
+            directory,
             fs,
             backend,
             cloud,
@@ -297,7 +297,7 @@ fn should_retain_metadata_when_selected_authority_read_is_uncertain() {
         fixture.publish(sequence, true);
     }
     let candidate_key = first.objects[0].object_key.clone();
-    let pointer_path = fixture._directory.path().join(".midge_shared_metadata");
+    let pointer_path = fixture.directory.path().join(".midge_shared_metadata");
     let committed_pointer = std::fs::read(&pointer_path).unwrap();
     let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
     fixture.lock.lock().retention.interval = Duration::ZERO;
