@@ -25,6 +25,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 mod maintenance_tests;
+#[cfg(feature = "failpoints")]
+mod publication_worker_tests;
 mod retirement_tests;
 
 fn test_flush_frontier(manifest: &crate::metadata::Manifest, cf_id: u32) -> u64 {
