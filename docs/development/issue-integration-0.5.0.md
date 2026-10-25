@@ -16,7 +16,10 @@ currently cover these slices:
 | `19926136` | #978 asserts the spill-specific global applied cut after partial apply | Cross-family rejection plus fresh snapshot cut/key assertions passed (1/1); whole-spill restart recovery passed (1/1) | Pipeline/rotation matrices, AC1–3, crash and performance evidence |
 | `a08f0616` | #905 covers a conflicting follower queued behind held Strict fsync | The follower waits without append or visibility, then conflicts after predecessor apply with no partial effects (1/1); Jev favored the evidence (0.65) | Hot-key throughput target and records-per-append/group-window measurements |
 | `4d7a429f` | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; `cargo fmt --check` and `git diff --check` passed | Injected-provider latency/A-B evidence and completion ordering/reconciliation cases (#935/#937); no full suite or benchmark run yet |
-| `be40e70e` | #904 pins replay of intact WAL bytes synced before their exact SyncOpen floor was recorded | New post-fsync/pre-frontier failpoint regression passed on the public Strict reopen path (1/1); adjacent WAL recovery-floor tests passed (2/2); `cargo fmt --check` and `git diff --check` passed | Damage classification on both sides of the floor, queued-append floor bound, separate fsync/A-B accounting, and explicit cadence sign-off |
+| `83f705bb` | #904 pins replay of intact WAL bytes synced before their exact SyncOpen floor was recorded | New post-fsync/pre-frontier failpoint regression passed on the public Strict reopen path (1/1); adjacent WAL recovery-floor tests passed (2/2); `cargo fmt --check` and `git diff --check` passed | Damage classification on both sides of the floor, queued-append floor bound, separate fsync/A-B accounting, and explicit cadence sign-off |
+| `508df52b` | #916 proves WAL catalog storage shrinks with a 10,000-segment history's unretired backlog | Encoded catalog sizes decreased at 10,000, 5,000 and 1,000 entries; anchor, head, next ID, remaining identities and round-trip decode held; focused test passed (1/1) | AC2 cloud-strict A/B/provider measurements and any justified publication interval decision |
+| `efc76aa4` | #923 proves production orphan GC protects one SST shared across two pinned snapshot generations until the final release | Real CloudSimulated compaction and scheduled sweeps preserved both snapshot values and the shared SST after first release, then deleted it after final release; cold reopen and focused test passed (1/1, 91.02 s) | AC1 latency pairs and AC4 measured 10,000-snapshot unpin work |
+| `f37cc4b1` | #927 proves a failed SST inventory probe retained under salvage does not advance the watchdog's `sst_inventory` progress | Jev selected this regression over out-of-order completion (0.74); corrected stage-specific progress test passed (1/1); `cargo fmt --check` and `git diff --check` passed | 10,000-SST cold-start A/B, out-of-order completion, late/unknown mutation and identity/provider qualification |
 
 Jev judgments informed the design reviews; implementation source and behavior
 tests remain the correctness evidence. Parallel Jev-reviewed slices found
@@ -43,6 +46,15 @@ deferred to preserve clock-correction recovery. No issue is closed by these
 local commits, and no aggregate gate, benchmark campaign, PR or merge is
 claimed at this checkpoint. The historical checkpoints below describe earlier
 branches and qualifications; this section is the current local status.
+
+The #916/#923/#927 acceptance audits found testable correctness gaps separate
+from their remaining measurements. The new catalog history test measures
+encoded size against 10k/5k/1k unretired entries. The shared-SST GC test holds
+two actual snapshot source generations and waits for scheduled sweeps before
+and after final release. The failed-probe test observes only `sst_inventory`
+completion events, excluding legitimate local `sst_crc` work; Jev favored
+that test over the still-missing out-of-order completion case. These focused
+tests passed, but they do not complete provider or A/B acceptance.
 
 For #904, Jev returned the choice field without selecting among the bounded
 options on two code-grounded prompts (confidence 0.78 and 0.80); that output is
