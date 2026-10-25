@@ -205,6 +205,41 @@ pub mod __internal {
         pub use crate::runtime::{IntentLogEntry, IntentPersistence};
     }
     pub mod sst {
+        /// Read-only SST point reader exposing exact decoder work to benchmarks.
+        #[doc(hidden)]
+        pub struct PointLookupReaderForBenchmarks(crate::sst::fs::SstFileIo);
+
+        impl PointLookupReaderForBenchmarks {
+            /// Open one immutable SST using its database root and manifest name.
+            ///
+            /// # Errors
+            /// Returns an error if the root or SST cannot be opened or validated.
+            pub fn open(
+                database_root: &std::path::Path,
+                sst_name: &str,
+            ) -> crate::MidgeResult<Self> {
+                let fs = std::sync::Arc::new(
+                    crate::io::RealFs::open_existing(database_root)
+                        .map_err(crate::io::FsError::into_midge)?,
+                );
+                let reader = crate::sst::fs::SstFileIo::open(&format!("sst/{sst_name}"), fs)?;
+                Ok(Self(reader))
+            }
+
+            /// Return the exact number of encoded entries decoded by one point lookup.
+            ///
+            /// # Errors
+            /// Returns a decoder or filesystem error from the production SST reader.
+            pub fn entries_decoded(
+                &self,
+                key: &[u8],
+                snapshot_seq: u64,
+            ) -> crate::MidgeResult<u64> {
+                let (_, stats) = self.0.get_raw_state_at_with_stats(key, snapshot_seq)?;
+                Ok(stats.entries_decoded)
+            }
+        }
+
         pub mod decoder {
             pub use crate::sst::fs::reader_io::{validate_data_block, validate_index_block};
         }

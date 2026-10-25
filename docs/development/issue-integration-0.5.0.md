@@ -1320,6 +1320,21 @@ versions spanning intervals, TTL/deletes, reverse bounds and malformed framing.
 Three production decoder fuzz targets each have eight real writer-produced
 seeds, with additional footer/range and binary metadata/journal seeds.
 
+The new `tier4_system_sst_v5` fixture uses the production reader through a
+hidden benchmark facade to report unique-key, latest repeated-version and
+older-snapshot decode work, plus small-value SST footprint. Its optimized
+smoke observed 22 decoded entries for the unique-key lookup, 150 for both
+latest and older snapshots of the 128-version key group, and 358,941 SST bytes
+for 8,192 16-byte-key/32-byte-value keys plus that version group. This was a
+one-sample diagnostic run (the harness marked it untrustworthy), not A/B or
+footprint qualification. Jev favored deterministic high-entropy values,
+numeric decode ceilings (23 and 150), and reporting footprint until a
+representative baseline supports a minimum reduction. Three alternating
+base/candidate pairs and exact baseline compatibility remain required. The
+artifact is `target/stress/midge918-sst-v5-final-smoke/tier4-system-sst-v5/latest.json`;
+the run used `cargo bench --locked --features internal-testing --bench
+tier4_system_sst_v5 -- --profile smoke --workload tier4_system_sst_v5 --json`.
+
 The seed-equality test and FORMAT9/SSTV5 fixture verification pass, including
 Engine reads of fixture data. The three new decoder targets each passed a
 61-second smoke and the documented 1,800-second release fuzz budget with no
