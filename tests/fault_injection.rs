@@ -7103,6 +7103,10 @@ mod cloud_crash_recovery {
                 child_cloud_metadata_publication_before_pointer_cas(&db_path);
             }
             #[cfg(feature = "failpoints")]
+            "cloud_flush_and_compaction_pending_before_pointer_cas" => {
+                child_cloud_flush_and_compaction_pending_before_pointer_cas(&db_path);
+            }
+            #[cfg(feature = "failpoints")]
             "cloud_metadata_retention_authority_read_failed" => {
                 child_cloud_metadata_retention_authority_read_failed(&db_path);
             }
@@ -7541,6 +7545,120 @@ mod cloud_crash_recovery {
 
     #[cfg(feature = "failpoints")]
     #[test]
+    fn should_recover_consistent_manifest_when_flush_and_compaction_edits_are_pending_at_process_abort(
+    ) {
+        // Arrange: create several selected cloud SSTs so the child can pause a
+        // real compaction publisher while a later flush reaches its own
+        // metadata publication boundary.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        let mut engine = open_cloud_engine(db_path, None);
+        let cf = default_cf(&engine);
+        let shared_key = b"pending-edits-seed-shared-key".to_vec();
+        let mut shared_value = Vec::new();
+        let mut values = Vec::new();
+        for index in 0..4 {
+            let next_shared_value = format!("pending-edits-seed-shared-value-{index}").into_bytes();
+            let unique_key = format!("pending-edits-seed-z-{index}").into_bytes();
+            let unique_value = format!("pending-edits-seed-unique-value-{index}").into_bytes();
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin overlapping compaction seed");
+            tx.put(shared_key.clone(), next_shared_value.clone(), None)
+                .expect("update overlapping seed key");
+            tx.put(unique_key.clone(), unique_value.clone(), None)
+                .expect("write distinct seed key");
+            tx.commit(WriteOptions::cloud_strict())
+                .expect("commit overlapping compaction seed");
+            engine.flush_cf(&cf).expect("publish selected seed SST");
+            shared_value = next_shared_value;
+            values.push((unique_key, unique_value));
+        }
+        values.push((shared_key, shared_value));
+        let selected_before = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("seed storage layout")
+            .levels
+            .into_iter()
+            .flat_map(|level| level.files.into_iter().map(|file| file.name))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            selected_before.len() >= 4,
+            "seed must produce compaction inputs"
+        );
+        engine
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown before pending publication crash");
+
+        // Act: the child aborts after the compaction output is durable and the
+        // flush candidate chain is uploaded, but before that chain wins pointer
+        // CAS. The two failpoints independently prove both pending edits.
+        run_child_expect_abort(
+            "cloud_flush_and_compaction_pending_before_pointer_cas",
+            db_path,
+        );
+        let output_names_path = db_path.join("pending-compaction-output-names");
+        let compaction_outputs = std::fs::read_to_string(&output_names_path)
+            .expect("child records durable compaction outputs")
+            .lines()
+            .map(str::to_owned)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            !compaction_outputs.is_empty(),
+            "crash boundary must follow durable compaction output publication"
+        );
+        let uploaded_candidates = remote_sst_paths(db_path)
+            .into_iter()
+            .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
+            .filter(|name| !selected_before.contains(name))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            compaction_outputs.is_subset(&uploaded_candidates),
+            "the recorded compaction outputs must be durable remote SSTs"
+        );
+        assert!(
+            uploaded_candidates
+                .difference(&compaction_outputs)
+                .next()
+                .is_some(),
+            "the pending flush must also have uploaded its SST"
+        );
+
+        discard_local_cloud_data_cache(db_path);
+        expire_crashed_process_lease(db_path);
+
+        // Assert: the committed metadata lineage remains coherent, the strict
+        // flush write recovers, and no uncommitted compaction output is selected.
+        let reopened = open_cloud_engine(db_path, None);
+        for (key, value) in &values {
+            assert_value_visible(&reopened, key, value);
+        }
+        assert_value_visible(
+            &reopened,
+            b"pending-edits-crash-flush-key",
+            b"pending-edits-crash-flush-value",
+        );
+        let selected_after = reopened
+            .metrics()
+            .get_storage_layout()
+            .expect("recovered storage layout")
+            .levels
+            .into_iter()
+            .flat_map(|level| level.files.into_iter().map(|file| file.name))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            uploaded_candidates.is_disjoint(&selected_after),
+            "uncommitted flush and compaction outputs must not become manifest-authoritative"
+        );
+        assert!(
+            selected_before.is_subset(&selected_after),
+            "the previously selected input SSTs must remain authoritative after recovery"
+        );
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
     fn should_retain_metadata_after_uncertain_authority_read_process_abort() {
         // Arrange: publish enough versions for the child collector to have an
         // otherwise reclaimable candidate.
@@ -7654,6 +7772,88 @@ mod cloud_crash_recovery {
             .flush_cf(&default_cf(&engine))
             .expect("flush should reach in-flight metadata publication");
         wait_for_configured_crash(&engine, "metadata chain upload before pointer CAS");
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn child_cloud_flush_and_compaction_pending_before_pointer_cas(db_path: &Path) {
+        use std::sync::{mpsc, Arc, Condvar, Mutex};
+
+        let engine = open_cloud_engine(db_path, None);
+        let selected_before = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("child seed storage layout")
+            .levels
+            .into_iter()
+            .flat_map(|level| level.files.into_iter().map(|file| file.name))
+            .collect::<std::collections::BTreeSet<_>>();
+        let cf = default_cf(&engine);
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let callback_gate = Arc::clone(&gate);
+        let output_names_path = db_path.join("pending-compaction-output-names");
+        let callback_db_path = db_path.to_path_buf();
+        let fail_scenario = fail::FailScenario::setup();
+        fail::cfg_callback(
+            "slice7::after_compaction_output_durable_before_manifest_publish",
+            move || {
+                let output_names = remote_sst_paths(&callback_db_path)
+                    .into_iter()
+                    .filter_map(|path| {
+                        let name = path.file_name()?.to_str()?.to_owned();
+                        (!selected_before.contains(&name)).then_some(name)
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                let output_names = output_names.into_iter().collect::<Vec<_>>().join("\n");
+                std::fs::write(&output_names_path, output_names)
+                    .expect("record durable compaction output names");
+                entered_tx
+                    .send(())
+                    .expect("signal durable compaction output");
+                let (released, changed) = &*callback_gate;
+                let mut released = released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*released {
+                    let (next, waited) = changed
+                        .wait_timeout(released, Duration::from_secs(90))
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    released = next;
+                    assert!(!waited.timed_out(), "flush did not reach crash boundary");
+                }
+            },
+        )
+        .expect("configure compaction output pause");
+        std::mem::forget(fail_scenario);
+
+        // The compaction callback remains blocked while this real flush
+        // reaches the metadata chain upload boundary and aborts the process.
+        std::thread::scope(|scope| {
+            let _compaction = scope.spawn(|| engine.compact_all());
+            entered_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("compaction output durability boundary");
+            commit_value(
+                &engine,
+                b"pending-edits-crash-flush-key",
+                b"pending-edits-crash-flush-value",
+                WriteOptions::cloud_strict(),
+            );
+            fail::cfg_callback(
+                "midge::cloud::after_metadata_chain_upload_before_pointer_cas",
+                || {
+                    crash::abort_at_trigger(
+                        "cloud_flush_and_compaction_pending_before_pointer_cas",
+                        "midge::cloud::after_metadata_chain_upload_before_pointer_cas",
+                    );
+                },
+            )
+            .expect("configure flush metadata publication crash");
+            engine
+                .flush_cf(&cf)
+                .expect("flush should reach metadata publication crash boundary");
+            wait_for_configured_crash(&engine, "flush metadata chain upload before pointer CAS");
+        });
     }
 
     #[cfg(feature = "failpoints")]
@@ -7967,6 +8167,9 @@ mod cloud_crash_recovery {
             "cloud_metadata_publication_before_pointer_cas" => {
                 "midge::cloud::after_metadata_chain_upload_before_pointer_cas"
             }
+            "cloud_flush_and_compaction_pending_before_pointer_cas" => {
+                "midge::cloud::after_metadata_chain_upload_before_pointer_cas"
+            }
             "cloud_metadata_retention_authority_read_failed" => {
                 "midge::cloud::metadata_retention_authority_read_failed"
             }
@@ -8075,6 +8278,15 @@ mod cloud_crash_recovery {
             .collect::<Vec<_>>();
         paths.sort();
         paths
+    }
+
+    fn discard_local_cloud_data_cache(db_path: &Path) {
+        for name in ["sst", "wal", "txn", "cloud_recovery"] {
+            let path = db_path.join(name);
+            if path.exists() {
+                std::fs::remove_dir_all(path).expect("discard local cloud data cache");
+            }
+        }
     }
 
     /// Simulated cloud keeps its lease document in the shared object store.
