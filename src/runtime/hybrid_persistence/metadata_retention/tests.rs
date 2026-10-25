@@ -45,6 +45,15 @@ impl Fixture {
     }
 
     fn context<'a>(&'a self, deadline: &'a OperationDeadline) -> CloudMetadataMirrorContext<'a> {
+        self.context_at_epoch(deadline, "writer", 1)
+    }
+
+    fn context_at_epoch<'a>(
+        &'a self,
+        deadline: &'a OperationDeadline,
+        holder_id: &'a str,
+        writer_epoch: u64,
+    ) -> CloudMetadataMirrorContext<'a> {
         CloudMetadataMirrorContext {
             cloud: &self.cloud,
             fs: self.fs.as_ref(),
@@ -53,13 +62,23 @@ impl Fixture {
             deadline,
             authority: CloudMetadataMirrorAuthority {
                 store: self.store.as_ref(),
-                holder_id: "writer",
-                writer_epoch: 1,
+                holder_id,
+                writer_epoch,
             },
         }
     }
 
     fn publish(&self, sequence: u64, snapshot: bool) -> CloudMetadataGeneration {
+        self.publish_at_epoch(sequence, snapshot, "writer", 1)
+    }
+
+    fn publish_at_epoch(
+        &self,
+        sequence: u64,
+        snapshot: bool,
+        holder_id: &str,
+        writer_epoch: u64,
+    ) -> CloudMetadataGeneration {
         let intent = if snapshot {
             crate::runtime::IntentLogEntry::CloudUploadComplete {
                 resource: format!("{sequence}:{}", "x".repeat(32 * 1024)),
@@ -73,7 +92,11 @@ impl Fixture {
         };
         crate::runtime::IntentPersistence::save_with_fs(&self.fs, &[intent]).unwrap();
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
-        mirror_control_metadata_within(self.context(&deadline), |_| Ok(())).unwrap();
+        mirror_control_metadata_within(
+            self.context_at_epoch(&deadline, holder_id, writer_epoch),
+            |_| Ok(()),
+        )
+        .unwrap();
         let CloudMetadataHead::Committed(generation) = self
             .store
             .read_committed_metadata(deadline.remaining())
@@ -92,6 +115,54 @@ impl Fixture {
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
         collect_after_commit(&self.context(&deadline), generation, state);
     }
+}
+
+#[test]
+fn should_fence_predecessor_retention_until_successor_epoch_takes_over() {
+    // Arrange: the predecessor publishes an old generation and later history.
+    let fixture = Fixture::new();
+    let old_generation = fixture.publish(1, true);
+    let predecessor_head = old_generation.clone();
+    for sequence in 2..=10 {
+        fixture.publish(sequence, true);
+    }
+    let old_key = old_generation.objects[0].object_key.clone();
+    let predecessor_epoch = 1;
+    fixture
+        .store
+        .release_if_owner("writer", predecessor_epoch)
+        .unwrap();
+    let successor = fixture.store.acquire_leadership("successor").unwrap();
+    assert!(successor.epoch > predecessor_epoch);
+    let head = fixture.publish_at_epoch(11, true, "successor", successor.epoch);
+    fixture.lock.lock().retention.interval = Duration::ZERO;
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+
+    // Act: a stale predecessor cannot collect after takeover; the current
+    // successor can collect the same unreachable object under its own epoch.
+    let stale = collect_selected_metadata_within(
+        &fixture.context_at_epoch(&deadline, "writer", predecessor_epoch),
+        |_| Ok(()),
+    );
+    assert!(stale.is_err(), "fenced predecessor must not run collection");
+    read_committed_metadata_bodies_within(&fixture.cloud, &predecessor_head, &deadline).unwrap();
+    assert!(BlockingCloud::new(&fixture.cloud, &deadline)
+        .get_optional(&old_key)
+        .unwrap()
+        .is_some());
+
+    collect_selected_metadata_within(
+        &fixture.context_at_epoch(&deadline, "successor", successor.epoch),
+        |_| Ok(()),
+    )
+    .unwrap();
+
+    // Assert: successor reclaimed only stale history; committed recovery is intact.
+    assert!(BlockingCloud::new(&fixture.cloud, &deadline)
+        .get_optional(&old_key)
+        .unwrap()
+        .is_none());
+    read_committed_metadata_bodies_within(&fixture.cloud, &head, &deadline).unwrap();
 }
 
 #[test]

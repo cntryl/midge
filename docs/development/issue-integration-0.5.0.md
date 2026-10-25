@@ -1106,10 +1106,11 @@ lock used from head capture through body decoding. The selected chain closure
 and current plus three older ordinals remain protected; every deletion checks
 decoded lineage, fresh lease/head authority and the original object identity.
 Each pass permits four LISTs and eight candidates. Active regressions cover
-snapshot retention/restart, required delta history, pointer replacement and
-capture exclusion. Shared test targets compile; these tests have not executed.
-An idle continuation is still required so the bounded cursor progresses after
-the final write or a cooldown, and is being implemented separately.
+snapshot retention/restart, required delta history, pointer replacement,
+capture exclusion, and predecessor fencing across a real lease takeover. The
+new AC2 regression failed when the epoch checks were removed, then passed with
+them restored. `cargo test --lib metadata_retention -- --nocapture` passes all
+seven tests; AC3's GC-enabled crash campaign remains open.
 
 #911 now prewarms ordinary flush-name blocks of sixteen and replenishes when
 eight remain. Only matching successful mirror completion admits the bound;
@@ -1131,8 +1132,8 @@ no gain or qualification is claimed by preregistration.
 seconds through the existing gate and worker. Idle wakeups drain the bounded
 retention cursor without another metadata mutation. An active 25-snapshot
 regression exercises cooldown and multiple idle batches with an injected short
-interval rather than resetting cooldown state. Failpoint test targets compile
-cleanly; execution remains pending.
+interval rather than resetting cooldown state; its execution is recorded in
+the focused retention test run above.
 
 #941 parks sequenced raw append, then exact append completion and Strict sync,
 before the existing ordered commit/apply handoff. The writer owns nested
