@@ -3,6 +3,7 @@
 use crate::common::resource_budget::ResourceBudget;
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::io::{File, FsError, FsResult, ReadFile};
+use crate::sst::traits::SstFactory;
 use crate::storage::cloud::native_http::{NativeHttpServer, Request, Response};
 use crate::storage::cloud::{CloudBackend, CloudStorage};
 use crate::storage::{StorageBackend, StorageFileUpload, StoragePrecondition, StorageRequest};
@@ -257,14 +258,49 @@ fn upload_fixture(
     mutate_source: bool,
     size: usize,
     through_hybrid: bool,
+    finalized_sst: bool,
 ) -> MidgeResult<()> {
     let directory = tempfile::tempdir()?;
-    let bytes = vec![7; size];
-    std::fs::write(directory.path().join("source"), &bytes)?;
+    let source_path = directory.path().join("source");
+    let (bytes, finalized_size, finalized_checksum) = if finalized_sst {
+        let fs = Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let mut writer = factory.create_for_compaction(ResourceBudget::new(64 * 1024 * 1024))?;
+        let mut value = vec![0_u8; 4096];
+        let mut random = 0x9e37_79b9_u32;
+        for sequence in 0..=3583_u64 {
+            for byte in &mut value {
+                random ^= random << 13;
+                random ^= random >> 17;
+                random ^= random << 5;
+                *byte = random as u8;
+            }
+            writer.add_sorted_with_meta(
+                &sequence.to_be_bytes(),
+                Some(&value),
+                sequence + 1,
+                crate::types::EntryType::Put,
+                None,
+            )?;
+        }
+        let finalized = writer
+            .finish_to_path_with_summary(std::path::Path::new("source"))?
+            .expect("filesystem writer returns finalized SST identity");
+        assert!(finalized.size_bytes >= (crate::storage::FILE_UPLOAD_PART_BYTES * 2) as u64);
+        (
+            std::fs::read(&source_path)?,
+            finalized.size_bytes,
+            finalized.content_crc32c,
+        )
+    } else {
+        let bytes = vec![7; size];
+        std::fs::write(&source_path, &bytes)?;
+        (bytes.clone(), bytes.len() as u64, crc32c::crc32c(&bytes))
+    };
     if mutate_source {
         let mut changed = bytes.clone();
         changed[0] ^= 1;
-        std::fs::write(directory.path().join("source"), changed)?;
+        std::fs::write(&source_path, changed)?;
     }
     let uploaded = Arc::new(Mutex::new(Uploaded::default()));
     let endpoint = Arc::new(OnceLock::<String>::new());
@@ -316,8 +352,8 @@ fn upload_fixture(
                     key: "object",
                     fs: &fs,
                     path: &crate::io::FsPath::new("source"),
-                    size: size as u64,
-                    checksum: crc32c::crc32c(&bytes),
+                    size: finalized_size,
+                    checksum: finalized_checksum,
                 },
                 &budget,
             );
@@ -349,8 +385,8 @@ fn upload_fixture(
                 .with_reservation(reservation),
                 StorageFileUpload {
                     file,
-                    size: size as u64,
-                    content_crc32c: crc32c::crc32c(&bytes),
+                    size: finalized_size,
+                    content_crc32c: finalized_checksum,
                     part_size: crate::storage::FILE_UPLOAD_PART_BYTES,
                 },
                 tx,
@@ -428,7 +464,7 @@ fn should_stream_exact_bytes_with_bounded_parts_when_native_providers_publish_la
     ] {
         // Act: run the production upload with bounded native parts.
         // Assert: the fixture checks exact committed bytes and peak admission.
-        upload_fixture(protocol, false, false, 64 * 1024 * 1024, true)?;
+        upload_fixture(protocol, false, false, 64 * 1024 * 1024, true, false)?;
     }
     Ok(())
 }
@@ -445,7 +481,7 @@ fn should_reject_corrupted_parts_before_commit_when_native_upload_integrity_fail
     ] {
         // Act: run the production upload after injecting a corrupt part.
         // Assert: the fixture requires rejection before remote commit.
-        upload_fixture(protocol, true, false, 12 * 1024 * 1024, false)?;
+        upload_fixture(protocol, true, false, 12 * 1024 * 1024, false, false)?;
     }
     Ok(())
 }
@@ -462,7 +498,7 @@ fn should_reject_changed_finalized_files_before_commit_when_streaming_upload_rea
     ] {
         // Act: run the production upload against the changed source bytes.
         // Assert: the fixture rejects committing an unproven immutable identity.
-        upload_fixture(protocol, false, true, 12 * 1024 * 1024, false)?;
+        upload_fixture(protocol, false, true, 12 * 1024 * 1024, true, true)?;
     }
     Ok(())
 }
