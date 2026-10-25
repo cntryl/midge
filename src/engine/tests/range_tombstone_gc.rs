@@ -1,7 +1,6 @@
 use super::*;
 #[test]
-fn should_reclaim_range_tombstone_after_snapshot_release_and_keep_disjoint_sst() -> MidgeResult<()>
-{
+fn should_reclaim_covered_history_after_snapshot_release() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let mut engine = Engine::open(
