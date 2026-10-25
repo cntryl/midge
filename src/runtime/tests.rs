@@ -9,6 +9,318 @@ use std::time::Duration;
 mod compaction_deadline_tests;
 
 #[cfg(feature = "failpoints")]
+struct HeldSync {
+    reached: crossbeam::channel::Receiver<()>,
+    release: crossbeam::channel::Sender<()>,
+}
+
+#[cfg(feature = "failpoints")]
+impl HeldSync {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (entered, reached) = crossbeam::channel::bounded(1);
+        let (release, released) = crossbeam::channel::unbounded();
+        let calls = Arc::new(AtomicUsize::new(0));
+        fail::cfg_callback("midge::wal::before_physical_sync", move || {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                entered.send(()).expect("signal held fsync");
+                released
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("release held fsync");
+            }
+        })
+        .expect("configure held fsync");
+        Self { reached, release }
+    }
+}
+
+#[cfg(feature = "failpoints")]
+impl Drop for HeldSync {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+        fail::remove("midge::wal::before_physical_sync");
+    }
+}
+
+#[cfg(feature = "failpoints")]
+struct SpilledRuntime {
+    runtime: Runtime,
+    handle: RuntimeHandle,
+    db_path: std::path::PathBuf,
+    _directory: tempfile::TempDir,
+}
+
+#[cfg(feature = "failpoints")]
+impl SpilledRuntime {
+    fn new() -> crate::common::MidgeResult<Self> {
+        let directory = tempfile::tempdir().expect("runtime directory");
+        let db_path = directory.path().join("db");
+        std::fs::create_dir_all(&db_path).expect("create db directory");
+        let state = RuntimeState::new(db_path.clone(), false);
+        let (runtime, _) = Runtime::new();
+        let (runtime, handle) = runtime.start_with_config(state, RuntimeConfig::default())?;
+        Ok(Self {
+            runtime,
+            handle,
+            db_path,
+            _directory: directory,
+        })
+    }
+
+    fn source(
+        &self,
+        request_id: u64,
+        key: &'static [u8],
+        value: &'static [u8],
+    ) -> crate::common::MidgeResult<crate::runtime::transaction_spill::TransactionOpSource> {
+        use crate::runtime::transaction_spill::{TransactionMemoryPool, TransactionWriteSet};
+        use bytes::Bytes;
+
+        let mut writes = TransactionWriteSet::new(
+            Arc::new(TransactionMemoryPool::new(0)),
+            &crate::io::real::test_root(&self.db_path),
+            false,
+            request_id,
+        );
+        writes.push(TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::from_static(key),
+            value: Bytes::from_static(value),
+            ttl_seconds: None,
+            insert_only: false,
+        })?;
+        Ok(writes.take_source())
+    }
+}
+
+#[cfg(feature = "failpoints")]
+fn spilled_strict_message(
+    request_id: u64,
+    source: crate::runtime::transaction_spill::TransactionOpSource,
+) -> RuntimeMsg {
+    RuntimeMsg::ApplySpilledTransaction {
+        request_id,
+        source,
+        assertions: Vec::new(),
+        durability_policy: Some(DurabilityPolicy::Strict),
+        start_sequence: 0,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+        response_tx: None,
+    }
+}
+
+#[cfg(feature = "failpoints")]
+fn begin_runtime_snapshot(
+    handle: &RuntimeHandle,
+    request_id: u64,
+) -> crate::common::MidgeResult<(u64, Arc<crate::runtime::read_snapshot::ReadSnapshot>)> {
+    let response = handle
+        .router
+        .register(request_id, "test transaction snapshot");
+    handle.send(RuntimeMsg::BeginTransaction {
+        request_id,
+        cf_id: 0,
+    })?;
+    match response.recv_timeout(Duration::from_secs(1)) {
+        Ok(RuntimeResponse::BeginTransactionResult {
+            start_sequence,
+            snapshot: Some(snapshot),
+            ..
+        }) => Ok((start_sequence, snapshot)),
+        result => panic!("transaction snapshot did not complete: {result:?}"),
+    }
+}
+
+#[cfg(feature = "failpoints")]
+fn await_transaction_applied(
+    response: &crossbeam::channel::Receiver<RuntimeResponse>,
+    request_id: u64,
+) -> u64 {
+    match response.recv_timeout(Duration::from_secs(10)) {
+        Ok(RuntimeResponse::TransactionApplied {
+            request_id: completed_id,
+            last_sequence,
+            ..
+        }) if completed_id == request_id => last_sequence,
+        result => panic!("transaction {request_id} did not apply: {result:?}"),
+    }
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_progress_control_while_spilled_strict_sync_is_held() -> crate::common::MidgeResult<()> {
+    use bytes::Bytes;
+
+    // Arrange: start the runtime before holding its physical sync worker.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = SpilledRuntime::new()?;
+    let held = HeldSync::new();
+    let strict = fixture
+        .handle
+        .router
+        .register(96_100, "spilled strict commit");
+
+    // Act: park the actual physical fsync, then submit control, read and write work.
+    fixture.handle.send(spilled_strict_message(
+        96_100,
+        fixture.source(96_100, b"spilled-strict", b"durable-value")?,
+    ))?;
+    held.reached
+        .recv_timeout(Duration::from_secs(10))
+        .expect("spilled transaction reached physical fsync");
+    let control = fixture
+        .handle
+        .router
+        .register(96_101, "control during spilled fsync");
+    fixture.handle.send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+        request_id: 96_101,
+    }))?;
+
+    // Assert: the event loop stays available while the spill's fsync is held.
+    assert!(matches!(
+        control.recv_timeout(Duration::from_millis(250)),
+        Ok(RuntimeResponse::Ok { request_id: 96_101 })
+    ));
+    let (old_cut, old_snapshot) = begin_runtime_snapshot(&fixture.handle, 96_102)?;
+    assert_eq!(old_cut, 0);
+    assert_eq!(old_snapshot.get(b"spilled-strict", 0)?, None);
+
+    let later = fixture
+        .handle
+        .router
+        .register(96_103, "later BestEffort commit");
+    fixture.handle.send(RuntimeMsg::ApplyTransaction {
+        request_id: 96_103,
+        ops: vec![TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::from_static(b"later-best-effort"),
+            value: Bytes::from_static(b"later-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: Some(DurabilityPolicy::BestEffort),
+        start_sequence: None,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+        response_tx: None,
+    })?;
+    assert!(strict.try_recv().is_err(), "strict write waits for fsync");
+    assert!(
+        later.try_recv().is_err(),
+        "later write waits for ordered apply"
+    );
+
+    // Cleanup: let the worker finish before dropping its runtime owner.
+    held.release.send(()).expect("release held fsync");
+    let strict_sequence = await_transaction_applied(&strict, 96_100);
+    let later_sequence = await_transaction_applied(&later, 96_103);
+    assert!(later_sequence > strict_sequence);
+    let (current_cut, current_snapshot) = begin_runtime_snapshot(&fixture.handle, 96_104)?;
+    assert_eq!(current_cut, later_sequence);
+    assert_eq!(
+        current_snapshot.get(b"spilled-strict", later_sequence)?,
+        Some(b"durable-value".to_vec())
+    );
+    assert_eq!(
+        current_snapshot.get(b"later-best-effort", later_sequence)?,
+        Some(b"later-value".to_vec())
+    );
+    drop(held);
+    fixture.runtime.shutdown();
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_recover_spilled_strict_commit_after_post_sync_apply_failure(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = SpilledRuntime::new()?;
+    fail::cfg("midge::wal::spilled_apply_op", "return")
+        .expect("fail streamed apply after WAL sync");
+    let response = fixture
+        .handle
+        .router
+        .register(96_110, "spilled Strict post-sync apply");
+
+    // Act: the pipeline completes the durable sync, then the injected apply
+    // failure fences the writer before the transaction response is settled.
+    fixture.handle.send(spilled_strict_message(
+        96_110,
+        fixture.source(96_110, b"spill-recovered", b"durable-before-apply")?,
+    ))?;
+    let outcome = response.recv_timeout(Duration::from_secs(10));
+    fail::remove("midge::wal::spilled_apply_op");
+    assert!(matches!(
+        outcome,
+        Ok(RuntimeResponse::Error {
+            request_id: 96_110,
+            ..
+        })
+    ));
+
+    // Assert: cold recovery replays the complete synced spill as one unit.
+    fixture.runtime.shutdown();
+    let recovered = RuntimeState::try_new(
+        fixture.db_path.clone(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )?;
+    assert_eq!(recovered.applied_sequence, 3);
+    let family = recovered.get_cf(0).expect("recovered column family");
+    let snapshot = crate::runtime::read_snapshot::ReadSnapshot::new(
+        Arc::clone(&family.memtable),
+        family.immutable_memtables.clone(),
+        recovered.manifest.files.clone(),
+        Arc::clone(&recovered.fs),
+        std::path::PathBuf::from(crate::sst::fs::SST_DIR),
+        false,
+        u64::MAX,
+    );
+    assert_eq!(
+        snapshot.get(b"spill-recovered", recovered.applied_sequence)?,
+        Some(b"durable-before-apply".to_vec())
+    );
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_return_unknown_outcome_when_spilled_strict_sync_fails() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = SpilledRuntime::new()?;
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return")
+        .expect("inject Strict spill sync failure");
+    let response = fixture
+        .handle
+        .router
+        .register(96_120, "spilled Strict failed sync");
+
+    // Act
+    fixture.handle.send(spilled_strict_message(
+        96_120,
+        fixture.source(96_120, b"spill-unknown", b"sync-may-have-failed")?,
+    ))?;
+    let outcome = response.recv_timeout(Duration::from_secs(10));
+    fail::remove("midge::wal::inject_no_space_on_sync");
+
+    // Assert: appended records are never acknowledged as applied or durable.
+    assert!(matches!(
+        outcome,
+        Ok(RuntimeResponse::Error {
+            request_id: 96_120,
+            error: MidgeError::OutcomeUnknown(_),
+        })
+    ));
+    fixture.runtime.shutdown();
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
 const RUNTIME_PANIC_CHILD: &str = "MIDGE_RUNTIME_PANIC_CHILD";
 
 #[test]

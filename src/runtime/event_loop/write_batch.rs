@@ -934,6 +934,21 @@ impl CoalescedTransactionBatch {
         }
     }
 
+    pub(super) fn spilled_pipeline_placeholder(
+        request_id: u64,
+        touched_cfs: Vec<crate::types::ColumnFamilyId>,
+    ) -> Self {
+        let mut batch = Self::new(TransactionCoalescingKey {
+            durability_policy: crate::wal::DurabilityPolicy::Strict,
+            has_start_sequence: false,
+            conflict_policy: ConflictPolicy::LastWriteWins,
+        });
+        batch.request_ids.push(request_id);
+        batch.touched_cfs.insert(request_id, touched_cfs);
+        batch.handled = 1;
+        batch
+    }
+
     fn push_prepared(
         &mut self,
         request_id: u64,

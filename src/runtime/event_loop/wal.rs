@@ -102,35 +102,50 @@ impl WalCoordinator {
             validation,
             ..
         } = request;
-        match event_loop
-            .actors
-            .wal_actor
-            .append_spilled_transaction_with_proof(
-                &mut event_loop.state,
-                &source,
-                &crate::runtime::actors::wal::SpilledTransactionAppendParams {
-                    request_id,
-                    assertions,
-                    durability_policy,
-                    start_sequence,
-                    conflict_policy,
-                },
-                validation.as_deref(),
-            ) {
-            Ok((last_sequence, op_count, deferred)) => {
-                event_loop.publish_snapshots_for(&touched_cfs);
-                event_loop.ack_applied_transaction(
-                    request_id,
-                    &AppliedTransaction {
-                        last_sequence,
-                        op_count,
-                        deferred,
-                        touched_cfs: &touched_cfs,
-                    },
-                );
-            }
-            Err(error) => {
-                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+        let params = crate::runtime::actors::wal::SpilledTransactionAppendParams {
+            request_id,
+            assertions,
+            durability_policy,
+            start_sequence,
+            conflict_policy,
+        };
+        let is_strict = durability_policy
+            .unwrap_or_else(|| event_loop.actors.wal_actor.durability_policy())
+            == DurabilityPolicy::Strict;
+        if is_strict && !source.is_empty() && event_loop.actors.wal_actor.supports_sync_submission()
+        {
+            event_loop.start_spilled_strict_pipeline(
+                request_id,
+                source,
+                params,
+                validation,
+                touched_cfs,
+            );
+        } else {
+            match event_loop
+                .actors
+                .wal_actor
+                .append_spilled_transaction_with_proof(
+                    &mut event_loop.state,
+                    &source,
+                    &params,
+                    validation.as_deref(),
+                ) {
+                Ok((last_sequence, op_count, deferred)) => {
+                    event_loop.publish_snapshots_for(&touched_cfs);
+                    event_loop.ack_applied_transaction(
+                        request_id,
+                        &AppliedTransaction {
+                            last_sequence,
+                            op_count,
+                            deferred,
+                            touched_cfs: &touched_cfs,
+                        },
+                    );
+                }
+                Err(error) => {
+                    event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                }
             }
         }
 

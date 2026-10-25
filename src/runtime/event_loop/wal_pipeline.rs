@@ -18,6 +18,7 @@ const MAX_DEFERRED_CALLERS: usize = 128;
 
 struct PendingGroup {
     batch: CoalescedTransactionBatch,
+    spill: Option<PendingSpilledCommit>,
     io: Option<PendingStrictIo>,
     ticket: WalSyncTicket,
     generation: u64,
@@ -25,6 +26,12 @@ struct PendingGroup {
     ready: RefCell<Option<StrictIoCompletion>>,
     failed: bool,
     reservation: ResourceReservation,
+}
+
+struct PendingSpilledCommit {
+    source: crate::runtime::transaction_spill::TransactionOpSource,
+    prepared: crate::runtime::actors::wal::PreparedSpilledAppend,
+    workspace: ResourceBudget,
 }
 
 struct StartedGroup {
@@ -327,6 +334,7 @@ impl EventLoop {
             }) => {
                 self.pipeline.wal_commits.pending = Some(PendingGroup {
                     batch,
+                    spill: None,
                     io: Some(io),
                     ticket,
                     generation,
@@ -351,6 +359,102 @@ impl EventLoop {
             }
         }
         handled
+    }
+
+    pub(super) fn start_spilled_strict_pipeline(
+        &mut self,
+        request_id: u64,
+        source: crate::runtime::transaction_spill::TransactionOpSource,
+        params: crate::runtime::actors::wal::SpilledTransactionAppendParams,
+        proof: Option<std::sync::Arc<crate::runtime::actors::wal::SpilledValidationProof>>,
+        touched_cfs: Vec<crate::types::ColumnFamilyId>,
+    ) {
+        let workspace = match source.streaming_memory_bound() {
+            Ok(bound) => ResourceBudget::new(bound),
+            Err(error) => {
+                let batch = CoalescedTransactionBatch::spilled_pipeline_placeholder(
+                    request_id,
+                    touched_cfs,
+                );
+                self.finish_coalesced_transaction_outcome(batch, Err(error), None);
+                return;
+            }
+        };
+        let retained = source
+            .retained_memory_bytes()
+            .saturating_add(std::mem::size_of::<PendingSpilledCommit>());
+        let batch =
+            CoalescedTransactionBatch::spilled_pipeline_placeholder(request_id, touched_cfs);
+        let reservation = match self
+            .pipeline
+            .wal_commits
+            .memory
+            .reserve(retained, "strict spilled WAL in-flight group")
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                self.finish_coalesced_transaction_outcome(batch, Err(error), None);
+                return;
+            }
+        };
+        let generation = self.pipeline.durability.current_key();
+        let next_generation = match self.next_wal_generation(generation) {
+            Ok(next_generation) => next_generation,
+            Err(error) => {
+                self.finish_coalesced_transaction_outcome(batch, Err(error), None);
+                return;
+            }
+        };
+        let ticket = match self.pipeline.wal_transition.begin_sync(generation) {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                self.finish_coalesced_transaction_outcome(batch, Err(error), None);
+                return;
+            }
+        };
+        let submission = self.actors.wal_actor.begin_spilled_strict_group_submission(
+            &mut self.state,
+            &source,
+            &params,
+            proof.as_deref(),
+            &ticket,
+            &workspace,
+        );
+        let (sync, prepared) = match submission {
+            Ok(result) => result,
+            Err(error) => {
+                if self.actors.wal_actor.is_fenced() {
+                    self.fence_wal_transition(&error, None);
+                } else if let Err(finish) = self.pipeline.wal_transition.finish_sync(ticket) {
+                    self.fence_wal_transition(&finish, None);
+                }
+                self.finish_coalesced_transaction_outcome(batch, Err(error), None);
+                return;
+            }
+        };
+        self.pipeline.wal_commits.pending = Some(PendingGroup {
+            batch,
+            spill: Some(PendingSpilledCommit {
+                source,
+                prepared,
+                workspace,
+            }),
+            io: Some(PendingStrictIo::Sync(sync)),
+            ticket,
+            generation,
+            next_generation,
+            ready: RefCell::new(None),
+            failed: false,
+            reservation,
+        });
+        if self.pipeline.inline_flush_worker {
+            while self.wal_group_in_flight() {
+                self.progress_wal_pipeline();
+                if self.wal_group_in_flight() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
     }
 
     fn start_strict_pipeline_io(
@@ -483,11 +587,55 @@ impl EventLoop {
             )
             .map_err(|error| crate::common::error::classify_commit_error(error, false))
         });
-        let batch = group.batch;
-        drop(group.io); // release lexical native root before apply/transitions
+        let PendingGroup {
+            batch,
+            spill,
+            io,
+            reservation,
+            ..
+        } = group;
+        drop(io); // release lexical native root before apply/transitions
+        if let Some(spill) = spill {
+            let request_id = spill.prepared.request_id;
+            match completed.and_then(|()| {
+                self.actors
+                    .wal_actor
+                    .apply_spilled_strict_after_pipeline_sync(
+                        &mut self.state,
+                        &spill.source,
+                        spill.prepared,
+                        &spill.workspace,
+                    )
+            }) {
+                Ok((last_sequence, op_count, touched_cfs)) => {
+                    self.publish_snapshots_for(&touched_cfs);
+                    self.ack_applied_transaction(
+                        request_id,
+                        &super::durability_sync::AppliedTransaction {
+                            last_sequence,
+                            op_count,
+                            deferred: false,
+                            touched_cfs: &touched_cfs,
+                        },
+                    );
+                    drop(reservation);
+                    self.pipeline.wal_commits.release_admitting();
+                    self.restore_wal_pipeline_message();
+                }
+                Err(error) => {
+                    self.fence_wal_transition(&error, None);
+                    self.actors
+                        .wal_actor
+                        .release_fenced_writer_after_completion();
+                    self.finish_coalesced_transaction_outcome(batch, Err(error), Some(reservation));
+                    self.restore_wal_pipeline_message();
+                }
+            }
+            return;
+        }
         let error = match completed {
             Ok(()) => {
-                self.begin_memtable_apply_group(batch, group.reservation);
+                self.begin_memtable_apply_group(batch, reservation);
                 return;
             }
             Err(error) => error,
@@ -496,7 +644,7 @@ impl EventLoop {
         self.actors
             .wal_actor
             .release_fenced_writer_after_completion();
-        self.finish_coalesced_transaction_outcome(batch, Err(error), Some(group.reservation));
+        self.finish_coalesced_transaction_outcome(batch, Err(error), Some(reservation));
         self.restore_wal_pipeline_message();
     }
 

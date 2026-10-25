@@ -122,6 +122,19 @@ pub(crate) struct PreparedTransactionAppend {
     effective_durability: DurabilityPolicy,
 }
 
+/// A streamed transaction whose WAL records are appended but whose durable
+/// sync and memtable publication are owned by the event-loop pipeline.
+pub(crate) struct PreparedSpilledAppend {
+    pub(crate) request_id: u64,
+    pub(crate) last_sequence: u64,
+    pub(crate) op_count: usize,
+    pub(crate) touched_cfs: Vec<crate::types::ColumnFamilyId>,
+    pub(crate) effective_durability: DurabilityPolicy,
+    sequence_plan: TxnSequencePlan,
+    pub(crate) commit_time_millis: u64,
+    pub(crate) logged: bool,
+}
+
 /// Result returned after a prepared transaction has been appended and applied.
 pub(crate) struct TransactionAppendResult {
     pub request_id: u64,
@@ -773,8 +786,7 @@ impl WalActor {
         Ok(actor)
     }
 
-    #[cfg(test)]
-    pub fn durability_policy(&self) -> DurabilityPolicy {
+    pub(crate) fn durability_policy(&self) -> DurabilityPolicy {
         self.durability_policy
     }
 
