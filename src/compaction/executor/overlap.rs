@@ -137,3 +137,33 @@ impl OverlapTracker<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::GrandparentOverlap;
+    use crate::metadata::FileMeta;
+
+    #[test]
+    fn should_count_incomplete_grandparent_bounds_in_every_output_interval() {
+        // Arrange
+        let unknown = FileMeta {
+            name: "unknown-parent.sst".into(),
+            level: 2,
+            size_bytes: 11,
+            key_bounds_complete: false,
+            ..Default::default()
+        };
+        let overlap = GrandparentOverlap::from_files(std::iter::once(&unknown), 10);
+
+        // Act
+        let first_interval = overlap.bytes_between(b"a", b"b");
+        let distant_interval = overlap.bytes_between(b"x", b"z");
+
+        // Assert: incomplete bounds cannot be treated as disjoint from any
+        // candidate output when enforcing the soft overlap target.
+        assert_eq!(first_interval, 11);
+        assert_eq!(distant_interval, 11);
+        assert!(!overlap.permits_whole_file(b"a", b"b"));
+        assert!(!overlap.permits_whole_file(b"x", b"z"));
+    }
+}
