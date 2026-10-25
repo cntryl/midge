@@ -1155,12 +1155,14 @@ versions spanning intervals, TTL/deletes, reverse bounds and malformed framing.
 Three production decoder fuzz targets each have eight real writer-produced
 seeds, with additional footer/range and binary metadata/journal seeds.
 
-The existing Cargo fixture/corpus tests passed 2/2 (latest 0.39s); the new
-FORMAT9/SSTV5 fixture verifies and Engine reads its data. All fuzz binaries
-compile through the existing fuzz package. Restart/conformance regressions,
-fuzz time budgets, performance and system footprint qualification remain
-pending. Redundant unsafe lease auto-trait declarations were removed and a
-compiler trait-bound assertion retains the requirement.
+The seed-equality test and FORMAT9/SSTV5 fixture verification pass, including
+Engine reads of fixture data. The three new decoder targets each passed a
+61-second smoke and the documented 1,800-second release fuzz budget with no
+crash artifacts. The seed-equality and lease auto-trait tests both passed on
+2026-10-25; no `unsafe impl` remains in `src/lease`. Restart/conformance,
+performance and system-footprint qualification remain pending. Existing
+footer/range and metadata/journal fuzz targets were not part of this budget
+campaign.
 
 #947 borrows passthrough and incompressible WAL values until final framing,
 removing the intermediate owned-value allocation/copy. Compressed values keep
