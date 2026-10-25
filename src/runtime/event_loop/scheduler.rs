@@ -242,6 +242,7 @@ impl EventLoop {
     /// writes into its batched sync; the fairness slot runs after dispatch
     /// and leaves the queue in order.
     pub(super) fn background_progress(&mut self, drain_writes_from: Option<&Receiver<RuntimeMsg>>) {
+        self.progress_cloud_seal();
         self.progress_wal_pipeline();
         if self.wal_group_in_flight() {
             self.drain_validation_results(&crossbeam::channel::never());

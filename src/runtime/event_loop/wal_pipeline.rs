@@ -139,7 +139,9 @@ fn requires_applied_prefix(message: &RuntimeMsg) -> bool {
 
 impl EventLoop {
     pub(super) fn wal_group_in_flight(&self) -> bool {
-        self.pipeline.wal_commits.pending.is_some() || self.pipeline.memtable_apply.is_pending()
+        self.pipeline.wal_commits.pending.is_some()
+            || self.pipeline.memtable_apply.is_pending()
+            || self.pipeline.pending_cloud_seal.is_some()
     }
 
     pub(super) fn pending_message_waits_for_wal(&self) -> bool {

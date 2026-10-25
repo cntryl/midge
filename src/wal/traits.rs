@@ -194,6 +194,18 @@ pub trait WalWriter: Send + Sync {
     ) -> Option<MidgeResult<WalPendingSync>> {
         None
     }
+
+    /// Append an immutable segment footer on the writer worker without
+    /// waiting. A separate exact-prefix sync establishes its durability.
+    fn submit_footer(
+        &self,
+        _operation_id: u64,
+        _facts: &SealedFacts,
+        _timeout: Duration,
+        _group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<MidgeResult<crate::wal::footer_completion::WalPendingFooter>> {
+        None
+    }
     /// Install the authority fence held around each background storage effect.
     fn set_write_authority(&self, _authority: Option<WriteAuthority>) {}
 

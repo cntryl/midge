@@ -442,23 +442,14 @@ impl WalCoordinator {
             // is a zero budget, not an unbounded one. This used to be a second
             // copy of the rule that disagreed with it.
             let deadline = event_loop.registered_request_deadline(request_id);
-            match event_loop.seal_current_cloud_segment_within(&deadline) {
-                Ok(Some((segment_id, max_sequence))) => {
-                    if max_sequence < sequence {
-                        event_loop.respond(
-                            request_id,
-                            RuntimeResponse::Error {
-                                request_id,
-                                error: crate::common::MidgeError::Internal(format!(
-                                    "sealed WAL segment up to sequence {max_sequence}, but requested cloud durability for {sequence}"
-                                )),
-                            },
-                        );
-                        return HandleOutcome::Continue;
-                    }
-                    inflight_segment = Some(segment_id);
-                }
-                Ok(None) => {}
+            match event_loop.start_cloud_seal_for_request(
+                &deadline,
+                request_id,
+                sequence,
+                wait_for_ack,
+            ) {
+                Ok(true) => return HandleOutcome::Continue,
+                Ok(false) => {}
                 Err(error) => {
                     event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
                     return HandleOutcome::Continue;

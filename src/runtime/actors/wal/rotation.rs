@@ -35,6 +35,202 @@ use crate::wal::FsWalFactoryIo;
 use std::sync::Arc;
 
 impl WalActor {
+    /// Prepare the reversible rotation steps and submit the footer append to
+    /// the writer worker. The event loop retains both the returned pending
+    /// effect and the prepared ledger edit until the footer append and its
+    /// separate sync barrier complete.
+    pub(crate) fn submit_cloud_rotation_footer(
+        &mut self,
+        state: &mut RuntimeState,
+        deadline: &crate::common::OperationDeadline,
+        ticket: &WalSealTicket,
+    ) -> MidgeResult<(
+        crate::wal::footer_completion::WalPendingFooter,
+        PreparedRotation,
+    )> {
+        self.ensure_transition_authority(state)?;
+        if ticket.segment_id() != state.wal.open_segment()
+            || ticket.next_segment_id() != state.wal.history.ledger().next_segment_id()
+            || ticket.max_sequence() != self.open_segment_max_sequence()
+        {
+            let error = MidgeError::Internal(
+                "CloudAsync rotation ticket no longer matches the open WAL prefix".into(),
+            );
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        }
+        let first_seq = match state.sequence.checked_add(1) {
+            Some(first_seq) => first_seq,
+            None => {
+                self.cancel_reversible_cloud_flush(ticket)?;
+                return Err(MidgeError::ResourceLimit("sequence space exhausted".into()));
+            }
+        };
+        self.begin_io_transition(WalTransitionOperation::Rotate)?;
+        let facts = match self.seal_facts() {
+            Ok(facts) => facts,
+            Err(error) => {
+                self.fence_transition(
+                    state,
+                    format!("the open WAL segment could not be sealed: {error}"),
+                );
+                return Err(error);
+            }
+        };
+        if let Err(error) = WalTransitionBoundary::AfterSealDigest.check() {
+            return Err(self.roll_back_rotation(state, error));
+        }
+        let prepared = match self.prepare_next_segment(state, facts.clone(), first_seq) {
+            Ok(prepared) => prepared,
+            Err(error @ (MidgeError::RecoveryFailed(_) | MidgeError::Corruption(_))) => {
+                self.fence_transition(state, error.to_string());
+                return Err(error);
+            }
+            Err(error) => return Err(self.roll_back_rotation(state, error)),
+        };
+        if let Err(error) = self.ensure_transition_authority(state) {
+            return Err(error);
+        }
+        let Some(io_timeout) = deadline.clamp_nonzero(self.storage_io_timeout) else {
+            return Err(self.roll_back_rotation(
+                state,
+                MidgeError::Timeout(
+                    "operation deadline expired before WAL footer submission".into(),
+                ),
+            ));
+        };
+        let pending = match self
+            .writer()
+            .ok_or_else(|| MidgeError::Internal("WAL rotation lost its writer".into()))
+            .and_then(|writer| {
+                writer
+                    .submit_footer(ticket.footer_operation_id(), &facts, io_timeout, None)
+                    .ok_or_else(|| {
+                        MidgeError::Internal("WAL writer lost footer submission capability".into())
+                    })?
+            }) {
+            Ok(pending) => pending,
+            Err(error)
+                if matches!(error, MidgeError::Fenced(_) | MidgeError::RecoveryFailed(_)) =>
+            {
+                self.fence_with_cause(state, error.to_string(), true);
+                return Err(error);
+            }
+            Err(error) => return Err(self.roll_back_rotation(state, error)),
+        };
+        self.mark_transition_sealed(ticket.segment_id());
+        Ok((pending, prepared))
+    }
+
+    /// Submit the footer durability barrier after its frame append completed.
+    /// This remains a distinct barrier from the pre-rotation prefix sync.
+    pub(crate) fn submit_cloud_footer_sync(
+        &mut self,
+        state: &mut RuntimeState,
+        deadline: &crate::common::OperationDeadline,
+        ticket: &WalSealTicket,
+        footer: crate::wal::footer_completion::WalFooterPrefix,
+    ) -> MidgeResult<(
+        crate::wal::traits::WalPendingSync,
+        crate::wal::traits::WalSyncPrefix,
+    )> {
+        self.ensure_transition_authority(state)?;
+        let writer = self
+            .writer()
+            .ok_or_else(|| MidgeError::Internal("WAL rotation lost its writer".into()))?;
+        let tail = writer.tail();
+        let expected = crate::wal::traits::WalSyncPrefix {
+            barrier_id: footer.operation_id,
+            writer_epoch: footer.writer_epoch,
+            segment_id: footer.segment_id,
+            first_sequence: tail.first_seq.unwrap_or(0),
+            last_sequence: tail.last_seq.unwrap_or(0),
+            end_offset: footer.end_offset,
+        };
+        if footer.segment_id != ticket.segment_id()
+            || footer.operation_id != ticket.footer_operation_id()
+            || footer.writer_epoch != self.current_epoch
+            || writer.current_pos() != footer.end_offset
+        {
+            let error = MidgeError::Internal(
+                "WAL footer completion does not match the transitioning segment".into(),
+            );
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        }
+        let Some(io_timeout) = deadline.clamp_nonzero(self.storage_io_timeout) else {
+            let error = MidgeError::OutcomeUnknown(
+                "operation deadline expired after footer append; footer durability is unresolved"
+                    .into(),
+            );
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        };
+        let submission = Self::sync_failure_boundary().and_then(|()| {
+            WalTransitionBoundary::BeforeFsync.check()?;
+            writer
+                .submit_sync_prefix(expected, io_timeout, None)
+                .ok_or_else(|| {
+                    MidgeError::Internal("WAL writer lost asynchronous sync capability".into())
+                })?
+        });
+        match submission {
+            Ok(pending) => Ok((pending, expected)),
+            Err(error) => {
+                self.fence_transition(state, format!("WAL footer sync submission failed: {error}"));
+                Err(error)
+            }
+        }
+    }
+
+    /// Finish a previously admitted footer only after its append and separate
+    /// footer fsync have both completed. Ledger changes and replacement writer
+    /// installation remain owned by the event loop's actor call.
+    pub(crate) fn finish_cloud_rotation_footer(
+        &mut self,
+        state: &mut RuntimeState,
+        ticket: &WalSealTicket,
+        prepared: PreparedRotation,
+        completion: MidgeResult<crate::wal::traits::WalSyncCompletion>,
+        expected: crate::wal::traits::WalSyncPrefix,
+    ) -> MidgeResult<WalRotationReceipt> {
+        let completed = completion.and_then(|completion| {
+            if completion.prefix != expected {
+                return Err(MidgeError::Internal(
+                    "CloudAsync footer sync did not match its admitted prefix".into(),
+                ));
+            }
+            self.ensure_lease_validity()?;
+            WalTransitionBoundary::AfterFooter.check()?;
+            Ok(())
+        });
+        if let Err(error) = completed {
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        }
+        let old_segment = ticket.segment_id();
+        let next_segment = ticket.next_segment_id();
+        let max_sequence = ticket.max_sequence();
+        let fs = self
+            .filesystem()
+            .ok_or_else(|| MidgeError::Internal("WAL rotation lost its filesystem".into()))?;
+        self.record_rotation(state, prepared, old_segment)?;
+        self.install_next_writer(state, &fs, old_segment, next_segment)?;
+        if let Err(error) = self.finish_io_transition() {
+            self.fence_transition(
+                state,
+                format!("WAL rotation could not return to the open state: {error}"),
+            );
+            return Err(error);
+        }
+        tracing::info!(old_segment, new_segment = next_segment, "WAL rotate");
+        Ok(WalRotationReceipt {
+            sealed_segment: old_segment,
+            next_segment,
+            max_sequence,
+        })
+    }
+
     /// Rotate to a new WAL segment and return the immutable receipt that the
     /// event-loop transition protocol must register before it can accept more
     /// durable work.

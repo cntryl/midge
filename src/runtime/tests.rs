@@ -36,6 +36,42 @@ impl HeldSync {
 }
 
 #[cfg(feature = "failpoints")]
+struct HeldTwoSyncs {
+    reached: crossbeam::channel::Receiver<()>,
+    release: crossbeam::channel::Sender<()>,
+}
+
+#[cfg(feature = "failpoints")]
+impl HeldTwoSyncs {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (entered, reached) = crossbeam::channel::bounded(2);
+        let (release, released) = crossbeam::channel::unbounded();
+        let calls = Arc::new(AtomicUsize::new(0));
+        fail::cfg_callback("midge::wal::before_physical_sync", move || {
+            if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                entered.send(()).expect("signal held WAL sync");
+                released
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("release held WAL sync");
+            }
+        })
+        .expect("configure held WAL sync");
+        Self { reached, release }
+    }
+}
+
+#[cfg(feature = "failpoints")]
+impl Drop for HeldTwoSyncs {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+        let _ = self.release.send(());
+        fail::remove("midge::wal::before_physical_sync");
+    }
+}
+
+#[cfg(feature = "failpoints")]
 impl Drop for HeldSync {
     fn drop(&mut self) {
         let _ = self.release.send(());
@@ -92,6 +128,372 @@ impl SpilledRuntime {
         })?;
         Ok(writes.take_source())
     }
+}
+
+#[cfg(feature = "failpoints")]
+struct CloudAsyncRuntime {
+    runtime: Option<Runtime>,
+    handle: RuntimeHandle,
+    db_path: std::path::PathBuf,
+    store: Arc<crate::lease::fs_leader_store::FsLeaderStore>,
+    _directory: tempfile::TempDir,
+}
+
+#[cfg(feature = "failpoints")]
+impl CloudAsyncRuntime {
+    fn new() -> crate::common::MidgeResult<Self> {
+        use crate::lease::LeaderStore as _;
+
+        let directory = tempfile::tempdir().expect("CloudAsync runtime directory");
+        let db_path = directory.path().join("db");
+        std::fs::create_dir_all(&db_path).expect("create CloudAsync database");
+        let state = RuntimeState::new_in_epoch(&db_path, false, 1);
+        let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
+            db_path.join("cloud-store"),
+        )?);
+        let shared_metadata = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+            cloud.clone(),
+            Duration::from_secs(5),
+        ));
+        let inventory: Arc<dyn crate::storage::inventory::ObjectInventory> = cloud.clone();
+        let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ));
+        hybrid.configure_object_inventories(Arc::clone(&inventory), inventory)?;
+        let store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+            crate::io::real::test_root(db_path.join("cloud-store")),
+            crate::lease::LeaseClock::default(),
+        ));
+        let leader_store: Arc<dyn crate::lease::LeaderStore> = store.clone();
+        store.acquire_leadership("test-writer")?;
+        crate::metadata::ensure_or_create_format_marker(&state.fs, &db_path)?;
+        crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        crate::runtime::ddl::fence_remote_registry_on_startup(
+            &hybrid,
+            &crate::runtime::ddl::DdlLeaseAuthority {
+                store: Arc::clone(&leader_store),
+                holder_id: "test-writer".into(),
+                writer_epoch: 1,
+            },
+            &deadline,
+        )?;
+        crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+                cloud: &shared_metadata,
+                fs: state.fs.as_ref(),
+                publication_lock: &crate::runtime::MetadataPublicationLock::default(),
+                lock_wait_budget: Duration::from_secs(5),
+                deadline: &deadline,
+                authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                    store: store.as_ref(),
+                    holder_id: "test-writer",
+                    writer_epoch: 1,
+                },
+            },
+            |_| Ok(()),
+        )?;
+        crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::clone(&hybrid))
+            .fence_cloud_wal_catalog(1)?;
+        let policy = crate::runtime::CloudRuntimePolicy {
+            wal_seal: crate::runtime::CloudWalSealPolicy {
+                min_segment_bytes: 0,
+                max_pending_writes: usize::MAX,
+                max_flush_delay: Duration::from_secs(60),
+            },
+            ..crate::runtime::CloudRuntimePolicy::default()
+        };
+        let config = RuntimeConfig {
+            wal_durability_policy: DurabilityPolicy::CloudAsync,
+            hybrid_storage: Some(hybrid),
+            cloud_metadata_storage: Some(shared_metadata),
+            cloud_runtime_policy: policy,
+            provider_ddl_fencing: true,
+            leader_store: Some(Arc::clone(&leader_store)),
+            leader_holder_id: Some("test-writer".into()),
+            writer_epoch: 1,
+            retry_policy: RuntimeRetryPolicy::fast_for_testing(),
+            ..RuntimeConfig::default()
+        };
+        let (runtime, _) = Runtime::new();
+        let (runtime, handle) = runtime.start_with_config(state, config)?;
+        Ok(Self {
+            runtime: Some(runtime),
+            handle,
+            db_path,
+            store,
+            _directory: directory,
+        })
+    }
+
+    fn shutdown(mut self) -> crate::common::MidgeResult<()> {
+        let result = self.handle.shutdown(Duration::from_secs(10));
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown();
+        }
+        result
+    }
+}
+
+#[cfg(feature = "failpoints")]
+fn apply_cloud_async_put(
+    fixture: &CloudAsyncRuntime,
+    request_id: u64,
+    key: &'static [u8],
+) -> crate::common::MidgeResult<u64> {
+    use bytes::Bytes;
+
+    let write = fixture
+        .handle
+        .router
+        .register(request_id, "CloudAsync test write");
+    fixture.handle.send(RuntimeMsg::ApplyTransaction {
+        request_id,
+        ops: vec![TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::from_static(key),
+            value: Bytes::from_static(b"value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: None,
+        start_sequence: None,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+        response_tx: None,
+    })?;
+    Ok(match write.recv_timeout(Duration::from_secs(5)) {
+        Ok(RuntimeResponse::TransactionApplied { last_sequence, .. }) => last_sequence,
+        response => panic!("CloudAsync write did not apply: {response:?}"),
+    })
+}
+
+#[cfg(feature = "failpoints")]
+fn request_cloud_async_seal(
+    fixture: &CloudAsyncRuntime,
+    request_id: u64,
+    sequence: u64,
+) -> crate::common::MidgeResult<crossbeam::channel::Receiver<RuntimeResponse>> {
+    let response = fixture
+        .handle
+        .router
+        .register(request_id, "explicit CloudAsync seal");
+    fixture.handle.send(RuntimeMsg::SealWalForCloud {
+        request_id,
+        sequence,
+        wait_for_ack: false,
+    })?;
+    Ok(response)
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_progress_control_while_cloud_seal_fsync_is_held() -> crate::common::MidgeResult<()> {
+    // Arrange: start a real CloudAsync runtime before holding its physical WAL sync.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = CloudAsyncRuntime::new()?;
+    let held = HeldTwoSyncs::new();
+    let last_sequence = apply_cloud_async_put(&fixture, 96_200, b"cloud-seal-prefix")?;
+    let seal = request_cloud_async_seal(&fixture, 96_202, last_sequence)?;
+    if held
+        .reached
+        .recv_timeout(Duration::from_millis(500))
+        .is_err()
+    {
+        let pending = seal.try_recv();
+        let _ = held.release.send(());
+        let _ = fixture.shutdown();
+        panic!("CloudAsync seal did not reach held physical fsync; response={pending:?}");
+    }
+
+    // Act: control and local read requests enter while the prefix fsync is held.
+    let prefix_progress = cloud_seal_control_and_read(&fixture, 96_201, 96_204);
+    held.release
+        .send(())
+        .expect("release held cloud prefix fsync");
+    if held.reached.recv_timeout(Duration::from_secs(1)).is_err() {
+        let pending = seal.try_recv();
+        let _ = held.release.send(());
+        let shutdown = fixture.shutdown();
+        panic!(
+            "CloudAsync footer sync was not held; seal response={pending:?}; shutdown={shutdown:?}"
+        );
+    }
+
+    // Act: both request classes must progress during the footer barrier too.
+    let footer_progress = cloud_seal_control_and_read(&fixture, 96_203, 96_205);
+    held.release
+        .send(())
+        .expect("release held cloud footer fsync");
+    let seal_result = seal.recv_timeout(Duration::from_secs(5));
+    let shutdown = fixture.shutdown();
+
+    // Assert: both control responses arrive under their respective holds; the later
+    // seal request also proves the ticket returned to Ready after completion.
+    assert_cloud_seal_control_and_read_progress(&prefix_progress, 96_201, 96_204, "prefix fsync");
+    assert_cloud_seal_control_and_read_progress(&footer_progress, 96_203, 96_205, "footer fsync");
+    assert!(matches!(
+        seal_result,
+        Ok(RuntimeResponse::Ok { request_id: 96_202 })
+    ));
+    shutdown?;
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_cloud_seal_control_and_read_progress(
+    progress: &(
+        Result<RuntimeResponse, crossbeam::channel::RecvTimeoutError>,
+        Result<RuntimeResponse, crossbeam::channel::RecvTimeoutError>,
+    ),
+    control_id: u64,
+    read_id: u64,
+    phase: &str,
+) {
+    assert!(
+        matches!(
+            progress.0,
+            Ok(RuntimeResponse::Ok { request_id }) if request_id == control_id
+        ),
+        "control request stalled behind CloudAsync {phase}: {progress:?}"
+    );
+    assert!(
+        matches!(
+            progress.1,
+            Ok(RuntimeResponse::ReadValue {
+                request_id,
+                value: None,
+                ..
+            }) if request_id == read_id
+        ),
+        "local read stalled behind CloudAsync {phase}: {progress:?}"
+    );
+}
+
+#[cfg(feature = "failpoints")]
+fn cloud_seal_control_and_read(
+    fixture: &CloudAsyncRuntime,
+    control_id: u64,
+    read_id: u64,
+) -> (
+    Result<RuntimeResponse, crossbeam::channel::RecvTimeoutError>,
+    Result<RuntimeResponse, crossbeam::channel::RecvTimeoutError>,
+) {
+    let control = fixture
+        .handle
+        .router
+        .register(control_id, "control during CloudAsync seal");
+    let read = fixture
+        .handle
+        .router
+        .register(read_id, "local read during CloudAsync seal");
+    fixture
+        .handle
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+            request_id: control_id,
+        }))
+        .expect("send control request during seal");
+    fixture
+        .handle
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Read {
+            request_id: read_id,
+            cf_id: 0,
+            key: b"cloud-seal-prefix".to_vec(),
+            sequence: 0,
+            requested_durability: crate::types::ReadDurability::Strict,
+        }))
+        .expect("send local read during seal");
+    (
+        control.recv_timeout(Duration::from_millis(250)),
+        read.recv_timeout(Duration::from_millis(250)),
+    )
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_cancel_cloud_footer_when_lease_is_lost_after_prefix_sync(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: append a CloudAsync record and release its lease after the
+    // accepted prefix sync, before the event loop admits the footer.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = CloudAsyncRuntime::new()?;
+    let sequence = apply_cloud_async_put(&fixture, 96_300, b"stale-footer-lease")?;
+    let wal_path = fixture
+        .db_path
+        .join(crate::wal::WAL_DIR)
+        .join(crate::wal::segment_file_name(1));
+    let before = std::fs::metadata(&wal_path)?.len();
+    let store = Arc::clone(&fixture.store);
+    let (released, release_observed) = crossbeam::channel::bounded(1);
+    fail::cfg_callback(
+        "midge::cloud::inject_fail_after_wal_flush_before_rotate",
+        move || {
+            let result = store.release_if_owner("test-writer", 1);
+            let _ = released.send(result.is_ok_and(|released| released));
+        },
+    )
+    .expect("release leadership between prefix sync and footer admission");
+
+    // Act: request cloud durability. The callback releases the lease only
+    // after the accepted prefix sync reaches the reversible cancellation edge.
+    let seal = request_cloud_async_seal(&fixture, 96_301, sequence)?;
+    let response = seal.recv_timeout(Duration::from_secs(5));
+    let was_released = release_observed.recv_timeout(Duration::from_secs(5));
+    fail::remove("midge::cloud::inject_fail_after_wal_flush_before_rotate");
+    let after = std::fs::metadata(&wal_path)?.len();
+    let _ = fixture.shutdown();
+
+    // Assert: lease loss cancels the reversible CloudFlush and no footer bytes
+    // or successful seal receipt escape.
+    assert_eq!(
+        was_released,
+        Ok(true),
+        "test takeover did not release the lease"
+    );
+    assert!(matches!(
+        response,
+        Ok(RuntimeResponse::Error {
+            request_id: 96_301,
+            ..
+        })
+    ));
+    assert_eq!(after, before, "stale authority appended WAL footer bytes");
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_fence_cloud_seal_when_footer_transition_fails_after_async_sync(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: fail after the accepted footer append and its durability barrier.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = CloudAsyncRuntime::new()?;
+    let sequence = apply_cloud_async_put(&fixture, 96_310, b"footer-accepted-failure")?;
+    fail::cfg("midge::wal_transition::after_footer", "return")
+        .expect("configure post-footer failure");
+
+    // Act
+    let seal = request_cloud_async_seal(&fixture, 96_311, sequence)?;
+    let response = seal.recv_timeout(Duration::from_secs(5));
+    fail::remove("midge::wal_transition::after_footer");
+    let shutdown = fixture.shutdown();
+
+    // Assert: the accepted footer is retained as a recovery obligation and no
+    // successful seal acknowledgement escapes the failed rotation transition.
+    assert!(matches!(
+        response,
+        Ok(RuntimeResponse::Error {
+            request_id: 96_311,
+            ..
+        })
+    ));
+    assert!(
+        shutdown.is_err(),
+        "fenced footer failure reported clean shutdown"
+    );
+    Ok(())
 }
 
 #[cfg(feature = "failpoints")]

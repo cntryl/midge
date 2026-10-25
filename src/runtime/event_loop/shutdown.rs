@@ -79,6 +79,10 @@ impl EventLoop {
 
         // Establish authoritative remote WAL durability before replacing that
         // recovery authority with an SST/manifest checkpoint.
+        // Shutdown has stopped admitting requests and no longer services the
+        // event loop for ordinary reads or controls. Keep this final seal as a
+        // bounded synchronous drain under `cloud_shutdown_deadline`; active
+        // CloudAsync seals use the pending writer-runner path instead.
         if cloud_async && self.state.wal.pending_writes > 0 {
             match trace_shutdown_phase(
                 "final-cloud-wal-seal",

@@ -3,8 +3,8 @@
 ## Current local follow-up checkpoint (2026-10-25)
 
 The active local integration branch is `work/0.5.0-issue-integration`, based
-on `b5d1bc7b38efea90bde2e243d49d2978e2dcdf7d`. Four small commits currently
-cover these slices:
+on `b5d1bc7b38efea90bde2e243d49d2978e2dcdf7d`. The issue-scoped commits
+currently cover these slices:
 
 | Commit | Issue slice | Focused evidence | Remaining issue gates |
 | --- | --- | --- | --- |
@@ -15,18 +15,27 @@ cover these slices:
 | `f8c14a1c` | #914 removes hidden reads from the metadata request-count test double | The zero-read/two-PUT test was red on two inner GETs, then passed (1/1) with actual mock GET/range history and conditional-header assertions; Jev favored the test design (0.98) | Cold-start before/after and #937/#935 performance evidence |
 | `19926136` | #978 asserts the spill-specific global applied cut after partial apply | Cross-family rejection plus fresh snapshot cut/key assertions passed (1/1); whole-spill restart recovery passed (1/1) | Pipeline/rotation matrices, AC1–3, crash and performance evidence |
 | `a08f0616` | #905 covers a conflicting follower queued behind held Strict fsync | The follower waits without append or visibility, then conflicts after predecessor apply with no partial effects (1/1); Jev favored the evidence (0.65) | Hot-key throughput target and records-per-append/group-window measurements |
+| pending | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; `cargo fmt --check` and `git diff --check` passed | Injected-provider latency/A-B evidence and completion ordering/reconciliation cases (#935/#937); no full suite or benchmark run yet |
 
 Jev judgments informed the design reviews; implementation source and behavior
-tests remain the correctness evidence. The #926 implementation was already
+tests remain the correctness evidence. Parallel Jev-reviewed slices found
+#947's proposed framing optimizations and #911's checkpoint failure handling
+already present; their remaining throughput measurements stay open. The
+#910 callback-admission retry is also implemented and its focused adapter
+suite passed 4/4. The #926 implementation was already
 present, so its eight focused ordering, proof, replay and recovery tests were
 executed and passed without a code change. #949's implementation was likewise
 already present; its focused writer/merge coverage is recorded in its issue,
-while the compaction CPU-per-MB comparison remains open. #907 was previously
-blocked on the async WAL ownership seam. Re-evaluation against `4e0499f2`
-confirmed cloud seal also needs a `WalSealTicket`-aware worker handoff and
-loop-owned rotation. A direct threaded event-loop test hung and was stopped;
-that attempt is inconclusive and no #907 code change was made. The issue stays
-open while the whole-prefix failure regression from #978 is investigated.
+while the compaction CPU-per-MB comparison remains open. Re-evaluation against
+`4e0499f2` confirmed cloud seal needs a `WalSealTicket`-aware worker handoff
+and loop-owned rotation. The async seal path now retains a ticket across
+prefix sync, footer append and footer sync, then performs rotation and ledger
+updates on the event loop after exact completion checks. Normal seal work no
+longer blocks the loop on these barriers. Shutdown retains its bounded
+synchronous final seal after admission stops. The focused regressions establish
+the core transition and progress behavior; provider latency, reordered or
+duplicate completion and caller-timeout reconciliation remain open acceptance
+gates.
 
 The live 0.5.0 milestone still has 28 open issues. #912 remains deliberately
 deferred to preserve clock-correction recovery. No issue is closed by these

@@ -444,6 +444,95 @@ impl WalActor {
         Ok(open_max_sequence)
     }
 
+    /// Submit the CloudAsync seal barrier to the WAL writer without waiting on
+    /// the event-loop thread. The returned prefix is the authority the caller
+    /// must match before rotating the segment.
+    pub(crate) fn submit_cloud_upload_flush(
+        &mut self,
+        state: &mut RuntimeState,
+        deadline: &crate::common::OperationDeadline,
+        ticket: &WalSealTicket,
+    ) -> MidgeResult<(
+        crate::wal::traits::WalPendingSync,
+        crate::wal::traits::WalSyncPrefix,
+        u64,
+    )> {
+        self.ensure_filesystem_wal_available(state)?;
+        let open_max_sequence = self.open_segment_max_sequence();
+        self.begin_io_transition(WalTransitionOperation::CloudFlush)?;
+        let Some(io_timeout) = deadline.clamp_nonzero(self.storage_io_timeout) else {
+            self.finish_io_transition()?;
+            return Err(MidgeError::Timeout(format!(
+                "operation deadline exhausted before WAL flush: remaining={:?}",
+                deadline.remaining()
+            )));
+        };
+        let Some(writer) = self.writer() else {
+            self.finish_io_transition()?;
+            return Err(MidgeError::Internal(
+                "filesystem WAL writer disappeared during cloud flush".into(),
+            ));
+        };
+        if !writer.supports_sync_submission() {
+            self.finish_io_transition()?;
+            return Err(MidgeError::InvalidArgument(
+                "CloudAsync WAL writer does not support asynchronous sync submission".into(),
+            ));
+        }
+        let tail = writer.tail();
+        let prefix = crate::wal::traits::WalSyncPrefix {
+            barrier_id: ticket.prefix_operation_id(),
+            writer_epoch: self.current_epoch,
+            segment_id: state.wal.open_segment(),
+            first_sequence: tail.first_seq.unwrap_or(0),
+            last_sequence: tail.last_seq.unwrap_or(0),
+            end_offset: writer.current_pos(),
+        };
+        let submission = Self::sync_failure_boundary().and_then(|()| {
+            WalTransitionBoundary::BeforeFsync.check()?;
+            writer
+                .submit_sync_prefix(prefix, io_timeout, None)
+                .ok_or_else(|| {
+                    MidgeError::Internal("WAL writer lost asynchronous sync capability".into())
+                })?
+        });
+        match submission {
+            Ok(pending) => Ok((pending, prefix, open_max_sequence)),
+            Err(error) => {
+                self.fence_transition(state, format!("WAL seal fsync submission failed: {error}"));
+                Err(error)
+            }
+        }
+    }
+
+    /// Validate the completion of an admitted CloudAsync seal barrier. The
+    /// event loop performs lease revalidation before rotating.
+    pub(crate) fn finish_cloud_upload_flush(
+        &mut self,
+        state: &mut RuntimeState,
+        expected: crate::wal::traits::WalSyncPrefix,
+        completion: MidgeResult<crate::wal::traits::WalSyncCompletion>,
+    ) -> MidgeResult<()> {
+        let result = completion.and_then(|completion| {
+            if completion.prefix != expected {
+                return Err(MidgeError::Internal(
+                    "CloudAsync seal completion did not match its admitted prefix".into(),
+                ));
+            }
+            Self::after_fsync_boundary()?;
+            WalTransitionBoundary::AfterFsync.check()?;
+            Ok(())
+        });
+        if let Err(error) = result {
+            self.fence_transition(state, format!("WAL seal fsync failed: {error}"));
+            return Err(error);
+        }
+        self.counters.record(|metrics| {
+            metrics.record_wal_flush();
+        });
+        Ok(())
+    }
+
     /// Clear buffered WAL accounting after a `CloudAsync` segment is sealed and
     /// owned by the upload backlog or inflight frontier.
     ///

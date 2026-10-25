@@ -10,7 +10,7 @@ mod ack;
 mod metadata;
 mod publication;
 pub(super) mod publication_worker;
-mod sealing;
+pub(super) mod sealing;
 
 impl EventLoop {
     pub(super) fn elapsed_micros_to_u64(duration: std::time::Duration) -> u64 {

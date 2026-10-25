@@ -27,8 +27,9 @@ use crate::wal::traits::{GroupedWalWriter, WalAppendError, WalWriter};
 use crate::wal::types::{WalPos, WalRecord};
 use crate::wal::writer_authority::PendingWriterEffect;
 use parking_lot::{Condvar, Mutex};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
@@ -321,6 +322,92 @@ impl FsWalWriterIo {
         Ok(Footer::sealing(&self.header, &self.tail.lock(), &digest))
     }
 
+    fn submit_footer_operation(
+        &self,
+        operation_id: u64,
+        facts: &SealedFacts,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<crate::wal::footer_completion::WalPendingFooter> {
+        let started = Instant::now();
+        if let Some(error) = self.writer_failure() {
+            return Err(error);
+        }
+        let footer = self.sealing(timeout)?;
+        if footer.sealed_facts() != *facts {
+            return Err(MidgeError::Internal(format!(
+                "WAL segment {} changed after its seal facts were taken",
+                self.header.id
+            )));
+        }
+        let data = footer.encode_frame()?;
+        let start_offset = self.current_pos();
+        let end_offset = start_offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| MidgeError::ResourceLimit("WAL footer offset overflow".into()))?;
+        let expected = crate::wal::footer_completion::WalFooterPrefix {
+            operation_id,
+            writer_epoch: self.header.epoch,
+            segment_id: self.header.id,
+            start_offset,
+            end_offset,
+        };
+        if data.is_empty() {
+            return Err(MidgeError::Internal("encoded WAL footer is empty".into()));
+        }
+        crate::failpoints::fail_point!("midge::wal::timeout_before_enqueue", |_| Err(
+            MidgeError::Timeout("injected timeout before WAL footer enqueue".into())
+        ));
+        let (effect, root) =
+            PendingWriterEffect::admit(self.write_authority.read().clone(), group, timeout)?;
+        let reservation = self
+            .raw_submission_memory
+            .reserve(data.len(), "asynchronous WAL footer")?;
+        let (sender, response) = std::sync::mpsc::sync_channel(1);
+        {
+            let mut queue = self.queue.lock();
+            let mut state = self.sync_state.lock();
+            if let Some(error) = state.failure() {
+                return Err(error);
+            }
+            if self.sealed.load(Ordering::Acquire) {
+                return Err(MidgeError::Internal(format!(
+                    "WAL segment {} is already sealed",
+                    self.header.id
+                )));
+            }
+            if queue.len() >= super::writer_runner::MAX_QUEUE_DEPTH
+                || state.submitted_writes != state.completed_writes
+                || started.elapsed() >= timeout
+            {
+                return Err(MidgeError::WriteStall(
+                    "WAL footer admission is not at a drained segment boundary".into(),
+                ));
+            }
+            let id = state.submitted_writes.checked_add(1).ok_or_else(|| {
+                MidgeError::ResourceLimit("WAL writer request identity exhausted".into())
+            })?;
+            self.sealed.store(true, Ordering::Release);
+            state.submitted_writes = id;
+            queue.push(super::writer_runner::QueuedWrite::footer(
+                data,
+                expected,
+                sender,
+                effect,
+                id,
+                reservation,
+            ));
+        }
+        self.queue_cond.notify_one();
+        let failure_state = Arc::clone(&self.sync_state);
+        Ok(crate::wal::footer_completion::WalPendingFooter::new(
+            response,
+            expected,
+            Arc::new(move || failure_state.lock().failure()),
+            root,
+        ))
+    }
+
     fn take_buffer(&self) -> Vec<u8> {
         let mut pool = self.buf_pool.lock();
         pool.pop().unwrap_or_else(|| Vec::with_capacity(1024))
@@ -503,6 +590,16 @@ impl WalWriter for FsWalWriterIo {
         group: Option<&crate::lease::WriterEffectGroup>,
     ) -> Option<MidgeResult<crate::wal::traits::WalPendingSync>> {
         Some(self.enqueue_sync_prefix(prefix, timeout, group))
+    }
+
+    fn submit_footer(
+        &self,
+        operation_id: u64,
+        facts: &SealedFacts,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<MidgeResult<crate::wal::footer_completion::WalPendingFooter>> {
+        Some(self.submit_footer_operation(operation_id, facts, timeout, group))
     }
 
     fn set_write_authority(&self, authority: Option<crate::wal::traits::WriteAuthority>) {
