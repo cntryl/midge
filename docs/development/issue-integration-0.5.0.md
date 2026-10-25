@@ -1523,7 +1523,13 @@ change before delete and replacement identity. Pointer-advance checkpoint
 selection is implicit in the published history and production collector path,
 not asserted as a generation identifier. This does not cover publication racing
 collection, uncertain authority reads in a crash campaign, or ambiguous delete
-responses; #913 remains open pending those AC3 cases.
+responses. Two focused collector regressions additionally hold a real pending
+metadata capture and corrupt the selected pointer: retention performs no
+deletes while capture ownership is pending or the authority read is uncertain,
+and the exact committed pointer restores readable history. Removing both
+pending-capture guards makes the capture regression fail because the candidate
+is deleted. These unit checks complement but do not replace the remaining AC3
+process-crash cases; #913 remains open.
 
 These checks do not complete #907's injected-latency/A-B gates or #916's cost
 and catalog-size measurements. #913's metadata-generation GC crash acceptance
