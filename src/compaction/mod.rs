@@ -324,16 +324,21 @@ mod tests {
         )?;
         incomplete.finish_to_path(&directory.path().join(incomplete_name))?;
         let files = vec![
-            test_file_meta(directory.path(), source_name, 0, b"b", b"m", 2, 2, true)?,
-            test_file_meta(directory.path(), covered_name, 1, b"h", b"h", 1, 1, true)?,
+            test_file_meta(directory.path(), source_name, 0, (b"b", b"m"), (2, 2), true)?,
+            test_file_meta(
+                directory.path(),
+                covered_name,
+                1,
+                (b"h", b"h"),
+                (1, 1),
+                true,
+            )?,
             test_file_meta(
                 directory.path(),
                 incomplete_name,
                 1,
-                b"z",
-                b"z",
-                1,
-                1,
+                (b"z", b"z"),
+                (1, 1),
                 false,
             )?,
         ];
@@ -372,10 +377,8 @@ mod tests {
         directory: &std::path::Path,
         name: &str,
         level: u32,
-        smallest_key: &[u8],
-        largest_key: &[u8],
-        smallest_seq: u64,
-        largest_seq: u64,
+        key_bounds: (&[u8], &[u8]),
+        sequence_bounds: (u64, u64),
         key_bounds_complete: bool,
     ) -> MidgeResult<crate::metadata::FileMeta> {
         let bytes = std::fs::read(directory.join(name))?;
@@ -385,10 +388,10 @@ mod tests {
             size_bytes: u64::try_from(bytes.len()).expect("SST size fits u64"),
             content_crc32c: Some(crc32c::crc32c(&bytes)),
             cf_id: 0,
-            smallest_key: Some(smallest_key.to_vec()),
-            largest_key: Some(largest_key.to_vec()),
-            smallest_seq: Some(smallest_seq),
-            largest_seq: Some(largest_seq),
+            smallest_key: Some(key_bounds.0.to_vec()),
+            largest_key: Some(key_bounds.1.to_vec()),
+            smallest_seq: Some(sequence_bounds.0),
+            largest_seq: Some(sequence_bounds.1),
             key_bounds_complete,
             ..Default::default()
         })
