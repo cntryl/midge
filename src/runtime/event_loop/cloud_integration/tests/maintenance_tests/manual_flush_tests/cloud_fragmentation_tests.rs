@@ -272,11 +272,10 @@ fn recover_remote_history(
 
 #[test]
 fn should_recover_raw_source_history_when_cloud_fragment_publication_commits() -> MidgeResult<()> {
-    // Arrange: the source fits one ordinary output, but overlaps excessive remote targets.
+    // Arrange: disabled overlap policy exercises conservative fragmentation of
+    // this broad legacy source before remote targets are compacted.
     let (mut el, worker, _) = cloud_debt(0)?;
-    // This retained broad source predates the configured output overlap
-    // budget and still requires source-only fragmentation.
-    install_cloud_actor(&mut el, u64::try_from(TARGET * 4).unwrap());
+    install_cloud_actor(&mut el, 0);
     let files = seed_fragment_layout(&mut el)?;
     let source = &files[0];
     let targets = &files[1..];
