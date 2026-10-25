@@ -84,6 +84,10 @@ impl Default for WalCommitPipeline {
 }
 
 impl WalCommitPipeline {
+    pub(super) fn has_pending_group(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub(super) fn has_ready_work(&self) -> bool {
         self.pending.as_ref().is_some_and(PendingGroup::ready)
     }
@@ -139,7 +143,7 @@ fn requires_applied_prefix(message: &RuntimeMsg) -> bool {
 
 impl EventLoop {
     pub(super) fn wal_group_in_flight(&self) -> bool {
-        self.pipeline.wal_commits.pending.is_some()
+        self.pipeline.wal_commits.has_pending_group()
             || self.pipeline.memtable_apply.is_pending()
             || self.pipeline.pending_cloud_seal.is_some()
     }

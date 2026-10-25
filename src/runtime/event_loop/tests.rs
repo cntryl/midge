@@ -50,6 +50,103 @@ fn should_preserve_fenced_kind_when_wal_sync_detects_stale_writer() -> crate::co
     Ok(())
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_settle_parked_strict_group_before_shutdown_wal_barrier() -> crate::common::MidgeResult<()>
+{
+    use crate::runtime::{ConflictPolicy, RuntimeResponse, TransactionOp};
+    use bytes::Bytes;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let db_path = event_loop.state.db_path.clone();
+    let (entered, reached) = crossbeam::channel::bounded(1);
+    let (release, released) = crossbeam::channel::bounded(1);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = Arc::clone(&calls);
+    fail::cfg_callback("midge::wal::before_physical_sync", move || {
+        if callback_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            entered.send(()).expect("signal held WAL sync");
+            released
+                .recv_timeout(Duration::from_secs(10))
+                .expect("release held WAL sync");
+        }
+    })
+    .expect("configure held WAL sync");
+
+    let commit = event_loop.routing.router.register(94_050, "strict commit");
+    let shutdown = event_loop.routing.router.register(94_051, "shutdown");
+    event_loop.process_one(
+        RuntimeMsg::ApplyTransaction {
+            request_id: 94_050,
+            ops: vec![TransactionOp::Put {
+                cf_id: 0,
+                key: Bytes::from_static(b"shutdown-prefix"),
+                value: Bytes::from_static(b"durable-before-shutdown"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+            start_sequence: None,
+            conflict_policy: ConflictPolicy::LastWriteWins,
+            response_tx: None,
+        },
+        &crossbeam::channel::never(),
+    );
+    assert!(
+        event_loop.wal_group_in_flight(),
+        "Strict transaction was not accepted into the WAL pipeline: sequence={}, response={:?}",
+        event_loop.state.sequence,
+        commit.try_recv()
+    );
+    let gate_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        event_loop.progress_wal_pipeline();
+        if reached.try_recv().is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < gate_deadline,
+            "strict group did not reach physical sync"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    // Act: shutdown must drain this owned barrier before requesting its final sync.
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(25));
+        release.send(()).expect("release held sync");
+    });
+    event_loop.handle_shutdown(Some(94_051));
+    releaser.join().expect("join WAL sync releaser");
+
+    // Assert: the accepted Strict write settles before shutdown acknowledges.
+    assert!(matches!(
+        commit.try_recv(),
+        Ok(RuntimeResponse::TransactionApplied {
+            request_id: 94_050,
+            ..
+        })
+    ));
+    assert!(matches!(
+        shutdown.try_recv(),
+        Ok(RuntimeResponse::Ok { request_id: 94_051 })
+    ));
+    drop(event_loop);
+    let recovered = RuntimeState::try_new(db_path, false, crate::config::RecoveryPolicy::Strict)?;
+    let family = recovered.get_cf(0).expect("recovered default family");
+    assert_eq!(
+        family.memtable.get(b"shutdown-prefix")?,
+        Some(b"durable-before-shutdown".to_vec())
+    );
+    Ok(())
+}
+
 #[test]
 fn should_preserve_resource_limit_when_compaction_launch_is_refused(
 ) -> crate::common::MidgeResult<()> {
