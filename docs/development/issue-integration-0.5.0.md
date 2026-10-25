@@ -1181,8 +1181,16 @@ writer authority and a conditional DELETE. Missing proof and replacement
 objects remain retained. Terminal confirmation journals the original identity
 and refuses active or replaced metadata. Active tests cover durable queue
 replay, cold hydration, replacement races, writer fencing and snapshot pins.
-Test targets compile; execution/crash qualification remains pending. General
-SST orphan and catalog-anchor WAL rediscovery are still separate code gaps.
+The public `cloud_core` held-snapshot regression now exercises the scheduled
+CloudSimulated sweep: after compaction retires the predecessor SST, the pinned
+snapshot continues reading it while a real sweep increments retained-object
+metrics without attempting DELETE; after releasing the final pin, a subsequent
+sweep reclaims the remote SST. Removing the sweep deletion gate makes this
+test fail (two DELETE attempts while pinned); restoring the gate passes in
+61.47 seconds. This supplies AC3's public read/sweep/reclaim evidence for
+CloudSimulated only. AC6's sweep-enabled crash campaign remains open, as do
+native-provider qualification and the general SST orphan and catalog-anchor
+WAL rediscovery evidence.
 
 #908 adds opt-in caller-side admission slowdown below existing L0/memory
 ceilings, an estimated pending-compaction byte band/hard limit and a shared
