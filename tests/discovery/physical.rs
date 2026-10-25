@@ -97,18 +97,18 @@ fn assert_restored(case: &CrashCase, counters: &mut Counters) {
 }
 
 fn assert_remove_only_intent(path: &Path) {
-    let bytes = std::fs::read(path.join("intent_log.json")).expect("durable compaction intent");
-    let intents: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    use cntryl_midge::__internal::io::{Fs, RealFs};
+    use cntryl_midge::__internal::recovery::{IntentLogEntry, IntentPersistence};
+    let fs: std::sync::Arc<dyn Fs> = std::sync::Arc::new(RealFs::open_existing(path).unwrap());
+    let intents =
+        IntentPersistence::load_with_fs_and_policy(&fs, cntryl_midge::RecoveryPolicy::Strict)
+            .expect("strict production replay of durable compaction intent");
     assert!(
-        intents.as_array().unwrap().iter().any(|intent| {
-            intent.get("CompactionPublish").is_some_and(|entry| {
-                entry["added"].as_array().is_some_and(Vec::is_empty)
-                    && entry["removed"]
-                        .as_array()
-                        .is_some_and(|files| !files.is_empty())
-            })
-        }),
-        "named abort must follow actual filtering to empty output: {intents}"
+        intents.iter().any(|intent| matches!(intent,
+            IntentLogEntry::CompactionPublish { added, removed, .. }
+                if added.is_empty() && !removed.is_empty()
+        )),
+        "named abort must follow actual filtering to empty output: {intents:?}"
     );
 }
 

@@ -1,7 +1,7 @@
 //! Shared bounded-resource accounting used by internal streaming pipelines.
 
 use super::{MidgeError, MidgeResult};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Source of pool identities. A pool id is never reused within a process, so a
@@ -76,7 +76,6 @@ impl ResourceBudget {
     /// the shared `Arc` because it is a per-holder error contract, and
     /// propagating it would change the errors unrelated callers observe.
     #[must_use]
-    #[cfg(test)]
     pub(crate) fn child(&self, limit: usize) -> Self {
         Self {
             inner: Arc::new(ResourceBudgetInner {
@@ -150,6 +149,8 @@ impl ResourceBudget {
                         budget: self.clone(),
                         bytes,
                         parent: None,
+                        shared_credit: None,
+                        credit_claimed: AtomicBool::new(false),
                     };
                     // Charge the parent only after this level succeeded, so the
                     // level that rejects is the level named in the error. If the
@@ -164,6 +165,39 @@ impl ResourceBudget {
                 Err(observed) => current = observed,
             }
         }
+    }
+
+    /// Include one already charged shared workspace in this reservation.
+    /// The credit is exclusive and follows the reservation's final physical
+    /// owner, so concurrent callback clones cannot spend the same bytes twice.
+    /// `bytes` must include the actual shared workspace; this cannot discount
+    /// a separate new allocation. The result's `bytes`, `resize` and `split`
+    /// describe its independently charged part, with credit retained separately.
+    pub(crate) fn reserve_with_shared_credit(
+        &self,
+        bytes: usize,
+        credit: &Arc<ResourceReservation>,
+        resource: &'static str,
+    ) -> MidgeResult<ResourceReservation> {
+        let reused = credit.bytes.min(bytes / 2);
+        if !Arc::ptr_eq(&self.inner, &credit.budget.inner)
+            || credit.shared_credit.is_some()
+            || reused == 0
+            || credit
+                .credit_claimed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return self.reserve(bytes, resource);
+        }
+        let credit_guard = SharedReservationCredit {
+            reservation: Arc::clone(credit),
+        };
+        // Keep at least half of the new operation's workspace independently
+        // charged, including space it may split into a new compact witness.
+        let mut reservation = self.reserve(bytes - reused, resource)?;
+        reservation.shared_credit = Some(credit_guard);
+        Ok(reservation)
     }
 
     #[must_use]
@@ -193,6 +227,11 @@ pub(crate) struct ResourceContention {
 }
 
 impl ResourceContention {
+    /// Match this failed attempt's originating pool even if the owner that
+    /// caused contention has already released its charge.
+    pub(crate) fn is_for_pool(&self, budget: &ResourceBudget) -> bool {
+        budget.is_within_pool(self.pool_id)
+    }
     /// Recover the contention that produced `error`, if it was produced by a
     /// contention-reporting budget. Pure: nothing is consumed, so the same
     /// error can be inspected any number of times and no other attempt can
@@ -245,9 +284,54 @@ pub struct ResourceReservation {
     // Matching charge held against the enclosing pool. Declared after `budget`
     // and `bytes` so this level is released before its parent.
     parent: Option<Box<ResourceReservation>>,
+    shared_credit: Option<SharedReservationCredit>,
+    credit_claimed: AtomicBool,
+}
+
+#[derive(Debug)]
+struct SharedReservationCredit {
+    reservation: Arc<ResourceReservation>,
+}
+
+impl Drop for SharedReservationCredit {
+    fn drop(&mut self) {
+        self.reservation
+            .credit_claimed
+            .store(false, Ordering::Release);
+    }
 }
 
 impl ResourceReservation {
+    /// Whether this attempt was refused by a reservation in this same pool
+    /// hierarchy, even if that owner finished before error classification.
+    pub(crate) fn admission_retryable(&self, error: &MidgeError) -> bool {
+        ResourceContention::from_error(error)
+            .is_some_and(|contention| contention.is_for_pool(&self.budget))
+    }
+
+    /// Transfer an existing charge without releasing or increasing any level
+    /// of its pool hierarchy. The two resulting owners release independently.
+    /// Borrowed credit stays with this source; it is never copied to the split.
+    pub(crate) fn split(&mut self, bytes: usize) -> MidgeResult<Self> {
+        if bytes > self.bytes || self.credit_claimed.load(Ordering::Acquire) {
+            return Err(MidgeError::ResourceLimit(
+                "resource reservation cannot split its owned charge".into(),
+            ));
+        }
+        let parent = self
+            .parent
+            .as_mut()
+            .map(|parent| parent.split(bytes).map(Box::new))
+            .transpose()?;
+        self.bytes -= bytes;
+        Ok(Self {
+            budget: self.budget.clone(),
+            bytes,
+            parent,
+            shared_credit: None,
+            credit_claimed: AtomicBool::new(false),
+        })
+    }
     pub(crate) fn reserve_related(
         &self,
         bytes: usize,
@@ -260,9 +344,32 @@ impl ResourceReservation {
         self.bytes
     }
 
-    /// Hold `bytes` in total. Growth is admitted like a new reservation and a
-    /// refusal leaves the charge unchanged; a smaller total releases the rest.
+    pub(crate) fn limit(&self) -> usize {
+        self.budget.limit()
+    }
+
+    /// Payload retained by this reservation and its owned parent Boxes.
+    /// The caller accounts for its outer Arc header separately. Shared pool
+    /// objects and borrowed-credit allocations already have separate owners.
+    pub(crate) fn allocation_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Self>();
+        let mut parent = self.parent.as_deref();
+        while let Some(reservation) = parent {
+            bytes = bytes.saturating_add(std::mem::size_of::<Self>());
+            parent = reservation.parent.as_deref();
+        }
+        bytes
+    }
+
+    /// Hold `bytes` of independent charge. Growth is admitted like a new
+    /// reservation and a refusal leaves the charge unchanged; a smaller total
+    /// releases the rest. Any borrowed credit remains separately owned.
     pub(crate) fn resize(&mut self, bytes: usize, resource: &'static str) -> MidgeResult<()> {
+        if self.credit_claimed.load(Ordering::Acquire) {
+            return Err(MidgeError::ResourceLimit(
+                "resource reservation cannot resize its lent charge".into(),
+            ));
+        }
         if bytes > self.bytes {
             let mut growth = self.budget.reserve(bytes - self.bytes, resource)?;
             self.absorb(&mut growth);
@@ -429,6 +536,236 @@ mod hierarchy_tests {
             matches!(result, Err(MidgeError::ResourceLimit(_))),
             "{result:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod shared_credit_tests {
+    use super::*;
+
+    #[test]
+    fn should_leave_credit_available_when_workspace_has_no_reusable_bytes() {
+        for bytes in [0, 1] {
+            // Arrange
+            let budget = ResourceBudget::new(128 + bytes);
+            let credit = Arc::new(budget.reserve(64, "selected witness").unwrap());
+
+            // Act: neither tiny reservation can reuse a half-workspace byte.
+            let small = budget
+                .reserve_with_shared_credit(bytes, &credit, "small body")
+                .unwrap();
+            let body = budget.reserve_with_shared_credit(128, &credit, "next body");
+
+            // Assert: retaining the tiny owner must not consume the claim.
+            assert!(body.is_ok(), "workspace={bytes}: {body:?}");
+            assert_eq!(budget.used(), 128 + bytes);
+            drop(body);
+            drop(small);
+            drop(credit);
+            assert_eq!(budget.used(), 0);
+        }
+    }
+
+    #[test]
+    fn should_restore_shared_credit_when_parent_refuses_admission() {
+        // Arrange: child fits, but another subtree fills the shared parent.
+        let root = ResourceBudget::new(100);
+        let child = root.child(80);
+        let credit = Arc::new(child.reserve(40, "selected witness").unwrap());
+        let other = root.reserve(60, "other subtree").unwrap();
+
+        // Act
+        let refused = child.reserve_with_shared_credit(80, &credit, "selected body");
+        let after_refusal = (child.used(), root.used());
+        drop(other);
+        let admitted = child
+            .reserve_with_shared_credit(80, &credit, "retry body")
+            .unwrap();
+
+        // Assert: retry could not fit if the failed claim remained borrowed.
+        assert!(matches!(refused, Err(MidgeError::ResourceLimit(_))));
+        assert_eq!(after_refusal, (40, 100));
+        assert_eq!((admitted.bytes(), child.used(), root.used()), (40, 80, 80));
+        drop(admitted);
+        drop(credit);
+        assert_eq!((child.used(), root.used()), (0, 0));
+    }
+
+    #[test]
+    fn should_keep_credit_exclusive_until_last_physical_callback_drops() {
+        // Arrange: double reuse would fit192; a second full body cannot fit.
+        let root = ResourceBudget::new(192);
+        let child = root.child(192);
+        let credit = Arc::new(child.reserve(64, "selected witness").unwrap());
+        let caller = Arc::new(
+            child
+                .reserve_with_shared_credit(128, &credit, "first body")
+                .unwrap(),
+        );
+        let callback = Arc::clone(&caller);
+        drop(caller);
+        let overlapping_budget = child.clone();
+        let overlapping_credit = Arc::clone(&credit);
+
+        // Act: the first caller is gone, but its actual callback still owns work.
+        let overlapping = std::thread::spawn(move || {
+            overlapping_budget.reserve_with_shared_credit(128, &overlapping_credit, "overlap body")
+        })
+        .join()
+        .unwrap();
+        let while_callback_owned = (child.used(), root.used());
+        drop(callback);
+        let next = child
+            .reserve_with_shared_credit(128, &credit, "next body")
+            .unwrap();
+
+        // Assert
+        assert!(matches!(overlapping, Err(MidgeError::ResourceLimit(_))));
+        assert_eq!(while_callback_owned, (128, 128));
+        assert_eq!((next.bytes(), child.used(), root.used()), (64, 128, 128));
+        drop(next);
+        drop(credit);
+        assert_eq!((child.used(), root.used()), (0, 0));
+        assert!(root.peak() <= root.limit());
+    }
+
+    #[test]
+    fn should_conserve_every_parent_charge_when_owned_reservation_is_split() {
+        // Arrange
+        let root = ResourceBudget::new(100);
+        let child = root.child(90);
+        let leaf = child.child(80);
+        let mut source = leaf.reserve(60, "source").unwrap();
+
+        // Act
+        let invalid = source.split(61);
+        let witness = source.split(20).unwrap();
+        let after_split = (leaf.used(), child.used(), root.used());
+        source.resize(50, "growth").unwrap();
+        source.resize(25, "shrink").unwrap();
+        drop(source);
+
+        // Assert: split transfers charge, never re-admits or releases it.
+        assert!(matches!(invalid, Err(MidgeError::ResourceLimit(_))));
+        assert_eq!(after_split, (60, 60, 60));
+        assert_eq!(
+            (witness.bytes(), leaf.used(), child.used(), root.used()),
+            (20, 20, 20, 20)
+        );
+        assert_eq!((leaf.peak(), child.peak(), root.peak()), (70, 70, 70));
+        drop(witness);
+        assert_eq!((leaf.used(), child.used(), root.used()), (0, 0, 0));
+    }
+
+    #[test]
+    fn should_preserve_borrowed_credit_when_own_charge_resize_fails() {
+        // Arrange
+        let root = ResourceBudget::new(160);
+        let child = root.child(160);
+        let credit = Arc::new(child.reserve(40, "selected witness").unwrap());
+        let mut body = child
+            .reserve_with_shared_credit(120, &credit, "body")
+            .unwrap();
+        let other = root.reserve(40, "other owner").unwrap();
+
+        // Act: growing fits this child but not the parent.
+        let refused = body.resize(81, "growth");
+        let after_refusal = (body.bytes(), child.used(), root.used());
+        drop(other);
+        body.resize(40, "retained body").unwrap();
+        let witness = body.split(20).unwrap();
+        drop(body);
+
+        // Assert: resizing releases only the independently charged part.
+        assert!(matches!(refused, Err(MidgeError::ResourceLimit(_))));
+        assert_eq!(after_refusal, (80, 120, 160));
+        assert_eq!((witness.bytes(), child.used(), root.used()), (20, 60, 60));
+        let retry = child
+            .reserve_with_shared_credit(80, &credit, "retry")
+            .unwrap();
+        assert_eq!((retry.bytes(), child.used(), root.used()), (40, 100, 100));
+        drop(retry);
+        drop(witness);
+        drop(credit);
+        assert_eq!((child.used(), root.used()), (0, 0));
+    }
+
+    #[test]
+    fn should_charge_full_workspace_when_credit_belongs_to_another_pool() {
+        // Arrange: sharing a parent does not make sibling pools identical.
+        let root = ResourceBudget::new(200);
+        let first = root.child(100);
+        let second = root.child(100);
+        let credit = Arc::new(first.reserve(40, "selected witness").unwrap());
+
+        // Act
+        let foreign = second
+            .reserve_with_shared_credit(80, &credit, "foreign body")
+            .unwrap();
+        let local = first
+            .reserve_with_shared_credit(80, &credit, "local body")
+            .unwrap();
+
+        // Assert: fallback neither discounts nor claims the foreign witness.
+        assert_eq!((foreign.bytes(), local.bytes()), (80, 40));
+        assert_eq!((first.used(), second.used(), root.used()), (80, 80, 160));
+        drop(foreign);
+        drop(local);
+        drop(credit);
+        assert_eq!((first.used(), second.used(), root.used()), (0, 0, 0));
+    }
+
+    #[test]
+    fn should_keep_half_workspace_independently_charged_when_credit_is_larger() {
+        // Arrange: using all80 witness bytes would incorrectly admit100.
+        let budget = ResourceBudget::new(100);
+        let credit = Arc::new(budget.reserve(80, "selected witness").unwrap());
+
+        // Act
+        let oversized = budget.reserve_with_shared_credit(100, &credit, "large body");
+        let mut admitted = budget
+            .reserve_with_shared_credit(40, &credit, "small body")
+            .unwrap();
+        let witness = admitted.split(20).unwrap();
+        drop(admitted);
+
+        // Assert: the fresh half remains transferable without pool expansion.
+        assert!(matches!(oversized, Err(MidgeError::ResourceLimit(_))));
+        assert_eq!((witness.bytes(), budget.used()), (20, 100));
+        assert!(budget.reserve(1, "over capacity").is_err());
+        drop(witness);
+        drop(credit);
+        assert_eq!(budget.used(), 0);
+        assert!(budget.peak() <= budget.limit());
+    }
+
+    #[test]
+    fn should_keep_split_witness_ownership_independent_of_borrowed_credit() {
+        // Arrange
+        let root = ResourceBudget::new(160);
+        let child = root.child(160);
+        let old_witness = Arc::new(child.reserve(40, "old witness").unwrap());
+        let mut source = child
+            .reserve_with_shared_credit(120, &old_witness, "source body")
+            .unwrap();
+        let new_witness = Arc::new(source.split(16).unwrap());
+
+        // Act: the next handoff borrows only the independently owned split.
+        let next = child
+            .reserve_with_shared_credit(32, &new_witness, "next body")
+            .unwrap();
+        let combined = (child.used(), root.used());
+        drop(source);
+        let after_source = (child.used(), root.used());
+        drop(next);
+        drop(new_witness);
+
+        // Assert: no cycle or second use of the old witness's credit.
+        assert_eq!(combined, (136, 136));
+        assert_eq!(after_source, (72, 72));
+        assert_eq!((child.used(), root.used()), (40, 40));
+        drop(old_witness);
+        assert_eq!((child.used(), root.used()), (0, 0));
     }
 }
 

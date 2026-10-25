@@ -1,11 +1,12 @@
 # Performance baseline procedure
 
-The 0.5.0 milestone judges every performance change against a baseline taken
-with this procedure. The rule in the milestone plan is that no implementation
-PR for a Phase 1–3 issue starts until the issue carries a numeric target
-relative to the current baseline, and the PR records before and after on the
-named rows. This page says how the baseline is taken so two runs are
-comparable.
+The 0.5.0 milestone judges performance changes using alternating base/candidate
+measurements on the same machine. Before a Phase 1–3 performance issue starts,
+record its named row, metric, required relative change and base SHA (`develop`
+at the PR's merge base). The evidence matrix required by #929 supplies absolute
+context; an unavailable quiet-machine baseline does not block an A/B result.
+Correctness work uses a failing invariant test and a relevant no-regression
+check; assurance work specifies detection power and compute budget.
 
 ## Machine and environment
 
@@ -14,12 +15,12 @@ comparable.
   source SHA. The first 0.5.0 baseline is an Apple Silicon macOS machine on
   APFS; its numbers are for relative deltas within the milestone, not for
   publication as absolute performance.
-- A quiet machine. No interactive desktop sessions (screen sharing, calls),
-  no other builds or test runs, no other benchmark. On Linux pass
-  `--require-quiet-env` so the harness fails on an adverse load or governor
-  observation. On macOS the harness observes only the power source, so
-  record `uptime` immediately before and after each run in the evidence
-  file; a run whose load average exceeds the core count is discarded.
+- Prefer a quiet machine without interactive calls, builds or other benchmark
+  runs. On Linux `--require-quiet-env` rejects adverse load/governor
+  observations. On macOS the harness observes only the power source, so record
+  `uptime` before and after every run. A loaded run cannot establish an idle
+  absolute baseline. It may contribute to an A/B comparison only with all load
+  observations and diagnostics retained; unstable pairs are inconclusive.
 - Mains power, performance power mode, and the laptop lid open.
 - Release profile as the repository defines it (`lto = "thin"`,
   `codegen-units = 1`), the system allocator, default features.
@@ -47,12 +48,13 @@ recorded as context, never as a parity claim; see
 [Performance Targets](performance-targets.md). The first 0.5.0 baseline is
 Midge-only.
 
-## Commands
+## Absolute matrix commands
 
 Run each target three times in a row and keep every artifact. The harness
 rejects `--quiet`; use `--no-progress`.
 
 ```bash
+mkdir -p target/stress
 for run in 1 2 3; do
   uptime >> target/stress/baseline-uptime.txt
   cargo bench --bench tier2_subsystem_baseline_matrix -- --no-progress
@@ -71,6 +73,22 @@ and the same for `_b` through `_f`.
 
 `--save-baseline` saves only runs without diagnostics; a row with a variance
 diagnostic still writes `latest.json`, which is what the copy above keeps.
+
+## Performance PR comparison
+
+Run three alternating pairs in one window on the same machine: base A1,
+candidate B1, base A2, candidate B2, base A3, candidate B3. Use the existing
+Cargo targets in each checkout, identical settings and independent fresh
+fixtures. Record both immutable SHAs and save each run's `latest.json` before
+the next invocation overwrites it. Record `uptime` around all six invocations.
+
+For a lower-is-better metric report each `1 - B_i/A_i`; for a
+higher-is-better metric report each `B_i/A_i - 1`. Report all three pair deltas
+and their median against the issue's required improvement. Include p99 and
+correctness/health guardrails rather than judging only the primary p50.
+Alternation reduces drift bias; it does not cancel abrupt load changes or
+validate unstable measurements. A row with inconsistent pairs or unresolved
+variance diagnostics is inconclusive, not a pass obtained by averaging.
 
 ## Reading the artifacts
 
@@ -93,15 +111,18 @@ with:
 - one table per target: row, median p50, p99 range, RSD range, trust class,
   and the inconclusive marker where it applies;
 - the exact commands and the artifact filenames;
-- what changed since the previous baseline file, if any.
+- what changed since the previous baseline file, if any;
+- for a performance PR, both SHAs, A/B order, all six artifacts, three pair
+  deltas, their median and the target verdict.
 
 Attach the raw `latest.json` copies under
 `docs/development/evidence/baseline-<version>-<sha>/`.
 
-## Setting targets from the baseline
+## Setting issue targets
 
-A Phase 1–3 issue's target names the row, the metric, the baseline value,
-and the required direction and size (for example "`readrandom hot` p50 at
-most 0.8× baseline"). Targets are written into the issue before its branch
-is created and checked in the PR with the same procedure, three runs,
-against the same baseline file.
+A Phase 1–3 performance target names the row, metric, base SHA and required
+direction/size (for example "`readrandom hot` p50 at least 20% lower than the
+merge base"). Write the target before implementation and verify it with the
+three A/B pairs above. The absolute matrix remains a release evidence
+obligation. External comparison is deferred until a matched run exists; the
+Midge-only matrix does not establish RocksDB or Pebble parity.

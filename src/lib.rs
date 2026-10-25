@@ -174,6 +174,8 @@ pub mod __internal {
         pub use crate::runtime::read_snapshot::point_read::audit::set_point_read_level_order_audit;
     }
     pub mod startup {
+        #[cfg(feature = "failpoints")]
+        pub use crate::engine::{install_manual_caller_expiry, OwnerExit};
         pub use crate::runtime::{StartupEvent, StartupObserver};
     }
     pub mod maintenance {
@@ -190,14 +192,19 @@ pub mod __internal {
         pub use crate::metadata::recovery_progress_fixture::{
             run_journal_recovery_progress_fixture, JournalRecoveryProgressFixtureResult,
         };
+        pub use crate::metadata::ManifestPersistence;
         pub use crate::runtime::cloud_startup::recovery_progress_fixture::{
             prepare_recovery_progress_fixture, PreparedRecoveryProgressFixture,
             RecoveryProgressFixtureMode, RecoveryProgressFixtureResult,
         };
+        pub use crate::runtime::{IntentLogEntry, IntentPersistence};
     }
     pub mod sst {
+        pub mod decoder {
+            pub use crate::sst::fs::reader_io::{validate_data_block, validate_index_block};
+        }
         pub mod bloom {
-            pub use crate::sst::bloom::{BloomReader, BloomWriter};
+            pub use crate::sst::bloom::{BlockBloomFilter, BloomReader, BloomWriter};
             pub mod writer {
                 pub use crate::sst::bloom::writer::BloomFilterOps;
             }
@@ -314,6 +321,7 @@ pub use config::{
     CloudStorageRole, CloudStorageTopology, CloudValidationFinding, CloudValidationMode,
     CloudValidationReport, EngineHealth, GcsApiStyle, GcsConfig, GcsCredentialSource,
     OciCredentialSource, OciObjectStorageConfig, S3CompatibleConfig, S3CredentialSource,
+    WriteBackpressureConfig,
 };
 pub use types::{
     HybridStorageBudgetSnapshot, LocalStorageUsage, StorageAdmissionBlock, StorageAdmissionKind,
@@ -343,6 +351,7 @@ pub use common::time::{Clock, SystemClock};
 
 // `engine::Key` is a public alias to `bytes::Bytes`; re-export it as `Bytes`.
 pub use engine::Key as Bytes;
+pub use storage::cloud::CloudRetryPolicy;
 // Re-export BytesMut directly from the `bytes` crate.
 pub use bytes::BytesMut;
 

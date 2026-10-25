@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod crash;
+pub mod metadata_fixtures;
 
 #[cfg(feature = "sqrzl-tests")]
 #[path = "../support/sqrzl.rs"]

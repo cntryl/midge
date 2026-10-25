@@ -173,7 +173,7 @@ fn should_roundtrip_maximum_decoded_entry_when_writing_sorted_or_unsorted() {
     let dir = tempfile::tempdir().unwrap();
     let factory = FsSstFactoryIo::new(Arc::new(crate::io::RealFs::new(dir.path()).unwrap()), 4096)
         .with_compression_policy(CompressionPolicy::Fixed(CompressionAlgo::Lz4));
-    let value = vec![b'v'; crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE - 29];
+    let value = vec![b'v'; crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE - 34];
     for sorted in [false, true] {
         let mut writer = factory.create().unwrap();
         // Act

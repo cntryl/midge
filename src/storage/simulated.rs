@@ -108,6 +108,7 @@ pub(crate) fn build_simulated_cloud_stores(
     store: Arc<dyn ObjectStore>,
     local_storage_budget_bytes: Option<u64>,
 ) -> SimulatedCloudStores {
+    let inventory: Arc<dyn super::inventory::ObjectInventory> = Arc::clone(&store) as _;
     let backend: Arc<dyn super::StorageBackend> = store;
     let (tx, rx) = crossbeam::channel::bounded::<StorageEvent>(
         crate::storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
@@ -121,6 +122,9 @@ pub(crate) fn build_simulated_cloud_stores(
     } else {
         Arc::new(HybridStorage::new_with_event_sender(backend, tx))
     };
+    hybrid_storage
+        .configure_object_inventories(Arc::clone(&inventory), inventory)
+        .expect("fresh simulated storage has no inventory owner");
     SimulatedCloudStores {
         hybrid_storage,
         events: rx,

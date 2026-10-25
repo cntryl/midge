@@ -6,6 +6,47 @@ use super::{
 };
 
 impl HybridStorage {
+    /// Exact, caller-bounded bytes from one pinned object identity. Format
+    /// validation and whether the key is reclaimable remain runtime policy.
+    pub(crate) fn read_remote_range_within(
+        &self,
+        key: &str,
+        metadata: &StorageObjectMetadata,
+        range: std::ops::Range<u64>,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<Vec<u8>> {
+        let timeout =
+            Self::deadline_timeout(key, "pinned object range", self.callback_timeout, deadline)?;
+        if range.start > range.end || range.end > metadata.size {
+            return Err(crate::common::MidgeError::Corruption(
+                "pinned object range exceeds its metadata".into(),
+            ));
+        }
+        let expected = range.end - range.start;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cloud_backend_for_key(key).submit_range_read_request(
+            crate::storage::StorageRequest::new(key, *deadline, timeout).with_precondition(
+                crate::storage::StoragePrecondition::IfMatch(metadata.clone()),
+            ),
+            range,
+            tx,
+        );
+        let bytes = rx
+            .recv_timeout(timeout)
+            .map_err(|error| {
+                crate::common::MidgeError::Timeout(format!("pinned object range: {error}"))
+            })?
+            .map_err(|error| {
+                crate::common::MidgeError::Internal(format!("pinned object range: {error}"))
+            })?;
+        if bytes.len() as u64 != expected {
+            return Err(crate::common::MidgeError::Corruption(
+                "pinned object range has a different length".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub(super) fn cloud_backend_for_key(&self, key: &str) -> &Arc<dyn StorageBackend> {
         if key.starts_with(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX) {
             &self.stores.wal
@@ -173,54 +214,6 @@ impl HybridStorage {
                     "object HEAD callback closed for '{key}'"
                 )))
             }
-        }
-    }
-
-    pub(super) fn delete_object_from_backend_blocking(
-        backend: &Arc<dyn StorageBackend>,
-        key: &str,
-        callback_timeout: Duration,
-    ) -> Result<bool, crate::storage::StorageError> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        backend.submit_delete_request(
-            crate::storage::StorageRequest::new(
-                key,
-                crate::common::OperationDeadline::from_budget(callback_timeout),
-                callback_timeout,
-            ),
-            tx,
-        );
-        match rx.recv_timeout(callback_timeout) {
-            Ok(StorageEvent::DeleteComplete {
-                key: returned_key,
-                result: StorageOutcome::Ok(()),
-            }) => {
-                let _ = returned_key;
-                Ok(true)
-            }
-            Ok(StorageEvent::DeleteComplete {
-                key: returned_key,
-                result: StorageOutcome::Err(error),
-            }) if Self::storage_error_indicates_missing(&error) => {
-                let _ = returned_key;
-                Ok(false)
-            }
-            Ok(StorageEvent::DeleteComplete {
-                key: returned_key,
-                result: StorageOutcome::Err(error),
-            }) => {
-                let _ = returned_key;
-                Err(crate::storage::StorageError::new(
-                    error.kind(),
-                    format!("object '{key}' delete failed: {error}"),
-                ))
-            }
-            Ok(other) => Err(crate::storage::StorageError::protocol(format!(
-                "unexpected storage delete response for '{key}': {other:?}"
-            ))),
-            Err(error) => Err(crate::storage::StorageError::timeout(format!(
-                "storage delete timed out for '{key}': {error}"
-            ))),
         }
     }
 }

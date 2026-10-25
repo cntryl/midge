@@ -385,6 +385,9 @@ pub(crate) enum ManifestPublicationOwner {
         flush_id: u64,
     },
     WalPrune,
+    MetadataMirror {
+        operation_id: u64,
+    },
     Compaction {
         request_id: u64,
         output_generation: u64,
@@ -401,6 +404,12 @@ pub(crate) struct ManifestPublicationGate {
 impl ManifestPublicationGate {
     pub(super) fn is_active(&self) -> bool {
         self.owner.is_some()
+    }
+
+    pub(super) fn blocks_validation_completion(&self) -> bool {
+        self.owner
+            .as_ref()
+            .is_some_and(|owner| !matches!(owner, ManifestPublicationOwner::MetadataMirror { .. }))
     }
 
     pub(super) fn is_owned_by(&self, owner: &ManifestPublicationOwner) -> bool {

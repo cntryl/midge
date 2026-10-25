@@ -6,10 +6,15 @@ pub mod strategy;
 
 #[cfg(test)]
 mod fragment_tests;
+#[cfg(test)]
+mod grandparent_tests;
+#[cfg(test)]
+mod ttl_gc_tests;
 
 pub(crate) use config::{
     OpenCompactionConfig, DEFAULT_COMPACTION_MEMORY_LIMIT, DEFAULT_TARGET_SST_SIZE,
 };
+pub use executor::GrandparentOverlap;
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
 use crate::common::{MidgeError, MidgeResult};
@@ -43,8 +48,13 @@ pub fn execute_compaction(
     execute_compaction_with_output_sink(plan, sst_factory, output_dir, abort_check, None, None)
 }
 
-pub(crate) type CompactionOutputSink<'a> =
-    dyn Fn(&str, &Path, &crate::common::resource_budget::ResourceBudget) -> MidgeResult<()> + 'a;
+pub(crate) type CompactionOutputSink<'a> = dyn Fn(
+        &str,
+        &Path,
+        &crate::common::resource_budget::ResourceBudget,
+        Option<&crate::sst::traits::FinalizedSst>,
+    ) -> MidgeResult<()>
+    + 'a;
 
 #[cfg(test)]
 pub(crate) fn execute_compaction_with_output_sink(
@@ -159,20 +169,26 @@ pub(crate) fn execute_compaction_at_target(
     let outputs = executor::write_partitioned_compaction_outputs(
         sst_factory,
         output_dir,
-        plan.cf_id,
-        plan.target_level,
-        plan.output_seq,
-        bounded_partition_target_size(target_sst_size, plan.compaction_memory_limit),
         inputs,
         &budget,
-        executor::TombstoneGcPolicy {
-            snapshot_horizon: plan.snapshot_horizon,
-            point_eligible: plan.point_tombstone_gc_eligible,
-            range_eligible: plan.range_tombstone_gc_eligible,
+        executor::PartitionOutputConfig {
+            cf_id: plan.cf_id,
+            target_level: plan.target_level,
+            generation: plan.output_seq,
+            target_sst_size: bounded_partition_target_size(
+                target_sst_size,
+                plan.compaction_memory_limit,
+            ),
+            tombstone_gc: executor::TombstoneGcPolicy {
+                snapshot_horizon: plan.snapshot_horizon,
+                point_eligible: plan.point_tombstone_gc_eligible,
+                range_eligible: plan.range_tombstone_gc_eligible,
+            },
+            output_size_limit,
+            grandparent_overlap: &plan.grandparent_overlap,
         },
         abort_check,
         output_sink,
-        output_size_limit,
     )?;
     if let Some(scratch) = &mut scratch {
         if let Err(error) = scratch.cleanup() {
@@ -524,15 +540,17 @@ mod tests {
         plan.add_test_source("ranges.sst");
         plan.target_sst_size = 128 * 1024;
         let observed = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                let reader = factory.open(Path::new(name))?;
-                observed
-                    .borrow_mut()
-                    .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
-                std::fs::remove_file(path)?;
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            let reader = factory.open(Path::new(name))?;
+            observed
+                .borrow_mut()
+                .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
+            std::fs::remove_file(path)?;
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(
@@ -573,15 +591,17 @@ mod tests {
         plan.add_test_source("ranges.sst");
         plan.target_sst_size = 16 * 1024;
         let observed = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                let reader = factory.open(Path::new(name))?;
-                observed
-                    .borrow_mut()
-                    .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
-                std::fs::remove_file(path)?;
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            let reader = factory.open(Path::new(name))?;
+            observed
+                .borrow_mut()
+                .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
+            std::fs::remove_file(path)?;
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(
@@ -628,17 +648,19 @@ mod tests {
             plan.add_test_source(name);
         }
         let observed = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                assert!(std::fs::metadata(path)?.len() <= 256 * 1024);
-                let reader = factory.open(Path::new(name))?;
-                let entries = reader.scan_range_raw_state(None, None)?;
-                observed
-                    .borrow_mut()
-                    .extend(entries.into_iter().map(|(key, _)| key[0]));
-                std::fs::remove_file(path)?;
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            assert!(std::fs::metadata(path)?.len() <= 256 * 1024);
+            let reader = factory.open(Path::new(name))?;
+            let entries = reader.scan_range_raw_state(None, None)?;
+            observed
+                .borrow_mut()
+                .extend(entries.into_iter().map(|(key, _)| key[0]));
+            std::fs::remove_file(path)?;
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(
@@ -726,18 +748,20 @@ mod tests {
         plan.target_sst_size = 32 * 1024;
         plan.compaction_memory_limit = 128 * 1024;
         let drained = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                for previous in drained.borrow().iter() {
-                    assert!(
-                        !dir.path().join(previous).exists(),
-                        "previous partitions must be gone before advancing"
-                    );
-                }
-                std::fs::remove_file(path)?;
-                drained.borrow_mut().push(name.to_string());
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            for previous in drained.borrow().iter() {
+                assert!(
+                    !dir.path().join(previous).exists(),
+                    "previous partitions must be gone before advancing"
+                );
+            }
+            std::fs::remove_file(path)?;
+            drained.borrow_mut().push(name.to_string());
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(
@@ -2494,18 +2518,21 @@ mod tests {
         let outputs = executor::write_partitioned_compaction_outputs(
             &factory,
             temp_dir.path(),
-            0,
-            1,
-            54,
-            target_sst_size,
             inputs,
             &budget,
-            executor::TombstoneGcPolicy {
-                snapshot_horizon: None,
-                point_eligible: false,
-                range_eligible: false,
+            executor::PartitionOutputConfig {
+                cf_id: 0,
+                target_level: 1,
+                generation: 54,
+                target_sst_size,
+                tombstone_gc: executor::TombstoneGcPolicy {
+                    snapshot_horizon: None,
+                    point_eligible: false,
+                    range_eligible: false,
+                },
+                output_size_limit: None,
+                grandparent_overlap: &executor::GrandparentOverlap::default(),
             },
-            None,
             None,
             None,
         )?;

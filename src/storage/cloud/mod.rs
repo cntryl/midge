@@ -25,6 +25,24 @@
 
 mod blocking;
 mod config;
+mod list_page;
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
+pub use list_page::MAX_LIST_PAGE_BYTES;
+pub use list_page::{
+    CloudListPage, CloudListPageCallback, CloudListPageRequest, MAX_LIST_PAGE_KEYS,
+};
+#[cfg(any(
+    feature = "cloud-aws",
+    feature = "cloud-azure",
+    feature = "cloud-gcp",
+    feature = "cloud-oci"
+))]
+pub(crate) mod multipart;
 #[cfg(any(
     feature = "cloud-aws",
     feature = "cloud-azure",
@@ -56,8 +74,8 @@ pub mod executor;
 mod list_budget;
 
 pub(crate) use blocking::BlockingCloud;
-pub use config::CloudWritePolicy;
 pub(crate) use config::CloudWritePolicyConfig;
+pub use config::{CloudRetryPolicy, CloudWritePolicy};
 
 use super::{StorageBackend, StorageCallback, StorageEvent, StorageObjectMetadata, StorageOutcome};
 #[cfg(test)]

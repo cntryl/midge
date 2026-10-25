@@ -35,15 +35,9 @@ impl RequestRouting {
     }
 
     pub(super) fn request_deadline(&self, request_id: u64) -> crate::common::OperationDeadline {
-        self.router.registered_at(request_id).map_or_else(
-            || crate::common::OperationDeadline::from_budget(Duration::ZERO),
-            |registered_at| {
-                crate::common::OperationDeadline::from_start(
-                    registered_at,
-                    self.runtime_response_timeout,
-                )
-            },
-        )
+        self.router
+            .request_deadline(request_id, self.runtime_response_timeout)
+            .unwrap_or_else(|| crate::common::OperationDeadline::from_budget(Duration::ZERO))
     }
 
     pub(super) fn register_inline_response(

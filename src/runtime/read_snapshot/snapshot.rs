@@ -36,6 +36,7 @@ impl ReadSnapshot {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_resources(
         memtable: Arc<SkipListMemtable>,
@@ -78,17 +79,35 @@ impl ReadSnapshot {
             |resources| resources.diagnostics(),
         );
         Self {
-            cf_id,
-            memtable,
-            immutable_memtables,
-            sst_view,
-            sst_fs,
-            sst_path_prefix,
-            memory_mode,
             read_time_millis,
-            read_resources,
-            diagnostics,
+            sources: Arc::new(super::ReadSnapshotSources {
+                cf_id,
+                memtable,
+                immutable_memtables,
+                sst_view,
+                sst_fs,
+                sst_path_prefix,
+                memory_mode,
+                read_resources,
+                diagnostics,
+            }),
         }
+    }
+
+    pub(crate) fn has_sources(
+        &self,
+        memtable: &Arc<SkipListMemtable>,
+        immutable_memtables: &[Arc<SkipListMemtable>],
+        sst_view: &Arc<SstReadView>,
+    ) -> bool {
+        Arc::ptr_eq(&self.memtable, memtable)
+            && Arc::ptr_eq(&self.sst_view, sst_view)
+            && self.immutable_memtables.len() == immutable_memtables.len()
+            && self
+                .immutable_memtables
+                .iter()
+                .zip(immutable_memtables)
+                .all(|(left, right)| Arc::ptr_eq(left, right))
     }
 
     pub(crate) fn with_read_time_millis(mut self, read_time_millis: u64) -> Self {

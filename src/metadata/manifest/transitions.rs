@@ -13,6 +13,8 @@ pub struct PreparedManifestEdit<'a> {
 pub(super) enum ManifestStep {
     Add(FileMeta),
     Remove(String),
+    Move(Vec<FileMeta>),
+    Deleted(String),
     Family(ColumnFamilyMeta, FamilyFrontier),
     Frontier(u32, FamilyFrontier),
     Next(u32, u64),
@@ -24,6 +26,21 @@ impl PreparedManifestEdit<'_> {
             match step {
                 ManifestStep::Add(file) => self.manifest.add_file(file),
                 ManifestStep::Remove(name) => self.manifest.remove_file(&name),
+                ManifestStep::Move(files) => {
+                    for moved in files {
+                        if let Some(file) = self
+                            .manifest
+                            .files
+                            .iter_mut()
+                            .find(|file| file.name == moved.name)
+                        {
+                            *file = moved;
+                        }
+                    }
+                }
+                ManifestStep::Deleted(name) => {
+                    self.manifest.retired_ssts.remove(&name);
+                }
                 ManifestStep::Family(family, frontier) => {
                     self.manifest
                         .flushed_through
@@ -439,6 +456,11 @@ impl<'a> EditValidator<'a> {
     }
 
     fn add_sst(&mut self, file: &FileMeta) -> MidgeResult<()> {
+        if self.base.retired_ssts.contains_key(&file.name)
+            || self.files.get(&file.name).is_some_and(Option::is_none)
+        {
+            return Err(invalid_transition("cannot reuse a retired SST identity"));
+        }
         if self.frontier(file.cf_id)? == FamilyFrontier::Dropped {
             return Err(invalid_transition("cannot add SST to dropped family"));
         }
@@ -456,6 +478,32 @@ impl<'a> EditValidator<'a> {
         Ok(())
     }
 
+    fn move_ssts(&mut self, captured: &[FileMeta], target: u32) -> MidgeResult<()> {
+        let files: Vec<_> = self
+            .base
+            .files
+            .iter()
+            .filter(|file| !self.files.contains_key(&file.name))
+            .cloned()
+            .chain(self.files.values().filter_map(Clone::clone))
+            .collect();
+        if super::validate_sst_move(&files, captured, target)? {
+            return Ok(());
+        }
+        let mut moved = Vec::with_capacity(captured.len());
+        for file in captured {
+            if self.frontier(file.cf_id)? == FamilyFrontier::Dropped {
+                return Err(invalid_transition("cannot move SST of dropped family"));
+            }
+            let mut file = file.clone();
+            file.level = target;
+            self.files.insert(file.name.clone(), Some(file.clone()));
+            moved.push(file);
+        }
+        self.steps.push(ManifestStep::Move(moved));
+        Ok(())
+    }
+
     /// Validate a whole outer edit: its flush pairing, then every transition.
     pub(super) fn validate(&mut self, edit: &ManifestEdit) -> MidgeResult<()> {
         check_flush_pairing(edit)?;
@@ -470,9 +518,28 @@ impl<'a> EditValidator<'a> {
                 }
             }
             ManifestEdit::AddSst(file) => self.add_sst(file)?,
+            ManifestEdit::MoveSsts {
+                captured,
+                target_level,
+            } => self.move_ssts(captured, *target_level)?,
             ManifestEdit::RemoveSst { name } => {
                 self.files.insert(name.clone(), None);
                 self.steps.push(ManifestStep::Remove(name.clone()));
+            }
+            ManifestEdit::CompleteSstDelete { file } => {
+                if self.file(&file.name).is_some() {
+                    return Err(invalid_transition(
+                        "cannot confirm deletion of an active SST",
+                    ));
+                }
+                if let Some(original) = self.base.retired_ssts.get(&file.name) {
+                    if !original.same_identity(file) {
+                        return Err(invalid_transition(
+                            "delete confirmation differs from retired identity",
+                        ));
+                    }
+                    self.steps.push(ManifestStep::Deleted(file.name.clone()));
+                }
             }
             ManifestEdit::CreateColumnFamily {
                 id,

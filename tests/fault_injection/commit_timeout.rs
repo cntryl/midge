@@ -5,6 +5,53 @@ use cntryl_midge::{Engine, MidgeError, OpenOptions, Severity, TransactionMode, W
 use std::time::Duration;
 
 #[test]
+fn should_keep_timeout_given_provably_unchanged_failure_when_commit_is_submitted() {
+    for pool_size in [1024, 16 * 1024] {
+        // Arrange: the small pool exercises the spilled route; both requests
+        // traverse Transaction, RuntimeHandle, the actor and the real writer.
+        let scenario = fail::FailScenario::setup();
+        let directory = tempfile::tempdir().unwrap();
+        let options = || {
+            OpenOptions::local(directory.path())
+                .transaction_memory_pool_size(pool_size)
+                .background_compaction(false)
+                .build()
+                .unwrap()
+        };
+        let mut engine = Engine::open(options()).unwrap();
+        let cf = engine.get_column_family("default").unwrap();
+        let point = "midge::wal::timeout_before_enqueue";
+        fail::cfg(point, "1*return->off").unwrap();
+        let mut transaction = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .unwrap();
+        transaction
+            .put(b"unchanged-timeout".to_vec(), vec![7; 4096], None)
+            .unwrap();
+
+        // Act
+        let result = transaction.commit(WriteOptions::sync());
+        fail::remove(point);
+
+        // Assert: this is a loop-reported timeout with proof, not an expired
+        // caller wait. Restart must find no record to replay.
+        assert!(matches!(result, Err(MidgeError::Timeout(_))), "{result:?}");
+        if let Err(error) = engine.shutdown(Duration::from_secs(5)) {
+            assert!(matches!(error, MidgeError::RecoveryFailed(_)), "{error}");
+        }
+        drop(engine);
+        let mut reopened = Engine::open(options()).unwrap();
+        let read = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .unwrap();
+        assert_eq!(read.get(b"unchanged-timeout").unwrap(), None);
+        drop(read);
+        reopened.shutdown(Duration::from_secs(5)).unwrap();
+        drop(scenario);
+    }
+}
+
+#[test]
 fn should_classify_commit_timeout_as_outcome_unknown_given_admitted_write_when_response_arrives_late(
 ) {
     // Arrange: the strict durability step pauses on the event loop for longer

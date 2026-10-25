@@ -3,7 +3,7 @@
 //! These tests intentionally assume Sqrzl is already running. Start it with:
 //! `docker compose up -d sqrzl`
 //! then run with the feature enabled, for example:
-//! `cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1`
+//! `cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1`
 
 use super::build_cloud_storage;
 use crate::config::{CloudPreflightOptions, CloudStorageLocation};
@@ -21,6 +21,42 @@ fn should_run_s3_compatible_contract_against_sqrzl() {
 fn should_run_azure_blob_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-azure");
     run_provider_contract("azure", &provider);
+}
+
+#[test]
+fn should_reject_incorrect_azure_shared_key_for_conditional_write_against_sqrzl() {
+    // Arrange: create the namespace with the emulator's actual credential.
+    require_sqrzl("azure-wrong-key");
+    ensure_sqrzl_azure_container("midge-sqrzl-azure").unwrap();
+    let provider = CloudProviderConfig::azure_blob_shared_key(
+        "admin",
+        "midge-sqrzl-azure",
+        "bm90LXRoZS1lbXVsYXRvci1rZXk=",
+    )
+    .with_endpoint("http://127.0.0.1:9000")
+    .unwrap();
+    let backend = build_cloud_storage(&provider, "").unwrap();
+    let key = format!(
+        "qualification/azure-wrong-key/{}/object",
+        uuid::Uuid::new_v4()
+    );
+
+    // Act
+    let result = put(
+        &backend,
+        &key,
+        b"must not be written".to_vec(),
+        vec![("If-None-Match".into(), "*".into())],
+    );
+
+    // Assert: authentication failure must not masquerade as a CAS conflict.
+    assert!(
+        matches!(result, Err(CloudError::Unauthorized(_))),
+        "{result:?}"
+    );
+    let valid =
+        build_cloud_storage(&CloudProviderConfig::sqrzl_azure("midge-sqrzl-azure"), "").unwrap();
+    assert!(matches!(get(&valid, &key), Err(CloudError::NotFound(_))));
 }
 
 #[test]
@@ -304,15 +340,15 @@ fn should_join_azure_canonical_headers_directly_to_resource() {
             "x-ms-date".to_string(),
             "Tue, 11 Aug 2026 12:00:00 GMT".to_string(),
         ),
-        ("x-ms-version".to_string(), "2025-01-05".to_string()),
+        ("x-ms-version".to_string(), "2026-10-06".to_string()),
     ];
 
     // Act
     let string_to_sign = azure_string_to_sign("GET", &headers, "/admin/container/blob", "", b"");
 
     // Assert
-    assert!(string_to_sign.contains("x-ms-version:2025-01-05\n/admin/admin/container/blob"));
-    assert!(!string_to_sign.contains("x-ms-version:2025-01-05\n\n/"));
+    assert!(string_to_sign.contains("x-ms-version:2026-10-06\n/admin/admin/container/blob"));
+    assert!(!string_to_sign.contains("x-ms-version:2026-10-06\n\n/"));
 }
 
 /// Precondition headers naming the current version of `key`.

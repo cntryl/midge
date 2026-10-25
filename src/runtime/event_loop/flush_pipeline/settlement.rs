@@ -57,12 +57,13 @@ impl EventLoop {
         }
     }
 
-    pub(super) fn fail_flush_pipeline(
+    pub(in crate::runtime::event_loop) fn fail_flush_pipeline(
         &mut self,
         flush_id: u64,
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
         error: &crate::common::MidgeError,
     ) {
+        self.forget_flush_mirror_retry(flush_id);
         self.state.finish_flush_publication_attempt(flush_id, true);
         let identity = self
             .state
@@ -83,7 +84,7 @@ impl EventLoop {
                 reservation,
             );
         }
-        self.actors.flush_actor.finish_pipeline();
+        self.actors.flush_actor.finish_pipeline(flush_id);
         self.publication.publication_gate.release(
             &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush { flush_id },
         );
@@ -215,6 +216,12 @@ impl EventLoop {
     }
 
     pub(in crate::runtime::event_loop) fn drain_flush_worker_results(&mut self) {
+        if !self.publication.publication_gate.is_active() {
+            let ready = std::mem::take(&mut self.pipeline.deferred_flush_results);
+            for result in ready {
+                self.handle_flush_worker_result(result);
+            }
+        }
         while let Ok(result) = self.pipeline.flush_worker_result_rx.try_recv() {
             self.handle_flush_worker_result(result);
         }
@@ -237,6 +244,9 @@ impl EventLoop {
     }
 
     pub(in crate::runtime::event_loop) fn drain_auto_flush_memtables(&mut self) -> usize {
+        if self.wal_group_in_flight() {
+            return 0;
+        }
         if self.state.is_memory_mode() || self.shutdown.shutting_down {
             return 0;
         }

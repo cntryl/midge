@@ -85,9 +85,12 @@ impl WalActor {
     pub(crate) fn begin_sync_transition(
         &mut self,
         state: &mut RuntimeState,
-        _ticket: &WalSyncTicket,
+        ticket: &WalSyncTicket,
     ) -> MidgeResult<WalSyncReceipt> {
-        let result = self.begin_sync_io(state, None);
+        let result = self.begin_sync_io(state, None).map(|mut receipt| {
+            receipt.generation = Some(ticket.generation());
+            receipt
+        });
         debug_assert!(
             result.is_ok() || self.is_open() || self.is_fenced(),
             "a failed WAL sync must settle in Open or Fenced"
@@ -100,12 +103,19 @@ impl WalActor {
         &mut self,
         state: &mut RuntimeState,
         receipt: WalSyncReceipt,
-        _ticket: &WalSyncTicket,
+        ticket: &WalSyncTicket,
     ) -> MidgeResult<()> {
+        if receipt.generation != Some(ticket.generation()) {
+            let error = MidgeError::Internal(
+                "WAL sync receipt belongs to a different barrier generation".into(),
+            );
+            self.fence_transition(state, error.to_string());
+            return Err(error);
+        }
         self.commit_sync_io(state, receipt)
     }
 
-    fn validate_sync_authority(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
+    pub(super) fn validate_sync_authority(&mut self, state: &mut RuntimeState) -> MidgeResult<()> {
         let admission_prevalidated =
             std::mem::replace(&mut self.sync_authority_prevalidated, false);
         self.ensure_lease_validity()?;
@@ -167,6 +177,11 @@ impl WalActor {
             }
             return Err(error);
         }
+
+        // Capture the exact admitted prefix before I/O. Future queued work
+        // must never be included by reading mutable writer/state fields after
+        // the physical barrier returns.
+        let receipt = self.capture_sync_receipt(state);
 
         if self.writer().is_some() {
             // Bound the acknowledgement wait so a degraded storage device cannot
@@ -254,20 +269,33 @@ impl WalActor {
             }
         }
 
-        self.persist_sync_boundary(state, group)?;
-        Ok(WalSyncReceipt {
-            durable_sequence: state.sequence,
-            pending_writes: state.wal.pending_writes,
-        })
+        self.persist_sync_boundary(state, group, receipt.end_offset)?;
+        Ok(receipt)
     }
 
-    fn persist_sync_boundary(
+    pub(super) fn capture_sync_receipt(&self, state: &RuntimeState) -> WalSyncReceipt {
+        WalSyncReceipt {
+            durable_sequence: self
+                .writer()
+                .and_then(|writer| writer.tail().last_seq)
+                .unwrap_or(state.sequence),
+            pending_writes: state.wal.pending_writes,
+            pending_sync_count: self.pending_sync_count,
+            bytes_since_sync: self.bytes_since_sync,
+            end_offset: self.writer().map(crate::wal::WalWriter::current_pos),
+            writer_epoch: self.current_epoch,
+            segment_id: state.wal.open_segment(),
+            generation: None,
+        }
+    }
+
+    pub(super) fn persist_sync_boundary(
         &mut self,
         state: &mut RuntimeState,
         group: Option<&crate::lease::WriterEffectGroup>,
+        end_offset: Option<u64>,
     ) -> MidgeResult<()> {
-        if let Some(writer) = self.writer() {
-            let bytes = writer.current_pos();
+        if let Some(bytes) = end_offset {
             let recorded = match group {
                 Some(group) => state.wal.history.record_sync_in_group(bytes, group),
                 None => state.wal.history.record_sync(bytes),
@@ -288,8 +316,12 @@ impl WalActor {
         state: &mut RuntimeState,
         receipt: WalSyncReceipt,
     ) -> MidgeResult<()> {
-        if state.sequence != receipt.durable_sequence
-            || state.wal.pending_writes != receipt.pending_writes
+        if state.sequence < receipt.durable_sequence
+            || state.wal.pending_writes < receipt.pending_writes
+            || self.pending_sync_count < receipt.pending_sync_count
+            || self.bytes_since_sync < receipt.bytes_since_sync
+            || self.current_epoch != receipt.writer_epoch
+            || state.wal.open_segment() != receipt.segment_id
         {
             let error = MidgeError::Internal(
                 "WAL state changed while a sync receipt awaited commit".to_string(),
@@ -305,9 +337,9 @@ impl WalActor {
             .wal
             .frontiers
             .advance_synced_to(receipt.durable_sequence);
-        state.wal.pending_writes = 0;
-        self.pending_sync_count = 0;
-        self.bytes_since_sync = 0;
+        state.wal.pending_writes -= receipt.pending_writes;
+        self.pending_sync_count -= receipt.pending_sync_count;
+        self.bytes_since_sync -= receipt.bytes_since_sync;
 
         Ok(())
     }
@@ -315,7 +347,7 @@ impl WalActor {
     // The failpoint expands to an early return only with the `failpoints`
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
-    fn sync_failure_boundary() -> MidgeResult<()> {
+    pub(super) fn sync_failure_boundary() -> MidgeResult<()> {
         crate::failpoints::fail_point!("midge::wal::inject_no_space_on_sync", |_| Err(
             MidgeError::NoSpace(
                 "wal writer fsync failed: failpoint: no space on WAL sync".to_string()
@@ -327,7 +359,7 @@ impl WalActor {
     // The failpoint expands to an early return only with the `failpoints`
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
-    fn after_fsync_boundary() -> MidgeResult<()> {
+    pub(super) fn after_fsync_boundary() -> MidgeResult<()> {
         crate::failpoints::fail_point!("midge::wal::after_fsync_before_durable_frontier", |_| Err(
             MidgeError::Internal(
                 "failpoint: WAL fsync completed before logical commit".to_string()
@@ -354,13 +386,11 @@ impl WalActor {
         )
     }
 
-    /// Flush and fsync a cloud-staging WAL only when its complete configured I/O wait can
-    /// still fit inside the shared operation deadline.
+    /// Flush and fsync a cloud-staging WAL within the shared operation deadline.
     ///
-    /// The filesystem writer treats an in-progress flush timeout as a sticky
-    /// write failure because completion is ambiguous. Refusing before it starts
-    /// keeps a short caller budget from poisoning an otherwise healthy writer;
-    /// the unchanged active segment can be retried by callerless maintenance.
+    /// The per-I/O timeout caps the shared remaining budget; a shorter caller
+    /// deadline still permits a fast sync. An accepted sync timeout is sticky:
+    /// the actor fences and retains the writer until admitted effects drain.
     ///
     /// Requires a [`WalSealTicket`]: the flush leaves the actor in the
     /// `CloudFlush` transition until the paired rotate or cancel, so it may
@@ -378,23 +408,24 @@ impl WalActor {
         self.begin_io_transition(WalTransitionOperation::CloudFlush)?;
 
         if self.writer().is_some() {
-            if deadline.is_bounded() && deadline.remaining() < self.storage_io_timeout {
+            let Some(io_timeout) = deadline.clamp_nonzero(self.storage_io_timeout) else {
                 self.finish_io_transition()?;
                 return Err(crate::common::MidgeError::Timeout(format!(
-                    "insufficient operation budget for WAL flush: remaining={:?}, required={:?}",
-                    deadline.remaining(),
-                    self.storage_io_timeout
+                    "operation deadline exhausted before WAL flush: remaining={:?}",
+                    deadline.remaining()
                 )));
-            }
+            };
             // Sealing advances local_durable_seq, and cloud recovery treats a
             // local sealed segment as complete. Fsync here (one barrier per
             // sealed segment, not per write) so power loss cannot leave a
             // torn sealed file.
-            let io_timeout = self.storage_io_timeout;
-            let sync_result = self
-                .writer_mut()
-                .ok_or_else(|| MidgeError::Internal("WAL writer disappeared during flush".into()))?
-                .sync_with_timeout(io_timeout);
+            let sync_result = Self::sync_failure_boundary().and_then(|()| {
+                self.writer_mut()
+                    .ok_or_else(|| {
+                        MidgeError::Internal("WAL writer disappeared during flush".into())
+                    })?
+                    .sync_with_timeout(io_timeout)
+            });
             if let Err(error) = sync_result {
                 self.fence_transition(state, format!("WAL seal fsync failed: {error}"));
                 return Err(error);

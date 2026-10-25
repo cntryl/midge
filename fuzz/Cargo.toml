@@ -44,6 +44,27 @@ doc = false
 bench = false
 
 [[bin]]
+name = "sst_data_block_decode"
+path = "fuzz_targets/sst_data_block_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sst_index_decode"
+path = "fuzz_targets/sst_index_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sst_filter_decode"
+path = "fuzz_targets/sst_filter_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "engine_differential"
 path = "fuzz_targets/engine_differential.rs"
 test = false

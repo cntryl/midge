@@ -4,7 +4,7 @@
   "manifest_epoch": 1,
   "manifest_files_verified": 1,
   "sst_files_verified": 1,
-  "bytes_verified": 437,
+  "bytes_verified": 376,
   "data_blocks_verified": 1,
   "wal_boundary": null,
   "wal_recovery_records_replayed": 0,

@@ -51,6 +51,9 @@ impl CloudReadAuthority {
 #[cfg(test)]
 #[path = "handle/read_authority_tests.rs"]
 mod read_authority_tests;
+#[cfg(test)]
+#[path = "handle/write_admission_tests.rs"]
+mod write_admission_tests;
 
 /// Handle for submitting work to the runtime.
 ///
@@ -61,6 +64,7 @@ mod read_authority_tests;
 /// - `RuntimeHandle` MUST be thread-safe and support concurrent callers.
 #[derive(Clone)]
 pub struct RuntimeHandle {
+    pub(crate) write_admission: Arc<super::write_admission::WriteAdmission>,
     pub(super) msg_tx: Sender<RuntimeMsg>,
     pub(super) router: Arc<ResponseRouter>,
     /// Lock-free snapshot cache for read-path bypass.
@@ -147,6 +151,7 @@ impl RuntimeHandle {
     }
 
     pub(crate) fn ensure_read_authority(&self) -> MidgeResult<()> {
+        self.lifecycle.ensure_readable()?;
         self.read_authority
             .as_ref()
             .map_or(Ok(()), CloudReadAuthority::check)
@@ -635,8 +640,20 @@ impl RuntimeHandle {
         request_id: u64,
         submission: TransactionSubmission,
     ) -> MidgeResult<RuntimeResponse> {
+        let started = std::time::Instant::now();
+        let deadline = OperationDeadline::from_start(started, self.runtime_response_timeout);
+        self.slow_write_admission(
+            submission
+                .ops
+                .iter()
+                .map(super::transaction_spill::op_cf_id),
+            &deadline,
+        )?;
         let submission_guard = self.lifecycle.begin_submission()?;
-        let response_rx = self.router.register(request_id, "ApplyTransaction");
+        let has_writes = !submission.ops.is_empty();
+        let response_rx =
+            self.router
+                .register_with_deadline(request_id, "ApplyTransaction", started, deadline);
         if let Err(error) = self.msg_tx.try_send(RuntimeMsg::ApplyTransaction {
             request_id,
             ops: submission.ops,
@@ -655,7 +672,8 @@ impl RuntimeHandle {
             &response_rx,
             "ApplyTransaction",
             request_id,
-            self.runtime_response_timeout,
+            deadline.remaining(),
+            has_writes,
         )
     }
 
@@ -664,8 +682,19 @@ impl RuntimeHandle {
         request_id: u64,
         submission: SpilledTransactionSubmission,
     ) -> MidgeResult<RuntimeResponse> {
+        let started = std::time::Instant::now();
+        let deadline = OperationDeadline::from_start(started, self.runtime_response_timeout);
+        if self.write_admission.enabled() {
+            self.slow_write_admission(submission.source.touched_cf_ids()?, &deadline)?;
+        }
         let submission_guard = self.lifecycle.begin_submission()?;
-        let response_rx = self.router.register(request_id, "ApplySpilledTransaction");
+        let has_writes = !submission.source.is_empty();
+        let response_rx = self.router.register_with_deadline(
+            request_id,
+            "ApplySpilledTransaction",
+            started,
+            deadline,
+        );
         if let Err(error) = self.msg_tx.try_send(RuntimeMsg::ApplySpilledTransaction {
             request_id,
             source: submission.source,
@@ -684,8 +713,50 @@ impl RuntimeHandle {
             &response_rx,
             "ApplySpilledTransaction",
             request_id,
-            self.runtime_response_timeout,
+            deadline.remaining(),
+            has_writes,
         )
+    }
+
+    fn slow_write_admission(
+        &self,
+        families: impl IntoIterator<Item = u32>,
+        deadline: &OperationDeadline,
+    ) -> MidgeResult<()> {
+        if !self.write_admission.enabled() {
+            return Ok(());
+        }
+        let queue_soft = self
+            .msg_tx
+            .capacity()
+            .is_some_and(|capacity| self.msg_tx.len() >= capacity.saturating_mul(3) / 4);
+        let delay = families
+            .into_iter()
+            .map(|cf| self.write_admission.delay(cf, queue_soft))
+            .max()
+            .unwrap_or_default();
+        if delay.is_zero() {
+            return Ok(());
+        }
+        let started = std::time::Instant::now();
+        let until = OperationDeadline::from_start(started, delay).earlier(*deadline);
+        let result = (|| {
+            while !until.is_expired() {
+                self.ensure_read_authority()?;
+                self.ensure_open()?;
+                std::thread::sleep(until.remaining().min(Duration::from_millis(1)));
+            }
+            self.ensure_open()?;
+            self.ensure_read_authority()?;
+            if deadline.is_expired() {
+                return Err(MidgeError::Timeout(
+                    "write deadline exhausted before admission".into(),
+                ));
+            }
+            Ok(())
+        })();
+        self.write_admission.record_delay(started.elapsed());
+        result
     }
 
     fn receive_routed_response(
@@ -694,15 +765,15 @@ impl RuntimeHandle {
         request_kind: &'static str,
         request_id: u64,
         timeout: Duration,
+        has_writes: bool,
     ) -> MidgeResult<RuntimeResponse> {
         match response_rx.recv_timeout(timeout) {
             Ok(response) => Ok(response),
             Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
                 if self.router.abandon(request_id, timeout) {
-                    Err(Self::response_timeout_error(
-                        request_kind,
-                        request_id,
-                        timeout,
+                    Err(crate::common::error::classify_commit_error(
+                        Self::response_timeout_error(request_kind, request_id, timeout),
+                        !has_writes,
                     ))
                 } else {
                     response_rx.recv().map_err(|_| {

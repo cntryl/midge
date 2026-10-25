@@ -65,6 +65,8 @@ pub struct FileMeta {
     pub largest_seq: Option<u64>,
     #[serde(default)]
     pub key_bounds_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_expiration_millis: Option<u64>,
 }
 
 impl FileMeta {
@@ -95,6 +97,7 @@ impl From<&FileMeta> for crate::metadata::FileMeta {
             smallest_seq,
             largest_seq,
             key_bounds_complete,
+            earliest_expiration_millis,
         } = value;
         Self {
             name: name.clone(),
@@ -107,6 +110,7 @@ impl From<&FileMeta> for crate::metadata::FileMeta {
             smallest_seq: *smallest_seq,
             largest_seq: *largest_seq,
             key_bounds_complete: *key_bounds_complete,
+            earliest_expiration_millis: *earliest_expiration_millis,
             ..Self::default()
         }
     }
@@ -126,6 +130,7 @@ impl From<&crate::metadata::FileMeta> for FileMeta {
             smallest_seq,
             largest_seq,
             key_bounds_complete,
+            earliest_expiration_millis,
             sublevel: _,
             read_count: _,
         } = value;
@@ -140,6 +145,7 @@ impl From<&crate::metadata::FileMeta> for FileMeta {
             smallest_seq: *smallest_seq,
             largest_seq: *largest_seq,
             key_bounds_complete: *key_bounds_complete,
+            earliest_expiration_millis: *earliest_expiration_millis,
         }
     }
 }
@@ -162,6 +168,7 @@ mod file_meta_conversion_tests {
             smallest_seq: Some(11),
             largest_seq: Some(99),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
         };
 
         // Act
@@ -285,6 +292,13 @@ pub enum IntentLogEntry {
         cf_id: crate::types::ColumnFamilyId,
         removed: Vec<String>,
         added: Vec<FileMeta>,
+    },
+    /// Logical promotion of the exact existing immutable objects. No member
+    /// is a newly created output or a physical deletion obligation.
+    MoveSstsPublish {
+        phase: PublicationPhase,
+        captured: Vec<crate::metadata::FileMeta>,
+        target_level: u32,
     },
     /// Manifest updated with new SST
     SstAdded { file_meta: FileMeta },
@@ -476,6 +490,8 @@ pub enum RuntimeMsg {
     CancelWaitForWriteStallClear { wait_request_id: u64 },
     /// Retry obsolete SST deletion after a snapshot pin is released.
     RetryGc,
+    /// Wake loop-owned settlement after an admitted memtable effect finishes.
+    MemtableApplyProgress,
 
     /// Test-only actor entry point; see [`TestRuntimeMsg`].
     ///
@@ -742,6 +758,7 @@ impl RuntimeMsg {
             RuntimeMsg::CompactionComplete { .. }
             | RuntimeMsg::CancelWaitForWriteStallClear { .. }
             | RuntimeMsg::Shutdown
+            | RuntimeMsg::MemtableApplyProgress
             | RuntimeMsg::RetryGc => None,
 
             RuntimeMsg::Test(msg) => msg.request_id(),
@@ -750,6 +767,7 @@ impl RuntimeMsg {
 
     pub fn kind_name(&self) -> &'static str {
         match self {
+            RuntimeMsg::MemtableApplyProgress => "MemtableApplyProgress",
             RuntimeMsg::FlushMemtable { .. } => "FlushMemtable",
             RuntimeMsg::CompactionComplete { .. } => "CompactionComplete",
             RuntimeMsg::ApplyTransaction { .. } => "ApplyTransaction",

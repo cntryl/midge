@@ -36,7 +36,7 @@ fn should_preserve_local_data_when_timed_startup_completes() {
     assert_eq!(value, Some(Bytes::from_static(b"value")));
     assert_eq!(
         std::fs::read_to_string(directory.path().join("FORMAT")).unwrap(),
-        "midge-format-version=8\n"
+        "midge-format-version=9\n"
     );
 }
 

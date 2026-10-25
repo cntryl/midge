@@ -29,6 +29,31 @@ pub(super) enum Extent {
     Full,
 }
 
+/// Value-free point state used by detached commit validation. Expiration is
+/// interpreted at final admission, so a TTL crossing during I/O stays exact.
+#[derive(Clone, Copy)]
+pub(crate) struct ValidationPointState {
+    pub(crate) sequence: Option<u64>,
+    pub(crate) value: ValidationValue,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ValidationValue {
+    Absent,
+    Present { expiration: Option<u64> },
+}
+
+impl ValidationPointState {
+    pub(crate) fn exists_at(self, read_time_millis: u64) -> bool {
+        match self.value {
+            ValidationValue::Absent => false,
+            ValidationValue::Present { expiration } => {
+                !crate::common::time::is_expired_at(expiration, read_time_millis)
+            }
+        }
+    }
+}
+
 /// Point-read state accumulated over the sources visited so far.
 pub(super) struct PointReadWalk {
     snapshot_seq: u64,
@@ -175,6 +200,33 @@ pub(super) fn point_group_end(candidates: &[Arc<FileMeta>], start: usize) -> usi
 }
 
 impl ReadSnapshot {
+    pub(crate) fn validation_point_state(
+        &self,
+        key: &[u8],
+        sequence: u64,
+    ) -> MidgeResult<ValidationPointState> {
+        let walk = self.walk_point(key, sequence, Observe::Nothing, Extent::FirstHit)?;
+        #[cfg(any(test, feature = "internal-testing"))]
+        self.audit_point_walk(key, sequence, &walk)?;
+        let latest = walk.decided_sequence().filter(|sequence| *sequence > 0);
+        let value = match &walk.best_state {
+            Some(KeyState::Value(_, sequence, expiration, _))
+                if walk
+                    .covering_tombstone_seq
+                    .is_none_or(|cover| cover < *sequence) =>
+            {
+                ValidationValue::Present {
+                    expiration: *expiration,
+                }
+            }
+            _ => ValidationValue::Absent,
+        };
+        Ok(ValidationPointState {
+            sequence: latest,
+            value,
+        })
+    }
+
     /// Visit sources newest-first: the active memtable, immutables newest
     /// first, then the SST candidates group by group.
     pub(super) fn walk_point(

@@ -43,6 +43,7 @@ mod router;
 mod runtime_worker;
 mod startup_gate;
 mod startup_observer;
+pub(crate) mod write_admission;
 
 pub use event_loop::EventLoop;
 pub use intent_persistence::IntentPersistence;
@@ -56,7 +57,7 @@ pub use config::RuntimeConfig;
 pub(crate) use config::{CloudRuntimePolicy, CloudWalSealPolicy, RuntimeRetryPolicy};
 pub use handle::RuntimeHandle;
 pub(crate) use lifecycle::{RuntimeLifecycle, RuntimeLifecycleState, RuntimeTransactionGuard};
-pub(crate) use metadata_publication::MetadataPublicationLock;
+pub(crate) use metadata_publication::{CapturedMetadataCut, MetadataPublicationLock};
 pub(crate) use protocol::next_request_id;
 #[cfg(test)]
 pub use protocol::CompactionPlan;

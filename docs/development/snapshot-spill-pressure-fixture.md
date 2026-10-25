@@ -11,11 +11,27 @@ flushes and actual compactions. Every round checks exact frozen and current
 scans and point reads. Range deletes affect initially non-expiring keys, so
 TTL expiry cannot make those assertions vacuous.
 
-An uncommitted transaction then spills until actual `NoSpace`, with more than
-1.5 MiB of real spill files. A separate bounded write must be rejected before
-acceptance; its key and all uncommitted spill keys remain absent. Dropping the
-spill owner must let the same 64 KiB write succeed while the original snapshot
-remains open and exact.
+An uncommitted transaction then spills until actual `NoSpace`. Physical spill
+files must exceed the 128 KiB resident transaction pool. The test requires an
+actual `TransactionSpill` local-capacity rejection whose request exceeds the
+recorded free bytes, verifies every shared disk charge and the unchanged
+2 MiB total, and reports the variable WAL contribution. Measured boundaries
+include 1,479,750 physical spill bytes with 529,488 WAL bytes (95% committed)
+and 2,071,650 physical spill bytes with no WAL charge (98% committed). The final
+green fixture measured 1,282,450 physical spill bytes with 794,232 WAL bytes
+(99% committed). A fixed 1.5 MiB spill-only floor would incorrectly reject
+valid boundaries with more retained WAL.
+A separate bounded write must be rejected before acceptance; its key and all
+uncommitted spill keys remain absent. Dropping the spill owner must remove its
+actual files, clear its charge and restore capacity, then let the same 64 KiB
+write succeed while the original snapshot remains open and exact.
+
+WAL retirement can also lag a successful flush. If acknowledged, manifest-
+covered WAL alone prevents the reusable compaction staging request, the fixture
+drives ordinary runtime progress for at most ten seconds. It permits one
+compaction retry only after the measured WAL charge decreases and sufficient
+capacity returns. Unexplained charges, permanent pressure and other errors
+still fail; neither configured budget increases.
 
 Compaction must have retired actual snapshot input names. Those files must
 physically remain while pinned, then all disappear within ten seconds after

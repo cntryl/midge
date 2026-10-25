@@ -18,15 +18,31 @@ use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use std::sync::Arc;
 
 mod catalog;
-mod metadata_snapshot;
+pub(crate) mod metadata_chain;
+mod metadata_cuts;
+mod metadata_retention;
+pub(crate) use metadata_cuts::mirror_captured_control_metadata_within;
+pub(crate) mod metadata_snapshot;
+mod orphan_sweep;
+mod wal_orphan_sweep;
+pub(crate) use wal_orphan_sweep::sweep_retired_wal_within;
+mod retired_sst;
 use crate::storage::hybrid::backend::ControlObject;
 pub(crate) use catalog::refusal_error;
 pub(crate) use catalog::AdmittedCatalog;
 use catalog::{load_and_repair_catalog_within, mutate_wal_catalog_within, Missing, Mutation};
+pub(crate) use metadata_retention::INTERVAL as METADATA_RETENTION_INTERVAL;
+pub(crate) use metadata_retention::{collect_selected_metadata_within, MetadataRetentionState};
 pub(crate) use metadata_snapshot::{
     decode_generation_manifest, mirror_control_metadata_within,
     read_committed_metadata_bodies_within, CloudMetadataMirrorAuthority,
-    CloudMetadataMirrorContext, SharedMetadataSnapshot, SharedRetirementAuthority,
+    CloudMetadataMirrorContext, MetadataMirrorCache, SharedMetadataSnapshot,
+    SharedRetirementAuthority,
+};
+pub(crate) use orphan_sweep::visit_intent_sources;
+pub(crate) use orphan_sweep::{
+    sweep_sst_orphans_within, InventoryCursor, OrphanSweepContext, OrphanSweepProgress,
+    SstOrphanProtection,
 };
 
 /// Why a WAL upload could not be verified or published (#841).
@@ -509,13 +525,6 @@ impl CloudPersistence {
         cleanup.schedule();
         results.sort_by_key(|(id, _)| *id);
         Ok(results)
-    }
-
-    pub(crate) fn delete_sst_object_blocking(&self, sst_name: &str) -> MidgeResult<()> {
-        crate::failpoints::fail_point!("midge::cloud::inject_fail_sst_delete", |_| Err(
-            MidgeError::Internal("failpoint: cloud SST delete failed".to_string())
-        ));
-        self.delete_immutable_object_blocking(&crate::cloud_layout::object_key(sst_name))
     }
 }
 

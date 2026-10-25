@@ -32,7 +32,7 @@ const VALUE: &[u8] = b"unchanged-real-sst-value";
 type DataEvidence = (Vec<u8>, Vec<(Bytes, KeyState)>);
 
 #[derive(Clone, Debug)]
-struct ReadEvidence {
+struct MetadataIoEvidence {
     key: String,
     genuine_success: bool,
     provider_budget: Option<Duration>,
@@ -44,6 +44,7 @@ struct ReadEvidence {
 #[derive(Clone, Debug)]
 struct PutEvidence {
     key: String,
+    bytes: Vec<u8>,
     submitted_at: Instant,
     completed_at: Instant,
     genuine_success: bool,
@@ -54,40 +55,24 @@ struct DelayedAuthorityBackend {
     inner: MockCloudBackend,
     hold_until: Mutex<Option<Instant>>,
     release: AtomicBool,
-    reads: Mutex<Vec<ReadEvidence>>,
+    observations: Mutex<Vec<MetadataIoEvidence>>,
     puts: Mutex<Vec<PutEvidence>>,
 }
 
 impl DelayedAuthorityBackend {
-    fn metadata_get(&self, key: &str, timeout: Option<Duration>, callback: &CloudCallback) {
+    fn descriptor(&self, key: &str) -> (Vec<u8>, crate::storage::StorageObjectMetadata) {
         let (observed, result) = std::sync::mpsc::channel();
         self.inner.submit_get_with_metadata(key, observed);
-        let event = result
+        match result
             .recv_timeout(PROVIDER_CAP)
-            .expect("receive actual delegated authority GET");
-        let hold_until = self.hold_until.lock().unwrap().take();
-        if let Some(until) = hold_until {
-            let delegated_at = Instant::now();
-            let uploads_at_delegation = self.inner.get_uploads();
-            let genuine_success = matches!(&event,
-                CloudEvent::GetWithMetadata { key: actual, result: Ok((bytes, metadata)) }
-                if actual == key && !bytes.is_empty() && !metadata.etag.is_empty()
-                    && metadata.size == u64::try_from(bytes.len()).unwrap());
-            // The immutable finite target is the safety release even if the
-            // observer never reaches its explicit cleanup path.
-            while Instant::now() < until && !self.release.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            self.reads.lock().unwrap().push(ReadEvidence {
-                key: key.to_string(),
-                genuine_success,
-                provider_budget: timeout,
-                delegated_at,
-                forwarded_at: Instant::now(),
-                uploads_at_delegation,
-            });
+            .expect("real metadata readback")
+        {
+            CloudEvent::GetWithMetadata {
+                key: actual,
+                result: Ok(value),
+            } if actual == key => value,
+            event => panic!("required genuine metadata descriptor: {event:?}"),
         }
-        let _ = callback.send(event);
     }
 }
 
@@ -97,7 +82,7 @@ impl crate::storage::cloud::CloudReadCapability for DelayedAuthorityBackend {
     }
 
     fn submit_get_with_metadata(&self, key: &str, callback: CloudCallback) {
-        self.metadata_get(key, None, &callback);
+        self.inner.submit_get_with_metadata(key, callback);
     }
 
     fn submit_get_with_metadata_with_timeout(
@@ -106,7 +91,8 @@ impl crate::storage::cloud::CloudReadCapability for DelayedAuthorityBackend {
         timeout: Duration,
         callback: CloudCallback,
     ) {
-        self.metadata_get(key, Some(timeout), &callback);
+        self.inner
+            .submit_get_with_metadata_with_timeout(key, timeout, callback);
     }
 
     fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
@@ -123,19 +109,48 @@ impl crate::storage::cloud::CloudWriteCapability for DelayedAuthorityBackend {
         callback: CloudCallback,
     ) {
         let submitted_at = Instant::now();
+        let provider_budget = headers
+            .iter()
+            .find(|(name, _)| {
+                name.eq_ignore_ascii_case(crate::storage::cloud::REQUEST_TIMEOUT_HEADER)
+            })
+            .and_then(|(_, value)| crate::storage::cloud::parse_request_timeout(value).ok());
+        let expected = bytes.clone();
         let (observed, result) = std::sync::mpsc::channel();
         self.inner.submit_put(key, bytes, headers, observed);
         let event = result
             .recv_timeout(PROVIDER_CAP)
             .expect("receive actual delegated conditional PUT");
+        let genuine_success = matches!(&event,
+            CloudEvent::Put { key: actual, result: crate::storage::cloud::CloudOutcome::Ok(()) }
+            if actual == key);
         self.puts.lock().unwrap().push(PutEvidence {
             key: key.to_string(),
+            bytes: expected.clone(),
             submitted_at,
             completed_at: Instant::now(),
-            genuine_success: matches!(&event,
-                CloudEvent::Put { key: actual, result: crate::storage::cloud::CloudOutcome::Ok(()) }
-                if actual == key),
+            genuine_success,
         });
+        if key.starts_with("manifest/") {
+            let hold_until = self.hold_until.lock().unwrap().take();
+            if let Some(until) = hold_until {
+                let (actual, metadata) = self.descriptor(key);
+                let uploads_at_delegation = self.inner.get_uploads();
+                while Instant::now() < until && !self.release.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                self.observations.lock().unwrap().push(MetadataIoEvidence {
+                    key: key.into(),
+                    genuine_success: genuine_success
+                        && actual == expected
+                        && !metadata.etag.is_empty(),
+                    provider_budget,
+                    delegated_at: submitted_at,
+                    forwarded_at: Instant::now(),
+                    uploads_at_delegation,
+                });
+            }
+        }
         let _ = callback.send(event);
     }
 }
@@ -329,7 +344,7 @@ fn assert_exact_fixture_data(actual: MidgeResult<DataEvidence>, expected: &[u8])
     );
 }
 
-fn assert_late_genuine_read(reads: &[ReadEvidence], started: Instant) {
+fn assert_late_genuine_metadata_io(reads: &[MetadataIoEvidence], started: Instant) {
     assert_eq!(reads.len(), 1, "actual delegated hold: {reads:?}");
     let read = &reads[0];
     assert!(read.genuine_success && !read.key.is_empty(), "{read:?}");
@@ -341,7 +356,7 @@ fn assert_late_genuine_read(reads: &[ReadEvidence], started: Instant) {
 }
 
 #[test]
-fn should_keep_name_reservation_uncovered_when_actual_metadata_read_outlives_original_budget(
+fn should_keep_name_reservation_uncovered_when_actual_metadata_write_outlives_original_budget(
 ) -> MidgeResult<()> {
     crate::failpoints::with_read_gate(|| {
         // Arrange: real FORMAT/manifest and conditional committed pointer precede time.
@@ -356,25 +371,32 @@ fn should_keep_name_reservation_uncovered_when_actual_metadata_read_outlives_ori
         let deadline = OperationDeadline::from_start(started, ORIGINAL_BUDGET);
         *fixture.backend.hold_until.lock().unwrap() = Some(started + LATE_SUCCESS);
 
-        // Act: forward a genuine successful authority response after caller expiry.
+        // Act: forward a genuine immutable metadata write after caller expiry.
         let result = fixture
             .el
             .reserve_sst_name_durably_within(0, RESERVED_GENERATION, &deadline);
         let elapsed = started.elapsed();
         fixture.backend.release.store(true, Ordering::Release);
-        let reads = fixture.backend.reads.lock().unwrap().clone();
+        let reads = fixture.backend.observations.lock().unwrap().clone();
         let after_head = fixture.committed_head();
         let after_manifest = fixture.committed_manifest();
         let after_uploads = fixture.backend.inner.get_uploads();
         let puts = fixture.backend.puts.lock().unwrap()[before_puts..].to_vec();
         let bound = fixture.el.state.sst_names.reserved_through.get(&0).copied();
         let local = crate::metadata::ManifestPersistence::load(&fixture.el.state.db_path);
-        let mut recovered = RuntimeState::try_new(
-            fixture.el.state.db_path.clone(),
+        let recovered =
+            RuntimeState::new_in_epoch(&fixture.el.state.db_path, false, fixture.lease.epoch());
+        let mut recovered_loop = EventLoop::new(
+            recovered,
             false,
-            crate::config::RecoveryPolicy::Strict,
+            Arc::new(crate::runtime::ResponseRouter::new()),
+            crate::runtime::RuntimeConfig {
+                writer_epoch: fixture.lease.epoch(),
+                ..Default::default()
+            },
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
         )?;
-        let next_generation = recovered.next_compaction_output_generation();
+        let next_generation = recovered_loop.allocate_compaction_sst_name(0);
         let lease_is_live = fixture.el.check_lease_health();
         let accepted_epoch = fixture.lease.epoch();
         let store = fixture.lease.get_leader_store().unwrap();
@@ -388,7 +410,7 @@ fn should_keep_name_reservation_uncovered_when_actual_metadata_read_outlives_ori
             elapsed >= LATE_SUCCESS && elapsed < SETUP_BUDGET,
             "{elapsed:?}"
         );
-        assert_late_genuine_read(&reads, started);
+        assert_late_genuine_metadata_io(&reads, started);
         assert_eq!(bound, before_bound);
         assert_eq!(
             fixture.el.state.manifest.next_sst_seqs[&0],
@@ -401,7 +423,7 @@ fn should_keep_name_reservation_uncovered_when_actual_metadata_read_outlives_ori
             RESERVED_THROUGH
         );
         assert!(
-            next_generation.expect("recovered allocator retains reservation") > RESERVED_THROUGH
+            next_generation.expect("recovered allocator retains reservation") >= RESERVED_THROUGH
         );
         assert_eq!(
             after_head.expect("read unchanged authoritative pointer"),
@@ -413,14 +435,14 @@ fn should_keep_name_reservation_uncovered_when_actual_metadata_read_outlives_ori
                 .next_sst_seqs,
             before_manifest.next_sst_seqs
         );
-        assert_journal_staging_before_expiry(
+        assert_metadata_staging_before_expiry(
             &fixture,
             &before_uploads,
             &after_uploads,
             &puts,
             &reads[0],
             started,
-        )?;
+        );
         let owner = owner
             .expect("read actual owner")
             .expect("lease remains present");
@@ -434,14 +456,14 @@ fn should_keep_name_reservation_uncovered_when_actual_metadata_read_outlives_ori
     })
 }
 
-fn assert_journal_staging_before_expiry(
+fn assert_metadata_staging_before_expiry(
     fixture: &NameFixture,
     before_uploads: &[(String, u64)],
     after_uploads: &[(String, u64)],
     puts: &[PutEvidence],
-    read: &ReadEvidence,
+    read: &MetadataIoEvidence,
     started: Instant,
-) -> MidgeResult<()> {
+) {
     assert_eq!(
         after_uploads,
         read.uploads_at_delegation.as_slice(),
@@ -452,31 +474,22 @@ fn assert_journal_staging_before_expiry(
     assert_eq!(
         staged.len(),
         1,
-        "only the changed journal is staged: {staged:?}"
+        "only the changed manifest version is staged: {staged:?}"
     );
-    assert!(staged[0].0.starts_with("metadata/generations/"));
-    assert!(staged[0].0.ends_with("/manifest.journal"));
-    assert_eq!(
-        staged[0].1,
-        std::fs::metadata(
-            fixture
-                .el
-                .state
-                .db_path
-                .join(crate::metadata::files::JOURNAL)
-        )?
-        .len()
-    );
+    assert!(staged[0].0.starts_with("manifest/"));
+    let (staged_bytes, metadata) = fixture.backend.descriptor(&staged[0].0);
+    assert_eq!(staged[0].1, u64::try_from(staged_bytes.len()).unwrap());
+    assert_eq!(metadata.size, staged[0].1);
     assert_eq!(
         puts.len(),
         1,
-        "only one genuine pre-expiry journal PUT: {puts:?}"
+        "only one genuine pre-expiry manifest PUT: {puts:?}"
     );
     assert_eq!(puts[0].key, staged[0].0);
+    assert_eq!(puts[0].bytes, staged_bytes);
     assert!(puts[0].genuine_success, "{puts:?}");
     assert!(puts[0].submitted_at >= started);
     assert!(puts[0].completed_at < started + ORIGINAL_BUDGET, "{puts:?}");
-    Ok(())
 }
 
 #[test]

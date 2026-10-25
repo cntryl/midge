@@ -157,6 +157,8 @@ fn should_credit_installed_sst_once_when_actual_mirror_receipt_is_replayed() -> 
             mirror.result
         );
         let replay = FlushMirrorCompletion {
+            phase: mirror.phase,
+            deadline: mirror.deadline,
             delta: mirror.delta.clone(),
             reservation: mirror.reservation,
             result: mirror.result.as_ref().copied().map_err(MidgeError::replay),

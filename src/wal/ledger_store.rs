@@ -29,7 +29,46 @@ use crate::common::{MidgeError, MidgeResult};
 use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions, ReadFs};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LedgerSyncSnapshot {
+    pub(crate) file_attempts: u64,
+    pub(crate) file_completed: u64,
+    pub(crate) directory_attempts: u64,
+    pub(crate) directory_completed: u64,
+}
+
+#[derive(Default)]
+struct LedgerSyncCounters {
+    file_attempts: AtomicU64,
+    file_completed: AtomicU64,
+    directory_attempts: AtomicU64,
+    directory_completed: AtomicU64,
+}
+
+impl LedgerSyncCounters {
+    fn record(&self, event: crate::io::staging::StagingSyncEvent) {
+        use crate::io::staging::StagingSyncEvent;
+        let counter = match event {
+            StagingSyncEvent::FileAttempt => &self.file_attempts,
+            StagingSyncEvent::FileComplete => &self.file_completed,
+            StagingSyncEvent::DirectoryAttempt => &self.directory_attempts,
+            StagingSyncEvent::DirectoryComplete => &self.directory_completed,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> LedgerSyncSnapshot {
+        LedgerSyncSnapshot {
+            file_attempts: self.file_attempts.load(Ordering::Relaxed),
+            file_completed: self.file_completed.load(Ordering::Relaxed),
+            directory_attempts: self.directory_attempts.load(Ordering::Relaxed),
+            directory_completed: self.directory_completed.load(Ordering::Relaxed),
+        }
+    }
+}
 
 /// The ledger journal, relative to the WAL directory's filesystem root.
 pub(crate) const LEDGER_FILE: &str = "LEDGER";
@@ -67,6 +106,7 @@ enum Frame {
 /// failed write the content of LEDGER is unknown: the store republishes its
 /// ledger as a snapshot (it heals) before it appends again.
 pub(crate) struct LedgerStore {
+    syncs: LedgerSyncCounters,
     /// Rooted at the WAL directory.
     fs: Arc<dyn Fs>,
     /// The state LEDGER holds.
@@ -150,6 +190,7 @@ impl LedgerStore {
             )));
         }
         let mut store = Self {
+            syncs: LedgerSyncCounters::default(),
             fs,
             ledger: ledger.clone(),
             len: 0,
@@ -183,6 +224,7 @@ impl LedgerStore {
         };
         let parsed = parse(&bytes)?;
         let mut store = Self {
+            syncs: LedgerSyncCounters::default(),
             fs,
             ledger: parsed.ledger,
             len: 0,
@@ -270,7 +312,7 @@ impl LedgerStore {
         image.extend_from_slice(&VERSION.to_le_bytes());
         image.extend(encode_frame(&Frame::Snapshot(self.ledger.clone()))?);
         self.failed = true;
-        publish(&self.fs, &image)?;
+        publish(&self.fs, &image, &self.syncs)?;
         self.len = byte_len(&image);
         self.image = self.image.is_some().then(|| Bytes::from(image));
         self.edits = 0;
@@ -312,7 +354,17 @@ impl LedgerStore {
         }
         file.write_at(len, Bytes::copy_from_slice(frame))
             .map_err(FsError::into_midge)?;
-        file.sync(Durability::Durable).map_err(FsError::into_midge)
+        self.syncs
+            .record(crate::io::staging::StagingSyncEvent::FileAttempt);
+        file.sync(Durability::Durable)
+            .map_err(FsError::into_midge)?;
+        self.syncs
+            .record(crate::io::staging::StagingSyncEvent::FileComplete);
+        Ok(())
+    }
+
+    pub(crate) fn sync_counts(&self) -> LedgerSyncSnapshot {
+        self.syncs.snapshot()
     }
 }
 
@@ -353,13 +405,14 @@ fn read_ledger(fs: &dyn ReadFs) -> MidgeResult<Option<Bytes>> {
 
 /// Make `image` LEDGER's durable content without touching the current LEDGER
 /// until the rename.
-fn publish(fs: &Arc<dyn Fs>, image: &[u8]) -> MidgeResult<()> {
-    crate::io::staging::stage_bytes_typed(
+fn publish(fs: &Arc<dyn Fs>, image: &[u8], syncs: &LedgerSyncCounters) -> MidgeResult<()> {
+    crate::io::staging::stage_bytes_typed_observed(
         fs,
         &FsPath::new(LEDGER_TEMP_FILE),
         &FsPath::new(LEDGER_FILE),
         image,
         || Ok(()),
+        Some(&|event| syncs.record(event)),
     )
 }
 

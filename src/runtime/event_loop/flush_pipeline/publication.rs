@@ -3,6 +3,7 @@ use super::{
     FlushMirrorCompletion, FlushMirrorTask, FlushPublicationDelta, FlushPublishCompletion,
     ImmutableFlushPhase, Origin,
 };
+use crate::runtime::actors::flush::FlushMirrorPhase;
 
 impl EventLoop {
     pub(super) fn runtime_fs_path(
@@ -15,7 +16,7 @@ impl EventLoop {
     /// Picks the SST sequence for a flush output and, when the output can
     /// reach remote storage before it is published, makes the name durable.
     #[cfg(test)]
-    pub(super) fn reserve_flush_sst_seq(
+    pub(in crate::runtime::event_loop) fn reserve_flush_sst_seq(
         &mut self,
         cf_id: crate::types::ColumnFamilyId,
     ) -> crate::common::MidgeResult<u64> {
@@ -27,13 +28,7 @@ impl EventLoop {
         cf_id: crate::types::ColumnFamilyId,
         origin: Origin,
     ) -> crate::common::MidgeResult<u64> {
-        let durable_next = self
-            .state
-            .manifest
-            .next_sst_seqs
-            .get(&cf_id)
-            .copied()
-            .unwrap_or(1);
+        let sst_seq = self.next_sst_name(cf_id)?;
         if self.actors.cloud_coordinator.hybrid_storage.is_some() {
             // The publish worker uploads before it journals AddSst, so the
             // name must already be durable (as compaction does) or a crash in
@@ -41,24 +36,9 @@ impl EventLoop {
             // Names come from a cursor inside a durably reserved block, so
             // most flushes reserve nothing (#491). A restart resumes at the
             // durable reservation, past every name this session handed out.
-            let cursor = self
-                .state
-                .sst_names
-                .cursor
-                .entry(cf_id)
-                .or_insert(durable_next);
-            let sst_seq = *cursor;
-            *cursor = sst_seq.checked_add(1).ok_or_else(|| {
-                crate::common::MidgeError::ResourceLimit("SST filename allocation exhausted".into())
-            })?;
             self.reserve_sst_name_durably_for(cf_id, sst_seq, origin)?;
-            return Ok(sst_seq);
         }
-        let sst_seq = durable_next;
-        let next_sst_seq = sst_seq.saturating_add(1);
-        self.state
-            .manifest
-            .advance_next_sst_seq(cf_id, next_sst_seq);
+        self.consume_sst_name(cf_id, sst_seq)?;
         Ok(sst_seq)
     }
 
@@ -149,17 +129,12 @@ impl EventLoop {
             flush.phase = ImmutableFlushPhase::Built;
             flush.clone()
         };
-        // A compaction publication owns the metadata turn from its durable
-        // intent through the final mirrored clear. Park this completed flush
-        // as Queued with its build retained so it cannot start a second
-        // metadata writer mid-turn; the scheduler resumes queued flushes when
-        // the gate is released and publishes a retained build directly. The
-        // build is done, so release the worker; publication re-arms it.
-        if self.publication.publication_gate.is_active() {
+        // Inline compatibility publication still serializes its live-file
+        // mirror. Background workers publish captured cuts independently.
+        if self.pipeline.inline_flush_worker && self.publication.publication_gate.is_active() {
             if let Some((_, current)) = self.state.immutable_flush_by_id_mut(identity.flush_id) {
                 current.phase = ImmutableFlushPhase::Queued;
             }
-            self.actors.flush_actor.finish_pipeline();
             return;
         }
         if let Some((_, current)) = self.state.immutable_flush_by_id_mut(identity.flush_id) {
@@ -208,7 +183,9 @@ impl EventLoop {
             self.state
                 .finish_flush_publication_attempt(completion.identity.flush_id, true);
             self.settle_stale_publish_reservation(&completion);
-            self.actors.flush_actor.finish_pipeline();
+            self.actors
+                .flush_actor
+                .finish_pipeline(completion.identity.flush_id);
             self.publication.publication_gate.release(
                 &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
                     flush_id: completion.identity.flush_id,
@@ -279,15 +256,20 @@ impl EventLoop {
         )?;
         crate::failpoints::fail_point!("midge::flush::after_publication_intent_before_manifest");
         self.check_lease_health()?;
-        self.state
-            .commit_flush_publication_for(FlushManifestPublication {
-                origin,
-                cf_id: delta.identity.cf_id,
-                sequence: delta.identity.sequence,
-                file_meta: &delta.file_meta,
-                next_sst_seq: delta.next_sst_seq,
-                require_snapshot: self.actors.cloud_coordinator.hybrid_storage.is_some(),
-            })?;
+        let publication = FlushManifestPublication {
+            origin,
+            cf_id: delta.identity.cf_id,
+            sequence: delta.identity.sequence,
+            file_meta: &delta.file_meta,
+            next_sst_seq: delta.next_sst_seq,
+            require_snapshot: self.actors.cloud_coordinator.hybrid_storage.is_some(),
+        };
+        if self.actors.cloud_coordinator.hybrid_storage.is_some() {
+            self.state
+                .commit_flush_manifest_retaining_intent(publication)?;
+        } else {
+            self.state.commit_flush_publication_for(publication)?;
+        }
         Ok(())
     }
 
@@ -296,10 +278,28 @@ impl EventLoop {
         delta: FlushPublicationDelta,
         reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
     ) -> crate::common::MidgeResult<()> {
+        let deadline = self.flush_mirror_deadline(delta.identity);
+        self.submit_flush_mirror_phase(
+            delta,
+            reservation,
+            FlushMirrorPhase::ManifestPublished,
+            deadline,
+        )
+    }
+
+    fn submit_flush_mirror_phase(
+        &mut self,
+        delta: FlushPublicationDelta,
+        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+        phase: FlushMirrorPhase,
+        deadline: crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<()> {
         let task = FlushMirrorTask {
+            phase,
             delta,
             reservation,
             fs: Arc::clone(&self.state.fs),
+            metadata_cut: None,
             storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
                 self.actors.cloud_coordinator.hybrid_storage.clone(),
                 self.actors.cloud_coordinator.cloud_metadata_storage.clone(),
@@ -309,9 +309,9 @@ impl EventLoop {
             lease_healthy: self.authority.fencing.lease_healthy.clone(),
             leader_store: self.authority.fencing.leader_store.clone(),
             leader_holder_id: self.authority.fencing.leader_holder_id.clone(),
-            runtime_response_timeout: self.routing.runtime_response_timeout,
+            deadline,
         };
-        self.actors.flush_actor.submit_mirror(task)
+        self.admit_flush_mirror(task)
     }
 
     pub(super) fn handle_flush_mirror_completion(
@@ -328,6 +328,32 @@ impl EventLoop {
         }
         match completion.result {
             Ok(cloud_metadata_published) => {
+                if cloud_metadata_published
+                    && completion.phase == FlushMirrorPhase::ManifestPublished
+                {
+                    let result = self
+                        .state
+                        .clear_flush_publication_intent(&completion.delta.file_meta.name)
+                        .and_then(|()| {
+                            self.submit_flush_mirror_phase(
+                                completion.delta.clone(),
+                                completion.reservation,
+                                FlushMirrorPhase::IntentCleared,
+                                completion.deadline,
+                            )
+                        });
+                    self.publication.publication_gate.release(
+                        &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush { flush_id: completion.delta.identity.flush_id });
+                    if let Err(error) = result {
+                        self.fail_flush_pipeline(
+                            completion.delta.identity.flush_id,
+                            completion.reservation,
+                            &error,
+                        );
+                        return true;
+                    }
+                    return false;
+                }
                 self.publication.publication_gate.release(
                     &crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
                         flush_id: completion.delta.identity.flush_id,
@@ -352,13 +378,7 @@ impl EventLoop {
         &self,
         identity: FlushIdentity,
     ) -> crate::common::MidgeResult<()> {
-        self.check_lease_health()?;
-        if identity.writer_epoch != self.authority.fencing.writer_epoch {
-            return Err(crate::common::MidgeError::Fenced(format!(
-                "flush {} epoch {} does not match runtime epoch {}",
-                identity.flush_id, identity.writer_epoch, self.authority.fencing.writer_epoch
-            )));
-        }
+        self.validate_flush_owner(identity)?;
         if let Some(store) = &self.authority.fencing.leader_store {
             store
                 .validate_epoch(
@@ -377,6 +397,20 @@ impl EventLoop {
                 })?;
         }
         self.check_lease_health()?;
+        Ok(())
+    }
+
+    pub(in crate::runtime::event_loop) fn validate_flush_owner(
+        &self,
+        identity: FlushIdentity,
+    ) -> crate::common::MidgeResult<()> {
+        self.check_lease_health()?;
+        if identity.writer_epoch != self.authority.fencing.writer_epoch {
+            return Err(crate::common::MidgeError::Fenced(format!(
+                "flush {} epoch {} does not match runtime epoch {}",
+                identity.flush_id, identity.writer_epoch, self.authority.fencing.writer_epoch
+            )));
+        }
         let Some((cf_id, flush)) = self.state.immutable_flush_by_id(identity.flush_id) else {
             return Err(crate::common::MidgeError::Fenced(format!(
                 "flush {} is no longer owned by this runtime",
@@ -407,7 +441,9 @@ impl EventLoop {
             {
                 hybrid.flush_completed_with_token(token, delta.file_meta.size_bytes);
             }
-            self.actors.flush_actor.finish_pipeline();
+            self.actors
+                .flush_actor
+                .finish_pipeline(delta.identity.flush_id);
             return;
         };
         let accounting = flush.accounting;
@@ -451,7 +487,9 @@ impl EventLoop {
         if cloud_metadata_published {
             self.evict_published_sst_cache(std::slice::from_ref(&delta.file_meta.name));
         }
-        self.actors.flush_actor.finish_pipeline();
+        self.actors
+            .flush_actor
+            .finish_pipeline(delta.identity.flush_id);
         self.publish_snapshot();
         self.refresh_write_stall_timing();
         self.wake_write_stall_waiters();

@@ -3758,6 +3758,10 @@ mod engine_compaction {
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put batch value");
             }
+            // A shared existing key makes source ranges overlap, requiring
+            // physical replacement while retaining exactly 500 distinct keys.
+            tx.put(b"batch00_key0000".to_vec(), b"value".to_vec(), None)
+                .expect("overlap compaction source ranges");
             tx.commit(cntryl_midge::WriteOptions::buffered())
                 .expect("commit batch");
             engine.flush_cf(&cf).expect("flush batch");
@@ -3838,6 +3842,8 @@ mod engine_compaction {
                 tx.put(key.as_bytes().to_vec(), b"value".to_vec(), None)
                     .expect("put batch value");
             }
+            tx.put(b"batch00_key0000".to_vec(), b"value".to_vec(), None)
+                .expect("require physical source replacement before cleanup");
             tx.commit(cntryl_midge::WriteOptions::buffered())
                 .expect("commit batch");
             engine.flush_cf(&cf).expect("flush batch");
@@ -5119,11 +5125,16 @@ mod consistent_cut_backup {
                 .any(|line| line == "expires: 1970-01-01T00:00:00Z"),
             "backup must not transfer the source writer lease: {lease_document}"
         );
-        assert!(
-            lease_document
-                .lines()
-                .any(|line| line.starts_with("metadata: {")),
-            "backup must retain the committed shared metadata pointer: {lease_document}"
+        assert!(lease_document.starts_with("lease_version: 4\n"));
+        let pointer_object = "cloud_store/metadata/committed-pointer.v1";
+        assert!(inventory
+            .objects
+            .iter()
+            .any(|object| object.path == pointer_object));
+        assert_ne!(
+            std::fs::read(artifact.join("objects").join(pointer_object))
+                .expect("backup retains separate committed metadata authority"),
+            Vec::<u8>::new()
         );
         drop(engine);
 

@@ -46,7 +46,7 @@ fn should_reject_spilled_transaction_before_wal_write_when_preflight_finds_dupli
     let result = actor.append_spilled_transaction(
         &mut state,
         &source,
-        SpilledTransactionAppendParams {
+        &SpilledTransactionAppendParams {
             request_id: 1,
             assertions: Vec::new(),
             durability_policy: Some(DurabilityPolicy::Strict),
@@ -203,7 +203,7 @@ fn append_admission_test_transaction(
             .append_spilled_transaction(
                 state,
                 &write_set.take_source(),
-                SpilledTransactionAppendParams {
+                &SpilledTransactionAppendParams {
                     request_id: 2,
                     assertions: Vec::new(),
                     durability_policy: Some(DurabilityPolicy::CloudAsync),
@@ -269,7 +269,7 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
     let first_result = actor.append_spilled_transaction(
         &mut state,
         &source,
-        SpilledTransactionAppendParams {
+        &SpilledTransactionAppendParams {
             request_id: 1,
             assertions: Vec::new(),
             durability_policy: Some(DurabilityPolicy::CloudAsync),
@@ -298,7 +298,7 @@ fn should_keep_spilled_append_retryable_when_wal_admission_fails_before_first_fr
     actor.append_spilled_transaction(
         &mut state,
         &source,
-        SpilledTransactionAppendParams {
+        &SpilledTransactionAppendParams {
             request_id: 2,
             assertions: Vec::new(),
             durability_policy: Some(DurabilityPolicy::CloudAsync),
@@ -388,25 +388,92 @@ fn should_release_wal_admission_when_failed_append_is_durably_rolled_back() -> M
     Ok(())
 }
 
+#[test]
+fn should_preserve_physical_wal_when_trait_append_claims_unchanged() -> MidgeResult<()> {
+    for (wrapped, batch) in [(false, false), (false, true), (true, false), (true, true)] {
+        // Arrange: seed the real writer, then exercise both accounted entry
+        // points through the trait, including a delegating test writer.
+        let fs = Arc::new(PartialAppendFs::default());
+        let name = crate::wal::segment_file_name(1);
+        let writer = FsWalFactoryIo::new(fs.clone()).create_writer(&name)?;
+        writer
+            .append_record_accounted(&WalRecord::new(
+                crate::wal::WalOpKind::Put,
+                Bytes::from_static(b"seed"),
+                Some(Bytes::from_static(b"retained")),
+                1,
+            ))
+            .unwrap();
+        let writer: Box<dyn WalWriter> = if wrapped {
+            Box::new(super::FsyncFailingWriter { inner: writer })
+        } else {
+            writer
+        };
+        let before = fs.inner.get_file(&name).unwrap();
+        let before_pos = writer.current_pos();
+        assert_eq!(writer.append_batch_accounted(&[]).unwrap(), before_pos);
+        assert_eq!(fs.inner.get_file(&name).unwrap(), before);
+        fs.fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let record = WalRecord::new(
+            crate::wal::WalOpKind::Put,
+            Bytes::from_static(b"failed"),
+            Some(Bytes::from_static(b"partial frame")),
+            2,
+        );
+
+        // Act: the physical write lands partially before the injected failure.
+        let failure = if batch {
+            let mut later = record.clone();
+            later.seq = 3;
+            writer.append_batch_accounted(&[record, later])
+        } else {
+            writer.append_record_accounted(&record)
+        }
+        .expect_err("injected partial append");
+        let after_pos = writer.current_pos();
+        drop(writer); // Join the worker so no late effect can escape the check.
+
+        // Assert: unchanged is a physical proof, not just a logical position.
+        assert!(matches!(failure.error, MidgeError::NoSpace(_)));
+        assert!(failure.unchanged, "the fixture's rollback must be durable");
+        assert_eq!(fs.inner.get_file(&name).unwrap(), before);
+        assert_eq!(after_pos, before_pos);
+    }
+    Ok(())
+}
+
 struct UncertainAppendWriter {
     timeout: bool,
 }
 
 impl WalWriter for UncertainAppendWriter {
-    fn append_record(&self, _record: &WalRecord) -> MidgeResult<u64> {
-        if self.timeout {
-            Err(MidgeError::Timeout("append remains in flight".into()))
+    fn append_record_accounted(
+        &self,
+        _record: &WalRecord,
+    ) -> Result<u64, crate::wal::traits::WalAppendError> {
+        let error = if self.timeout {
+            MidgeError::Timeout("append remains in flight".into())
         } else {
-            Err(MidgeError::NoSpace(
-                "partial append could not roll back".into(),
-            ))
-        }
+            MidgeError::NoSpace("partial append could not roll back".into())
+        };
+        Err(crate::wal::traits::WalAppendError::unknown(error))
+    }
+
+    fn append_batch_accounted(
+        &self,
+        records: &[WalRecord],
+    ) -> Result<u64, crate::wal::traits::WalAppendError> {
+        records.first().map_or_else(
+            || Ok(self.current_pos()),
+            |record| self.append_record_accounted(record),
+        )
     }
 
     fn current_pos(&self) -> u64 {
         0
     }
-    fn sync(&self) -> MidgeResult<()> {
+    fn sync_with_timeout(&self, _timeout: std::time::Duration) -> MidgeResult<()> {
         Ok(())
     }
 
@@ -598,7 +665,7 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
     let budget_before = setup.hybrid_storage.budget_snapshot().total_committed_bytes;
 
     // Act: the whole unit is rejected before its begin frame can be written.
-    let first_result = actor.append_spilled_transaction(&mut state, &source, params(1));
+    let first_result = actor.append_spilled_transaction(&mut state, &source, &params(1));
     let wal_len_after_first = fs
         .metadata(&FsPath::new(crate::wal::segment_file_name(1)))
         .map_or(0, |m| m.len);
@@ -606,7 +673,7 @@ fn should_keep_wal_open_when_spilled_transaction_exceeds_remaining_wal_budget() 
     let budget_after_rejection = setup.hybrid_storage.budget_snapshot().total_committed_bytes;
     // The budget frees up (e.g. uploads retire WAL); the caller retries.
     setup.hybrid_storage.release_local_wal_bytes(pre_admitted);
-    let retry = actor.append_spilled_transaction(&mut state, &source, params(2));
+    let retry = actor.append_spilled_transaction(&mut state, &source, &params(2));
 
     // Assert
     assert!(

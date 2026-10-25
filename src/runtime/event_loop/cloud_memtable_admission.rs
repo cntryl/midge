@@ -46,6 +46,33 @@ impl EventLoop {
         self.admit_cloud_memtable_growth(&growth, window)
     }
 
+    /// Reserve for every prepared member, whose writes are not yet reflected
+    /// in the active memtable. False ends the group before this transaction;
+    /// ordinary admission can then freeze the earlier group's generation.
+    pub(super) fn prepare_coalesced_cloud_memtables(
+        &mut self,
+        ops: &[TransactionOp],
+        staged_growth: &mut HashMap<u32, usize>,
+    ) -> MidgeResult<bool> {
+        let Some(window) = self.cloud_flush_staging_window() else {
+            return Ok(true);
+        };
+        let mut growth = staged_growth.clone();
+        for op in ops {
+            add_operation_growth(&mut growth, op);
+        }
+        if !staged_growth.is_empty()
+            && growth.values().any(|&additional| {
+                flush_staging_bytes(FIXED_SST_BYTES.saturating_add(additional)) > window
+            })
+        {
+            return Ok(false);
+        }
+        self.admit_cloud_memtable_growth(&growth, window)?;
+        *staged_growth = growth;
+        Ok(true)
+    }
+
     fn admit_cloud_memtable_growth(
         &mut self,
         growth: &HashMap<u32, usize>,
@@ -238,6 +265,171 @@ mod tests {
     }
 
     #[test]
+    fn should_apply_flush_staging_admission_to_coalesced_followers_given_ephemeral_cache(
+    ) -> MidgeResult<()> {
+        use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
+        use crate::runtime::{ConflictPolicy, RuntimeMsg, RuntimeResponse};
+        use crate::wal::DurabilityPolicy;
+
+        for policy in [DurabilityPolicy::Strict, DurabilityPolicy::Batched] {
+            for (stalled, fallback) in [(false, false), (false, true), (true, false), (true, true)]
+            {
+                // Arrange: the first family fits. The queued follower either
+                // cannot fit alone or cannot freeze its already full family.
+                let (_directory, mut event_loop, _hybrid) = fixture()?;
+                let other = event_loop.state.create_cf("follower".into())?;
+                if stalled {
+                    event_loop.state.limits.max_immutable_memtables = 1;
+                    let cf = event_loop.state.get_cf_mut(other).unwrap();
+                    cf.memtable
+                        .put_with_seq(b"seed".to_vec(), vec![1; 20 * 1024], 1, None)?;
+                    cf.immutable_memtables
+                        .push(Arc::new(crate::memtable::SkipListMemtable::new()));
+                    event_loop.state.sequence = 1;
+                }
+                let put = |cf_id, key: &'static [u8], size| TransactionOp::Put {
+                    cf_id,
+                    key: bytes::Bytes::from_static(key),
+                    value: bytes::Bytes::from(vec![2; size]),
+                    ttl_seconds: None,
+                    insert_only: false,
+                };
+                let (messages, message_rx) = crossbeam::channel::unbounded();
+                let (follower_response, follower_rx) = crossbeam::channel::bounded(1);
+                messages
+                    .send(RuntimeMsg::ApplyTransaction {
+                        request_id: 7202,
+                        ops: vec![put(
+                            other,
+                            b"rejected",
+                            if stalled { 16 * 1024 } else { 40 * 1024 },
+                        )],
+                        assertions: Vec::new(),
+                        durability_policy: Some(policy),
+                        start_sequence: fallback.then_some(0),
+                        conflict_policy: ConflictPolicy::LastWriteWins,
+                        response_tx: Some(follower_response),
+                    })
+                    .unwrap();
+                let (first_response, first_rx) = crossbeam::channel::bounded(1);
+
+                // Act: production dispatch collects or falls back to the follower.
+                WalCoordinator::apply_transaction(
+                    &mut event_loop,
+                    &message_rx,
+                    ApplyTransactionRequest {
+                        validation: None,
+                        request_id: 7201,
+                        ops: vec![put(0, b"accepted", 8)],
+                        assertions: Vec::new(),
+                        durability_policy: Some(policy),
+                        start_sequence: None,
+                        conflict_policy: ConflictPolicy::LastWriteWins,
+                    },
+                    Some(first_response),
+                );
+
+                // Assert: no WAL record or memtable value for the rejected follower.
+                assert!(matches!(
+                    first_rx.try_recv(),
+                    Ok(RuntimeResponse::TransactionApplied { .. })
+                ));
+                let response = follower_rx.try_recv().unwrap();
+                assert!(matches!(&response,
+                    RuntimeResponse::Error { error: MidgeError::NoSpace(_), .. } if !stalled
+                ) || matches!(&response,
+                    RuntimeResponse::Error { error: MidgeError::WriteStall(_), .. } if stalled
+                ), "follower skipped staging admission (policy={policy:?}, stalled={stalled}, fallback={fallback}): {response:?}");
+                assert_eq!(
+                    event_loop
+                        .state
+                        .get_cf(other)
+                        .unwrap()
+                        .memtable
+                        .get(b"rejected")?,
+                    None
+                );
+                assert_eq!(event_loop.actors.wal_actor.append_calls(), 1);
+                assert!(!event_loop.actors.wal_actor.is_fenced());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn should_split_coalesced_group_before_combined_cloud_growth_exceeds_flush_window(
+    ) -> MidgeResult<()> {
+        use super::super::wal::ApplyTransactionRequest;
+        use crate::runtime::{ConflictPolicy, RuntimeMsg, RuntimeResponse};
+        use crate::wal::DurabilityPolicy;
+
+        for (policy, value_size, appends) in [
+            (DurabilityPolicy::Strict, 2 * 1024, 1),
+            (DurabilityPolicy::Strict, 20 * 1024, 2),
+            (DurabilityPolicy::Batched, 2 * 1024, 1),
+            (DurabilityPolicy::Batched, 20 * 1024, 2),
+        ] {
+            // Arrange: small transactions fit together; larger ones fit alone
+            // but exceed the conservative staging window when combined.
+            let (_directory, mut event_loop, _hybrid) = fixture()?;
+            let put = |key: &'static [u8]| TransactionOp::Put {
+                cf_id: 0,
+                key: bytes::Bytes::from_static(key),
+                value: bytes::Bytes::from(vec![3; value_size]),
+                ttl_seconds: None,
+                insert_only: false,
+            };
+            let (messages, message_rx) = crossbeam::channel::unbounded();
+            let first_rx = event_loop.routing.router.register(7301, "ApplyTransaction");
+            let second_rx = event_loop.routing.router.register(7302, "ApplyTransaction");
+            messages
+                .send(RuntimeMsg::ApplyTransaction {
+                    request_id: 7302,
+                    ops: vec![put(b"second")],
+                    assertions: Vec::new(),
+                    durability_policy: Some(policy),
+                    start_sequence: None,
+                    conflict_policy: ConflictPolicy::LastWriteWins,
+                    response_tx: None,
+                })
+                .unwrap();
+
+            // Act
+            event_loop.apply_transaction_with_coalescing(
+                &message_rx,
+                ApplyTransactionRequest {
+                    validation: None,
+                    request_id: 7301,
+                    ops: vec![put(b"first")],
+                    assertions: Vec::new(),
+                    durability_policy: Some(policy),
+                    start_sequence: None,
+                    conflict_policy: ConflictPolicy::LastWriteWins,
+                },
+                2,
+            );
+
+            // Assert: both writes succeed through separately flushable generations.
+            for response in [first_rx, second_rx] {
+                assert!(matches!(
+                    response.try_recv(),
+                    Ok(RuntimeResponse::TransactionApplied { .. })
+                ));
+            }
+            let cf = event_loop.state.get_cf(0).unwrap();
+            let window = event_loop.cloud_flush_staging_window().unwrap();
+            for memtable in std::iter::once(&cf.memtable).chain(cf.immutable_memtables.iter()) {
+                assert!(
+                    flush_staging_bytes(memtable.encoded_size_upper_bound()) <= window,
+                    "coalescing admitted an unflushable generation under {policy:?}"
+                );
+            }
+            assert_eq!(event_loop.actors.wal_actor.append_calls(), appends);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn should_not_freeze_for_staging_pressure_held_by_partly_applied_family() -> MidgeResult<()> {
         // Arrange: a family holding a partly applied unit cannot freeze until
         // restart, so its memtable never needs flush staging before then.
@@ -343,6 +535,7 @@ mod tests {
             }]
         };
         let request = |request_id| super::super::wal::ApplyTransactionRequest {
+            validation: None,
             request_id,
             ops: ops(),
             assertions: Vec::new(),

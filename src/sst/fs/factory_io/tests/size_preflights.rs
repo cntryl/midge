@@ -151,6 +151,16 @@ fn reference_bound(writer: &FsSstWriter) -> usize {
         .saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES)
         .saturating_add(usize::try_from(streaming.sink.offset().unwrap()).unwrap())
         .saturating_add(pipeline.current_block.len().saturating_mul(2))
+        // V5 adds one u32 offset per 16 entries plus the directory count.
+        // The bound allows twice the encoded extent for compressor growth.
+        .saturating_add(
+            pipeline
+                .current_block_keys
+                .len()
+                .div_ceil(crate::sst::data_block::RESTART_INTERVAL)
+                .saturating_add(1)
+                .saturating_mul(8),
+        )
         .saturating_add(index)
         .saturating_add(current_index)
         .saturating_add(key_bounds)

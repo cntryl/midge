@@ -126,7 +126,14 @@ fn begin_held_manifest_phase(
         .publication
         .compaction_publish_result_rx
         .recv_timeout(FIXTURE_WAIT)
-        .expect("genuine OutputDurable completion");
+        .unwrap_or_else(|error| panic!(
+            "genuine OutputDurable completion: {error:?}; {}; publisher={}, mirror={}, cuts={}; writes={:?}",
+            describe_settle_state(&fixture.el),
+            fixture.el.actors.compaction_publish_actor.is_inflight(),
+            fixture.el.actors.cloud_coordinator.metadata_mirror.is_running(),
+            fixture.el.publication.metadata_publication_lock.pending_captures(),
+            fixture.backend.inner.get_uploads(),
+        ));
     let evidence = PhaseEvidence {
         phase: completion.phase,
         completed_at: Instant::now(),
@@ -217,20 +224,13 @@ fn assert_matching_intent(
     )));
 }
 
-fn descriptor_field<'a>(bytes: &'a [u8], prefix: &str) -> &'a str {
-    std::str::from_utf8(bytes)
-        .expect("actual V2 lease descriptor UTF-8")
-        .lines()
-        .find_map(|line| line.strip_prefix(prefix))
-        .expect("actual lease descriptor field")
-}
-
 fn descriptor_generation(bytes: &[u8]) -> crate::lease::CloudMetadataGeneration {
-    serde_json::from_str::<Option<crate::lease::CloudMetadataGeneration>>(descriptor_field(
-        bytes,
-        "metadata: ",
-    ))
-    .expect("actual committed descriptor JSON")
+    let pointer: serde_json::Value =
+        crate::metadata::codec::decode(4, bytes).expect("actual bounded binary metadata pointer");
+    serde_json::from_value::<Option<crate::lease::CloudMetadataGeneration>>(
+        pointer["committed"].clone(),
+    )
+    .expect("actual committed generation")
     .expect("actual committed metadata pointer")
 }
 
@@ -245,27 +245,21 @@ fn assert_committed_cas(
         "one actual held conditional CAS: {writes:?}"
     );
     let write = &writes[0];
-    assert_eq!(
-        write.key,
-        crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY
-    );
+    assert_eq!(write.key, "metadata/committed-pointer.v1");
     assert_ne!(write.condition, "");
     assert_eq!(write.condition, write.before_etag);
     assert_ne!(write.before_etag, write.after_etag);
     assert_ne!(write.before, write.after);
     assert!(write.committed_at < started + CALLER_BUDGET);
     assert!(write.forwarded_at >= started + CALLER_BUDGET + Duration::from_millis(500));
-    for prefix in [
-        "fencing_epoch: ",
-        "holder: ",
-        "owner: ",
-        "acquired: ",
-        "expires: ",
-    ] {
-        assert_eq!(
-            descriptor_field(&write.before, prefix),
-            descriptor_field(&write.after, prefix)
-        );
+    assert_eq!(
+        write.lease_before, write.lease_after,
+        "metadata publication leaves every exact lease byte unchanged"
+    );
+    let before: serde_json::Value = crate::metadata::codec::decode(4, &write.before)?;
+    let after: serde_json::Value = crate::metadata::codec::decode(4, &write.after)?;
+    for field in ["writer_epoch", "holder_id", "owner_token"] {
+        assert_eq!(before[field], after[field]);
     }
     let before = descriptor_generation(&write.before);
     let after = descriptor_generation(&write.after);

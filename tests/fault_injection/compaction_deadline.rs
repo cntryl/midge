@@ -15,6 +15,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const OUTPUT_PROVED: &str = "slice7::after_compaction_output_durable_before_manifest_publish";
+const FAILED_OUTPUT_DELETE: &str = "midge::cloud::before_compaction_orphan_delete";
 const CALLER_BUDGET: Duration = Duration::from_secs(5);
 const OBSERVATION_WAIT: Duration = Duration::from_secs(10);
 const HOLD_LIMIT: Duration = Duration::from_secs(30);
@@ -22,6 +23,7 @@ const CLEANUP_WAIT: Duration = Duration::from_secs(15);
 const SHORT_SHUTDOWN: Duration = Duration::from_millis(100);
 const BATCHES: usize = 4;
 const RECORDS_PER_BATCH: usize = 16;
+const OVERLAP_ANCHOR: &[u8] = b"deadline:anchor";
 
 type Row = (Bytes, Bytes);
 
@@ -64,19 +66,22 @@ impl PublicationHold {
     }
 }
 
-struct ReleasePublication(Arc<PublicationHold>);
+struct ReleasePublication(Arc<PublicationHold>, &'static str);
 
 impl Drop for ReleasePublication {
     fn drop(&mut self) {
         self.0.release();
-        fail::remove(OUTPUT_PROVED);
+        fail::remove(self.1);
     }
 }
 
-fn install_publication_hold(hold: &Arc<PublicationHold>) -> mpsc::Receiver<()> {
+fn install_publication_hold(
+    hold: &Arc<PublicationHold>,
+    boundary: &'static str,
+) -> mpsc::Receiver<()> {
     let callback_hold = Arc::clone(hold);
     let (entered_tx, entered_rx) = mpsc::sync_channel(1);
-    fail::cfg_callback(OUTPUT_PROVED, move || {
+    fail::cfg_callback(boundary, move || {
         if !callback_hold.entered.swap(true, Ordering::AcqRel) {
             let _ = entered_tx.try_send(());
             callback_hold.wait();
@@ -110,10 +115,16 @@ fn acknowledge_flushed_batches(engine: &Engine) -> MidgeResult<Vec<Row>> {
             write.put(key.to_vec(), value.to_vec(), None)?;
             rows.push((key, value));
         }
+        // The shared key requires a physical merge instead of a legal move.
+        write.put(OVERLAP_ANCHOR.to_vec(), batch.to_be_bytes().to_vec(), None)?;
         write.commit(WriteOptions::cloud_strict())?;
         acknowledged.extend(rows);
         engine.flush_cf(&cf)?;
     }
+    acknowledged.push((
+        Bytes::from_static(OVERLAP_ANCHOR),
+        Bytes::copy_from_slice(&(BATCHES - 1).to_be_bytes()),
+    ));
     Ok(acknowledged)
 }
 
@@ -148,11 +159,28 @@ fn assert_exact_rows(observed: MidgeResult<ReadSnapshot>, acknowledged: &[Row]) 
         .collect::<Vec<_>>();
     assert_eq!(observed.points, expected_points);
     assert_eq!(observed.scan, acknowledged);
-    assert_eq!(observed.scan.len(), BATCHES * RECORDS_PER_BATCH);
+    assert_eq!(observed.scan.len(), BATCHES * RECORDS_PER_BATCH + 1);
 }
 
 #[test]
 fn should_retain_acknowledged_inputs_when_expired_publication_remains_owned_during_shutdown() {
+    // Arrange
+    let boundary = OUTPUT_PROVED;
+    // Act: expire the caller while the chosen physical effect stays held.
+    // Assert: the shared scenario checks writer ownership and exact recovery.
+    verify_expired_owned_compaction(boundary);
+}
+
+#[test]
+fn should_retain_writer_ownership_while_failed_compaction_cleanup_is_held() {
+    // Arrange
+    let boundary = FAILED_OUTPUT_DELETE;
+    // Act: expire the caller while the chosen physical effect stays held.
+    // Assert: the shared scenario checks writer ownership and exact recovery.
+    verify_expired_owned_compaction(boundary);
+}
+
+fn verify_expired_owned_compaction(boundary: &'static str) {
     // Arrange: each real CloudStrict acknowledgement is followed by a flush.
     let directory = tempfile::tempdir().expect("create database directory");
     let options = options(directory.path());
@@ -160,9 +188,16 @@ fn should_retain_acknowledged_inputs_when_expired_publication_remains_owned_duri
     let acknowledged = acknowledge_flushed_batches(&engine).expect("acknowledge four real batches");
     let inputs = manifest_names(&engine).expect("capture authoritative input names");
     let scenario = fail::FailScenario::setup();
+    if boundary == FAILED_OUTPUT_DELETE {
+        fail::cfg(
+            "midge::compaction::after_remote_partition_evicted",
+            "return",
+        )
+        .expect("fail the actual compute task after its first remote upload");
+    }
     let hold = Arc::new(PublicationHold::default());
-    let release = ReleasePublication(Arc::clone(&hold));
-    let entered_rx = install_publication_hold(&hold);
+    let release = ReleasePublication(Arc::clone(&hold), boundary);
+    let entered_rx = install_publication_hold(&hold, boundary);
 
     // Act: abandoning the compact response does not cancel the owned worker.
     let (entered, compact_result, caller_elapsed) = std::thread::scope(|scope| {

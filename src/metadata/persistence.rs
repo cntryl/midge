@@ -1,6 +1,6 @@
 //! Manifest persistence - serialization and file I/O
 //!
-//! Persists manifest state to disk in JSON format to enable
+//! Persists manifest state in shared checksummed binary frames to enable
 //! recovery of LSM structure across restarts.
 
 use crate::common::{DeadlineScope, MidgeError, MidgeResult};
@@ -65,8 +65,7 @@ impl ManifestPersistence {
         scope: &DeadlineScope,
     ) -> MidgeResult<Manifest> {
         scope.check("shared manifest decode")?;
-        let mut manifest: Manifest = serde_json::from_slice(snapshot)
-            .map_err(|error| MidgeError::Corruption(format!("invalid shared manifest: {error}")))?;
+        let mut manifest: Manifest = super::codec::decode(super::codec::MANIFEST, snapshot)?;
         manifest.validate_persisted()?;
         if let Some(journal) = journal {
             for (id, edit) in crate::metadata::journal::replay_identified_edits_from_bytes(
@@ -95,25 +94,25 @@ impl ManifestPersistence {
 
     /// Get the manifest file path
     #[cfg(test)]
-    pub fn manifest_path(db_path: &Path) -> PathBuf {
+    pub(crate) fn manifest_path(db_path: &Path) -> PathBuf {
         db_path.join(ManifestPersistence::MANIFEST_SNAPSHOT)
     }
 
     /// Get the manifest snapshot path
     #[cfg(test)]
-    pub fn manifest_snapshot_path(db_path: &Path) -> PathBuf {
+    pub(crate) fn manifest_snapshot_path(db_path: &Path) -> PathBuf {
         db_path.join(ManifestPersistence::MANIFEST_SNAPSHOT)
     }
 
-    fn load_json_manifest_file(
+    fn load_binary_manifest_file(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         path: &crate::io::traits::FsPath,
         context: &str,
     ) -> Result<Manifest, String> {
-        Self::load_json_manifest_file_typed(fs, path, context).map_err(|error| error.to_string())
+        Self::load_binary_manifest_file_typed(fs, path, context).map_err(|error| error.to_string())
     }
 
-    fn load_json_manifest_file_typed(
+    fn load_binary_manifest_file_typed(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         path: &crate::io::traits::FsPath,
         context: &str,
@@ -136,8 +135,7 @@ impl ManifestPersistence {
         let data = file
             .read_at(0, len)
             .map_err(|error| recovery_io_error(error, &format!("failed to read {context}")))?;
-        let manifest: Manifest = serde_json::from_slice(&data)
-            .map_err(|e| MidgeError::Corruption(format!("failed to parse {context} JSON: {e}")))?;
+        let manifest: Manifest = super::codec::decode(super::codec::MANIFEST, &data)?;
         manifest.validate_persisted()?;
         let elapsed = start.elapsed();
         tracing::info!(
@@ -145,7 +143,7 @@ impl ManifestPersistence {
             files = manifest.files.len(),
             cf = manifest.column_families.len(),
             elapsed_ms = elapsed.as_secs_f64() * 1000.0,
-            "manifest JSON loaded"
+            "binary manifest loaded"
         );
         Ok(manifest)
     }
@@ -165,6 +163,10 @@ impl ManifestPersistence {
     }
 
     /// Load manifest using the requested recovery policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if storage cannot be read or durable metadata is invalid.
     pub fn load_with_fs_and_policy(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         recovery_policy: crate::config::RecoveryPolicy,
@@ -204,12 +206,12 @@ impl ManifestPersistence {
             .exists(&snap_path)
             .map_err(|error| recovery_io_error(error, "failed to check for manifest snapshot"))?
         {
-            Self::load_json_manifest_file_typed(fs, &snap_path, "manifest snapshot")?
+            Self::load_binary_manifest_file_typed(fs, &snap_path, "manifest snapshot")?
         } else if fs
             .exists(&manifest_path)
             .map_err(|error| recovery_io_error(error, "failed to check for manifest file"))?
         {
-            Self::load_json_manifest_file_typed(fs, &manifest_path, "manifest file")?
+            Self::load_binary_manifest_file_typed(fs, &manifest_path, "manifest file")?
         } else {
             tracing::debug!(
                 current_manifest = ?manifest_path,
@@ -311,9 +313,7 @@ impl ManifestPersistence {
 
         let preserved = crate::metadata::journal::preserve_corrupt_journal_with_fs_unlocked(fs)?;
         Self::validate_persisted_sst_names(manifest).map_err(MidgeError::RecoveryFailed)?;
-        let json = serde_json::to_vec_pretty(manifest).map_err(|e| {
-            MidgeError::RecoveryFailed(format!("failed to serialize manifest to JSON: {e}"))
-        })?;
+        let json = super::codec::encode(super::codec::MANIFEST, manifest)?;
         crate::io::staging::stage_bytes_typed(
             fs,
             &FsPath::new(Self::MANIFEST_SNAPSHOT_TEMP),
@@ -354,7 +354,7 @@ impl ManifestPersistence {
             });
         }
 
-        let persisted = Self::load_json_manifest_file(fs, &snapshot_path, "manifest snapshot")?;
+        let persisted = Self::load_binary_manifest_file(fs, &snapshot_path, "manifest snapshot")?;
         if !replay_from_durable_base && persisted.edit_checkpoint_id <= manifest.edit_checkpoint_id
         {
             return Ok(manifest.clone());
@@ -395,9 +395,7 @@ impl ManifestPersistence {
         use crate::io::traits::FsPath;
 
         Self::validate_persisted_sst_names(manifest).map_err(MidgeError::Corruption)?;
-        let json = serde_json::to_vec(manifest).map_err(|e| {
-            MidgeError::Internal(format!("failed to serialize manifest to JSON: {e}"))
-        })?;
+        let json = super::codec::encode(super::codec::MANIFEST, manifest)?;
 
         crate::io::staging::stage_bytes_typed(
             fs,
@@ -431,7 +429,7 @@ impl ManifestPersistence {
     /// in-memory checkpoint horizon when that is safe. Runtime writers go
     /// through `ManifestStore`; this reads the journal position from disk.
     #[cfg(test)]
-    pub fn save_snapshot_and_truncate_journal_with_fs(
+    pub(crate) fn save_snapshot_and_truncate_journal_with_fs(
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         manifest: &Manifest,
     ) -> Result<WrittenCheckpoint, String> {
@@ -531,9 +529,7 @@ impl ManifestPersistence {
         let (checkpoint, caller_was_current) =
             Self::reconstruct_checkpoint_with_fs(fs, manifest, known)?;
         Self::validate_persisted_sst_names(&checkpoint).map_err(MidgeError::Corruption)?;
-        let json = serde_json::to_vec(&checkpoint).map_err(|e| {
-            MidgeError::Internal(format!("failed to serialize manifest to JSON: {e}"))
-        })?;
+        let json = super::codec::encode(super::codec::MANIFEST, &checkpoint)?;
 
         crate::failpoints::fail_point!("midge::manifest::inject_snapshot_write_failure", |_| Err(
             MidgeError::Internal("failpoint: manifest snapshot write failed".to_string())
@@ -574,9 +570,9 @@ impl ManifestPersistence {
         })
     }
 
-    /// Save `manifest` as JSON through a `RealFs` rooted at `db_path`.
+    /// Save the binary manifest through a `RealFs` rooted at `db_path`.
     #[cfg(test)]
-    pub fn save(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
+    pub(crate) fn save(db_path: &Path, manifest: &Manifest) -> Result<(), String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
@@ -588,7 +584,7 @@ impl ManifestPersistence {
 
     /// Load the manifest strictly through a `RealFs` rooted at `db_path`.
     #[cfg(test)]
-    pub fn load(db_path: &Path) -> Result<Manifest, String> {
+    pub(crate) fn load(db_path: &Path) -> Result<Manifest, String> {
         use crate::io::real::RealFs;
         use std::sync::Arc;
 
@@ -601,7 +597,7 @@ impl ManifestPersistence {
     /// Save a full manifest snapshot and truncate journal (atomic as possible).
     /// This wrapper constructs a `RealFs` and delegates to the fs-backed implementation.
     #[cfg(test)]
-    pub fn save_snapshot_and_truncate_journal(
+    pub(crate) fn save_snapshot_and_truncate_journal(
         db_path: &Path,
         manifest: &Manifest,
     ) -> Result<WrittenCheckpoint, String> {
@@ -774,7 +770,8 @@ mod tests {
             .unwrap();
         let mut encoded = serde_json::to_value(&manifest).unwrap();
         encoded["flushed_through"].as_array_mut().unwrap().pop();
-        let bytes = serde_json::to_vec(&encoded).unwrap();
+        let bytes =
+            crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &encoded).unwrap();
         std::fs::write(
             directory
                 .path()
@@ -918,7 +915,9 @@ mod tests {
     fn should_decode_immutable_bodies_with_the_same_durable_batch_boundary() {
         // Arrange
         let directory = tempfile::tempdir().unwrap();
-        let snapshot = serde_json::to_vec(&Manifest::default()).unwrap();
+        let snapshot =
+            super::super::codec::encode(super::super::codec::MANIFEST, &Manifest::default())
+                .unwrap();
         let edit = flush(0, "shared.sst", 4);
         crate::metadata::journal::append_edit(directory.path(), &edit).unwrap();
         let journal = std::fs::read(directory.path().join("manifest.journal")).unwrap();
@@ -1218,12 +1217,14 @@ mod tests {
         };
         std::fs::write(
             test_dir.join(ManifestPersistence::MANIFEST_FILE_TEMP),
-            serde_json::to_vec_pretty(&manifest).expect("serialize temp manifest"),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest)
+                .expect("serialize temp manifest"),
         )
         .expect("write temp manifest");
         std::fs::write(
             test_dir.join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP),
-            serde_json::to_vec_pretty(&manifest).expect("serialize temp snapshot"),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest)
+                .expect("serialize temp snapshot"),
         )
         .expect("write temp snapshot");
 
@@ -1256,7 +1257,8 @@ mod tests {
         });
         std::fs::write(
             test_dir.join(ManifestPersistence::MANIFEST_FILE),
-            serde_json::to_vec(&manifest_only).expect("encode legacy manifest"),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest_only)
+                .expect("encode legacy manifest"),
         )
         .expect("write legacy manifest");
 
@@ -1315,6 +1317,7 @@ mod tests {
             smallest_seq: Some(5),
             largest_seq: Some(15),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             ..Default::default()
         });
 
@@ -1343,7 +1346,8 @@ mod tests {
         });
         std::fs::write(
             test_dir.join(ManifestPersistence::MANIFEST_FILE),
-            serde_json::to_vec(&manifest_only).expect("encode legacy manifest"),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest_only)
+                .expect("encode legacy manifest"),
         )
         .expect("write legacy manifest");
 
@@ -1538,7 +1542,7 @@ mod tests {
         let fs: std::sync::Arc<dyn crate::io::traits::Fs> = std::sync::Arc::new(
             crate::io::real::RealFs::open_existing(&test_dir).expect("open test filesystem"),
         );
-        let snapshot_checkpoint = ManifestPersistence::load_json_manifest_file(
+        let snapshot_checkpoint = ManifestPersistence::load_binary_manifest_file(
             &fs,
             &crate::io::traits::FsPath::new(ManifestPersistence::MANIFEST_SNAPSHOT),
             "manifest snapshot",
@@ -1655,6 +1659,7 @@ mod tests {
             smallest_seq: Some(10),
             largest_seq: Some(20),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             sublevel: 0,
             read_count: std::sync::Arc::default(),
         });
@@ -1760,12 +1765,14 @@ mod tests {
         let snapshot_temp_path = test_dir.join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP);
         std::fs::write(
             &manifest_temp_path,
-            serde_json::to_vec_pretty(&manifest).expect("serialize temp manifest"),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest)
+                .expect("serialize temp manifest"),
         )
         .expect("write temp manifest");
         std::fs::write(
             &snapshot_temp_path,
-            serde_json::to_vec_pretty(&manifest).expect("serialize temp snapshot"),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest)
+                .expect("serialize temp snapshot"),
         )
         .expect("write temp snapshot");
 
@@ -1797,7 +1804,8 @@ mod tests {
         });
         std::fs::write(
             test_dir.join(ManifestPersistence::MANIFEST_FILE),
-            serde_json::to_vec(&manifest_only).expect("encode legacy manifest"),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest_only)
+                .expect("encode legacy manifest"),
         )
         .expect("write legacy manifest");
 
@@ -1823,12 +1831,14 @@ mod tests {
         .expect("append manifest edit");
         std::fs::write(
             test_dir.join(ManifestPersistence::MANIFEST_FILE_TEMP),
-            serde_json::to_vec_pretty(&manifest_only).expect("serialize temp manifest"),
+            super::super::codec::encode(super::super::codec::MANIFEST, &manifest_only)
+                .expect("serialize temp manifest"),
         )
         .expect("write temp manifest");
         std::fs::write(
             test_dir.join(ManifestPersistence::MANIFEST_SNAPSHOT_TEMP),
-            serde_json::to_vec_pretty(&snapshot_manifest).expect("serialize temp snapshot"),
+            super::super::codec::encode(super::super::codec::MANIFEST, &snapshot_manifest)
+                .expect("serialize temp snapshot"),
         )
         .expect("write temp snapshot");
 

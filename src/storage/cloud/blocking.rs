@@ -3,12 +3,12 @@
 //! Callers that must wait for a cloud round trip (startup recovery, the flush
 //! worker, the event loop's metadata mirror) all go through this one type so a
 //! timeout is reported as [`MidgeError::Timeout`] everywhere and a provider
-//! failure carries the same context. It owns only the callback protocol,
-//! deadline clamping, and response-shape validation; no policy lives here.
+//! failure carries the same context. It owns the callback protocol, bounded
+//! local read admission, deadline clamping, and response-shape validation.
 
 use super::{
-    contextualize_operation_error, is_not_found_error, CloudEvent, CloudOutcome, CloudStorage,
-    ObjectMetadata,
+    contextualize_operation_error, is_not_found_error, CloudEvent, CloudOutcome, CloudReadOptions,
+    CloudRequestOptions, CloudStorage, ObjectMetadata,
 };
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 use std::sync::mpsc::RecvTimeoutError;
@@ -16,11 +16,24 @@ use std::sync::mpsc::RecvTimeoutError;
 pub(crate) struct BlockingCloud<'a> {
     cloud: &'a CloudStorage,
     deadline: &'a OperationDeadline,
+    reservation: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
 }
 
 impl<'a> BlockingCloud<'a> {
     pub(crate) fn new(cloud: &'a CloudStorage, deadline: &'a OperationDeadline) -> Self {
-        Self { cloud, deadline }
+        Self {
+            cloud,
+            deadline,
+            reservation: None,
+        }
+    }
+
+    pub(crate) fn with_reservation(
+        mut self,
+        reservation: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+    ) -> Self {
+        self.reservation = Some(reservation);
+        self
     }
 
     fn timeout(&self, operation: &str, key: &str) -> MidgeResult<std::time::Duration> {
@@ -91,13 +104,41 @@ impl<'a> BlockingCloud<'a> {
 
     pub(crate) fn get_optional(&self, key: &str) -> MidgeResult<Option<Vec<u8>>> {
         let read_deadline = self.begin("get", key)?;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let request_timeout = self.remaining(&read_deadline, "get", key)?;
-        self.cloud.submit_get_within(key, request_timeout, tx);
-        self.wait(&rx, &read_deadline, "get", key, |event| match event {
-            CloudEvent::Get { result, .. } => Some(result),
-            _ => None,
-        })
+        loop {
+            self.remaining(&read_deadline, "get", key)?;
+            let (tx, rx) = std::sync::mpsc::channel();
+            // The backend recomputes timeout/header controls from the same
+            // absolute deadline after every local admission wait.
+            self.cloud.reads.read(
+                &self.cloud.full_path(key),
+                CloudReadOptions::default().with_request_options(
+                    CloudRequestOptions::default()
+                        .with_deadline(read_deadline)
+                        .with_reservation(self.reservation.clone()),
+                ),
+                tx,
+            );
+            let result = self.wait(&rx, &read_deadline, "get", key, |event| match event {
+                CloudEvent::Get { result, .. } => Some(result),
+                _ => None,
+            });
+            match result {
+                Err(error)
+                    if self
+                        .reservation
+                        .as_ref()
+                        .is_some_and(|memory| memory.admission_retryable(&error)) =>
+                {
+                    // Only a definitely unsubmitted read reaches this branch.
+                    // Do not retry provider effects or renew the caller budget.
+                    std::thread::sleep(
+                        self.remaining(&read_deadline, "get", key)?
+                            .min(std::time::Duration::from_millis(1)),
+                    );
+                }
+                result => return result,
+            }
+        }
     }
 
     pub(crate) fn head_optional(&self, key: &str) -> MidgeResult<Option<ObjectMetadata>> {
@@ -123,6 +164,42 @@ impl<'a> BlockingCloud<'a> {
         Ok(keys.unwrap_or_default())
     }
 
+    pub(crate) fn list_page(
+        &self,
+        prefix: &str,
+        page: super::CloudListPageRequest,
+    ) -> MidgeResult<Option<super::CloudListPage>> {
+        let deadline = self.begin("LIST page", prefix)?;
+        let timeout = self.remaining(&deadline, "LIST page", prefix)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let expected = page.clone();
+        self.cloud
+            .submit_list_page_within(prefix, page, deadline, tx);
+        let result = rx.recv_timeout(timeout).map_err(|error| {
+            MidgeError::Timeout(format!("bounded cloud LIST page callback: {error}"))
+        })?;
+        self.remaining(&deadline, "LIST page", prefix)?;
+        result
+            .map_err(|error| {
+                contextualize_operation_error(
+                    &error,
+                    format_args!("bounded cloud LIST page '{prefix}' failed"),
+                    self.deadline,
+                )
+            })?
+            .map(|result| {
+                expected
+                    .accept(
+                        &self.cloud.full_path(prefix),
+                        result.keys,
+                        result.continuation,
+                    )
+                    .map_err(|error| MidgeError::Corruption(error.to_string()))
+            })
+            .transpose()
+    }
+
+    #[cfg(test)]
     pub(crate) fn put_with_headers(
         &self,
         key: &str,
@@ -157,6 +234,7 @@ impl<'a> BlockingCloud<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn put_with_precondition(
         &self,
         key: &str,

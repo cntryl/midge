@@ -16,7 +16,49 @@ pub(super) struct VerifiedUpload {
 
 type VerifiedUploads = Arc<Mutex<super::HashMap<u64, VerifiedUpload>>>;
 
+#[derive(Clone)]
+pub(super) struct WalUploadWorkerConfig {
+    pub(super) timeout: Duration,
+    pub(super) concurrency: usize,
+    pub(super) memory: crate::common::resource_budget::ResourceBudget,
+}
+
+pub(super) struct UploadAttemptAdmission {
+    pub(super) timeout: Duration,
+    pub(super) memory: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+}
+
 impl HybridStorage {
+    pub(crate) fn queue_cloud_metadata_mirror_complete(
+        &self,
+        operation_id: u64,
+        writer_epoch: u64,
+    ) {
+        Self::queue_storage_event(
+            &self.event_queue,
+            self.external_event_tx.as_ref(),
+            StorageEvent::CloudMetadataMirrorComplete {
+                operation_id,
+                writer_epoch,
+            },
+        );
+    }
+
+    pub(crate) fn queue_cloud_wal_publication_complete(
+        &self,
+        operation_id: u64,
+        writer_epoch: u64,
+    ) {
+        Self::queue_storage_event(
+            &self.event_queue,
+            self.external_event_tx.as_ref(),
+            StorageEvent::CloudWalPublicationComplete {
+                operation_id,
+                writer_epoch,
+            },
+        );
+    }
+
     /// Consume an upload's confirmation once. Missing or evicted confirmations
     /// fall back to remote readback; this cache never grants catalog authority.
     pub(crate) fn take_verified_upload(&self, id: u64, key: &str, bytes: &[u8]) -> bool {
@@ -361,39 +403,73 @@ impl HybridStorage {
     pub(super) fn spawn_wal_upload_worker(
         counters: &crate::telemetry::CounterSink,
         wal_upload_rx: mpsc::Receiver<UploadState>,
-        cloud: Arc<dyn StorageBackend>,
-        event_queue: Arc<Mutex<BoundedEventQueue>>,
-        external_event_tx: Option<cb::Sender<StorageEvent>>,
-        callback_timeout: Duration,
-        verified_uploads: VerifiedUploads,
-    ) -> (Option<JoinHandle<()>>, bool) {
-        let worker_counters = counters.clone();
-        let spawn_result = thread::Builder::new()
-            .name("midge-wal-uploader".to_string())
-            .spawn(move || {
-                while let Ok(upload) = wal_upload_rx.recv() {
-                    Self::process_wal_upload_attempt(
-                        &worker_counters,
-                        &upload,
-                        &cloud,
-                        &event_queue,
-                        external_event_tx.as_ref(),
-                        callback_timeout,
-                        &verified_uploads,
-                    );
-                }
-            });
-
-        match spawn_result {
-            Ok(handle) => (Some(handle), false),
-            Err(error) => {
-                tracing::error!("Failed to spawn WAL upload worker: {error}");
-                counters.record(|m| {
-                    m.record_thread_spawn_failure();
+        cloud: &Arc<dyn StorageBackend>,
+        event_queue: &Arc<Mutex<BoundedEventQueue>>,
+        external_event_tx: Option<&cb::Sender<StorageEvent>>,
+        config: &WalUploadWorkerConfig,
+        verified_uploads: &VerifiedUploads,
+    ) -> (Vec<JoinHandle<()>>, bool) {
+        let receiver = Arc::new(Mutex::new(wal_upload_rx));
+        let mut handles = Vec::with_capacity(config.concurrency);
+        for ordinal in 0..config.concurrency {
+            let worker_counters = counters.clone();
+            let receiver = Arc::clone(&receiver);
+            let cloud = Arc::clone(cloud);
+            let event_queue = Arc::clone(event_queue);
+            let external_event_tx = external_event_tx.cloned();
+            let verified_uploads = Arc::clone(verified_uploads);
+            let config = config.clone();
+            let gate = crate::failpoints::worker_gate();
+            let spawn_result = thread::Builder::new()
+                .name(format!("midge-wal-uploader-{ordinal}"))
+                .spawn(move || {
+                    gate.run(|| loop {
+                        // Release the receive lock before any filesystem/provider
+                        // work, allowing the other fixed workers to make progress.
+                        let Ok(upload) = receiver.lock().recv() else {
+                            break;
+                        };
+                        let memory =
+                            match reserve_upload_memory(&upload, cloud.as_ref(), &config.memory) {
+                                Ok(memory) => memory,
+                                Err(error) => {
+                                    Self::emit_wal_upload_failure(
+                                        &upload,
+                                        &error.to_string(),
+                                        CloudUploadFailureKind::Other,
+                                        &event_queue,
+                                        external_event_tx.as_ref(),
+                                    );
+                                    continue;
+                                }
+                            };
+                        Self::process_wal_upload_attempt(
+                            &worker_counters,
+                            &upload,
+                            &cloud,
+                            &event_queue,
+                            external_event_tx.as_ref(),
+                            &UploadAttemptAdmission {
+                                timeout: config.timeout,
+                                memory: Some(memory),
+                            },
+                            &verified_uploads,
+                        );
+                    });
                 });
-                (None, true)
+
+            match spawn_result {
+                Ok(handle) => handles.push(handle),
+                Err(error) => {
+                    tracing::error!("Failed to spawn WAL upload worker: {error}");
+                    counters.record(|m| {
+                        m.record_thread_spawn_failure();
+                    });
+                }
             }
         }
+        let failed = handles.is_empty();
+        (handles, failed)
     }
 
     pub(super) fn process_wal_upload_attempt(
@@ -402,11 +478,11 @@ impl HybridStorage {
         cloud: &Arc<dyn StorageBackend>,
         event_queue: &Arc<Mutex<BoundedEventQueue>>,
         external_event_tx: Option<&cb::Sender<StorageEvent>>,
-        callback_timeout: Duration,
+        admission: &UploadAttemptAdmission,
         verified_uploads: &VerifiedUploads,
     ) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::process_wal_upload(counters, upload, cloud, callback_timeout, verified_uploads)
+            Self::process_wal_upload(counters, upload, cloud, admission, verified_uploads)
         }));
         let terminal_event = if let Ok(event) = result {
             event
@@ -430,10 +506,11 @@ impl HybridStorage {
         counters: &crate::telemetry::CounterSink,
         upload: &UploadState,
         cloud: &Arc<dyn StorageBackend>,
-        callback_timeout: Duration,
+        admission: &UploadAttemptAdmission,
         verified_uploads: &VerifiedUploads,
     ) -> StorageEvent {
         let upload_start = Instant::now();
+        let callback_timeout = admission.timeout;
         counters.record(|m| {
             m.record_cloud_async_wal_upload_started();
         });
@@ -466,16 +543,16 @@ impl HybridStorage {
         let expected_data = data.clone();
         let object_key = upload.object_key.clone();
         let (tx, rx) = std::sync::mpsc::channel();
-        cloud.submit_write_receipt_request(
-            crate::storage::StorageRequest::new(
-                &upload.object_key,
-                crate::common::OperationDeadline::from_budget(callback_timeout),
-                callback_timeout,
-            )
-            .with_precondition(crate::storage::StoragePrecondition::IfAbsent),
-            data,
-            tx,
-        );
+        let mut request = crate::storage::StorageRequest::new(
+            &upload.object_key,
+            crate::common::OperationDeadline::from_budget(callback_timeout),
+            callback_timeout,
+        )
+        .with_precondition(crate::storage::StoragePrecondition::IfAbsent);
+        if let Some(memory) = &admission.memory {
+            request = request.with_reservation(Arc::clone(memory));
+        }
+        cloud.submit_write_receipt_request(request, data, tx);
 
         let mut provider_confirmed = false;
         let result = Self::handle_wal_upload_result(
@@ -496,19 +573,7 @@ impl HybridStorage {
                         ))
                     };
                 }
-                let proof =
-                    Self::stable_object_proof_from_backend(cloud, &object_key, callback_timeout)
-                        .map_err(crate::storage::StorageError::from)?;
-                // An existing object with the same bytes is this upload. One
-                // with other bytes is never overwritten: no retry can fix it.
-                if proof.bytes == expected_data {
-                    Ok(())
-                } else {
-                    Err(crate::storage::StorageError::new(
-                        crate::storage::StorageErrorKind::Corruption,
-                        format!("remote object '{object_key}' differs from uploaded bytes"),
-                    ))
-                }
+                verify_upload_ranges(cloud, &object_key, &expected_data, admission)
             },
         );
         if provider_confirmed && matches!(result, StorageEvent::CloudAck { .. }) {
@@ -561,7 +626,7 @@ impl HybridStorage {
     fn read_wal_file(upload: &UploadState) -> Result<Vec<u8>, String> {
         upload
             .source
-            .read_all()
+            .read_exact_size(upload.size_bytes)
             .map(Vec::from)
             .map_err(|error| format!("read {}: {error}", upload.source))
     }
@@ -688,4 +753,78 @@ impl HybridStorage {
             }
         }
     }
+}
+
+fn reserve_upload_memory(
+    upload: &UploadState,
+    cloud: &dyn StorageBackend,
+    budget: &crate::common::resource_budget::ResourceBudget,
+) -> crate::common::MidgeResult<Arc<crate::common::resource_budget::ResourceReservation>> {
+    // Source, retained expected bytes and conservative fallback readback,
+    // plus every body copy the provider advertises. Reserve before reading.
+    let bytes = usize::try_from(upload.size_bytes)
+        .ok()
+        .and_then(|size| size.checked_mul(3usize.saturating_add(cloud.write_payload_copies())))
+        .ok_or_else(|| {
+            crate::common::MidgeError::ResourceLimit(
+                "WAL upload memory size overflows address space".into(),
+            )
+        })?;
+    budget
+        .reserve(bytes, "WAL upload bodies and verification")
+        .map(Arc::new)
+}
+
+fn verify_upload_ranges(
+    cloud: &Arc<dyn StorageBackend>,
+    key: &str,
+    expected: &[u8],
+    admission: &UploadAttemptAdmission,
+) -> Result<(), crate::storage::StorageError> {
+    use crate::storage::{StorageError, StorageErrorKind, StoragePrecondition, StorageRequest};
+    let deadline = crate::common::OperationDeadline::from_budget(admission.timeout);
+    let metadata = HybridStorage::head_range_object_from_backend(cloud, key, deadline.remaining())?;
+    if metadata.size != expected.len() as u64 || !metadata.same_version(&metadata) {
+        return Err(StorageError::new(
+            StorageErrorKind::Corruption,
+            "WAL upload identity is incomplete or has a conflicting size",
+        ));
+    }
+    for (ordinal, chunk) in expected.chunks(64 * 1024).enumerate() {
+        let mut request = StorageRequest::new(key, deadline, admission.timeout)
+            .with_precondition(StoragePrecondition::IfMatch(metadata.clone()));
+        if let Some(memory) = &admission.memory {
+            request = request.with_reservation(Arc::clone(memory));
+        }
+        let start = (ordinal * 64 * 1024) as u64;
+        let (tx, rx) = mpsc::channel();
+        cloud.submit_range_read_request(request, start..start + chunk.len() as u64, tx);
+        let bytes = rx.recv_timeout(deadline.remaining()).map_err(|error| {
+            crate::storage::storage_timeout_error(format!("WAL upload range verification: {error}"))
+        })??;
+        if deadline.is_expired() {
+            return Err(crate::storage::storage_timeout_error(
+                "WAL upload verification deadline exhausted",
+            ));
+        }
+        if bytes != chunk {
+            return Err(StorageError::new(
+                StorageErrorKind::Corruption,
+                format!("remote object '{key}' differs from uploaded bytes"),
+            ));
+        }
+    }
+    let current = HybridStorage::head_range_object_from_backend(cloud, key, deadline.remaining())?;
+    if deadline.is_expired() {
+        return Err(crate::storage::storage_timeout_error(
+            "WAL upload verification deadline exhausted",
+        ));
+    }
+    if !metadata.same_version(&current) {
+        return Err(StorageError::new(
+            StorageErrorKind::Corruption,
+            "WAL object changed during verification",
+        ));
+    }
+    Ok(())
 }

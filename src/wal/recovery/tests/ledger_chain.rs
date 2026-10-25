@@ -212,3 +212,81 @@ fn should_fail_strict_replay_when_open_member_belongs_to_another_database() {
     // Assert
     assert_corruption(result, "holder");
 }
+
+#[test]
+fn should_salvage_verified_records_when_torn_open_frame_is_below_its_recorded_floor() {
+    // Arrange: unlike a missing suffix, the file reaches the persisted floor,
+    // so replay must classify the torn frame itself using real sync evidence.
+    let (wal, mut history) = ledgered_wal();
+    let id = history.ledger().open_segment();
+    let mut bytes = read_segment(wal.as_ref(), id);
+    bytes.extend(encode_frame(&put_record(b"verified", 3)));
+    let prefix_end = bytes.len() as u64;
+    bytes.extend_from_slice(&[0xff; 3]);
+    replace_segment(wal.as_ref(), id, &bytes);
+    history.record_sync(bytes.len() as u64).unwrap();
+    let segments = ReplaySegments::from_ledger(history.ledger(), segment_path);
+    let mut memtables = HashMap::new();
+
+    // Act
+    let strict = replay_members(wal.as_ref(), &history);
+    let salvage = replay_wal_with_frontiers_within(
+        wal.as_ref(),
+        &segments,
+        &mut memtables,
+        ReplayPolicy::SalvageValidPrefix,
+        &crate::metadata::frontiers::FlushFrontiers::default(),
+        None,
+    )
+    .expect("salvage complete verified records");
+
+    // Assert
+    assert!(
+        matches!(strict, Err(MidgeError::Corruption(_))),
+        "{strict:?}"
+    );
+    assert!(salvage.had_corruption);
+    assert_eq!(salvage.max_sequence, Some(3));
+    assert_eq!(salvage.salvage_stop.unwrap().valid_bytes, prefix_end);
+    assert_eq!(
+        memtables[&0].get(b"verified").unwrap(),
+        Some(b"value".to_vec())
+    );
+    assert_eq!(read_segment(wal.as_ref(), id), bytes, "replay is read-only");
+}
+
+#[test]
+fn should_salvage_complete_open_segment_when_its_footer_is_below_the_sync_floor() {
+    // Arrange: the open ledger member has a verified footer but its persisted
+    // floor promises still more bytes. Salvage retains all verified records.
+    let (wal, mut history) = ledgered_wal();
+    let id = history.ledger().open_segment();
+    let header = SegmentHeader::decode(&read_segment(wal.as_ref(), id)).unwrap();
+    let (bytes, _) = SegmentBuilder::from_header(header)
+        .record(&put_record(b"verified", 3))
+        .seal();
+    replace_segment(wal.as_ref(), id, &bytes);
+    history.record_sync(bytes.len() as u64 + 1).unwrap();
+    let segments = ReplaySegments::from_ledger(history.ledger(), segment_path);
+    let mut memtables = HashMap::new();
+
+    // Act
+    let stats = replay_wal_with_frontiers_within(
+        wal.as_ref(),
+        &segments,
+        &mut memtables,
+        ReplayPolicy::SalvageValidPrefix,
+        &crate::metadata::frontiers::FlushFrontiers::default(),
+        None,
+    )
+    .expect("retain the whole verified file");
+
+    // Assert
+    assert!(stats.had_corruption);
+    assert_eq!(stats.max_sequence, Some(3));
+    assert_eq!(stats.salvage_stop.unwrap().valid_bytes, bytes.len() as u64);
+    assert_eq!(
+        memtables[&0].get(b"verified").unwrap(),
+        Some(b"value".to_vec())
+    );
+}

@@ -39,7 +39,7 @@ impl SnapshotCoordinator {
         request_id: u64,
         cf_id: crate::types::ColumnFamilyId,
     ) -> HandleOutcome {
-        let start_sequence = event_loop.state.sequence;
+        let start_sequence = event_loop.state.applied_sequence;
         let snapshot = event_loop.create_read_snapshot(cf_id).map(Arc::new);
         event_loop.respond(
             request_id,

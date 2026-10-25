@@ -108,9 +108,10 @@ fn should_attribute_cloud_shutdown_flush_when_acknowledged_rows_remain_active() 
 }
 
 #[test]
-fn should_attribute_compaction_checkpoint_when_real_local_outputs_replace_inputs() {
+fn should_attribute_compaction_publication_when_overlapping_local_inputs_are_rewritten() {
     crate::failpoints::with_read_gate(|| {
-        // Arrange: two genuine strict-ack flushes create distinct local inputs.
+        // Arrange: overlapping strict-ack flushes require physical replacement,
+        // rather than a metadata-only promotion of disjoint immutable inputs.
         let directory = tempfile::tempdir().unwrap();
         let options = OpenOptions::local(directory.path())
             .background_compaction(false)
@@ -121,7 +122,7 @@ fn should_attribute_compaction_checkpoint_when_real_local_outputs_replace_inputs
         let retained = engine.checkpoint_metrics();
         let before = retained.snapshot();
         let family = engine.get_column_family("default").unwrap();
-        write_rows(&engine, 0, 16);
+        write_rows(&engine, 0, 32);
         engine.flush_cf(&family).unwrap();
         write_rows(&engine, 16, 32);
         engine.flush_cf(&family).unwrap();
@@ -146,7 +147,8 @@ fn should_attribute_compaction_checkpoint_when_real_local_outputs_replace_inputs
         verify_rows(&reopened);
         reopened.shutdown(Duration::from_secs(30)).unwrap();
 
-        // Assert: actual compaction count and forced metadata cost remain distinct.
+        // Assert: this small journal stays below the local checkpoint cadence;
+        // its actual publication cost and rewritten SST credit remain distinct.
         assert!(compactions_after > compactions_before);
         let forced = &measured
             .bucket(Origin::CompactionBeforeGc, Medium::Persistent)
@@ -156,7 +158,9 @@ fn should_attribute_compaction_checkpoint_when_real_local_outputs_replace_inputs
             compactions_after - compactions_before
         );
         assert!(forced.compaction_committed_sst_bytes > 0);
-        assert!(forced.checkpoint_complete_count > 0);
+        assert!(forced.journal_append_attempts > 0);
+        assert!(forced.journal_durable_bytes > 0);
+        assert_eq!(forced.checkpoint_complete_count, 0);
         assert_eq!(forced.flush_committed_count, 0);
         assert_eq!(
             measured

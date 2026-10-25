@@ -57,6 +57,7 @@ pub(crate) enum RuntimeLifecycleState {
     Open = 0,
     Closing = 1,
     Closed = 2,
+    Fenced = 3,
 }
 
 impl RuntimeLifecycleState {
@@ -64,7 +65,8 @@ impl RuntimeLifecycleState {
         match state.load(Ordering::Acquire) {
             0 => Self::Open,
             1 => Self::Closing,
-            _ => Self::Closed,
+            2 => Self::Closed,
+            _ => Self::Fenced,
         }
     }
 }
@@ -93,13 +95,11 @@ impl RuntimeLifecycle {
     }
 
     pub(crate) fn acquire(self: &Arc<Self>) -> MidgeResult<RuntimeTransactionGuard> {
-        if self.state() != RuntimeLifecycleState::Open {
-            return Err(MidgeError::Busy("engine is shutting down".to_string()));
-        }
+        self.ensure_open()?;
         self.active_transactions.fetch_add(1, Ordering::AcqRel);
-        if self.state() != RuntimeLifecycleState::Open {
+        if let Err(error) = self.ensure_open() {
             self.release();
-            return Err(MidgeError::Busy("engine is shutting down".to_string()));
+            return Err(error);
         }
         Ok(RuntimeTransactionGuard {
             lifecycle: Arc::clone(self),
@@ -107,14 +107,15 @@ impl RuntimeLifecycle {
     }
 
     pub(crate) fn release(&self) {
-        // Pair the counter transition with the same mutex used by the waiter.
-        // Without this lock, the final transaction can notify between the
-        // waiter's condition check and `Condvar::wait`, losing the wakeup.
-        let _wait_guard = self
-            .wait_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.active_transactions.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // Only the final release takes the wait mutex. A waiter either
+            // observes zero, or atomically releases this mutex when sleeping
+            // before we can acquire it and notify. Intermediate releases need
+            // no notification and never contend on the mutex.
+            let _wait_guard = self
+                .wait_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.wait_cv.notify_all();
         }
     }
@@ -124,11 +125,34 @@ impl RuntimeLifecycle {
     }
 
     pub(crate) fn ensure_open(&self) -> MidgeResult<()> {
-        if self.state() == RuntimeLifecycleState::Open {
-            Ok(())
-        } else {
-            Err(MidgeError::Busy("engine is shutting down".to_string()))
+        match self.state() {
+            RuntimeLifecycleState::Open => Ok(()),
+            RuntimeLifecycleState::Fenced => Err(MidgeError::Fenced(
+                "engine was dropped after its transaction wait expired".into(),
+            )),
+            RuntimeLifecycleState::Closing | RuntimeLifecycleState::Closed => {
+                Err(MidgeError::Busy("engine is shutting down".into()))
+            }
         }
+    }
+
+    pub(crate) fn ensure_readable(&self) -> MidgeResult<()> {
+        if matches!(
+            self.state(),
+            RuntimeLifecycleState::Fenced | RuntimeLifecycleState::Closed
+        ) {
+            Err(MidgeError::Fenced(
+                "transaction outlived its runtime".into(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn fence_transactions(&self) {
+        self.state
+            .store(RuntimeLifecycleState::Fenced as u8, Ordering::Release);
+        self.wait_cv.notify_all();
     }
 
     pub(crate) fn begin_submission(&self) -> MidgeResult<std::sync::RwLockReadGuard<'_, ()>> {
@@ -168,8 +192,10 @@ impl RuntimeLifecycle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.running.store(false, Ordering::Release);
-        self.state
-            .store(RuntimeLifecycleState::Closed as u8, Ordering::Release);
+        if self.state() != RuntimeLifecycleState::Fenced {
+            self.state
+                .store(RuntimeLifecycleState::Closed as u8, Ordering::Release);
+        }
         self.wait_cv.notify_all();
     }
 
@@ -188,6 +214,25 @@ impl RuntimeLifecycle {
                 .wait(guard)
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+    }
+
+    pub(crate) fn wait_for_transactions_within(&self, timeout: Duration) -> bool {
+        let started = std::time::Instant::now();
+        let mut guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while self.active_transaction_count() != 0 {
+            let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                return false;
+            };
+            let (next, _) = self
+                .wait_cv
+                .wait_timeout(guard, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = next;
+        }
+        true
     }
 
     pub(crate) fn wait_until_stopped(&self, timeout: Duration) -> bool {
@@ -238,5 +283,62 @@ pub(crate) struct RuntimeTransactionGuard {
 impl Drop for RuntimeTransactionGuard {
     fn drop(&mut self) {
         self.lifecycle.release();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_release_nonfinal_transaction_while_shutdown_wait_mutex_is_held() {
+        // Arrange
+        let lifecycle = Arc::new(RuntimeLifecycle::new());
+        let first = lifecycle.acquire().expect("first transaction");
+        let last = lifecycle.acquire().expect("last transaction");
+        let wait_guard = lifecycle.wait_lock.lock().unwrap();
+        let (completed, receiver) = std::sync::mpsc::channel();
+
+        // Act
+        let worker = std::thread::spawn(move || {
+            drop(first);
+            completed.send(()).expect("report release");
+        });
+        let result = receiver.recv_timeout(Duration::from_secs(1));
+        drop(wait_guard);
+        worker.join().expect("release worker");
+
+        // Assert
+        assert!(result.is_ok(), "nonfinal release waited on global mutex");
+        assert_eq!(lifecycle.active_transaction_count(), 1);
+        drop(last);
+        lifecycle.begin_shutdown();
+        lifecycle.wait_for_transactions();
+    }
+
+    #[test]
+    fn should_wake_shutdown_when_final_release_races_wait_setup() {
+        for _ in 0..100 {
+            // Arrange
+            let lifecycle = Arc::new(RuntimeLifecycle::new());
+            let transaction = lifecycle.acquire().expect("transaction");
+            lifecycle.begin_shutdown();
+            let waiting = Arc::clone(&lifecycle);
+            let (completed, receiver) = std::sync::mpsc::channel();
+
+            // Act
+            let worker = std::thread::spawn(move || {
+                waiting.wait_for_transactions();
+                completed.send(()).expect("report drained transactions");
+            });
+            drop(transaction);
+
+            // Assert
+            receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("final release must wake waiter");
+            worker.join().expect("shutdown waiter");
+            assert_eq!(lifecycle.active_transaction_count(), 0);
+        }
     }
 }

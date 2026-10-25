@@ -44,6 +44,7 @@ impl FragmentFixture {
                 l0_file_count_threshold: 2,
                 l1_target_size: 1,
                 max_levels: 3,
+                max_grandparent_overlap_bytes: 0,
                 ..Default::default()
             },
         );
@@ -260,6 +261,19 @@ fn should_recover_fragmented_source_when_critical_l0_work_interrupts_promotion()
             let key = format!("z{index}");
             fixture.seed(0, 100 + index, &[key.as_bytes()], 128)?;
         }
+        // These fixture ingests must be durable inputs before real moves can
+        // journal their promotion. A later compaction checkpoint is optional.
+        fixture.persist()?;
+        let durable = crate::metadata::ManifestPersistence::load(&fixture.el.state.db_path)
+            .map_err(MidgeError::Internal)?;
+        assert!(fixture
+            .el
+            .state
+            .manifest
+            .files
+            .iter()
+            .filter(|file| file.level == 0)
+            .all(|file| durable.files.iter().any(|saved| saved.same_identity(file))));
         assert!(fixture.el.state.has_critical_l0_debt(0));
         let names = fixture
             .el
@@ -316,7 +330,6 @@ fn should_reject_fragment_publication_when_source_or_replacement_changes() -> Mi
         let plan = fixture.plan()?;
         assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));
         let completion = fixture.compute(plan)?;
-        fixture.el.actors.compaction_actor.join_completed_worker();
         let (inputs, outputs, target_level) = match &completion {
             RuntimeMsg::CompactionComplete {
                 input_ssts,
@@ -364,7 +377,8 @@ fn should_reject_fragment_publication_when_source_or_replacement_changes() -> Mi
 
         // Assert: neither failed guard creates durable publication authority or removes inputs.
         assert!(matches!(replacement, Err(MidgeError::Fenced(_))));
-        assert!(matches!(stale, Err(MidgeError::Fenced(_))));
+        assert!(matches!(stale, Err(MidgeError::Aborted(message))
+            if message == "compaction input identity or ordering changed; replan"));
         assert!(fixture.el.state.intent_log.is_empty());
         assert!(!fixture.el.publication.publication_gate.is_active());
         assert!(fixture
@@ -390,7 +404,6 @@ fn should_reject_fragment_publication_when_cut_or_source_neighbors_change() -> M
         let plan = fixture.plan()?;
         assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));
         let completion = fixture.compute(plan)?;
-        fixture.el.actors.compaction_actor.join_completed_worker();
         let (inputs, outputs, target_level) = match &completion {
             RuntimeMsg::CompactionComplete {
                 input_ssts,
@@ -474,7 +487,6 @@ fn should_recover_fragment_when_publication_stops_after_durable_manifest_batch()
         let plan = fixture.plan()?;
         assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));
         let completion = fixture.compute(plan)?;
-        fixture.el.actors.compaction_actor.join_completed_worker();
         Ok::<_, MidgeError>((fixture, expected, completion))
     })?;
     let _guard = crate::failpoints::test_failpoint_guard();
@@ -516,5 +528,66 @@ fn should_recover_fragment_when_publication_stops_after_durable_manifest_batch()
         .any(|file| file.name == fixture.source));
     assert_eq!(fixture.recover_rows()?, expected);
     scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_start_next_deep_level_job_after_publication_without_flush_or_timer() -> MidgeResult<()> {
+    // Arrange
+    let mut fixture = FragmentFixture::new()?;
+    fixture.seed(1, 8, &[b"z0"], 128)?;
+    fixture.persist()?;
+    fixture
+        .el
+        .actors
+        .compaction_actor
+        .set_l0_file_count_threshold(1);
+    fixture
+        .el
+        .pipeline
+        .background_compaction_schedule
+        .defer_for(Duration::from_secs(3600));
+    assert!(!fixture.el.state.has_any_critical_l0_debt());
+    let first = fixture
+        .el
+        .actors
+        .compaction_actor
+        .check_compaction(&fixture.el.state)?
+        .expect("first deep-level debt");
+    fixture.el.launch_compaction(first)?;
+    let completion = fixture
+        .completions
+        .recv_timeout(WAIT)
+        .expect("first compute completion");
+    assert!(matches!(
+        completion,
+        RuntimeMsg::CompactionComplete {
+            succeeded: true,
+            ..
+        }
+    ));
+
+    // Act
+    fixture.publish(completion);
+    fixture.el.run_background_compaction_maintenance_if_due();
+    let next = fixture
+        .completions
+        .recv_timeout(WAIT)
+        .expect("follow-up before the one-hour timer");
+
+    // Assert: a real second job publishes and both generations survive restart.
+    assert!(matches!(
+        next,
+        RuntimeMsg::CompactionComplete {
+            succeeded: true,
+            ..
+        }
+    ));
+    fixture.publish(next);
+    let recovered = fixture.recover_rows()?;
+    for key in SOURCE_KEYS {
+        assert!(recovered.iter().any(|row| row.key == key && row.seq == 7));
+    }
+    assert!(recovered.iter().any(|row| row.key == b"z0"));
     Ok(())
 }

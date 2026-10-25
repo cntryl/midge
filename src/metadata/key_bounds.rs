@@ -11,6 +11,9 @@ pub(crate) fn serialize<S: Serializer>(
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     match key {
+        Some(bytes) if !serializer.is_human_readable() => {
+            serializer.serialize_some(&BinaryKey(bytes))
+        }
         Some(bytes) => serializer.serialize_some(&hex::encode(bytes)),
         None => serializer.serialize_none(),
     }
@@ -23,6 +26,14 @@ pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
 }
 
 struct OptionalKey;
+
+struct BinaryKey<'a>(&'a [u8]);
+
+impl serde::Serialize for BinaryKey<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(self.0)
+    }
+}
 
 impl<'de> Visitor<'de> for OptionalKey {
     type Value = Option<Vec<u8>>;
@@ -40,7 +51,11 @@ impl<'de> Visitor<'de> for OptionalKey {
     }
 
     fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
-        deserializer.deserialize_str(Key).map(Some)
+        if deserializer.is_human_readable() {
+            deserializer.deserialize_str(Key).map(Some)
+        } else {
+            deserializer.deserialize_byte_buf(Key).map(Some)
+        }
     }
 }
 
@@ -55,6 +70,14 @@ impl Visitor<'_> for Key {
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
         hex::decode(value).map_err(|error| E::custom(format!("invalid hex key bound: {error}")))
+    }
+
+    fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+        Ok(value.to_vec())
+    }
+
+    fn visit_byte_buf<E: de::Error>(self, value: Vec<u8>) -> Result<Self::Value, E> {
+        Ok(value)
     }
 }
 

@@ -15,6 +15,73 @@ use crate::metadata::FileMeta;
 #[path = "strategy/work_partition_tests.rs"]
 mod work_partition_tests;
 
+#[cfg(test)]
+mod range_gc_tests {
+    use super::*;
+
+    #[test]
+    fn should_prove_range_gc_with_complete_bounds_when_disjoint_files_are_unselected() {
+        // Arrange
+        let selected = FileMeta {
+            name: "selected.sst".into(),
+            key_bounds_complete: true,
+            earliest_expiration_millis: None,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"m".to_vec()),
+            ..Default::default()
+        };
+        let outside = FileMeta {
+            name: "outside.sst".into(),
+            key_bounds_complete: true,
+            earliest_expiration_millis: None,
+            smallest_key: Some(b"x".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            ..Default::default()
+        };
+        let levels = vec![vec![&selected], vec![&outside]];
+
+        // Act
+        let proof =
+            Compactor::tombstone_gc_eligibility(&levels, std::slice::from_ref(&selected.name))
+                .unwrap();
+
+        // Assert
+        assert_eq!(proof, (true, true));
+    }
+
+    #[test]
+    fn should_retain_ranges_when_unselected_bounds_are_incomplete() {
+        // Arrange
+        let selected = FileMeta {
+            name: "selected.sst".into(),
+            key_bounds_complete: true,
+            earliest_expiration_millis: None,
+            smallest_key: Some(b"a".to_vec()),
+            largest_key: Some(b"m".to_vec()),
+            ..Default::default()
+        };
+        let legacy = FileMeta {
+            name: "legacy.sst".into(),
+            key_bounds_complete: false,
+            earliest_expiration_millis: None,
+            smallest_key: Some(b"x".to_vec()),
+            largest_key: Some(b"z".to_vec()),
+            ..Default::default()
+        };
+
+        // Act
+        let proof = Compactor::tombstone_gc_eligibility(
+            &[vec![&selected], vec![&legacy]],
+            std::slice::from_ref(&selected.name),
+        )
+        .unwrap();
+
+        // Assert
+        assert!(proof.0);
+        assert!(!proof.1);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompactionPurpose {
     Merge,
@@ -60,6 +127,9 @@ pub struct CompactionPlan {
     /// persisted legacy bounds are advisory and cannot prove a range delete
     /// does not reach an otherwise unselected file.
     pub range_tombstone_gc_eligible: bool,
+    /// Soft next-level overlap target. Oversized individual grandparents or
+    /// indivisible key coverage may exceed it; source key groups stay whole.
+    pub grandparent_overlap: super::executor::GrandparentOverlap,
 }
 
 impl CompactionPlan {
@@ -84,6 +154,7 @@ impl CompactionPlan {
             snapshot_horizon: None,
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
+            grandparent_overlap: crate::compaction::GrandparentOverlap::default(),
         }
     }
 
@@ -125,6 +196,8 @@ impl CompactionPlan {
 ///   Ln (n >= 2): `L1_target` * `level_multiplier^(n` - 1)
 #[derive(Debug, Clone)]
 pub struct LeveledCompactionConfig {
+    /// Soft maximum bytes of level+2 intersected by one output. Zero disables.
+    pub max_grandparent_overlap_bytes: u64,
     pub l0_compaction_threshold: u64,
     pub l0_file_count_threshold: usize,
     /// Hard safety bound for simultaneously active source merge streams.
@@ -139,6 +212,7 @@ pub struct LeveledCompactionConfig {
 impl Default for LeveledCompactionConfig {
     fn default() -> Self {
         Self {
+            max_grandparent_overlap_bytes: 320 * 1024 * 1024,
             l0_compaction_threshold: 4 * 1024 * 1024, // 4MB
             l0_file_count_threshold: 4,
             max_compaction_input_files: 64,
@@ -216,6 +290,7 @@ impl Compactor {
         self.plan_zero_level(&levels, cf_id)
     }
 
+    #[cfg(test)]
     pub(crate) fn pick_deepest_inner_compaction(
         &self,
         files: &[FileMeta],
@@ -229,7 +304,33 @@ impl Compactor {
             let target_size =
                 self.level_target_size(u32::try_from(level).expect("level index fits in u32"));
             if level_size > target_size {
-                return self.plan_inner_level(&levels, cf_id, level);
+                return self.plan_inner_level_filtered(&levels, cf_id, level, &|_| true);
+            }
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn pick_available_inner_compaction(
+        &self,
+        files: &[FileMeta],
+        cf_id: u32,
+        eligible: impl Fn(&FileMeta, u32) -> bool,
+        admitted: impl Fn(&CompactionPlan) -> bool,
+    ) -> MidgeResult<Option<CompactionPlan>> {
+        let Some(levels) = self.validated_levels(files, cf_id)? else {
+            return Ok(None);
+        };
+        for level in (1..self.config.max_levels.saturating_sub(1)).rev() {
+            let level_size: u64 = levels[level].iter().map(|file| file.size_bytes).sum();
+            let source_level = u32::try_from(level).expect("level index fits u32");
+            if level_size <= self.level_target_size(source_level) {
+                continue;
+            }
+            let available = |file: &FileMeta| eligible(file, source_level + 1);
+            if let Some(plan) = self.plan_inner_level_filtered(&levels, cf_id, level, &available)? {
+                if admitted(&plan) {
+                    return Ok(Some(plan));
+                }
             }
         }
         Ok(None)
@@ -271,6 +372,7 @@ impl Compactor {
                 snapshot_horizon: None,
                 point_tombstone_gc_eligible: false,
                 range_tombstone_gc_eligible: false,
+                grandparent_overlap: super::GrandparentOverlap::default(),
             }));
         }
         Ok(None)
@@ -417,15 +519,16 @@ impl Compactor {
             snapshot_horizon: None,
             point_tombstone_gc_eligible,
             range_tombstone_gc_eligible,
+            grandparent_overlap: super::GrandparentOverlap::default(),
         }))
     }
 
-    /// Build a compaction plan for level N → N+1.
-    fn plan_inner_level(
+    fn plan_inner_level_filtered(
         &self,
         levels: &[Vec<&FileMeta>],
         cf_id: u32,
         level: usize,
+        eligible: &dyn Fn(&FileMeta) -> bool,
     ) -> MidgeResult<Option<CompactionPlan>> {
         if levels[level].is_empty() {
             return Ok(None);
@@ -440,7 +543,17 @@ impl Compactor {
                 .cmp(&right.smallest_key)
                 .then_with(|| left.name.cmp(&right.name))
         });
+        // Keep a contiguous available component. Combining both sides of an
+        // active publication range would reserve a conflicting output span.
+        source_files = source_files
+            .into_iter()
+            .skip_while(|file| !eligible(file))
+            .take_while(|file| eligible(file))
+            .collect();
         source_files.truncate(self.config.l0_file_count_threshold.max(1));
+        if source_files.is_empty() {
+            return Ok(None);
+        }
         let source_level = u32::try_from(level).expect("level index fits in u32");
         let target_level = u32::try_from(level + 1).expect("level index fits in u32");
         let (mut source_names, mut target_files) = self.complete_overlap_span(
@@ -459,7 +572,9 @@ impl Compactor {
                 source_level,
                 target_level,
             )?;
-            if self.exceeds_work_target(&source_files, &levels[level + 1], &target_files) {
+            if self.exceeds_work_target(&source_files, &levels[level + 1], &target_files)
+                && self.target_span_needs_fragmentation(&levels[level + 1], &target_files)
+            {
                 if let Some(split_key) = Self::fragmentation_split_key(
                     source_files[0],
                     &levels[level],
@@ -491,6 +606,7 @@ impl Compactor {
             snapshot_horizon: None,
             point_tombstone_gc_eligible,
             range_tombstone_gc_eligible,
+            grandparent_overlap: super::GrandparentOverlap::default(),
         }))
     }
 
@@ -514,6 +630,29 @@ impl Compactor {
             )
             .try_fold(0_u64, |total, file| total.checked_add(file.size_bytes));
         input_bytes.is_none_or(|bytes| bytes > u64::try_from(limit).unwrap_or(u64::MAX))
+    }
+
+    /// A conforming overlap span already has the output policy's preferred
+    /// shape. Stream that complete merge even when its work exceeds the soft
+    /// scheduling target, instead of rewriting the same source once first.
+    /// Older/widened spans and an explicitly disabled overlap policy retain
+    /// fragmentation when complete bounds prove a useful interior boundary.
+    fn target_span_needs_fragmentation(
+        &self,
+        target_files: &[&FileMeta],
+        selected_targets: &[String],
+    ) -> bool {
+        let overlap_limit = self.config.max_grandparent_overlap_bytes;
+        if overlap_limit == 0 {
+            return true;
+        }
+        let selected: std::collections::HashSet<_> =
+            selected_targets.iter().map(String::as_str).collect();
+        target_files
+            .iter()
+            .filter(|file| selected.contains(file.name.as_str()))
+            .try_fold(0_u64, |bytes, file| bytes.checked_add(file.size_bytes))
+            .is_none_or(|bytes| bytes > overlap_limit)
     }
 
     fn fragmentation_split_key(
@@ -563,6 +702,7 @@ impl Compactor {
             snapshot_horizon: None,
             point_tombstone_gc_eligible: false,
             range_tombstone_gc_eligible: false,
+            grandparent_overlap: super::GrandparentOverlap::default(),
         }
     }
 
@@ -589,20 +729,19 @@ impl Compactor {
                     .smallest_key
                     .as_ref()
                     .zip(file.largest_key.as_ref())
-                    .is_some_and(|(smallest, largest)| {
+                    .is_none_or(|(smallest, largest)| {
                         smallest.as_slice() <= max_key.as_slice()
                             && largest.as_slice() >= min_key.as_slice()
                     })
         });
         let point_tombstone_gc_eligible = !unselected_point_overlap;
 
-        // Legacy file bounds can omit range-tombstone endpoints. Only a plan
-        // containing every file in the column family proves that dropping a
-        // range marker cannot expose a covered value outside the selected
-        // metadata range.
+        // Complete bounds include both range endpoints. Legacy/incomplete
+        // bounds cannot establish disjointness, even outside their point span.
         let total_files = levels.iter().map(Vec::len).sum::<usize>();
+        let complete_bounds = levels.iter().flatten().all(|file| file.key_bounds_complete);
         let range_tombstone_gc_eligible =
-            point_tombstone_gc_eligible && selected_names.len() == total_files;
+            point_tombstone_gc_eligible && (selected_names.len() == total_files || complete_bounds);
         Ok((point_tombstone_gc_eligible, range_tombstone_gc_eligible))
     }
 
@@ -897,6 +1036,7 @@ mod tests {
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
             sublevel: 0,
             read_count: std::sync::Arc::default(),
         }

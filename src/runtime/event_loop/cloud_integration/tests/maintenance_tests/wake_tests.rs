@@ -18,64 +18,74 @@ fn should_complete_manual_waiter_when_prune_event_precedes_worker_exit(
 ) -> crate::common::MidgeResult<()> {
     // Arrange: hold the worker after it queues its terminal event. Consuming
     // that event cannot yet reap the handle or release the publication gate.
-    let mut el = idle_cloud_loop()?;
-    let response = el.routing.router.register(91_008, "CompactAll");
-    el.state.pending_compaction_waits.insert(
-        91_008,
-        el.routing
-            .router
-            .request_deadline(91_008, el.routing.runtime_response_timeout)
-            .unwrap(),
-    );
-    el.actors.cloud_coordinator.cloud_wal.admit_prunes([42]);
-    el.publication
-        .publication_gate
-        .try_acquire(crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune);
-    let storage = el.actors.cloud_coordinator.hybrid_storage.clone().unwrap();
-    let (event_sent, event_ready) = std::sync::mpsc::channel();
-    let (release_worker, release) = std::sync::mpsc::channel();
-    el.actors.cloud_coordinator.cloud_wal_prune_worker = Some(std::thread::spawn(move || {
-        storage.queue_cloud_wal_prune_attempt_failed(42, "yielded proof work".into());
-        event_sent.send(()).expect("report terminal event queued");
-        release.recv().expect("release completed worker");
-    }));
-    event_ready.recv_timeout(Duration::from_secs(1)).unwrap();
-    el.tick_hybrid_storage();
-    el.drain_hybrid_storage_events();
-    assert_eq!(el.actors.cloud_coordinator.cloud_wal.prunes().len(), 0);
-    assert!(!el
-        .actors
-        .cloud_coordinator
-        .cloud_wal_prune_worker
-        .as_ref()
-        .unwrap()
-        .is_finished());
-    assert!(el.publication.publication_gate.is_active());
-    let active_worker_poll = el.idle_progress_timeout();
     let (requests, request_rx) = crossbeam::channel::unbounded();
-
-    // Act: the worker exits without another event or user request. Only the
-    // runtime's own wake policy can finish the queued manual obligation.
+    let (initialized, initialization) = crossbeam::channel::bounded(1);
+    // Construct and destroy the thread-bound event loop on its owning thread.
     let runtime = std::thread::spawn(move || {
+        let mut el = idle_cloud_loop()?;
+        let response = el.routing.router.register(91_008, "CompactAll");
+        el.state.pending_compaction_waits.insert(
+            91_008,
+            el.routing
+                .router
+                .request_deadline(91_008, el.routing.runtime_response_timeout)
+                .unwrap(),
+        );
+        el.actors.cloud_coordinator.cloud_wal.admit_prunes([42]);
+        el.publication.publication_gate.try_acquire(
+            crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune,
+        );
+        let storage = el.actors.cloud_coordinator.hybrid_storage.clone().unwrap();
+        let (event_sent, event_ready) = std::sync::mpsc::channel();
+        let (release_worker, release) = std::sync::mpsc::channel();
+        el.actors.cloud_coordinator.cloud_wal_prune_worker = Some(std::thread::spawn(move || {
+            storage.queue_cloud_wal_prune_attempt_failed(42, "yielded proof work".into());
+            event_sent.send(()).expect("report terminal event queued");
+            release.recv().expect("release completed worker");
+        }));
+        event_ready.recv_timeout(Duration::from_secs(1)).unwrap();
+        el.tick_hybrid_storage();
+        el.drain_hybrid_storage_events();
+        assert_eq!(el.actors.cloud_coordinator.cloud_wal.prunes().len(), 0);
+        assert!(!el
+            .actors
+            .cloud_coordinator
+            .cloud_wal_prune_worker
+            .as_ref()
+            .unwrap()
+            .is_finished());
+        assert!(el.publication.publication_gate.is_active());
+        initialized
+            .send((response, el.idle_progress_timeout(), release_worker))
+            .expect("report initialized runtime");
         let (_worker_tx, worker_rx) = crossbeam::channel::unbounded();
         el.run(&request_rx, &worker_rx);
-        el
+        Ok::<_, crate::common::MidgeError>((
+            el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none(),
+            !el.publication.publication_gate.is_active(),
+            el.state.pending_compaction_waits.is_empty(),
+        ))
     });
+    let (response, active_worker_poll, release_worker) = initialization
+        .recv_timeout(Duration::from_secs(10))
+        .expect("runtime initialized");
+
+    // Act: no later event or user request wakes the completed worker.
     release_worker.send(()).unwrap();
     let completion = response.recv_timeout(Duration::from_secs(1));
     // Always release the test loop, including the RED timeout path.
     drop(requests);
-    let el = runtime
+    let (worker_reaped, gate_released, waits_empty) = runtime
         .join()
-        .expect("runtime exits after request channel closes");
+        .expect("runtime exits after request channel closes")?;
 
     // Assert
     assert!(matches!(completion, Ok(RuntimeResponse::Ok { request_id: 91_008 })),
         "manual completion needs no additional request or 30-second maintenance tick: {completion:?}");
     assert!(active_worker_poll.is_some_and(|timeout| timeout <= Duration::from_millis(5)));
-    assert!(el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none());
-    assert!(!el.publication.publication_gate.is_active());
-    assert!(el.state.pending_compaction_waits.is_empty());
+    assert!(worker_reaped);
+    assert!(gate_released);
+    assert!(waits_empty);
     Ok(())
 }
 

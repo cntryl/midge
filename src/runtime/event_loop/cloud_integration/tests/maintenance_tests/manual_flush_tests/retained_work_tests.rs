@@ -13,10 +13,10 @@ fn replace_flush_worker(el: &mut EventLoop, memory_bytes: usize) -> MidgeResult<
     el.actors.flush_actor.shutdown_and_join()?;
     let (tx, rx) = crossbeam::channel::unbounded();
     el.actors.flush_actor = FlushActor::new_with_memory_limit(
-        Arc::clone(&el.state.fs),
+        &el.state.fs,
         false,
-        crate::codec::CompressionPolicy::default(),
-        tx,
+        &crate::codec::CompressionPolicy::default(),
+        &tx,
         memory_bytes,
     )?;
     el.pipeline.flush_worker_result_rx = rx;

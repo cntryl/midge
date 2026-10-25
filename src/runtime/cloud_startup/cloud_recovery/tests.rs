@@ -135,3 +135,82 @@ fn should_retain_invalid_restored_sst_when_staging_filesystem_cannot_discard_it(
     );
     Ok(())
 }
+
+struct ConcurrentInventory {
+    active: std::sync::atomic::AtomicUsize,
+    peak: std::sync::atomic::AtomicUsize,
+    released: std::sync::Mutex<bool>,
+    release: std::sync::Condvar,
+}
+
+impl crate::storage::inventory::ObjectInventory for ConcurrentInventory {
+    fn object_size(&self, _key: &str, _scope: Option<&DeadlineScope>) -> MidgeResult<Option<u64>> {
+        use std::sync::atomic::Ordering;
+        let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
+        self.peak.fetch_max(active, Ordering::AcqRel);
+        let mut released = self.released.lock().unwrap();
+        if active == 32 {
+            *released = true;
+            self.release.notify_all();
+        }
+        let (mut released, _) = self
+            .release
+            .wait_timeout_while(released, std::time::Duration::from_secs(1), |released| {
+                !*released
+            })
+            .unwrap();
+        // Bound the negative control as well: a serial implementation must
+        // fail the concurrency assertion instead of hanging the test.
+        *released = true;
+        self.release.notify_all();
+        self.active.fetch_sub(1, Ordering::AcqRel);
+        Ok(Some(64))
+    }
+
+    fn keys_under(
+        &self,
+        _prefix: &str,
+        _scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Vec<String>> {
+        unreachable!("manifest inventory only probes referenced objects")
+    }
+}
+
+#[test]
+fn should_probe_manifest_ssts_with_bounded_concurrency_when_opening_cloud_state() -> MidgeResult<()>
+{
+    // Arrange
+    let temp = tempfile::tempdir()?;
+    let mut state = RuntimeState::try_new(temp.path(), true, RecoveryPolicy::Strict)?;
+    let files = (0..100)
+        .map(|index| crate::metadata::FileMeta {
+            name: format!("inventory-{index}.sst"),
+            size_bytes: 64,
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+    state.manifest.replace_files(files.clone());
+    let inventory = ConcurrentInventory {
+        active: std::sync::atomic::AtomicUsize::new(0),
+        peak: std::sync::atomic::AtomicUsize::new(0),
+        released: std::sync::Mutex::new(false),
+        release: std::sync::Condvar::new(),
+    };
+
+    // Act
+    CloudStartupRecovery::validate_manifest_ssts_in_store(&mut state, &inventory)?;
+
+    // Assert
+    assert_eq!(
+        inventory.peak.load(std::sync::atomic::Ordering::Acquire),
+        32
+    );
+    assert_eq!(state.manifest.files.len(), files.len());
+    assert!(state
+        .manifest
+        .files
+        .iter()
+        .zip(&files)
+        .all(|(actual, expected)| actual.same_identity(expected)));
+    Ok(())
+}

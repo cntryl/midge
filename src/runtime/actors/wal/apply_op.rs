@@ -134,6 +134,7 @@ impl TransactionApplyOp {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn batch_record(
         &self,
         txn_id: u64,

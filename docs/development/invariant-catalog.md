@@ -5,10 +5,11 @@ across writes, reads, background work, recovery, and provider operations. It
 extends the narrower [storage invariants](storage-invariants.md) page. It does
 not attempt to list every local helper precondition or Rust type invariant.
 
-The initial inventory was recorded during the #707/#708 work. This update
-refreshes only WAL-2/3/4/5 and CLOUD-3/5 for the WAL redesign contracts; other
-rows retain their existing references. Source references and SHA256 postimages
-identify the implementation revision recorded in the accompanying inventory.
+The initial inventory was recorded during the #707/#708 work. The current
+reference refresh retains all catalog IDs and records current symbols,
+assertions, fixture scopes and explicit deferrals across the 0.5.0 changes.
+Source references and SHA256 postimages identify the implementation revision
+recorded in the accompanying inventory; they do not qualify its behavior.
 Historical qualification objects retain their recorded source and outcomes;
 they do not qualify a later revision.
 The retained nine-cell outcome, original readback digest and #730/#731
@@ -29,8 +30,8 @@ implementation and evidence; they do not prove an invariant or run Rust tests.
 | ID | Invariant | Evidence |
 |---|---|---|
 | AUTH-1 | Mutations require current writer authority. A writer whose monotonic lease validity expires or whose epoch is superseded must be fenced before it submits another state-changing operation. A provider request already submitted may have an ambiguous outcome; Midge cannot claim it was cancelled. | [Exact evidence](invariant-evidence.md#auth-1) |
-| AUTH-2 | Loss of writer authority stops new mutations while leaving reads and diagnostics available. Unknown authority caused by a timeout or transient provider failure remains distinguishable from proven lease loss. | [Exact evidence](invariant-evidence.md#auth-2) |
-| AUTH-3 | The event loop owns authoritative mutable runtime state. Actors and storage workers return results; they do not independently publish manifest, memtable, sequence, or health state. An operation becomes authoritative only at its serialized publication boundary. | [Exact evidence](invariant-evidence.md#auth-3) |
+| AUTH-2 | Loss of writer authority stops new mutations. Retained local reads remain available; cloud reads require current lease authority and return Fenced after lease loss because a successor can reclaim their remote sources. A terminal lifecycle fence also rejects reads. Diagnostics retain their control path while the runtime is running. Unknown authority caused by a timeout or transient provider failure remains distinguishable from proven lease loss. | [Exact evidence](invariant-evidence.md#auth-2) |
+| AUTH-3 | The event loop owns authoritative mutable runtime state. Actors and storage workers return results; admitted memtable workers may mutate captured sources above the visible cut, while bookkeeping, manifest, sequence, health, and visibility publication remain loop-owned. An operation becomes authoritative only at its serialized publication boundary after every lower admitted unit is complete. | [Exact evidence](invariant-evidence.md#auth-3) |
 | AUTH-4 | Cloud DDL and control metadata changes are fenced by the active lease epoch. An ambiguous compare-exchange keeps writes and maintenance fenced until recovery reconciles the prepared operation. Column-family IDs remain retired after drop and are not reused. | [Exact evidence](invariant-evidence.md#auth-4) |
 
 Owners: `src/lease/`, `src/runtime/event_loop/fencing.rs`,
@@ -60,6 +61,11 @@ Owners: `src/engine/api/transaction.rs`, `src/runtime/read_snapshot.rs`,
 [`transaction-durability-contract.md`](../user-guides/transaction-durability-contract.md)
 and [`transactions-and-mvcc.md`](../transactions-and-mvcc.md).
 
+TTL visibility follows the reader's captured clock. Compaction preserves raw
+expiration metadata so permitted clock correction does not become permanent
+data loss. Destructive TTL-driven SST reclamation is deferred under #912;
+elapsed expiry alone is not a claim of physical purge.
+
 ### Commit durability and WAL recovery
 
 | ID | Invariant | Evidence |
@@ -87,13 +93,13 @@ in [`recovery-internals.md`](recovery-internals.md).
 | SST-1 | The manifest's published file set is authoritative. Raw SST presence, a local cache file, an upload, or a temporary output does not make a file visible to reads or recovery. | [Exact evidence](invariant-evidence.md#sst-1) |
 | SST-2 | A published SST is immutable. Readers and recovery rely on its name, size, any recorded checksum, and validated metadata describing the same bytes. A changed or missing authoritative object is corruption or unavailable authority, not a reason to guess. | [Exact evidence](invariant-evidence.md#sst-2) |
 | SST-3 | Key and sequence bounds used to skip files are trusted only when complete and validated. Unknown or overlapping L1+ bounds stay in a conservative read path until a complete repair publishes a disjoint replacement. Endpoints are treated conservatively where equality could hide tombstone coverage. | [Exact evidence](invariant-evidence.md#sst-3) |
-| SST-4 | Flush either publishes the complete new SST state through the manifest or leaves prior state authoritative. Durable intent bridges output creation and manifest publication; an orphan is not exposed as committed data. | [Exact evidence](invariant-evidence.md#sst-4) |
-| SST-5 | Compaction writes and proves the complete output set, persists intent, and switches the manifest atomically before deleting inputs. Recovery resolves a crash to the complete old set or complete new set, never a partial mixture. Cleanup is idempotent and retains inputs or intent when publication is ambiguous. | [Exact evidence](invariant-evidence.md#sst-5) |
+| SST-4 | Flush either publishes the complete new SST state through the manifest or leaves prior state authoritative. Durable intent bridges output creation and manifest publication; an orphan is not exposed as committed data. A retained generation, including retry backoff, blocks younger same-family publication while other families remain independently schedulable. | [Exact evidence](invariant-evidence.md#sst-4) |
+| SST-5 | Compaction proves the complete output set, persists intent, and switches the manifest atomically before deleting replaced inputs. A metadata-only move preserves existing immutable identities without writing replacement SST bytes or retiring those objects. Recovery resolves a crash to the complete old set or complete new set, never a partial mixture. Cleanup is idempotent and retains inputs or intent when publication is ambiguous. | [Exact evidence](invariant-evidence.md#sst-5) |
 | SST-6 | Compaction preserves the logical state visible to active snapshots. It retains versions and tombstones newer than the oldest snapshot and drops older tombstones only with the required bottommost/coverage proof. Snapshot pins prevent this runtime's GC from unlinking files still in use. Cloud snapshots are invalidated with Fenced after lease loss; pins do not coordinate reclamation with a successor. | [Exact evidence](invariant-evidence.md#sst-6) |
 | SST-7 | Compaction output identity and sequence are assigned before worker execution. A placeholder or incomplete plan is not publishable. Resource exhaustion or cancellation before publication retains the authoritative inputs. | [Exact evidence](invariant-evidence.md#sst-7) |
 | SST-8 | Manifest journal edits are replayed without gaps. Checkpoint horizons advance only over edits included in that snapshot; a crash between snapshot rename and journal truncation remains idempotent. | [Exact evidence](invariant-evidence.md#sst-8) |
 | SST-9 | Newly created database and storage directories are durably linked before Midge admits writes, so a synced file is not lost behind a volatile parent-directory entry. | [Exact evidence](invariant-evidence.md#sst-9) |
-| SST-10 | L0 → L1 compaction preserves level order: a file joins the batch only once every older L0 file overlapping its keys is in the batch, so after publication every version a remaining L0 file holds over a key is newer than every L1 version of that key. The oldest L0 file is always the first pick; read heat orders only admissible files. A manifest edit that would leave an older L0 file behind a newer deeper one is applied but logged. | [Exact evidence](invariant-evidence.md#sst-10) |
+| SST-10 | L0 → L1 compaction preserves level order: a file joins the batch only once every older L0 file overlapping its keys is in the batch, so after publication every version a remaining L0 file holds over a key is newer than every L1 version of that key. The oldest L0 file is always the first pick; read heat orders only admissible files. Ordinary replacement edits log detected ordering violations; metadata-only moves reject unprovable coverage, changed source order or conflicting target coverage before applying the edit. | [Exact evidence](invariant-evidence.md#sst-10) |
 
 Owners: `src/metadata/`, `src/runtime/intent_persistence.rs`,
 `src/runtime/actors/flush/`, `src/runtime/actors/compaction/`,
@@ -109,7 +115,7 @@ publication crash matrix in
 | ID | Invariant | Evidence |
 |---|---|---|
 | CLOUD-1 | Cloud WAL segments are immutable, epoch-scoped objects. Object existence alone grants no replay or durability authority; startup replays only entries in a validated publication catalog. Late uploads from a fenced writer remain ignored orphans. | [Exact evidence](invariant-evidence.md#cloud-1) |
-| CLOUD-2 | `CloudAck` is emitted only after immutable upload and exact byte readback. The runtime validates the active lease and publishes the WAL catalog before advancing the cloud durability frontier or completing strict durability waiters. | [Exact evidence](invariant-evidence.md#cloud-2) |
+| CLOUD-2 | `CloudAck` requires immutable upload plus an exact validated provider checksum receipt or identity-pinned byte-readback fallback. The runtime validates the active lease and publishes the WAL catalog before advancing the cloud durability frontier or completing strict durability waiters. | [Exact evidence](invariant-evidence.md#cloud-2) |
 | CLOUD-3 | The committed cloud metadata generation is the authority for mirrored local control files. Mutable metadata copies and unreferenced uploads do not override the committed descriptor; catalog and metadata format versions are checked before mutation, with unsupported versions rejected and no migration path. | [Exact evidence](invariant-evidence.md#cloud-3) |
 | CLOUD-4 | Cloud startup inventories each manifest-authoritative SST by its exact object key and recorded size. SST readers validate content, identity and format when those paths consume it; metadata-only inventory does not eagerly verify every body or block. Definitive missing/size-mismatched objects fail closed or enter the explicitly supported salvage path; unrelated objects are not substituted. | [Exact evidence](invariant-evidence.md#cloud-4) |
 | CLOUD-5 | Cloud recovery combines intact local WAL with the validated published catalog chain and preserves sequence/epoch holes. A `cloud_strict()` acknowledgment survives cache loss from published WAL or SST state. `cloud_async()` unpublished WAL may recover from its surviving cache, but is not promised to a successor and cannot override the shared catalog. | [Exact evidence](invariant-evidence.md#cloud-5) |
@@ -124,6 +130,14 @@ Evidence includes `tests/cloud_core.rs`, provider contract and engine
 qualification suites, cloud recovery tests, and the native Sqrzl evidence in
 [`roadmap-0.3.1.md`](roadmap-0.3.1.md). The boundary of emulator evidence is
 defined in [`cloud-qualification-policy.md`](cloud-qualification-policy.md).
+
+The #910 overlap regressions separate controlled storage latency from real
+filesystem evidence. The controlled cases require the actual flush response
+within 100 ms while an earlier provider effect remains held for two seconds;
+separate real-filesystem schedules require owner release and exact cold recovery
+before that effect is released. They do not establish a real hardware latency
+bound. The [publication guide](metadata-publication-910.md) keeps #910's hardware
+timing and performance acceptance open.
 
 ### Column-family lifecycle and backup/restore
 
@@ -265,7 +279,7 @@ device bytes. Final fourteen hours follow the final merged #711 source.
 | Transaction spill lookup scaling | The accepted #681 design retains matching-run point probes and does not implement the original eight-source sorted spill view or upfront auxiliary scratch reservation. Correctness and configured-budget checks passed, but the original stronger read-work bound was not shipped. | Add deterministic lookup-work/read-source counters to any future scaling claim and measure resident plus heavily spilled transactions. |
 | Cloud replay locality | The accepted #682 design bounds retained readers/blocks but clears them at checkpoints. Release cold-recovery evidence improved ranges and bytes substantially; it is not a same-host latency comparison or production SLO. | Keep the configured budget as the safety gate and rerun the native cold-recovery workload when changing cache retention. |
 | Compaction caller deadline | Delivered #714 captures one immutable manual origin through queueing, multi-CF work, cooperative compute/output staging, native operations and publication phases. Later waiters cannot replace the owner. Background None keeps its ordinary callerless policy. A caller can still time out while accepted work retains storage/lease ownership. | Preserve typed Timeout, ambiguous CAS recovery and safe joins; do not interpret deadline expiry as provider cancellation or claim preemption of a blocked local syscall. |
-| Startup aggregate deadline | Delivered #713 adds optional open_timeout (default None), one original deadline, scoped native/local recovery and prepared-runtime acceptance. Expired startup cannot admit a late runtime, and genuinely uncertain lease acquisition stays LeaseIndeterminate while cleanup retains ownership. | Preserve None/Complete compatibility and typed Timeout through strict/salvage; local calls are checked cooperatively rather than forcibly interrupted. |
+| Startup aggregate deadline | Delivered #713 adds optional open_timeout (default None), one original deadline, scoped native/local recovery and prepared-runtime acceptance. Expired startup cannot admit a late runtime, and genuinely uncertain lease acquisition stays LeaseIndeterminate while cleanup retains ownership. | Preserve None/Complete compatibility and typed Timeout through strict/salvage. #982 separates real 600 ms native elapsed-time checks from controlled prepared-runtime cancellation; see [fixture scope](startup-deadline-982.md). Local calls are checked cooperatively rather than forcibly interrupted. |
 | Directory-entry durability for deletion | Unix object deletion does not sync the parent directory. A crash can resurrect obsolete bytes. Manifest/catalog authority keeps them inactive, so the classified risk is a storage leak rather than data loss; bounded cleanup is not guaranteed by this behavior. | Revisit if a hard storage-reclamation bound becomes a supported contract. |
 | Provider environment scope | Sqrzl qualifies modeled provider protocol behavior. It cannot establish a deployment's IAM, quotas, network policy, lifecycle rules, availability, or capacity. | Treat environment-specific qualification as a deployment acceptance item, not as repository CI evidence. |
 | Documentation freshness | #724 aligns identified present-tense current-version claims to Cargo.toml 0.3.1 and labels the superseded historical roadmap section. Historical and migration 0.3.0 references remain intentional. | Continue distinguishing current contracts, historical examples and final exact-source qualification; do not rewrite history as current evidence. |

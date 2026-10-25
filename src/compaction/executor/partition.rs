@@ -21,6 +21,12 @@ struct OutputSetCleanup {
     armed: bool,
 }
 
+struct FinishedPartition {
+    name: String,
+    path: std::path::PathBuf,
+    summary: Option<crate::sst::traits::FinalizedSst>,
+}
+
 impl OutputSetCleanup {
     fn new(fs: std::sync::Arc<dyn crate::io::Fs>) -> Self {
         Self {
@@ -36,17 +42,22 @@ impl OutputSetCleanup {
 
     fn record_finished_partition(
         &mut self,
-        finished: Option<(String, std::path::PathBuf)>,
+        finished: Option<FinishedPartition>,
         names: &mut Vec<String>,
         budget: &crate::common::resource_budget::ResourceBudget,
         sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
     ) -> MidgeResult<()> {
-        if let Some((name, path)) = finished {
+        if let Some(FinishedPartition {
+            name,
+            path,
+            summary,
+        }) = finished
+        {
             // Record cleanup ownership before a fallible sink can publish or
             // reject this finalized non-authoritative partition.
             self.record(path.clone());
             if let Some(sink) = sink {
-                sink(&name, &path, budget)?;
+                sink(&name, &path, budget, summary.as_ref())?;
             }
             names.push(name);
         }
@@ -125,7 +136,7 @@ fn finish_partition(
     abort_check: Option<&dyn Fn() -> bool>,
     output_size_limit: Option<usize>,
     output_fs: &std::sync::Arc<dyn crate::io::Fs>,
-) -> MidgeResult<Option<(String, std::path::PathBuf)>> {
+) -> MidgeResult<Option<FinishedPartition>> {
     ensure_compaction_not_aborted(abort_check)?;
     let tombstone_count = add_partition_range_tombstones(
         writer.as_mut(),
@@ -146,7 +157,7 @@ fn finish_partition(
         identity.ordinal,
     );
     let path = output_dir.join(&name);
-    writer.finish_to_path(&path)?;
+    let summary = writer.finish_to_path_with_summary(&path)?;
     let fs_path = crate::sst::fs::fs_relative_sst_path(output_fs, &path)?;
     let size = match output_fs.metadata(&fs_path) {
         Ok(metadata) => metadata.len,
@@ -165,7 +176,11 @@ fn finish_partition(
             "encoded compaction partition exceeds its local staging limit".into(),
         ));
     }
-    Ok(Some((name, path)))
+    Ok(Some(FinishedPartition {
+        name,
+        path,
+        summary,
+    }))
 }
 
 struct BudgetedEvent {
@@ -539,7 +554,9 @@ fn select_newest_version<'a>(
     let mut versions: Vec<&CompactionVersion> = events
         .filter_map(|event| match event {
             CompactionEvent::Version(version) => Some(version),
-            CompactionEvent::RangeStart(_) | CompactionEvent::RangeEnd(_) => None,
+            CompactionEvent::RangeStart(_)
+            | CompactionEvent::RangeEnd(_)
+            | CompactionEvent::Boundary(_) => None,
         })
         .collect();
     versions.sort_by_key(|version| std::cmp::Reverse(version.seq));
@@ -831,7 +848,7 @@ impl<'a> PartitionRoller<'a> {
         tombstones: &RangeTombstoneTracker,
         upper_bound: Option<&[u8]>,
         abort_check: Option<&dyn Fn() -> bool>,
-    ) -> MidgeResult<Option<(String, std::path::PathBuf)>> {
+    ) -> MidgeResult<Option<FinishedPartition>> {
         let writer = self
             .writer
             .take()
@@ -862,7 +879,7 @@ impl<'a> PartitionRoller<'a> {
         tombstones: &RangeTombstoneTracker,
         abort_check: Option<&dyn Fn() -> bool>,
     ) -> MidgeResult<(
-        Option<(String, std::path::PathBuf)>,
+        Option<FinishedPartition>,
         crate::common::resource_budget::ResourceReservation,
     )> {
         let boundary_reservation = self
@@ -904,7 +921,7 @@ impl<'a> PartitionRoller<'a> {
         mut self,
         tombstones: &RangeTombstoneTracker,
         abort_check: Option<&dyn Fn() -> bool>,
-    ) -> MidgeResult<Option<(String, std::path::PathBuf)>> {
+    ) -> MidgeResult<Option<FinishedPartition>> {
         self.finish_current(tombstones, None, abort_check)
     }
 }
@@ -943,7 +960,9 @@ fn write_fragment_key_events(
     let newest = select_newest_version(events.iter().map(|event| &event.event))?;
     let starts = events.iter().filter_map(|event| match &event.event {
         CompactionEvent::RangeStart(tombstone) => Some(tombstone),
-        CompactionEvent::RangeEnd(_) | CompactionEvent::Version(_) => None,
+        CompactionEvent::RangeEnd(_)
+        | CompactionEvent::Version(_)
+        | CompactionEvent::Boundary(_) => None,
     });
     let retain_all = TombstoneGcPolicy {
         snapshot_horizon: None,
@@ -1096,48 +1115,88 @@ pub(crate) fn write_fragmented_compaction_outputs(
 /// Merge, normalize, deduplicate, and write target-sized compaction partitions
 /// without materializing a second deduplicated result vector.
 #[allow(clippy::too_many_arguments)]
+fn collect_same_key_events(
+    merged: &mut EventMergeIterator<'_>,
+    first: CompactionEvent,
+    key: &[u8],
+    budget: &crate::common::resource_budget::ResourceBudget,
+    seen: &mut usize,
+    abort_check: Option<&dyn Fn() -> bool>,
+) -> MidgeResult<Vec<BudgetedEvent>> {
+    let mut events = vec![BudgetedEvent::new(first, budget)?];
+    while merged
+        .peek_event()
+        .is_some_and(|candidate| candidate.key() == key)
+    {
+        let event = merged
+            .next_event()?
+            .expect("peeked compaction event exists");
+        events.push(BudgetedEvent::new(event, budget)?);
+        *seen = seen.saturating_add(1);
+        if seen.is_multiple_of(1024) {
+            ensure_compaction_not_aborted(abort_check)?;
+        }
+    }
+    Ok(events)
+}
+
+fn range_starts(events: &[BudgetedEvent]) -> impl Iterator<Item = &RangeTombstone> + Clone {
+    events.iter().filter_map(|event| match &event.event {
+        CompactionEvent::RangeStart(tombstone) => Some(tombstone),
+        CompactionEvent::RangeEnd(_)
+        | CompactionEvent::Version(_)
+        | CompactionEvent::Boundary(_) => None,
+    })
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PartitionOutputConfig<'a> {
+    pub cf_id: u32,
+    pub target_level: u32,
+    pub generation: u64,
+    pub target_sst_size: usize,
+    pub tombstone_gc: TombstoneGcPolicy,
+    pub output_size_limit: Option<usize>,
+    pub grandparent_overlap: &'a super::GrandparentOverlap,
+}
+
 pub(crate) fn write_partitioned_compaction_outputs(
     sst_factory: &dyn SstFactory,
     output_dir: &Path,
-    cf_id: u32,
-    target_level: u32,
-    generation: u64,
-    target_sst_size: usize,
     inputs: CompactionStreamInputs<'_>,
     budget: &crate::common::resource_budget::ResourceBudget,
-    tombstone_gc: TombstoneGcPolicy,
+    config: PartitionOutputConfig<'_>,
     abort_check: Option<&dyn Fn() -> bool>,
     output_sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
-    output_size_limit: Option<usize>,
 ) -> MidgeResult<Vec<String>> {
     ensure_compaction_not_aborted(abort_check)?;
     let CompactionStreamInputs {
-        cursors,
+        mut cursors,
         _cursor_reservation,
     } = inputs;
+    if let Some(boundaries) = config.grandparent_overlap.boundary_cursor(budget)? {
+        cursors.push(boundaries);
+    }
+    let mut overlap = config.grandparent_overlap.tracker(budget);
     let mut roller = PartitionRoller::new(
         sst_factory,
         output_dir,
         PartitionIdentity {
-            cf_id,
-            target_level,
-            generation,
+            cf_id: config.cf_id,
+            target_level: config.target_level,
+            generation: config.generation,
             ordinal: 0,
         },
-        target_sst_size,
+        config.target_sst_size,
         budget,
-        output_size_limit,
+        config.output_size_limit,
     )?;
     let mut output_names = Vec::new();
     let mut cleanup = OutputSetCleanup::new(sst_factory.output_fs());
     let mut tombstones = RangeTombstoneTracker::new();
 
     let mut merged = EventMergeIterator::new(cursors, budget.clone(), abort_check)?;
-    if merged.peek_event().is_none() {
-        return Err(crate::common::MidgeError::Internal(
-            "compaction produced no output; inputs were not replaced".to_string(),
-        ));
-    }
+    require_compaction_input(&merged)?;
     let mut seen = 0usize;
     while let Some(first_event) = merged.next_event()? {
         if seen.is_multiple_of(1024) {
@@ -1145,39 +1204,37 @@ pub(crate) fn write_partitioned_compaction_outputs(
         }
         seen = seen.saturating_add(1);
         let event_key = first_event.key().to_vec();
-        let mut key_events = vec![BudgetedEvent::new(first_event, budget)?];
-        while merged
-            .peek_event()
-            .is_some_and(|candidate| candidate.key() == event_key)
-        {
-            let event = merged
-                .next_event()?
-                .expect("peeked compaction event exists");
-            key_events.push(BudgetedEvent::new(event, budget)?);
-            seen = seen.saturating_add(1);
-            if seen.is_multiple_of(1024) {
-                ensure_compaction_not_aborted(abort_check)?;
-            }
-        }
+        let key_events = collect_same_key_events(
+            &mut merged,
+            first_event,
+            &event_key,
+            budget,
+            &mut seen,
+            abort_check,
+        )?;
 
         tombstones.advance_to_key(key_events.iter().map(|event| &event.event));
 
         let selected_version = select_newest_version(key_events.iter().map(|event| &event.event))?;
 
-        let starts = key_events.iter().filter_map(|event| match &event.event {
-            CompactionEvent::RangeStart(tombstone) => Some(tombstone),
-            CompactionEvent::RangeEnd(_) | CompactionEvent::Version(_) => None,
-        });
+        let starts = range_starts(&key_events);
         let selected_version = selected_version.filter(|version| {
             survives_tombstone_gc(
                 version,
                 tombstones.highest_obsolete_cover(),
                 starts.clone(),
-                tombstone_gc,
+                config.tombstone_gc,
             )
         });
 
-        if roller.should_roll(selected_version, starts.clone(), &tombstones, tombstone_gc)? {
+        let has_output = roller.partition_point_count > 0 || tombstones.has_partition_tombstones();
+        if roller.should_roll(
+            selected_version,
+            starts.clone(),
+            &tombstones,
+            config.tombstone_gc,
+        )? || (has_output && overlap.should_roll(&event_key))
+        {
             let (finished, boundary_reservation) =
                 roller.finish_for_roll(&event_key, &tombstones, abort_check)?;
             let partition_emitted = finished.is_some();
@@ -1189,11 +1246,12 @@ pub(crate) fn write_partitioned_compaction_outputs(
                 &mut tombstones,
                 partition_emitted,
             )?;
+            overlap.reset();
         }
 
         tombstones.observe_starts(
             starts,
-            tombstone_gc,
+            config.tombstone_gc,
             budget,
             roller.pending_tombstone_bound(),
         )?;
@@ -1202,11 +1260,34 @@ pub(crate) fn write_partitioned_compaction_outputs(
             roller.write_selected(version)?;
         }
         roller.ensure_current_fits(&tombstones)?;
+        if roller.partition_point_count > 0 || tombstones.has_partition_tombstones() {
+            overlap.observe(&event_key)?;
+        }
     }
 
+    finish_partitioned_outputs(
+        roller,
+        &tombstones,
+        cleanup,
+        output_names,
+        budget,
+        abort_check,
+        output_sink,
+    )
+}
+
+fn finish_partitioned_outputs(
+    roller: PartitionRoller<'_>,
+    tombstones: &RangeTombstoneTracker,
+    mut cleanup: OutputSetCleanup,
+    mut output_names: Vec<String>,
+    budget: &crate::common::resource_budget::ResourceBudget,
+    abort_check: Option<&dyn Fn() -> bool>,
+    output_sink: Option<&crate::compaction::CompactionOutputSink<'_>>,
+) -> MidgeResult<Vec<String>> {
     ensure_compaction_not_aborted(abort_check)?;
     cleanup.record_finished_partition(
-        roller.finish(&tombstones, abort_check)?,
+        roller.finish(tombstones, abort_check)?,
         &mut output_names,
         budget,
         output_sink,
@@ -1214,6 +1295,15 @@ pub(crate) fn write_partitioned_compaction_outputs(
     ensure_compaction_not_aborted(abort_check)?;
     cleanup.disarm();
     Ok(output_names)
+}
+
+fn require_compaction_input(merged: &EventMergeIterator<'_>) -> MidgeResult<()> {
+    if merged.peek_event().is_none() {
+        return Err(crate::common::MidgeError::Internal(
+            "compaction produced no output; inputs were not replaced".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1238,11 +1328,13 @@ impl VersionMergeIterator<'_> {
     fn next_version(&mut self) -> MidgeResult<Option<CompactionVersion>> {
         match self.0.next_event()? {
             Some(CompactionEvent::Version(version)) => Ok(Some(version)),
-            Some(CompactionEvent::RangeEnd(_) | CompactionEvent::RangeStart(_)) => {
-                Err(crate::common::MidgeError::Internal(
-                    "version-only test merge observed a range event".to_string(),
-                ))
-            }
+            Some(
+                CompactionEvent::RangeEnd(_)
+                | CompactionEvent::RangeStart(_)
+                | CompactionEvent::Boundary(_),
+            ) => Err(crate::common::MidgeError::Internal(
+                "version-only test merge observed a range event".to_string(),
+            )),
             None => Ok(None),
         }
     }

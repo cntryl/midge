@@ -315,6 +315,7 @@ fn publish_successor_history(
 fn assert_stale_frontier_retained(
     predecessor: Arc<Engine>,
     prefix_frontier: u64,
+    held_local_wal: &Path,
     evidence: &mut Evidence,
 ) {
     let deadline = Instant::now() + WAIT;
@@ -335,16 +336,26 @@ fn assert_stale_frontier_retained(
     );
     let mut predecessor = Arc::try_unwrap(predecessor)
         .unwrap_or_else(|_| panic!("predecessor client must release engine"));
+    let retained_wal = std::fs::read(held_local_wal).expect("accepted local WAL is retained");
+    assert!(
+        !retained_wal.is_empty(),
+        "held immutable PUT has real WAL bytes"
+    );
     // Fencing preserves the accepted, unpublished WAL obligation. Shutdown
-    // must report that incomplete drain rather than erase it or claim success.
+    // may first exhaust its budget draining an accepted immutable flush.
+    // Prove the retained obligation itself instead of one phase's wording.
     let predecessor_shutdown = predecessor.shutdown(WAIT);
     evidence.details["predecessor_shutdown"] = json!(format!("{predecessor_shutdown:?}"));
     evidence.details["settled_frontier"] = json!(settled.wal_cloud_durable_seq);
     assert!(
-        matches!(&predecessor_shutdown, Err(MidgeError::Timeout(message))
-            if message.contains("0 storage-owned and 1 runtime-owned cloud uploads")),
+        matches!(&predecessor_shutdown, Err(MidgeError::Timeout(_))),
         "fenced dirty runtime must retain its unpublished obligation: {predecessor_shutdown:?}"
     );
+    assert_eq!(
+        std::fs::read(held_local_wal).expect("failed shutdown retains accepted local WAL"),
+        retained_wal
+    );
+    evidence.details["retained_unpublished_local_wal_bytes"] = json!(retained_wal.len());
     drop(predecessor);
 }
 
@@ -492,7 +503,12 @@ fn run_schedule(boundary: Boundary) {
     evidence.details["phase"] = json!("late_predecessor_completion");
     let predecessor_release_index =
         release_predecessor_write(&predecessor_proxy, &held, pending, &mut evidence);
-    assert_stale_frontier_retained(predecessor, prefix_frontier, &mut evidence);
+    let held_local_wal = directory.path().join("predecessor/wal").join(
+        Path::new(&held.path)
+            .file_name()
+            .expect("held WAL file name"),
+    );
+    assert_stale_frontier_retained(predecessor, prefix_frontier, &held_local_wal, &mut evidence);
     assert!(predecessor_proxy.control.observations()[predecessor_release_index..]
         .iter().all(|event| !event.forwarded
             || !matches!(event.method.as_str(), "PUT" | "DELETE")

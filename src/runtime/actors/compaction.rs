@@ -16,12 +16,12 @@ use crate::types::EntryType;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::JoinHandle;
 
 /// The compaction factory is rooted at the SST directory, so compaction names
 /// its inputs, outputs and repair scratch relative to it; outputs land at its
 /// top level.
 const OUTPUT_DIR: &str = "";
+mod moves;
 
 #[cfg(test)]
 #[path = "compaction/publication_tests.rs"]
@@ -38,11 +38,17 @@ mod publication_error_tests;
 #[path = "compaction/publication.rs"]
 pub(crate) mod publication;
 
+mod concurrent;
+#[path = "compaction/jobs.rs"]
+mod jobs;
+#[path = "compaction/pool.rs"]
+mod pool;
+pub use concurrent::CompactionActor;
+
 /// A finished compaction partition, summarized where it was written.
 ///
-/// Summarizing re-reads the partition and CRCs it, so it belongs on the
-/// compaction worker. On the event loop a 64 MiB output would stall every
-/// queued read, write, ack and shutdown behind it.
+/// Filesystem writers supply the finalized bounds and CRC. Capability fallback
+/// verification remains on the worker, as does exact source validation/upload.
 #[derive(Clone)]
 pub(crate) struct PreparedCompactionOutput {
     pub(crate) metadata: crate::runtime::FileMeta,
@@ -54,16 +60,32 @@ pub(crate) struct PreparedCompactionOutput {
 type PreparedCompactionOutputs =
     Arc<parking_lot::Mutex<std::collections::HashMap<String, PreparedCompactionOutput>>>;
 
+fn cleanup_failed_prepared_outputs(
+    prepared: &PreparedCompactionOutputs,
+    storage: Option<&Arc<dyn CompactionStorage>>,
+) {
+    let Some(storage) = storage else {
+        return;
+    };
+    // Never hold the registry mutex across provider work: the event loop can
+    // still inspect the active job while its owned compute task cleans up.
+    let mut outputs = std::mem::take(&mut *prepared.lock());
+    storage.cleanup_failed_outputs(&mut outputs);
+    prepared.lock().extend(outputs);
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct CompactionOutputAdmission<'a> {
     budget: &'a crate::common::resource_budget::ResourceBudget,
     manual_deadline: Option<OperationDeadline>,
+    finalized: Option<&'a crate::sst::traits::FinalizedSst>,
 }
 
 #[derive(Clone, Copy)]
 struct CompactionOutputWork<'a> {
     prepared: &'a PreparedCompactionOutputs,
     manual_deadline: Option<OperationDeadline>,
+    budget: Option<&'a crate::common::resource_budget::ResourceBudget>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -133,9 +155,47 @@ pub(crate) trait CompactionStorage: Send + Sync {
         path: &std::path::Path,
         admission: CompactionOutputAdmission<'_>,
     ) -> MidgeResult<PreparedCompactionOutput>;
+    /// Retain any uncertain residue; only the failed compute task's original
+    /// immutable identities can authorize cleanup of its unpublished outputs.
+    fn cleanup_failed_outputs(
+        &self,
+        outputs: &mut std::collections::HashMap<String, PreparedCompactionOutput>,
+    );
 }
 
 impl CompactionStorage for crate::storage::HybridStorage {
+    fn cleanup_failed_outputs(
+        &self,
+        outputs: &mut std::collections::HashMap<String, PreparedCompactionOutput>,
+    ) {
+        // Cleanup is a separate ownership obligation, not an extension of the
+        // expired caller/publication deadline. The compute task remains joined
+        // before lease release, and every DELETE checks current write authority.
+        let deadline = OperationDeadline::from_budget(self.storage_io_timeout());
+        outputs.retain(|name, output| {
+            let Some(proof) = &output.proof else {
+                return true;
+            };
+            let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.delete_unpublished_object_within(proof, &deadline)
+            }));
+            match attempt {
+                Ok(Ok(())) => false,
+                Ok(Err(error)) => {
+                    tracing::warn!(name, %error, "retaining uncertain failed compaction output");
+                    true
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        name,
+                        "retaining failed compaction output after cleanup panic"
+                    );
+                    true
+                }
+            }
+        });
+    }
+
     fn ephemeral_sst_cache_enabled(&self) -> bool {
         self.ephemeral_sst_cache_enabled()
     }
@@ -229,13 +289,21 @@ fn summarize_output_partition(
 ) -> MidgeResult<(crate::runtime::FileMeta, u64, u32)> {
     check_manual_deadline(admission.manual_deadline, "before output summary")?;
     let fs_path = crate::sst::fs::fs_relative_sst_path(fs, path)?;
-    let summary = crate::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
-        &fs_path.0,
-        Arc::clone(fs),
-        admission.budget.clone(),
-    )?;
+    let (summary, size, crc) = if let Some(finalized) = admission.finalized {
+        let summary = finalized.summary.clone().ok_or_else(|| {
+            MidgeError::Corruption("compaction finalized an empty partition".into())
+        })?;
+        (summary, finalized.size_bytes, finalized.content_crc32c)
+    } else {
+        let summary = crate::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
+            &fs_path.0,
+            Arc::clone(fs),
+            admission.budget.clone(),
+        )?;
+        let (size, crc) = crate::sst::fs::file_identity_with_fs(fs, path)?;
+        (summary, size, crc)
+    };
     check_manual_deadline(admission.manual_deadline, "after output summary")?;
-    let (size, crc) = crate::sst::fs::file_identity_with_fs(fs, path)?;
     check_manual_deadline(admission.manual_deadline, "after output checksum")?;
     if size != summary.size_bytes {
         return Err(MidgeError::Corruption(
@@ -254,6 +322,7 @@ fn summarize_output_partition(
             smallest_seq: Some(summary.smallest_seq),
             largest_seq: Some(summary.largest_seq),
             key_bounds_complete: true,
+            earliest_expiration_millis: summary.earliest_expiration_millis,
         },
         size,
         crc,
@@ -306,7 +375,20 @@ fn record_staged_output_partition(
 }
 
 /// Actor handling SST compaction
-pub struct CompactionActor {
+#[derive(Clone, Copy)]
+enum ActiveCompactionOperation {
+    Rewrite,
+    Repair,
+    Move,
+}
+
+pub struct CompactionJobActor {
+    active_job_id: Option<u64>,
+    completed_outputs: Option<Vec<String>>,
+    completion_emitted: bool,
+    worker_succeeded: Option<bool>,
+    jobs: Arc<jobs::CompactionJobs>,
+    active_job_reservation: Option<jobs::CompactionJobGuard>,
     /// Whether a compaction is currently running
     compaction_running: bool,
     /// SST factory for creating readers/writers
@@ -315,6 +397,7 @@ pub struct CompactionActor {
     compactor: Compactor,
     target_sst_size: usize,
     compaction_memory_limit: usize,
+    memory_budget: Option<crate::common::resource_budget::ResourceBudget>,
     /// Last column family selected for the global compaction slot. Planning
     /// resumes after this ID so a perpetually eligible low ID cannot starve
     /// unrelated families.
@@ -326,7 +409,7 @@ pub struct CompactionActor {
     /// Exact manifest inputs owned by the active operation.
     active_input_ssts: Vec<String>,
     active_input_metadata: Vec<crate::metadata::FileMeta>,
-    active_same_level_repair: bool,
+    active_operation: ActiveCompactionOperation,
     active_source_fragmentation: Option<Vec<u8>>,
     /// Kept through completion so failed publication can charge its residue.
     active_output_generation: Option<(u32, u32, u64)>,
@@ -339,7 +422,8 @@ pub struct CompactionActor {
     /// Cooperative cancellation flag for the active background worker.
     worker_cancel: Arc<AtomicBool>,
     /// Active background worker, joined before runtime shutdown completes.
-    worker_handle: Option<JoinHandle<Vec<String>>>,
+    worker_handle: Option<pool::CompactionTask>,
+    worker_pool: Option<Arc<pool::CompactionPool>>,
     /// Exact terminal worker error transferred out-of-band so the public
     /// runtime message shape remains unchanged.
     worker_error: Arc<std::sync::Mutex<Option<MidgeError>>>,
@@ -348,33 +432,76 @@ pub struct CompactionActor {
     prepared_outputs: PreparedCompactionOutputs,
 }
 
-impl CompactionActor {
-    #[cfg(test)]
-    pub fn new(sst_factory: Arc<dyn SstFactory>) -> Self {
-        Self::new_with_config(sst_factory, LeveledCompactionConfig::default())
+impl CompactionJobActor {
+    /// Conservative excess bytes in levels which can move to a deeper level.
+    /// This is an admission estimate, not a prediction of physical rewrite I/O.
+    pub(crate) fn estimated_pending_bytes(&self, files: &[crate::metadata::FileMeta]) -> u64 {
+        let mut levels = std::collections::BTreeMap::<(u32, u32), (u64, usize)>::new();
+        for file in files {
+            let entry = levels.entry((file.cf_id, file.level)).or_default();
+            entry.0 = entry.0.saturating_add(file.size_bytes);
+            entry.1 = entry.1.saturating_add(1);
+        }
+        let config = &self.compactor.config;
+        levels
+            .into_iter()
+            .fold(0_u64, |total, ((_, level), (bytes, count))| {
+                if usize::try_from(level).unwrap_or(usize::MAX)
+                    >= config.max_levels.saturating_sub(1)
+                {
+                    return total;
+                }
+                let excess = if level == 0 {
+                    if count >= config.l0_file_count_threshold
+                        || bytes > config.l0_compaction_threshold
+                    {
+                        bytes
+                    } else {
+                        0
+                    }
+                } else {
+                    bytes.saturating_sub(
+                        config
+                            .l1_target_size
+                            .saturating_mul(config.level_multiplier.saturating_pow(level - 1)),
+                    )
+                };
+                total.saturating_add(excess)
+            })
     }
 
+    pub(crate) fn max_grandparent_overlap_bytes(&self) -> u64 {
+        self.compactor.config.max_grandparent_overlap_bytes
+    }
     pub fn new_with_config(
         sst_factory: Arc<dyn SstFactory>,
         config: LeveledCompactionConfig,
     ) -> Self {
         Self {
+            active_job_id: None,
+            completed_outputs: None,
+            completion_emitted: false,
+            worker_succeeded: None,
+            jobs: jobs::CompactionJobs::new(1),
+            active_job_reservation: None,
             compaction_running: false,
             sst_factory,
             compactor: Compactor::with_config(config),
             target_sst_size: crate::compaction::DEFAULT_TARGET_SST_SIZE,
             compaction_memory_limit: crate::compaction::DEFAULT_COMPACTION_MEMORY_LIMIT,
+            memory_budget: None,
             last_scheduled_cf: None,
             storage_reservation: None,
             active_input_ssts: Vec::new(),
             active_input_metadata: Vec::new(),
-            active_same_level_repair: false,
+            active_operation: ActiveCompactionOperation::Rewrite,
             active_source_fragmentation: None,
             active_output_generation: None,
             active_started_at: None,
             active_manual_deadline: None,
             worker_cancel: Arc::new(AtomicBool::new(false)),
             worker_handle: None,
+            worker_pool: None,
             worker_error: Arc::new(std::sync::Mutex::new(None)),
             prepared_outputs: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         }
@@ -392,14 +519,6 @@ impl CompactionActor {
     ) {
         self.target_sst_size = target_sst_size.max(1);
         self.compaction_memory_limit = compaction_memory_limit;
-    }
-
-    pub(crate) fn target_sst_size(&self) -> usize {
-        self.target_sst_size
-    }
-
-    pub(crate) fn compaction_memory_limit(&self) -> usize {
-        self.compaction_memory_limit
     }
 
     /// Prefer input bytes within four admitted output targets, returning to
@@ -496,7 +615,9 @@ impl CompactionActor {
                 .compactor
                 .pick_repair_compaction(&state.manifest.files, *cf_id)?
             {
-                return Ok(Some(self.record_scheduled_plan(plan)));
+                if self.jobs.available(&plan, &state.manifest.files) {
+                    return Ok(Some(self.record_scheduled_plan(plan)));
+                }
             }
         }
 
@@ -508,7 +629,9 @@ impl CompactionActor {
                     self.compactor
                         .pick_l0_compaction(&state.manifest.files, *cf_id, true)?
                 {
-                    return Ok(Some(self.record_scheduled_plan(plan)));
+                    if self.jobs.available(&plan, &state.manifest.files) {
+                        return Ok(Some(self.record_scheduled_plan(plan)));
+                    }
                 }
             }
         }
@@ -517,9 +640,12 @@ impl CompactionActor {
         // before creating more downstream debt from ordinary L0 work.
         let mut deepest_plan: Option<crate::compaction::CompactionPlan> = None;
         for cf_id in &cf_ids {
-            let candidate = self
-                .compactor
-                .pick_deepest_inner_compaction(&state.manifest.files, *cf_id)?;
+            let candidate = self.compactor.pick_available_inner_compaction(
+                &state.manifest.files,
+                *cf_id,
+                |file, target| self.jobs.source_available(file, target),
+                |plan| self.jobs.available(plan, &state.manifest.files),
+            )?;
             if candidate.as_ref().is_some_and(|plan| {
                 deepest_plan
                     .as_ref()
@@ -541,11 +667,16 @@ impl CompactionActor {
                 self.compactor
                     .pick_l0_compaction(&state.manifest.files, *cf_id, force_l0)?
             {
-                return Ok(Some(self.record_scheduled_plan(plan)));
+                if self.jobs.available(&plan, &state.manifest.files) {
+                    return Ok(Some(self.record_scheduled_plan(plan)));
+                }
             }
         }
 
         if !respect_background_enabled {
+            if self.jobs.active_count() > 0 {
+                return Ok(None);
+            }
             for cf_id in cf_ids {
                 if self
                     .compactor
@@ -605,7 +736,11 @@ impl CompactionActor {
             }
             plan.target_sst_size = plan.target_sst_size.min(target_limit);
         }
-        self.prepare_compaction(state, &plan, sba)?;
+        let trivial_move = moves::eligible(&plan, &state.manifest.files);
+        self.prepare_compaction(state, &plan, if trivial_move { None } else { sba })?;
+        if trivial_move {
+            self.active_operation = ActiveCompactionOperation::Move;
+        }
         self.active_manual_deadline = manual_deadline;
         if let Err(error) = check_manual_deadline(manual_deadline, "after actor preparation") {
             self.abort_compaction(state, &plan, sba, Some(&error));
@@ -715,6 +850,16 @@ impl CompactionActor {
         &self.active_input_metadata
     }
 
+    pub(crate) fn validate_reserved_inputs(
+        &self,
+        files: &[crate::metadata::FileMeta],
+    ) -> MidgeResult<()> {
+        if let Some(job) = &self.active_job_reservation {
+            job.validate_inputs(files)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn accepted_output_generation(
         &self,
         cf_id: u32,
@@ -780,7 +925,11 @@ impl CompactionActor {
     }
 
     pub(crate) fn active_same_level_repair(&self) -> bool {
-        self.active_same_level_repair
+        matches!(self.active_operation, ActiveCompactionOperation::Repair)
+    }
+
+    pub(crate) fn active_trivial_move(&self) -> bool {
+        matches!(self.active_operation, ActiveCompactionOperation::Move)
     }
 
     pub(crate) fn active_source_fragmentation(&self) -> Option<&[u8]> {
@@ -884,7 +1033,12 @@ impl CompactionActor {
         sba: Option<&Arc<dyn CompactionStorage>>,
     ) {
         self.worker_cancel.store(true, Ordering::Release);
-        let staged_outputs = self.join_worker();
+        let mut staged_outputs = self.join_worker();
+        if self.active_trivial_move() {
+            // A logical move returns its live input identities. It created no
+            // replacement bytes that cancellation could safely unlink.
+            staged_outputs.clear();
+        }
         if !self.compaction_running {
             return;
         }
@@ -923,6 +1077,9 @@ impl CompactionActor {
     }
 
     fn join_worker(&mut self) -> Vec<String> {
+        if let Some(outputs) = self.completed_outputs.take() {
+            return outputs;
+        }
         let Some(handle) = self.worker_handle.take() else {
             return Vec::new();
         };
@@ -962,7 +1119,9 @@ impl CompactionActor {
         }
         self.active_input_ssts.clear();
         self.active_input_metadata.clear();
-        self.active_same_level_repair = false;
+        self.active_job_reservation = None;
+        self.active_job_id = None;
+        self.active_operation = ActiveCompactionOperation::Rewrite;
         self.active_source_fragmentation = None;
         self.active_manual_deadline = None;
         self.active_started_at = None;
@@ -982,6 +1141,10 @@ impl CompactionActor {
         }
 
         self.prepared_outputs.lock().clear();
+        self.completed_outputs = None;
+        self.completion_emitted = false;
+        self.worker_succeeded = None;
+        let job_reservation = self.jobs.reserve(plan, &state.manifest.files)?;
         self.storage_reservation =
             if let Some(hybrid) = sba.filter(|hybrid| hybrid.ephemeral_sst_cache_enabled()) {
                 Some(
@@ -998,6 +1161,7 @@ impl CompactionActor {
             };
 
         self.compaction_running = true;
+        self.active_job_reservation = Some(job_reservation);
         self.active_manual_deadline = None;
         self.active_started_at = Some(std::time::Instant::now());
         self.active_output_generation = Some((plan.cf_id, plan.target_level, plan.output_seq));
@@ -1009,10 +1173,14 @@ impl CompactionActor {
             .filter(|file| plan.input_files.contains(&file.name))
             .cloned()
             .collect();
-        self.active_same_level_repair = matches!(
+        self.active_operation = if matches!(
             plan.purpose,
             crate::compaction::strategy::CompactionPurpose::Repair
-        );
+        ) {
+            ActiveCompactionOperation::Repair
+        } else {
+            ActiveCompactionOperation::Rewrite
+        };
         self.active_source_fragmentation = match &plan.purpose {
             crate::compaction::strategy::CompactionPurpose::Fragment { split_key } => {
                 Some(split_key.clone())
@@ -1081,7 +1249,18 @@ impl CompactionActor {
         input_ssts: &[String],
         storage: Option<&Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<()> {
-        let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1);
+        let cf_id = input_ssts
+            .first()
+            .and_then(|name| {
+                crate::cloud_layout::parse_file_name(name)
+                    .map(|(cf, _, _)| cf)
+                    .or_else(|| {
+                        crate::cloud_layout::parse_compaction_file_name(name)
+                            .map(|(cf, _, _, _)| cf)
+                    })
+            })
+            .unwrap_or(0);
+        let mut plan = crate::compaction::CompactionPlan::new(cf_id, 0, 1);
         plan.input_files = input_ssts.to_vec();
         self.prepare_compaction(state, &plan, storage)
     }
@@ -1091,6 +1270,11 @@ impl CompactionActor {
         plan: &crate::compaction::CompactionPlan,
         sba: Option<&Arc<dyn CompactionStorage>>,
     ) -> MidgeResult<Vec<String>> {
+        if self.active_trivial_move() {
+            let mut names = plan.input_files.clone();
+            names.sort_unstable();
+            return Ok(names);
+        }
         let output_ssts = Self::execute_with_storage(
             plan,
             self.compactor.config.max_compaction_input_files,
@@ -1101,8 +1285,10 @@ impl CompactionActor {
             CompactionOutputWork {
                 prepared: &self.prepared_outputs,
                 manual_deadline: self.active_manual_deadline,
+                budget: self.memory_budget.as_ref(),
             },
-        )?;
+        )
+        .inspect_err(|_| cleanup_failed_prepared_outputs(&self.prepared_outputs, sba))?;
 
         tracing::info!(
             input_count = plan.input_files.len(),
@@ -1125,7 +1311,8 @@ impl CompactionActor {
         let output_fs = factory.output_fs();
         let sink = |name: &str,
                     path: &std::path::Path,
-                    budget: &crate::common::resource_budget::ResourceBudget| {
+                    budget: &crate::common::resource_budget::ResourceBudget,
+                    finalized: Option<&crate::sst::traits::FinalizedSst>| {
             record_staged_output_partition(
                 storage.map(Arc::as_ref),
                 &output_fs,
@@ -1137,6 +1324,7 @@ impl CompactionActor {
                 CompactionOutputAdmission {
                     budget,
                     manual_deadline: work.manual_deadline,
+                    finalized,
                 },
             )
         };
@@ -1158,8 +1346,10 @@ impl CompactionActor {
             crate::compaction::CompactionResources {
                 target_sst_size: target,
                 source_fan_in,
-                budget: storage
-                    .and_then(|storage| storage.maintenance_memory())
+                budget: work
+                    .budget
+                    .cloned()
+                    .or_else(|| storage.and_then(|storage| storage.maintenance_memory()))
                     .unwrap_or_else(|| {
                         crate::common::resource_budget::ResourceBudget::new(
                             plan.compaction_memory_limit,
@@ -1200,14 +1390,22 @@ impl CompactionActor {
         let worker_cancel = Arc::clone(&self.worker_cancel);
         let worker_error = Arc::clone(&self.worker_error);
         let prepared_outputs = Arc::clone(&self.prepared_outputs);
+        let memory_budget = self.memory_budget.clone();
+        let trivial_move = self.active_trivial_move();
         let manual_deadline = self.active_manual_deadline;
         let source_fan_in = self.compactor.config.max_compaction_input_files;
         store_compaction_worker_error(&worker_error, None);
         let job_id = next_request_id()?;
+        self.active_job_id = Some(job_id);
 
-        let worker = std::thread::Builder::new()
-            .name(format!("midge-compaction-{job_id}"))
-            .spawn(move || {
+        let pool = if let Some(pool) = &self.worker_pool {
+            Arc::clone(pool)
+        } else {
+            let pool = pool::CompactionPool::new(1)?;
+            self.worker_pool = Some(Arc::clone(&pool));
+            pool
+        };
+        let worker = pool.submit(move || {
             let _span = tracing::debug_span!(
                 "compaction_job",
                 job_id,
@@ -1217,16 +1415,19 @@ impl CompactionActor {
             )
             .entered();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::failpoints::fail_point!("midge::compaction::before_compute");
                 let abort_check = || worker_cancel.load(Ordering::Acquire);
-                let result = Self::execute_with_storage(
+                let result = if trivial_move {
+                    let mut names = plan_clone.input_files.clone(); names.sort_unstable(); Ok(names)
+                } else { Self::execute_with_storage(
                     &plan_clone,
                     source_fan_in,
                     sst_factory.as_ref(),
                     output_dir,
                     Some(&abort_check),
                     hybrid_storage.as_ref(),
-                    CompactionOutputWork { prepared: &prepared_outputs, manual_deadline },
-                );
+                    CompactionOutputWork { prepared: &prepared_outputs, manual_deadline, budget: memory_budget.as_ref() },
+                ) };
 
                 let (output_ssts, error) = match result {
                     Ok(v) => (v, None),
@@ -1259,12 +1460,14 @@ impl CompactionActor {
                 }
             };
             let succeeded = error.is_none();
+            if !succeeded {
+                cleanup_failed_prepared_outputs(&prepared_outputs, hybrid_storage.as_ref());
+            }
             store_compaction_worker_error(&worker_error, error.as_ref());
 
             Self::notify_worker_completion(&tx, &plan_clone, input_files, &output_ssts, succeeded, job_id);
             output_ssts
-        })
-            .map_err(|error| MidgeError::Internal(format!("spawn compaction worker: {error}")))?;
+        })?;
         self.worker_handle = Some(worker);
 
         Ok(Vec::new())
@@ -1278,14 +1481,7 @@ impl CompactionActor {
         succeeded: bool,
         job_id: u64,
     ) {
-        let Ok(request_id) = next_request_id() else {
-            tracing::error!(
-                component = "compaction",
-                job_id,
-                "compaction worker could not allocate completion request ID"
-            );
-            return;
-        };
+        let request_id = job_id;
         if tx
             .try_send(RuntimeMsg::CompactionComplete {
                 request_id,
@@ -1388,6 +1584,7 @@ impl CompactionActor {
                 CompactionOutputAdmission {
                     budget: &budget,
                     manual_deadline: None,
+                    finalized: None,
                 },
             )?;
             prepared.insert(name.clone(), output);
@@ -1431,7 +1628,7 @@ fn store_compaction_worker_error(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = error.map(MidgeError::replay);
 }
 
-impl Drop for CompactionActor {
+impl Drop for CompactionJobActor {
     fn drop(&mut self) {
         self.worker_cancel.store(true, Ordering::Release);
         let _ = self.join_worker();
@@ -1453,7 +1650,7 @@ mod tests {
         // Act
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| {
-                CompactionActor::notify_worker_completion(&tx, &plan, Vec::new(), &[], false, 7);
+                CompactionJobActor::notify_worker_completion(&tx, &plan, Vec::new(), &[], false, 7);
                 completed_tx.send(()).expect("report worker completion");
             });
 

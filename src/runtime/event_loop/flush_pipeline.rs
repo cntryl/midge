@@ -10,12 +10,17 @@ use crate::runtime::RuntimeResponse;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod mirror_retry;
 mod publication;
 mod scheduling;
 mod settlement;
+pub(super) use mirror_retry::PendingFlushMirror;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "failpoints"))]
+mod retry_order_tests;
 
 #[cfg(test)]
 #[path = "flush_pipeline/accounting_tests.rs"]

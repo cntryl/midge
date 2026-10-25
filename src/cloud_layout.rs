@@ -85,6 +85,17 @@ pub(crate) fn file_name(cf_id: u32, level: u32, sequence: u64) -> String {
     format!("{cf_id:06}_{level:02}_{sequence:0SST_SEQUENCE_WIDTH$}.sst")
 }
 
+/// Parse only a canonical, complete flush object identity.
+pub(crate) fn parse_file_name(name: &str) -> Option<(u32, u32, u64)> {
+    let mut parts = name.strip_suffix(".sst")?.split('_');
+    let parsed = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    (parts.next().is_none() && file_name(parsed.0, parsed.1, parsed.2) == name).then_some(parsed)
+}
+
 /// Format a deterministic compaction partition filename. One compaction
 /// generation owns every zero-based partition ordinal in its replacement set.
 #[must_use]

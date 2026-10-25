@@ -59,6 +59,9 @@ pub enum CloudError {
     /// The response did not match the expected protocol: malformed body,
     /// unexpected status, or a required header was missing.
     Protocol(String),
+    /// A local read reservation refused admission before the backend request
+    /// was submitted. This is not a provider quota or an uncertain I/O result.
+    LocalReadAdmission(String),
 }
 
 impl CloudError {
@@ -152,6 +155,7 @@ impl std::fmt::Display for CloudError {
             Self::Transport(msg) => write!(f, "transport error: {msg}"),
             Self::Timeout(msg) => write!(f, "timeout: {msg}"),
             Self::Protocol(msg) => write!(f, "protocol error: {msg}"),
+            Self::LocalReadAdmission(msg) => write!(f, "local read admission: {msg}"),
         }
     }
 }
@@ -166,6 +170,8 @@ pub(crate) fn contextualize_operation_error(
     let message = format!("{context}: {error}");
     if deadline.is_expired() || error.is_timeout() {
         crate::common::MidgeError::Timeout(message)
+    } else if matches!(error, CloudError::LocalReadAdmission(_)) {
+        crate::common::MidgeError::ResourceLimit(message)
     } else {
         crate::common::MidgeError::Internal(message)
     }

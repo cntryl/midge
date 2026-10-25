@@ -7,7 +7,7 @@
 
 pub(crate) mod cloud_io;
 mod cloud_recovery;
-#[cfg(feature = "internal-testing")]
+#[cfg(any(test, feature = "internal-testing"))]
 #[doc(hidden)]
 pub(crate) mod recovery_progress_fixture;
 pub(crate) mod streaming_wal_fs;

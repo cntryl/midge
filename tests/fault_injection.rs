@@ -4,6 +4,9 @@
 
 mod common;
 
+#[path = "fault_injection/maintenance_concurrency.rs"]
+mod maintenance_concurrency;
+
 #[path = "fault_injection/wal_authority_regressions.rs"]
 mod wal_authority_regressions;
 
@@ -1120,7 +1123,9 @@ mod failure_injection {
         level: u32,
         size_bytes: u64,
         cf_id: u32,
+        #[serde(serialize_with = "crate::common::metadata_fixtures::serialize_key_bound")]
         smallest_key: Option<Vec<u8>>,
+        #[serde(serialize_with = "crate::common::metadata_fixtures::serialize_key_bound")]
         largest_key: Option<Vec<u8>>,
         smallest_seq: Option<u64>,
         largest_seq: Option<u64>,
@@ -1137,7 +1142,9 @@ mod failure_injection {
         level: u32,
         size_bytes: u64,
         cf_id: u32,
+        #[serde(serialize_with = "crate::common::metadata_fixtures::serialize_key_bound")]
         smallest_key: Option<Vec<u8>>,
+        #[serde(serialize_with = "crate::common::metadata_fixtures::serialize_key_bound")]
         largest_key: Option<Vec<u8>>,
         smallest_seq: Option<u64>,
         largest_seq: Option<u64>,
@@ -1264,7 +1271,7 @@ mod failure_injection {
         };
         std::fs::write(
             db_path.join("manifest.json"),
-            serde_json::to_string_pretty(&empty_manifest).expect("serialize empty manifest"),
+            crate::common::metadata_fixtures::manifest(&empty_manifest),
         )
         .expect("write empty manifest");
         std::fs::write(db_path.join("manifest.journal"), b"").expect("truncate manifest journal");
@@ -1284,7 +1291,7 @@ mod failure_injection {
         }];
         std::fs::write(
             db_path.join("intent_log.json"),
-            serde_json::to_string_pretty(&replay_intent).expect("serialize replay intent"),
+            crate::common::metadata_fixtures::intents(&replay_intent),
         )
         .expect("write replay intent log");
 
@@ -1368,7 +1375,7 @@ mod failure_injection {
         };
         std::fs::write(
             db_path.join("manifest.json"),
-            serde_json::to_string_pretty(&empty_manifest).expect("serialize empty manifest"),
+            crate::common::metadata_fixtures::manifest(&empty_manifest),
         )
         .expect("write empty manifest");
         std::fs::write(db_path.join("manifest.journal"), b"").expect("truncate manifest journal");
@@ -1388,7 +1395,7 @@ mod failure_injection {
         }];
         std::fs::write(
             db_path.join("intent_log.json"),
-            serde_json::to_string_pretty(&replay_intent).expect("serialize replay intent"),
+            crate::common::metadata_fixtures::intents(&replay_intent),
         )
         .expect("write replay intent log");
 
@@ -1535,6 +1542,7 @@ mod failure_injection {
                 tx.commit(WriteOptions::sync())
                     .expect("commit compaction seed");
             }
+            write_compaction_overlap_anchor(&engine, &cf, batch, WriteOptions::sync());
             engine.flush_cf(&cf).expect("flush compaction seed");
         }
 
@@ -1573,6 +1581,7 @@ mod failure_injection {
         let reopened_cf = default_cf(&reopened);
 
         // Assert
+        assert_compaction_overlap_anchor(&reopened, &reopened_cf, 5);
         for batch in 0..6 {
             for index in 0..25 {
                 let key = format!("cmp-b{batch}-k{index:02}");
@@ -1684,6 +1693,10 @@ mod failure_injection {
         );
         shutdown_engine(reopened);
 
+        assert_partitioned_compaction_restart(db_path);
+    }
+
+    fn assert_partitioned_compaction_restart(db_path: &Path) {
         let final_reopen = open_local_engine_with_target(db_path, 128);
         let final_cf = default_cf(&final_reopen);
         assert_compaction_batches_visible(&final_reopen, &final_cf, "cmp-recover", 4, 25);
@@ -1959,6 +1972,7 @@ mod failure_injection {
                 .expect("put compaction seed");
             tx.commit(WriteOptions::best_effort())
                 .expect("commit compaction seed");
+            write_compaction_overlap_anchor(&engine, &cf, batch, WriteOptions::best_effort());
             engine.flush_cf(&cf).expect("flush compaction seed");
         }
         let scenario = fail::FailScenario::setup();
@@ -1980,6 +1994,7 @@ mod failure_injection {
         // Assert
         assert!(matches!(fenced_retry, Err(MidgeError::Fenced(_))));
         let reopened_cf = default_cf(&reopened);
+        assert_compaction_overlap_anchor(&reopened, &reopened_cf, 3);
         for batch in 0..4 {
             let key = format!("ambiguous-sync-{batch}");
             assert_visible(&reopened, &reopened_cf, key.as_bytes(), b"value");
@@ -2094,6 +2109,7 @@ mod failure_injection {
             .expect("put compaction seed");
             tx.commit(WriteOptions::cloud_async())
                 .expect("commit compaction seed");
+            write_compaction_overlap_anchor(&engine, &cf, batch, WriteOptions::cloud_async());
             engine.flush_cf(&cf).expect("flush compaction seed");
         }
         let cloud_root = db_path.join("cloud_store");
@@ -2135,6 +2151,7 @@ mod failure_injection {
         assert_eq!(manifest_sst_file_names(&reopened), initial_remote);
         assert_eq!(sst_file_names(&cloud_root), failed_remote);
         let reopened_cf = default_cf(&reopened);
+        assert_compaction_overlap_anchor(&reopened, &reopened_cf, 3);
         for batch in 0..4 {
             let key = format!("partial-mirror-{batch}");
             assert_visible(
@@ -2171,6 +2188,7 @@ mod failure_injection {
                 .expect("put compaction seed");
             tx.commit(WriteOptions::cloud_async())
                 .expect("commit compaction seed");
+            write_compaction_overlap_anchor(&engine, &cf, batch, WriteOptions::cloud_async());
             engine.flush_cf(&cf).expect("flush compaction seed");
         }
         let cloud_root = db_path.join("cloud_store");
@@ -2244,6 +2262,7 @@ mod failure_injection {
                 .expect("put compaction seed");
             tx.commit(WriteOptions::cloud_async())
                 .expect("commit compaction seed");
+            write_compaction_overlap_anchor(&engine, &cf, batch, WriteOptions::cloud_async());
             engine.flush_cf(&cf).expect("flush compaction seed");
         }
         let cloud_root = db_path.join("cloud_store");
@@ -2382,23 +2401,12 @@ mod failure_injection {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let temp_dir = TempDir::new().expect("temp dir");
         let db_path = temp_dir.path();
-        let engine = open_local_engine(db_path);
+        // A complete partition batch must cross the real journal-byte policy
+        // boundary; a small compaction no longer checkpoints on every job.
+        let engine = open_local_engine_with_target(db_path, 64);
         let cf = default_cf(&engine);
 
-        for batch in 0..6 {
-            for index in 0..25 {
-                let key = format!("checkpoint-compaction-b{batch}-k{index:02}");
-                let value = format!("value-b{batch}-k{index:02}");
-                let mut tx = engine
-                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                    .expect("begin batch tx");
-                tx.put(key.into_bytes(), value.into_bytes(), None)
-                    .expect("put best-effort compaction seed");
-                tx.commit(WriteOptions::best_effort())
-                    .expect("commit best-effort compaction seed");
-            }
-            engine.flush_cf(&cf).expect("flush compaction seed");
-        }
+        seed_checkpoint_compaction_batches(&engine, &cf);
 
         let initial_layout = engine
             .metrics()
@@ -2414,6 +2422,8 @@ mod failure_injection {
 
         // Act
         let scenario = fail::FailScenario::setup();
+        let checkpoint_before = std::fs::read(db_path.join("manifest.snapshot.json"))
+            .expect("read original compaction checkpoint");
         fail::cfg(
             "midge::manifest::inject_no_space_on_checkpoint_save",
             "return",
@@ -2422,6 +2432,18 @@ mod failure_injection {
         engine
             .compact_all()
             .expect_err("compact_all must report the checkpoint save failure");
+        assert_eq!(
+            std::fs::read(db_path.join("manifest.snapshot.json")).unwrap(),
+            checkpoint_before,
+            "failed pre-rename staging must retain the previous checkpoint"
+        );
+        assert!(
+            std::fs::metadata(db_path.join("manifest.journal"))
+                .unwrap()
+                .len()
+                >= 16_384,
+            "the durable compaction batch must reach the actual byte-triggered checkpoint"
+        );
         assert_eq!(
             engine
                 .metrics()
@@ -2440,13 +2462,8 @@ mod failure_injection {
         let reopened_cf = default_cf(&reopened);
 
         // Assert
-        for batch in 0..6 {
-            for index in 0..25 {
-                let key = format!("checkpoint-compaction-b{batch}-k{index:02}");
-                let value = format!("value-b{batch}-k{index:02}");
-                assert_visible(&reopened, &reopened_cf, key.as_bytes(), value.as_bytes());
-            }
-        }
+        assert_compaction_overlap_anchor(&reopened, &reopened_cf, 5);
+        assert_compaction_batches_visible(&reopened, &reopened_cf, "checkpoint-compaction", 6, 25);
 
         let recovered_layout = reopened
             .metrics()
@@ -2610,6 +2627,52 @@ mod failure_injection {
                 .expect("put seed value");
             tx.commit(write_options).expect("commit seed value");
         }
+    }
+
+    const COMPACTION_OVERLAP_ANCHOR: &[u8] = b"compaction-overlap-anchor";
+
+    fn seed_checkpoint_compaction_batches(engine: &Engine, cf: &cntryl_midge::ColumnFamilyHandle) {
+        for batch in 0..6 {
+            for index in 0..25 {
+                let key = format!("checkpoint-compaction-b{batch}-k{index:02}");
+                let value = format!("value-b{batch}-k{index:02}");
+                let mut tx = engine
+                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                    .expect("begin batch tx");
+                tx.put(key.into_bytes(), value.into_bytes(), None)
+                    .expect("put best-effort compaction seed");
+                tx.commit(WriteOptions::best_effort())
+                    .expect("commit best-effort compaction seed");
+            }
+            write_compaction_overlap_anchor(engine, cf, batch, WriteOptions::best_effort());
+            engine.flush_cf(cf).expect("flush compaction seed");
+        }
+    }
+
+    fn write_compaction_overlap_anchor(
+        engine: &Engine,
+        cf: &cntryl_midge::ColumnFamilyHandle,
+        batch: usize,
+        options: WriteOptions,
+    ) {
+        let mut tx = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin overlapping compaction seed");
+        tx.put(
+            COMPACTION_OVERLAP_ANCHOR.to_vec(),
+            batch.to_be_bytes().to_vec(),
+            None,
+        )
+        .expect("put shared compaction anchor");
+        tx.commit(options).expect("commit shared compaction anchor");
+    }
+
+    fn assert_compaction_overlap_anchor(
+        engine: &Engine,
+        cf: &cntryl_midge::ColumnFamilyHandle,
+        batch: usize,
+    ) {
+        assert_visible(engine, cf, COMPACTION_OVERLAP_ANCHOR, &batch.to_be_bytes());
     }
 
     fn seed_compaction_batches(
@@ -3645,9 +3708,10 @@ mod chaos_real {
         expire_crashed_process_lease(db_path);
         let committed = read_committed_records(db_path);
         assert_eq!(committed.len(), 16);
-        assert!(!fs::read(db_path.join("manifest.journal"))
-            .unwrap()
-            .is_empty());
+        assert_ne!(
+            fs::read(db_path.join("manifest.journal")).unwrap(),
+            Vec::<u8>::new()
+        );
         // Every tracked write was already flushed. Removing WAL in this
         // private fixture prevents WAL replay from masking missing SST authority.
         fs::remove_dir_all(db_path.join("wal")).expect("remove flushed fixture WAL");
@@ -3684,9 +3748,10 @@ mod chaos_real {
                 .flush_cf(&cf)
                 .expect("acknowledged flush publication");
         }
-        assert!(!fs::read(db_path.join("manifest.journal"))
-            .unwrap()
-            .is_empty());
+        assert_ne!(
+            fs::read(db_path.join("manifest.journal")).unwrap(),
+            Vec::<u8>::new()
+        );
         crash::abort_at_trigger(
             "local_deferred_checkpoint",
             "manual::after_deferred_flush_ack",
@@ -3709,7 +3774,7 @@ mod chaos_real {
 
         // Assert: WAL replay cannot mask missing SST or frontier authority.
         assert_eq!(committed.len(), 2);
-        assert!(!journal.is_empty());
+        assert_ne!(journal, Vec::<u8>::new());
         assert!(journal.len() < 20 * 1024);
         assert_committed_records_visible(&engine, &committed);
         let layout = engine.metrics().get_storage_layout().unwrap();
@@ -3736,7 +3801,7 @@ mod chaos_real {
         // that checkpointing stays below the declared five-percent gate.
         let mut value = vec![0_u8; 128 * 1024];
         let mut generator = 0x1234_5678_u32;
-        for chunk in value.chunks_exact_mut(4) {
+        for chunk in value.as_chunks_mut::<4>().0 {
             generator ^= generator << 13;
             generator ^= generator >> 17;
             generator ^= generator << 5;
@@ -3756,9 +3821,10 @@ mod chaos_real {
             }
             engine.flush_cf(&cf).expect("acknowledged cheap flush");
             if round == 0 {
-                assert!(fs::read(db_path.join("manifest.journal"))
-                    .unwrap()
-                    .is_empty());
+                assert_eq!(
+                    fs::read(db_path.join("manifest.journal")).unwrap(),
+                    Vec::<u8>::new()
+                );
                 let snapshot_bytes = fs::metadata(db_path.join("manifest.snapshot.json"))
                     .unwrap()
                     .len();
@@ -3775,9 +3841,10 @@ mod chaos_real {
                 );
             }
         }
-        assert!(!fs::read(db_path.join("manifest.journal"))
-            .unwrap()
-            .is_empty());
+        assert_ne!(
+            fs::read(db_path.join("manifest.journal")).unwrap(),
+            Vec::<u8>::new()
+        );
         crash::abort_at_trigger(
             "local_forced_checkpoint_failure",
             "manual::after_forced_flush_ack",
@@ -4664,9 +4731,14 @@ mod chaos_compaction {
             .expect("collect scan")
             .len();
         assert_eq!(
+            tx.get(b"compaction-overlap-anchor")
+                .expect("read shared anchor"),
+            Some(Bytes::from_static(b"compaction_value"))
+        );
+        assert_eq!(
             count,
-            committed.len(),
-            "all {} committed keys must still be accessible after 2nd compaction",
+            committed.len() + 1,
+            "all {} original committed keys plus the shared anchor must survive the 2nd compaction",
             committed.len()
         );
     }
@@ -4823,6 +4895,12 @@ mod chaos_compaction {
                     .write_all(format!("{json}\n").as_bytes())
                     .expect("write commit record");
             }
+            tx.put(
+                b"compaction-overlap-anchor".to_vec(),
+                b"compaction_value".to_vec(),
+                None,
+            )
+            .expect("put shared physical-compaction anchor");
             tx.commit(WriteOptions::buffered()).expect("commit batch");
             engine.flush_cf(&default_cf).expect("flush batch");
         }
@@ -5599,7 +5677,15 @@ mod shutdown_orchestration {
         fail::remove(BLOCKED_UPLOAD_FAILPOINT);
         fail::remove(CLOUD_DRAIN_TIMEOUT_FAILPOINT);
         scenario.teardown();
-        let mut reopened = Engine::open(reopen_options(&db_path, Arc::clone(&lease_loss_calls)))
+
+        assert_released_shutdown_recovers_acknowledged_value(&db_path, &lease_loss_calls);
+    }
+
+    fn assert_released_shutdown_recovers_acknowledged_value(
+        db_path: &Path,
+        lease_loss_calls: &Arc<AtomicUsize>,
+    ) {
+        let mut reopened = Engine::open(reopen_options(db_path, Arc::clone(lease_loss_calls)))
             .expect("reopen only after blocked runtime has exited");
         let default_cf = reopened
             .get_column_family("default")
@@ -5743,6 +5829,7 @@ mod shutdown_orchestration {
                 wal_seal_min_segment_bytes: usize::MAX,
                 wal_seal_max_flush_delay: Duration::from_mins(1),
                 wal_seal_max_pending_writes: 1,
+                ..CloudWritePolicy::default()
             })
             .shutdown_cloud_drain_timeout_for_testing(shutdown_cloud_drain_timeout)
             .on_lease_loss(move || {
@@ -7380,6 +7467,7 @@ mod cloud_crash_recovery {
             wal_seal_min_segment_bytes: usize::MAX,
             wal_seal_max_flush_delay: Duration::from_hours(1),
             wal_seal_max_pending_writes: 1,
+            ..CloudWritePolicy::default()
         }
     }
 
@@ -7389,6 +7477,7 @@ mod cloud_crash_recovery {
             wal_seal_min_segment_bytes: usize::MAX,
             wal_seal_max_flush_delay: Duration::from_hours(1),
             wal_seal_max_pending_writes: usize::MAX,
+            ..CloudWritePolicy::default()
         }
     }
 
@@ -7506,18 +7595,19 @@ mod cloud_crash_recovery {
     /// Simulated cloud keeps its lease document in the shared object store.
     const CLOUD_LEASE: &str = "cloud_store/midge_primary_lease.json";
 
-    /// Seed what a holder that crashed before committing metadata leaves in
-    /// the shared store: the active authority sentinel and its lease.
+    /// Seed the actual acquisition prefix before pointer claim/activation:
+    /// a pending authority sentinel and a version4 lease with no descriptor.
+    /// Recovery must claim the separate binary pointer through production code.
     fn write_crashed_cloud_lease(db_path: &Path) {
         std::fs::create_dir_all(db_path.join("cloud_store/metadata")).expect("create shared store");
         std::fs::write(
             db_path.join("cloud_store/metadata/authority-initialized.v1"),
-            "midge cloud metadata authority v2 initialized\n",
+            "midge cloud metadata authority v3 pending\n",
         )
         .expect("write authority sentinel");
         std::fs::write(
             db_path.join(CLOUD_LEASE),
-            "lease_version: 3\nfencing_epoch: 1\nholder: crashed@host\nowner: lease-token\nacquired: 2026-07-26T11:00:00Z\nexpires: 2026-07-26T11:00:30Z\nmetadata: null\n",
+            "lease_version: 4\nfencing_epoch: 1\nholder: crashed@host\nowner: lease-token\nacquired: 2026-07-26T11:00:00Z\nexpires: 2026-07-26T11:00:30Z\n",
         )
         .expect("write lease record");
     }
@@ -7735,7 +7825,7 @@ mod cloud_persistence_hardening {
             let mirror = WalPublicationCatalog::decode(&mirror).unwrap();
             assert_eq!(primary.fencing_epoch(), before.fencing_epoch());
             assert_eq!(mirror.fencing_epoch(), before.fencing_epoch());
-            assert!(primary.entries().is_empty());
+            assert_eq!(primary.entries(), []);
             assert_eq!(mirror.entries(), before.entries());
         });
         fail::remove("midge::cloud::after_catalog_primary_before_mirror");
@@ -7989,7 +8079,10 @@ mod cloud_persistence_hardening {
             .collect::<Vec<_>>();
         let default_cf = default_cf(&engine);
         engine.flush_cf(&default_cf).expect("flush covered value");
-        assert!(wait_for_remote_wal_count(&remote_wal_dir, 0).is_empty());
+        assert_eq!(
+            wait_for_remote_wal_count(&remote_wal_dir, 0),
+            Vec::<PathBuf>::new()
+        );
         engine
             .shutdown(Duration::from_secs(5))
             .expect("shutdown before restoring interrupted prune residue");
@@ -8855,6 +8948,12 @@ mod cloud_remote_sst_compaction_recovery {
                 .expect("transaction");
             tx.put(key.to_vec(), b"preserved".to_vec(), None)
                 .expect("put");
+            tx.put(
+                b"compaction-overlap-anchor".to_vec(),
+                b"preserved".to_vec(),
+                None,
+            )
+            .expect("put shared physical-compaction anchor");
             tx.commit(WriteOptions::cloud_strict())
                 .expect("cloud commit");
             engine.flush_cf(&cf).expect("flush");
@@ -8892,7 +8991,11 @@ mod cloud_remote_sst_compaction_recovery {
         let tx = reopened
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("read transaction");
-        for key in [b"first".as_slice(), b"second".as_slice()] {
+        for key in [
+            b"first".as_slice(),
+            b"second".as_slice(),
+            b"compaction-overlap-anchor".as_slice(),
+        ] {
             assert_eq!(
                 tx.get(key).expect("read preserved input").as_deref(),
                 Some(b"preserved".as_slice())
@@ -8926,6 +9029,12 @@ mod cloud_remote_sst_compaction_recovery {
                 .expect("transaction");
             tx.put(key.to_vec(), b"preserved".to_vec(), None)
                 .expect("put");
+            tx.put(
+                b"compaction-overlap-anchor".to_vec(),
+                b"preserved".to_vec(),
+                None,
+            )
+            .expect("put shared physical-compaction anchor");
             tx.commit(WriteOptions::cloud_strict())
                 .expect("cloud commit");
             engine.flush_cf(&cf).expect("flush");
@@ -8976,7 +9085,11 @@ mod cloud_remote_sst_compaction_recovery {
         let tx = reopened
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
             .expect("read transaction");
-        for key in [b"first".as_slice(), b"second".as_slice()] {
+        for key in [
+            b"first".as_slice(),
+            b"second".as_slice(),
+            b"compaction-overlap-anchor".as_slice(),
+        ] {
             assert_eq!(
                 tx.get(key).expect("read after retry").as_deref(),
                 Some(b"preserved".as_slice())
@@ -9974,6 +10087,7 @@ mod external_adopter_smoke {
         let db_path = temp_dir.path();
         let mut engine = cntryl_midge::Engine::open(
             cntryl_midge::OpenOptions::local(db_path)
+                .background_compaction(false)
                 .build()
                 .expect("build options"),
         )
@@ -9992,6 +10106,19 @@ mod external_adopter_smoke {
                 tx.commit(WriteOptions::sync())
                     .expect("commit compaction seed");
             }
+            let mut anchor = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin overlapping compaction seed");
+            anchor
+                .put(
+                    b"compaction-overlap-anchor".to_vec(),
+                    b"overlapping-value".to_vec(),
+                    None,
+                )
+                .expect("put shared physical-compaction anchor");
+            anchor
+                .commit(WriteOptions::sync())
+                .expect("commit shared physical-compaction anchor");
             engine.flush_cf(&cf).expect("flush compaction seed");
         }
 
@@ -10023,6 +10150,11 @@ mod external_adopter_smoke {
             .expect("begin read tx");
 
         // Assert
+        assert_eq!(
+            tx.get(b"compaction-overlap-anchor")
+                .expect("get shared anchor"),
+            Some(Bytes::from_static(b"overlapping-value"))
+        );
         assert_eq!(
             tx.get(b"cmp-b0-k00").expect("get oldest compacted key"),
             Some(Bytes::from_static(b"value-0-0"))
@@ -10389,7 +10521,7 @@ mod observability_api {
             serde_json::from_slice(&output.stdout).expect("parse healthy report");
         assert_eq!(report["schema_version"], 1);
         assert_eq!(report["health"], "Healthy");
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, Vec::<u8>::new());
     }
 
     #[test]
@@ -10419,7 +10551,7 @@ mod observability_api {
                 .is_some_and(|message| message.contains("does not exist")),
             "unexpected structured error: {error}"
         );
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, Vec::<u8>::new());
     }
 
     #[cfg(unix)]
@@ -10458,7 +10590,7 @@ mod observability_api {
                 .is_some_and(|message| message.contains("Is a directory")),
             "unexpected inaccessible-storage error: {error}"
         );
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, Vec::<u8>::new());
     }
 
     #[test]
@@ -10479,7 +10611,7 @@ mod observability_api {
         assert_eq!(error["schema_version"], 1);
         assert_eq!(error["status"], "error");
         assert_eq!(error["error_kind"], "usage");
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, Vec::<u8>::new());
     }
 
     #[test]
@@ -10495,7 +10627,7 @@ mod observability_api {
 
         // Assert
         assert_eq!(output.status.code(), Some(2));
-        assert!(output.stdout.is_empty());
+        assert_eq!(output.stdout, Vec::<u8>::new());
         let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
         assert!(
             stderr.contains("unknown flag '--Json'"),
@@ -10553,7 +10685,7 @@ mod observability_api {
         assert_eq!(error["schema_version"], 1);
         assert_eq!(error["status"], "error");
         assert_eq!(error["error_kind"], "corruption");
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, Vec::<u8>::new());
     }
 
     #[test]
@@ -11687,18 +11819,17 @@ mod storage_verification_hardening {
     }
 
     fn write_empty_storage_fixture(db_path: &Path) {
-        std::fs::write(db_path.join("FORMAT"), "midge-format-version=8\n")
+        std::fs::write(db_path.join("FORMAT"), "midge-format-version=9\n")
             .expect("write format marker");
         std::fs::write(
             db_path.join("manifest.json"),
-            serde_json::to_vec_pretty(&json!({
+            crate::common::metadata_fixtures::manifest(&json!({
                 "flushed_through": [{"cf_id": 0, "through_sequence": 0}],
                 "files": [],
                 "column_families": [],
                 "next_sst_seqs": {},
                 "edit_checkpoint_id": 0
-            }))
-            .expect("serialize empty manifest"),
+            })),
         )
         .expect("write empty manifest");
     }
@@ -11735,7 +11866,7 @@ mod storage_verification_hardening {
         write_empty_storage_fixture(temp_dir.path());
         std::fs::write(
             temp_dir.path().join("intent_log.json"),
-            serde_json::to_vec_pretty(&json!([
+            crate::common::metadata_fixtures::intents(&json!([
                 {
                     "SstAdded": {
                         "file_meta": {
@@ -11748,8 +11879,7 @@ mod storage_verification_hardening {
                         }
                     }
                 }
-            ]))
-            .expect("serialize unsafe intent"),
+            ])),
         )
         .expect("write unsafe intent");
 
@@ -11771,15 +11901,14 @@ mod storage_verification_hardening {
         write_empty_storage_fixture(temp_dir.path());
         std::fs::write(
             temp_dir.path().join("intent_log.json"),
-            serde_json::to_vec_pretty(&json!([
+            crate::common::metadata_fixtures::intents(&json!([
                 {
                     "CompactionApplied": {
                         "removed": ["/tmp/escape.sst"],
                         "added": []
                     }
                 }
-            ]))
-            .expect("serialize unsafe intent"),
+            ])),
         )
         .expect("write unsafe intent");
 
@@ -11801,15 +11930,14 @@ mod storage_verification_hardening {
         write_empty_storage_fixture(temp_dir.path());
         std::fs::write(
             temp_dir.path().join("intent_log.json"),
-            serde_json::to_vec_pretty(&json!([
+            crate::common::metadata_fixtures::intents(&json!([
                 {
                     "WalSynced": {
                         "segment_id": 7,
                         "seqno": 11
                     }
                 }
-            ]))
-            .expect("serialize recovery intent"),
+            ])),
         )
         .expect("write recovery intent");
 

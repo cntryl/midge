@@ -1,56 +1,25 @@
-//! SST entry encoding/decoding
-//!
-//! Packed, zero-copy SST *data block* entry format.
-//!
-//! This is intentionally NOT TLV.
-//! TLV is reserved for block-level metadata.
-//!
-//! V4 entry layout (little-endian):
-//!
-//! [`shared_prefix_len`: u16]
-//! [`key_delta_len`:   u16]
-//! [`value_len`:       u32]
-//! [sequence:        u64]
-//! [`entry_type`:      u8]
-//! [`expiration_present`: u8] // exactly 0 or 1
-//! [`expiration_millis`: u64]
-//! [`key_delta` bytes]
-//! [value bytes?]
-//!
-//! Entry length is fully deterministic from the header.
-//! Decode is zero-copy and allocation-free.
-//!
-//! V4 supports an extended key-delta length form. When
-//! `key_delta_len == u16::MAX` and `value_len == u32::MAX`, the expiration field is
-//! followed by `[extended_key_delta_len: u32][extended_value_len: u32]` before the key bytes.
+//! V5 SST entries: canonical unsigned varint lengths, fixed sequence and one
+//! flags byte. Expiration occupies eight bytes only when present. The data
+//! block's restart trailer is defined in `data_block`.
 
 use crate::common::{MidgeError, MidgeResult};
 use crate::types::EntryType;
-use bytes::{BufMut, BytesMut};
 
-const EXTENDED_KEY_DELTA_LEN_MARKER: u16 = u16::MAX;
-const EXTENDED_VALUE_LEN_MARKER: u32 = u32::MAX;
-const V4_BASE_HEADER_LEN: usize = 26;
-const V4_EXTENDED_LENGTH_LEN: usize = 8;
+/// Prefixes remain bounded by the writer's existing u16 key-prefix contract.
+pub(crate) const MAX_SHARED_PREFIX_LEN: usize = 65_535;
+const EXPIRATION_PRESENT: u8 = 0x80;
+const ENTRY_TYPE_MASK: u8 = 0x03;
 
-/// Maximum key-delta length that can be stored directly in the legacy inline field.
-pub const MAX_INLINE_ENTRY_KEY_DELTA_LEN: usize = 65_535;
-
-/// Validate the worst-case entry size at a block restart, before admission.
-/// Prefix compression cannot be relied on: flush and compaction may put any
-/// entry first in a block. TTL bytes are already included in the V4 header.
 pub(crate) fn validate_entry_size(key_len: usize, value_len: usize) -> MidgeResult<()> {
-    let _ = checked_v4_lengths(key_len, value_len)?;
-    let header = V4_BASE_HEADER_LEN
-        + if key_len > MAX_INLINE_ENTRY_KEY_DELTA_LEN {
-            V4_EXTENDED_LENGTH_LEN
-        } else {
-            0
-        };
-    let size = header
+    let (key, value) = checked_lengths(key_len, value_len)?;
+    // A complete single-entry block includes worst-case TTL and its restart
+    // word/count. Admission cannot depend on a helpful compression prefix.
+    let header = 1 + varint_len(key) + varint_len(value) + 8 + 1 + 8 + 8;
+    if header
         .checked_add(key_len)
-        .and_then(|size| size.checked_add(value_len));
-    if size.is_none_or(|size| size > crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE) {
+        .and_then(|n| n.checked_add(value_len))
+        .is_none_or(|size| size > crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE)
+    {
         return Err(MidgeError::ResourceLimit(format!(
             "SST entry with {key_len} key bytes and {value_len} value bytes exceeds the 64 MiB decoded block limit"
         )));
@@ -58,12 +27,23 @@ pub(crate) fn validate_entry_size(key_len: usize, value_len: usize) -> MidgeResu
     Ok(())
 }
 
-/// Encode a single SST entry into `buf`.
-///
-/// This appends bytes to the provided buffer (block builder style).
+#[derive(Debug, Clone, Copy)]
+pub struct EntryView<'a> {
+    pub shared_len: u16,
+    pub key_delta: &'a [u8],
+    pub value: Option<&'a [u8]>,
+    pub value_offset: Option<usize>,
+    pub sequence: u64,
+    pub entry_type: EntryType,
+    pub expiration: Option<u64>,
+}
+
 #[cfg(any(test, feature = "internal-testing"))]
-#[inline]
 #[must_use]
+/// Encode one non-expiring entry for internal fixtures.
+///
+/// # Panics
+/// Panics if either byte slice exceeds the V5 u32 extent.
 pub fn encode(
     key_delta: &[u8],
     shared_len: u16,
@@ -71,248 +51,180 @@ pub fn encode(
     seq: u64,
     entry_type: EntryType,
 ) -> Vec<u8> {
-    encode_v4(key_delta, shared_len, value, seq, entry_type, None)
-        .expect("legacy-sized SST entry must fit the V4 length fields")
+    encode_v5(key_delta, shared_len, value, seq, entry_type, None)
+        .expect("SST entry fits V5 fields")
 }
 
-/// Zero-copy decoded SST entry view
-#[derive(Debug, Clone, Copy)]
-pub struct EntryView<'a> {
-    pub shared_len: u16,
-    /// Borrowed slice for key delta
-    pub key_delta: &'a [u8],
-    /// Borrowed slice for value (if present)
-    pub value: Option<&'a [u8]>,
-    /// Absolute offset of value in the original buffer (if present)
-    pub value_offset: Option<usize>,
-    pub sequence: u64,
-    pub entry_type: EntryType,
-    pub expiration: Option<u64>,
-}
-
-/// Decode a single entry starting at `offset`.
-///
-/// This is allocation-free and returns a borrowed view.
+/// Encode one entry; restart entries use shared length zero.
 ///
 /// # Errors
-///
-/// Returns an error if the entry is truncated or malformed.
+/// Returns a resource limit error for an unrepresentable length or extent.
+pub fn encode_v5(
+    key_delta: &[u8],
+    shared_len: u16,
+    value: Option<&[u8]>,
+    sequence: u64,
+    entry_type: EntryType,
+    expiration: Option<u64>,
+) -> MidgeResult<Vec<u8>> {
+    let (key_len, value_len) = checked_lengths(key_delta.len(), value.map_or(0, <[u8]>::len))?;
+    let capacity = varint_len(u32::from(shared_len))
+        + varint_len(key_len)
+        + varint_len(value_len)
+        + 8
+        + 1
+        + expiration.map_or(0, |_| 8);
+    let capacity = capacity
+        .checked_add(key_delta.len())
+        .and_then(|n| n.checked_add(value_len as usize))
+        .ok_or_else(|| {
+            MidgeError::ResourceLimit("encoded SST entry length exceeds address space".into())
+        })?;
+    let mut encoded = Vec::with_capacity(capacity);
+    put_varint(u32::from(shared_len), &mut encoded);
+    put_varint(key_len, &mut encoded);
+    put_varint(value_len, &mut encoded);
+    encoded.extend_from_slice(&sequence.to_le_bytes());
+    encoded.push(
+        entry_type as u8
+            | if expiration.is_some() {
+                EXPIRATION_PRESENT
+            } else {
+                0
+            },
+    );
+    if let Some(expiration) = expiration {
+        encoded.extend_from_slice(&expiration.to_le_bytes());
+    }
+    encoded.extend_from_slice(key_delta);
+    encoded.extend_from_slice(value.unwrap_or_default());
+    Ok(encoded)
+}
+
 #[cfg(any(test, feature = "internal-testing"))]
-pub fn decode(data: &[u8], offset: usize) -> MidgeResult<(EntryView<'_>, usize)> {
-    decode_with_format(data, offset, crate::sst::types::SST_FORMAT_V4)
-}
-
-/// Decode a single entry using the SST format version.
+/// Decode one current-format entry.
 ///
 /// # Errors
+/// Returns an error for an invalid extent, varint, type or flags.
+pub fn decode(data: &[u8], offset: usize) -> MidgeResult<(EntryView<'_>, usize)> {
+    decode_with_format(data, offset, crate::sst::types::SST_FORMAT_V5)
+}
+
+/// Decode one entry without allocation. V4 is an intentional pre-1.0 break.
 ///
-/// Returns an error if the entry is truncated, malformed, or the format version is unsupported.
+/// # Errors
+/// Returns compatibility errors for unsupported formats/types, and corruption
+/// for malformed lengths, flags or truncated extents.
 pub fn decode_with_format(
     data: &[u8],
     offset: usize,
     format_version: u32,
 ) -> MidgeResult<(EntryView<'_>, usize)> {
-    if format_version != crate::sst::types::SST_FORMAT_V4 {
+    if format_version != crate::sst::types::SST_FORMAT_V5 {
         return Err(MidgeError::CompatibilityError(format!(
-            "unsupported SST entry format version {format_version}; this build requires V{}",
-            crate::sst::types::SST_FORMAT_V4
+            "unsupported SST entry format version {format_version}; this build requires V5"
         )));
     }
-    decode_v4(data, offset)
-}
-
-fn decode_v4(data: &[u8], offset: usize) -> MidgeResult<(EntryView<'_>, usize)> {
-    if offset >= data.len() {
-        return Err(MidgeError::Corruption("Offset beyond data length".into()));
+    let mut cursor = offset;
+    let shared_len = u16::try_from(take_varint(data, &mut cursor)?)
+        .map_err(|_| MidgeError::Corruption("SST shared prefix exceeds u16".into()))?;
+    let key_len = take_varint(data, &mut cursor)? as usize;
+    let value_len = take_varint(data, &mut cursor)? as usize;
+    let sequence = u64::from_le_bytes(
+        take(data, &mut cursor, 8)?
+            .try_into()
+            .expect("exact sequence"),
+    );
+    let flags = take(data, &mut cursor, 1)?[0];
+    if flags & !(EXPIRATION_PRESENT | ENTRY_TYPE_MASK) != 0 {
+        return Err(MidgeError::Corruption("invalid SST entry flags".into()));
     }
-
-    let mut p = offset;
-
-    if data.len() < p + V4_BASE_HEADER_LEN {
-        return Err(MidgeError::Corruption("Truncated SST entry header".into()));
-    }
-
-    let shared = u16::from_le_bytes([data[p], data[p + 1]]);
-    let raw_key_len = u16::from_le_bytes([data[p + 2], data[p + 3]]);
-    let raw_val_len = u32::from_le_bytes([data[p + 4], data[p + 5], data[p + 6], data[p + 7]]);
-    let seq = u64::from_le_bytes([
-        data[p + 8],
-        data[p + 9],
-        data[p + 10],
-        data[p + 11],
-        data[p + 12],
-        data[p + 13],
-        data[p + 14],
-        data[p + 15],
-    ]);
-    let raw_entry_type = data[p + 16];
-    let entry_type = EntryType::try_from(raw_entry_type)?;
-    let expiration = decode_v4_expiration(data, p)?;
-
-    p += V4_BASE_HEADER_LEN;
-
-    let (key_len, val_len) = if raw_key_len == EXTENDED_KEY_DELTA_LEN_MARKER
-        && raw_val_len == EXTENDED_VALUE_LEN_MARKER
-    {
-        if data.len() < p + V4_EXTENDED_LENGTH_LEN {
-            return Err(MidgeError::Corruption(
-                "Truncated SST extended entry header".into(),
-            ));
-        }
-        let extended_key_len = u32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]]);
-        let extended_val_len =
-            u32::from_le_bytes([data[p + 4], data[p + 5], data[p + 6], data[p + 7]]);
-        p += V4_EXTENDED_LENGTH_LEN;
-        (
-            usize::try_from(extended_key_len).unwrap_or(usize::MAX),
-            usize::try_from(extended_val_len).unwrap_or(usize::MAX),
-        )
+    let entry_type = EntryType::try_from(flags & ENTRY_TYPE_MASK)?;
+    let expiration = if flags & EXPIRATION_PRESENT != 0 {
+        Some(u64::from_le_bytes(
+            take(data, &mut cursor, 8)?
+                .try_into()
+                .expect("exact expiration"),
+        ))
     } else {
-        (
-            usize::from(raw_key_len),
-            usize::try_from(raw_val_len).unwrap_or(usize::MAX),
-        )
+        None
     };
-
-    let key_end = checked_entry_end(p, key_len, "key")?;
-    if data.len() < key_end {
-        return Err(MidgeError::Corruption(format!(
-            "Not enough data for key: need {}, have {}",
-            key_len,
-            data.len().saturating_sub(p)
-        )));
+    let key_delta = take(data, &mut cursor, key_len)?;
+    let value_offset = cursor;
+    let bytes = take(data, &mut cursor, value_len)?;
+    if entry_type == EntryType::Delete && !bytes.is_empty() {
+        return Err(MidgeError::Corruption(
+            "SST tombstone carries value bytes".into(),
+        ));
     }
-
-    let value_end = checked_entry_end(key_end, val_len, "value")?;
-    if data.len() < value_end {
-        return Err(MidgeError::Corruption(format!(
-            "Not enough data for value: need {}, have {}",
-            val_len,
-            data.len().saturating_sub(key_end)
-        )));
-    }
-
-    let key = &data[p..key_end];
-    p = key_end;
-
-    let (value_offset, value) = decode_value(data, p, value_end, val_len, entry_type);
-    p = value_end;
-
+    let present = entry_type != EntryType::Delete;
     Ok((
         EntryView {
-            shared_len: shared,
-            key_delta: key,
-            value,
-            value_offset,
-            sequence: seq,
+            shared_len,
+            key_delta,
+            value: present.then_some(bytes),
+            value_offset: present.then_some(value_offset),
+            sequence,
             entry_type,
             expiration,
         },
-        p,
+        cursor,
     ))
 }
 
-fn decode_v4_expiration(data: &[u8], header_start: usize) -> MidgeResult<Option<u64>> {
-    let expiration_present = data[header_start + 17];
-    if expiration_present > 1 {
-        return Err(MidgeError::Corruption(format!(
-            "invalid SST expiration-presence byte {expiration_present}"
-        )));
-    }
-    let expiration_start = header_start + 18;
-    let expiration_raw = u64::from_le_bytes(
-        data[expiration_start..expiration_start + 8]
-            .try_into()
-            .expect("V4 header length checked before TTL decode"),
-    );
-    if expiration_present == 0 && expiration_raw != 0 {
-        return Err(MidgeError::Corruption(
-            "SST entry without expiration has nonzero expiration bytes".into(),
-        ));
-    }
-    Ok((expiration_present == 1).then_some(expiration_raw))
-}
-
-fn checked_entry_end(start: usize, len: usize, label: &str) -> MidgeResult<usize> {
-    start
-        .checked_add(len)
-        .ok_or_else(|| MidgeError::Corruption(format!("SST entry {label} length overflows block")))
-}
-
-fn decode_value(
-    data: &[u8],
-    value_start: usize,
-    value_end: usize,
-    value_len: usize,
-    entry_type: EntryType,
-) -> (Option<usize>, Option<&[u8]>) {
-    if value_len > 0 || !matches!(entry_type, EntryType::Delete) {
-        (Some(value_start), Some(&data[value_start..value_end]))
-    } else {
-        (None, None)
-    }
-}
-
-/// Encode a V4 SST entry with explicit persisted expiration presence.
-#[inline]
-pub fn encode_v4(
-    key_delta: &[u8],
-    shared_len: u16,
-    value: Option<&[u8]>,
-    seq: u64,
-    entry_type: EntryType,
-    expiration: Option<u64>,
-) -> MidgeResult<Vec<u8>> {
-    let val_len = value.map_or(0, <[u8]>::len);
-    let (encoded_key_len, encoded_val_len) = checked_v4_lengths(key_delta.len(), val_len)?;
-    let use_extended_lengths = key_delta.len() > MAX_INLINE_ENTRY_KEY_DELTA_LEN
-        || (key_delta.len() == MAX_INLINE_ENTRY_KEY_DELTA_LEN
-            && encoded_val_len == EXTENDED_VALUE_LEN_MARKER);
-    let header = if use_extended_lengths {
-        V4_BASE_HEADER_LEN + V4_EXTENDED_LENGTH_LEN
-    } else {
-        V4_BASE_HEADER_LEN
-    };
-    let key_len = key_delta.len();
-    let cap = header
-        .checked_add(key_len)
-        .and_then(|s| s.checked_add(val_len))
-        .ok_or_else(|| {
-            MidgeError::ResourceLimit("encoded SST entry length exceeds address space".to_string())
-        })?;
-
-    let mut buf = BytesMut::with_capacity(cap);
-    let val = value.unwrap_or(&[]);
-
-    buf.put_u16_le(shared_len);
-    if use_extended_lengths {
-        buf.put_u16_le(EXTENDED_KEY_DELTA_LEN_MARKER);
-        buf.put_u32_le(EXTENDED_VALUE_LEN_MARKER);
-    } else {
-        buf.put_u16_le(u16::try_from(key_delta.len()).unwrap_or(EXTENDED_KEY_DELTA_LEN_MARKER));
-        buf.put_u32_le(encoded_val_len);
-    }
-    buf.put_u64_le(seq);
-    buf.put_u8(entry_type as u8);
-    buf.put_u8(u8::from(expiration.is_some()));
-    buf.put_u64_le(expiration.unwrap_or(0));
-    if use_extended_lengths {
-        buf.put_u32_le(encoded_key_len);
-        buf.put_u32_le(encoded_val_len);
-    }
-    buf.extend_from_slice(key_delta);
-    buf.extend_from_slice(val);
-    Ok(buf.to_vec())
-}
-
-fn checked_v4_lengths(key_len: usize, value_len: usize) -> MidgeResult<(u32, u32)> {
-    let encoded_key_len = u32::try_from(key_len).map_err(|_| {
-        MidgeError::ResourceLimit("SST key delta exceeds the 4 GiB format limit".to_string())
+fn checked_lengths(key: usize, value: usize) -> MidgeResult<(u32, u32)> {
+    let key = u32::try_from(key).map_err(|_| {
+        MidgeError::ResourceLimit("SST key delta exceeds 4 GiB format limit".into())
     })?;
-    let encoded_value_len = u32::try_from(value_len).map_err(|_| {
-        MidgeError::ResourceLimit("SST value exceeds the 4 GiB format limit".to_string())
-    })?;
-    Ok((encoded_key_len, encoded_value_len))
+    let value = u32::try_from(value)
+        .map_err(|_| MidgeError::ResourceLimit("SST value exceeds 4 GiB format limit".into()))?;
+    Ok((key, value))
+}
+
+fn varint_len(mut value: u32) -> usize {
+    let mut len = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        len += 1;
+    }
+    len
+}
+
+fn put_varint(mut value: u32, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value.to_le_bytes()[0] & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    out.push(value.to_le_bytes()[0]);
+}
+
+fn take_varint(data: &[u8], cursor: &mut usize) -> MidgeResult<u32> {
+    let mut result = 0_u32;
+    for index in 0..5 {
+        let byte = take(data, cursor, 1)?[0];
+        if index == 4 && byte > 0x0f {
+            return Err(MidgeError::Corruption("SST varint overflows u32".into()));
+        }
+        result |= u32::from(byte & 0x7f) << (index * 7);
+        if byte & 0x80 == 0 {
+            if index > 0 && byte == 0 {
+                return Err(MidgeError::Corruption("noncanonical SST varint".into()));
+            }
+            return Ok(result);
+        }
+    }
+    Err(MidgeError::Corruption("unterminated SST varint".into()))
+}
+
+fn take<'a>(data: &'a [u8], cursor: &mut usize, length: usize) -> MidgeResult<&'a [u8]> {
+    let end = cursor
+        .checked_add(length)
+        .ok_or_else(|| MidgeError::Corruption("SST entry extent overflow".into()))?;
+    let slice = data
+        .get(*cursor..end)
+        .ok_or_else(|| MidgeError::Corruption("truncated SST entry".into()))?;
+    *cursor = end;
+    Ok(slice)
 }
 
 #[cfg(test)]
@@ -320,161 +232,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn should_reject_merge_entry_when_decoding_sst_entry() {
+    fn should_roundtrip_compact_entries_when_optional_fields_extend_the_header() {
         // Arrange
-        let encoded = encode_v4(b"key", 0, Some(b"operand"), 1, EntryType::Merge, None)
-            .expect("merge entry should encode");
-        // Act
-        let decoded = decode(&encoded, 0);
-        let converted = EntryType::try_from(3_u8);
-        // Assert
-        assert!(matches!(decoded, Err(MidgeError::CompatibilityError(_))));
-        assert!(matches!(converted, Err(MidgeError::CompatibilityError(_))));
-    }
-
-    #[test]
-    fn should_bound_range_admission_by_complete_encoded_size() {
-        use crate::sst::types::validate_range_tombstone_size;
-        // Arrange
-        let limit = crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
-        let half = limit / 2;
-        // Act
-        let accepted = validate_range_tombstone_size(half, half - 20);
-        let rejected = validate_range_tombstone_size(half, half - 19);
-        let oversized_end = validate_range_tombstone_size(0, limit - 33);
-        // Assert
-        assert!(accepted.is_ok());
-        assert!(matches!(rejected, Err(MidgeError::ResourceLimit(_))));
-        assert!(matches!(oversized_end, Err(MidgeError::ResourceLimit(_))));
-        assert!(validate_range_tombstone_size(usize::MAX, 1).is_err());
-    }
-
-    #[test]
-    fn should_admit_only_entries_within_decoded_limit_including_extended_headers() {
-        // Arrange
-        let limit = crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
-        for key_len in [0, 3, 65_535, 65_536] {
-            let header = if key_len > 65_535 { 34 } else { 26 };
-            let value_len = limit - header - key_len;
-            // Act
-            let accepted = validate_entry_size(key_len, value_len);
-            let rejected = validate_entry_size(key_len, value_len + 1);
-            // Assert
-            assert!(accepted.is_ok());
-            assert!(matches!(rejected, Err(MidgeError::ResourceLimit(_))));
+        for expiration in [None, Some(0), Some(u64::MAX)] {
+            for key_len in [0, 3, 65_536] {
+                let key = vec![b'k'; key_len];
+                let encoded = encode_v5(
+                    &key,
+                    42,
+                    Some(b"value"),
+                    u64::MAX,
+                    EntryType::Put,
+                    expiration,
+                )
+                .unwrap();
+                // Act
+                let (entry, end) = decode(&encoded, 0).unwrap();
+                // Assert
+                assert_eq!(entry.key_delta, key);
+                assert_eq!(entry.shared_len, 42);
+                assert_eq!(entry.value, Some(b"value".as_slice()));
+                assert_eq!(entry.expiration, expiration);
+                assert_eq!(entry.sequence, u64::MAX);
+                assert_eq!(end, encoded.len());
+            }
         }
+    }
+
+    #[test]
+    fn should_reject_malformed_compact_entry_headers() {
+        // Arrange
+        let canonical = encode_v5(b"k", 0, Some(b"v"), 1, EntryType::Put, None).unwrap();
+        let mut flags = canonical.clone();
+        flags[11] = 0x40;
+        let mut expiration = canonical.clone();
+        expiration[11] = EXPIRATION_PRESENT;
+        // Act
+        for data in [
+            &[0x80, 0][..],
+            &[0xff, 0xff, 0xff, 0xff, 0xff],
+            &flags,
+            &expiration,
+        ] {
+            // Assert: every malformed header is rejected by the decoder.
+            assert!(decode(data, 0).is_err());
+        }
+        assert!(decode(&canonical, usize::MAX).is_err());
+        assert!(matches!(
+            decode_with_format(&canonical, 0, 4),
+            Err(MidgeError::CompatibilityError(_))
+        ));
+    }
+
+    #[test]
+    fn should_save_fourteen_header_bytes_when_small_entry_has_no_expiration() {
+        // Arrange
+        let key = b"k";
+        let value = b"v";
+        // Act
+        let encoded = encode_v5(key, 0, Some(value), 1, EntryType::Put, None).unwrap();
+        // Assert: three lengths, sequence and flags = twelve bytes (V4:26).
+        assert_eq!(encoded.len(), 12 + 2);
         assert!(validate_entry_size(usize::MAX, 1).is_err());
         assert!(validate_entry_size(1, usize::MAX).is_err());
-    }
-
-    #[test]
-    fn should_round_trip_maximum_expiration_value_given_explicit_sst_ttl_presence() {
-        // Arrange
-        let encoded = encode_v4(
-            b"ttl-key",
-            0,
-            Some(b"ttl-value"),
-            7,
-            EntryType::Put,
-            Some(u64::MAX),
-        )
-        .expect("encode SST entry");
-
-        // Act
-        let (decoded, consumed) = decode_with_format(&encoded, 0, crate::sst::types::SST_FORMAT_V4)
-            .expect("decode SST entry");
-
-        // Assert
-        assert_eq!(consumed, encoded.len());
-        assert_eq!(decoded.expiration, Some(u64::MAX));
-    }
-
-    #[test]
-    fn should_reject_unknown_expiration_presence_given_v4_entry() {
-        // Arrange
-        let mut encoded = encode_v4(b"ttl-key", 0, Some(b"value"), 7, EntryType::Put, None)
-            .expect("encode SST entry");
-        encoded[17] = 2;
-
-        // Act
-        let result = decode(&encoded, 0);
-
-        // Assert
-        assert!(matches!(result, Err(MidgeError::Corruption(_))));
-    }
-
-    #[test]
-    fn should_reject_noncanonical_expiration_bytes_given_absent_v4_ttl() {
-        // Arrange
-        let mut encoded = encode_v4(b"ttl-key", 0, Some(b"value"), 7, EntryType::Put, None)
-            .expect("encode SST entry");
-        encoded[18] = 1;
-
-        // Act
-        let result = decode(&encoded, 0);
-
-        // Assert
-        assert!(matches!(result, Err(MidgeError::Corruption(_))));
-    }
-
-    #[test]
-    fn should_roundtrip_encode_decode_key_delta() {
-        let encoded = encode(b"mykey", 0u16, None, 0, EntryType::Put);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-        assert_eq!(entry.key_delta, b"mykey");
-    }
-
-    #[test]
-    fn should_roundtrip_encode_decode_with_value() {
-        let encoded = encode(b"key", 0u16, Some(b"myvalue"), 0, EntryType::Put);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-        assert_eq!(entry.value, Some(b"myvalue".as_slice()));
-    }
-
-    #[test]
-    fn should_roundtrip_encode_decode_sequence() {
-        let encoded = encode(b"key", 0u16, None, 12345, EntryType::Put);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-        assert_eq!(entry.sequence, 12345);
-    }
-
-    #[test]
-    fn should_roundtrip_encode_decode_entry_type_delete() {
-        let encoded = encode(b"key", 0u16, None, 0, EntryType::Delete);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-        assert_eq!(entry.entry_type, EntryType::Delete);
-    }
-
-    #[test]
-    fn should_roundtrip_encode_decode_shared_prefix() {
-        let encoded = encode(b"suffix", 42u16, Some(b"val"), 0, EntryType::Put);
-        let (entry, _) = decode(&encoded, 0).unwrap();
-        assert_eq!(entry.shared_len, 42u16);
-    }
-
-    #[test]
-    fn should_return_next_entry_offset() {
-        // Arrange
-        let encoded = encode(b"key", 0u16, Some(b"val"), 42, EntryType::Put);
-
-        // Act
-        let (_, next_offset) = decode(&encoded, 0).unwrap();
-
-        // Assert
-        assert_eq!(next_offset, encoded.len());
-    }
-
-    #[test]
-    fn should_reject_unrepresentable_v4_lengths_before_encoding() {
-        // Arrange
-        let too_large = usize::try_from(u64::from(u32::MAX) + 1).unwrap_or(usize::MAX);
-
-        // Act
-        let key_result = checked_v4_lengths(too_large, 0);
-        let value_result = checked_v4_lengths(0, too_large);
-
-        // Assert
-        assert!(key_result.is_err());
-        assert!(value_result.is_err());
     }
 }

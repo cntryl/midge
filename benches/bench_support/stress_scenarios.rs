@@ -2417,7 +2417,7 @@ fn workload_value(key: &str) -> Vec<u8> {
     value
 }
 
-fn unique_namespace(scenario: &str) -> String {
+pub(super) fn unique_namespace(scenario: &str) -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time after Unix epoch")
@@ -2430,7 +2430,7 @@ fn unique_namespace(scenario: &str) -> String {
     format!("midge-{simple}-{}-{timestamp}", std::process::id())
 }
 
-fn ensure_namespace(protocol: &str, namespace: &str) -> Result<(), String> {
+pub(super) fn ensure_namespace(protocol: &str, namespace: &str) -> Result<(), String> {
     match protocol {
         "s3" => signed_s3_namespace(namespace),
         "azure" => signed_azure_namespace(namespace),
@@ -2889,21 +2889,6 @@ pub(super) fn run_journal_recovery_watchdog_fixture(ctx: &mut StressContext) {
     artifacts.enter_phase("complete", "actual-manifest-journal-replay", &progress);
     artifacts.complete = true;
     artifacts.persist("passed");
-}
-
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "Only the watchdog integration target calls this fixture"
-)]
-pub(super) fn run_recovery_listener_fixture(ctx: &mut StressContext) {
-    let progress = ctx.progress_handle();
-    let listener_units = ctx.measure("recovery listener isolation", || {
-        let before = progress.completed_units();
-        recovery_progress::assert_listener_isolation(&progress);
-        progress.completed_units() - before
-    });
-    ctx.metadata("fixture_listener_progress_units", listener_units);
 }
 
 #[cfg(test)]

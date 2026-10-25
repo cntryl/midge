@@ -953,6 +953,7 @@ impl RuntimeStorageMaterialization {
         scope: Option<&DeadlineScope>,
     ) -> crate::runtime::RuntimeConfig {
         crate::runtime::RuntimeConfig {
+            write_backpressure: opts.write_backpressure().clone(),
             ttl_clock: opts.ttl_clock(),
             wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
             storage_io_timeout: opts.storage_io_timeout(),
@@ -967,6 +968,8 @@ impl RuntimeStorageMaterialization {
             block_cache_policy: opts.block_cache_policy_type(),
             target_sst_size: opts.target_sst_size(),
             compaction_memory_limit: opts.compaction_memory_pool_size(),
+            compaction_concurrency: opts.compaction_concurrency(),
+            flush_concurrency: opts.flush_concurrency(),
             flush_memory_limit: opts.flush_memory_limit(),
             l0_compaction_trigger: opts.l0_compaction_trigger(),
             background_compaction: opts.background_compaction_enabled(),
@@ -1122,15 +1125,24 @@ impl RuntimeStorageMaterialization {
         let (tx, rx) = crossbeam::channel::bounded::<crate::storage::StorageEvent>(
             crate::storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
         );
-        let hybrid_storage = Arc::new(
-            crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+        let retry = opts.cloud_write_policy_value().transient_retry;
+        for storage in [wal_storage, sst_storage, metadata_storage] {
+            storage.set_retry_policy(retry);
+        }
+        let mut hybrid_storage =
+            crate::storage::HybridStorage::new_with_class_stores_upload_policy_and_event_sender(
                 wal_backend,
                 sst_backend,
                 control_backend,
                 tx,
                 opts.storage_io_timeout(),
-            ),
-        );
+                opts.cloud_write_policy_value(),
+            );
+        hybrid_storage.set_immutable_retry_policy(retry);
+        let hybrid_storage = Arc::new(hybrid_storage);
+        hybrid_storage
+            .configure_object_inventories(wal_storage.clone(), sst_storage.clone())
+            .expect("fresh provider storage has no inventory owner");
         // The remote block cache holds its share outside this ledger (#938).
         let budget = opts.local_storage_budget_bytes();
         hybrid_storage.enable_ephemeral_sst_cache(budget - remote_block_cache_share(budget));
@@ -1272,6 +1284,7 @@ impl RuntimeStorageMaterialization {
         let batch_config = opts.wal_batch_config().unwrap_or_default();
 
         let runtime_config = crate::runtime::RuntimeConfig {
+            write_backpressure: opts.write_backpressure().clone(),
             ttl_clock: opts.ttl_clock(),
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             wal_batch_config: batch_config,
@@ -1287,6 +1300,8 @@ impl RuntimeStorageMaterialization {
             block_cache_policy: opts.block_cache_policy_type(),
             target_sst_size: opts.target_sst_size(),
             compaction_memory_limit: opts.compaction_memory_pool_size(),
+            compaction_concurrency: opts.compaction_concurrency(),
+            flush_concurrency: opts.flush_concurrency(),
             flush_memory_limit: opts.flush_memory_limit(),
             l0_compaction_trigger: opts.l0_compaction_trigger(),
             background_compaction: opts.background_compaction_enabled(),

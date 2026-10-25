@@ -138,7 +138,8 @@ fn should_remove_partial_output_through_injected_fs_when_compaction_aborts() -> 
     plan.add_test_source("input.sst");
     let sink = |_name: &str,
                 _path: &std::path::Path,
-                _budget: &crate::common::resource_budget::ResourceBudget| {
+                _budget: &crate::common::resource_budget::ResourceBudget,
+                _summary: Option<&crate::sst::traits::FinalizedSst>| {
         Err(crate::common::MidgeError::Aborted(
             "injected after first output".into(),
         ))

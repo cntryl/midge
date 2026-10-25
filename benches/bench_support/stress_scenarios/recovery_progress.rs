@@ -13,7 +13,7 @@ use tracing_subscriber::layer::{Context, Layer};
 const WORK_TARGET: &str = "midge::recovery::work";
 
 struct ActiveRecovery {
-    progress: ProgressHandle,
+    progress: Arc<dyn Fn() + Send + Sync>,
     phase: Arc<AtomicU64>,
     generation: u64,
 }
@@ -35,9 +35,18 @@ impl RecoveryScope {
         phase: &Arc<AtomicU64>,
         phase_name: &str,
     ) -> Self {
+        let progress = progress.clone();
+        Self::enter_with_completion(Arc::new(move || progress.advance()), phase, phase_name)
+    }
+
+    pub(super) fn enter_with_completion(
+        progress: Arc<dyn Fn() + Send + Sync>,
+        phase: &Arc<AtomicU64>,
+        phase_name: &str,
+    ) -> Self {
         let generation = phase.load(Ordering::Acquire);
         let active = (phase_name == "recovery" && generation & 1 != 0).then(|| ActiveRecovery {
-            progress: progress.clone(),
+            progress,
             phase: Arc::clone(phase),
             generation,
         });
@@ -116,123 +125,7 @@ impl<S: Subscriber> Layer<S> for RecoveryProgressLayer {
             })
         });
         if let Some(progress) = progress {
-            progress.advance();
+            progress();
         }
     }
-}
-
-#[cfg(test)]
-fn emit_work(bytes: u64, frames: u64, operations: u64, marked: bool, failed: bool) {
-    tracing::debug!(
-        target: WORK_TARGET,
-        recovery_work_completed = marked,
-        stage = "fixture",
-        completed_bytes = bytes,
-        completed_frames = frames,
-        completed_operations = operations,
-        failed,
-        "fixture recovery work"
-    );
-}
-
-#[cfg(test)]
-fn assert_event_filtering(progress: &ProgressHandle) {
-    // Arrange: the independent progress layer stays active with fmt disabled.
-    let phase = Arc::new(AtomicU64::new(3));
-    let before = progress.completed_units();
-    let _scope = RecoveryScope::enter(progress, &phase, "recovery");
-
-    // Act: bytes, frames, and operations are each meaningful completed work.
-    emit_work(1, 0, 0, true, false);
-    emit_work(0, 1, 0, true, false);
-    emit_work(0, 0, 1, true, false);
-
-    // Assert
-    assert_eq!(progress.completed_units(), before + 3);
-
-    // Act: incomplete, failed, zero and unrelated events are diagnostics.
-    emit_work(1, 0, 0, false, false);
-    emit_work(1, 0, 0, true, true);
-    emit_work(0, 0, 0, true, false);
-    tracing::info!(target: WORK_TARGET, completed_bytes = 1u64, failed = false, "phase entry");
-    tracing::info!(target: WORK_TARGET, recovery_work_completed = true,
-        completed_bytes = 1u64, "missing success classification");
-    tracing::info!(target: "midge::recovery", recovery_work_completed = true,
-        completed_bytes = 1u64, failed = false, "phase completion");
-    tracing::info!(target: "midge::lease", recovery_work_completed = true,
-        completed_bytes = 1u64, failed = false, "lease retry");
-
-    // Assert
-    assert_eq!(progress.completed_units(), before + 3);
-}
-
-#[cfg(test)]
-fn assert_scope_isolation(progress: &ProgressHandle) {
-    // Arrange
-    let before = progress.completed_units();
-    let phase = Arc::new(AtomicU64::new(3));
-
-    // Act / Assert: no active scope, a client phase, and an ended scope ignore work.
-    emit_work(1, 0, 0, true, false);
-    assert_eq!(progress.completed_units(), before);
-    {
-        let _scope = RecoveryScope::enter(progress, &phase, "workload");
-        emit_work(1, 0, 0, true, false);
-    }
-    assert_eq!(progress.completed_units(), before);
-    {
-        let _scope = RecoveryScope::enter(progress, &phase, "recovery");
-        emit_work(1, 0, 0, true, false);
-    }
-    emit_work(1, 0, 0, true, false);
-    assert_eq!(progress.completed_units(), before + 1);
-
-    // Act / Assert: changing the recorded phase invalidates its old scope.
-    {
-        let _scope = RecoveryScope::enter(progress, &phase, "recovery");
-        phase.store(5, Ordering::Release);
-        emit_work(1, 0, 0, true, false);
-    }
-    assert_eq!(progress.completed_units(), before + 1);
-
-    // Act / Assert: nested phases restore the previous recovery caller.
-    {
-        let _outer = RecoveryScope::enter(progress, &phase, "recovery");
-        {
-            let _inner = RecoveryScope::enter(progress, &phase, "workload");
-            emit_work(1, 0, 0, true, false);
-        }
-        emit_work(1, 0, 0, true, false);
-        let dispatch = tracing::dispatcher::get_default(Clone::clone);
-        std::thread::spawn(move || {
-            tracing::dispatcher::with_default(&dispatch, || emit_work(1, 0, 0, true, false));
-        })
-        .join()
-        .expect("join background recovery event fixture");
-    }
-    assert_eq!(progress.completed_units(), before + 2);
-}
-
-#[cfg(test)]
-pub(super) fn assert_listener_isolation(progress: &ProgressHandle) {
-    use tracing_subscriber::layer::SubscriberExt;
-
-    // Arrange: logging is fully disabled, while the separately filtered layer
-    // accepts genuine completed work from the active recovery caller.
-    let subscriber = tracing_subscriber::registry()
-        .with(
-            RecoveryProgressLayer
-                .with_filter(tracing_subscriber::filter::filter_fn(is_recovery_work)),
-        )
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::sink)
-                .with_filter(tracing_subscriber::EnvFilter::new("off")),
-        );
-
-    // Act / Assert: use the real event visitor, real scopes and real handle.
-    tracing::subscriber::with_default(subscriber, || {
-        assert_event_filtering(progress);
-        assert_scope_isolation(progress);
-    });
 }

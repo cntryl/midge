@@ -22,6 +22,8 @@ pub struct MockCloudBackend {
     mutation_lock: Arc<Mutex<()>>,
     uploads: Arc<Mutex<Vec<(String, u64)>>>,
     downloads: Arc<Mutex<Vec<String>>>,
+    #[cfg(test)]
+    get_timeouts: Arc<Mutex<Vec<std::time::Duration>>>,
     range_downloads: Arc<Mutex<Vec<String>>>,
 }
 impl MockCloudBackend {
@@ -33,6 +35,8 @@ impl MockCloudBackend {
             mutation_lock: Arc::new(Mutex::new(())),
             uploads: Arc::new(Mutex::new(Vec::new())),
             downloads: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(test)]
+            get_timeouts: Arc::new(Mutex::new(Vec::new())),
             range_downloads: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -47,6 +51,11 @@ impl MockCloudBackend {
         self.downloads.lock().clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn get_request_timeouts(&self) -> Vec<std::time::Duration> {
+        self.get_timeouts.lock().clone()
+    }
+
     #[must_use]
     pub fn get_range_downloads(&self) -> Vec<String> {
         self.range_downloads.lock().clone()
@@ -55,6 +64,8 @@ impl MockCloudBackend {
     pub fn clear_history(&self) {
         self.uploads.lock().clear();
         self.downloads.lock().clear();
+        #[cfg(test)]
+        self.get_timeouts.lock().clear();
         self.range_downloads.lock().clear();
     }
 }
@@ -66,6 +77,17 @@ impl Default for MockCloudBackend {
 }
 
 impl crate::storage::cloud::CloudReadCapability for MockCloudBackend {
+    #[cfg(test)]
+    fn submit_get_with_timeout(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.get_timeouts.lock().push(timeout);
+        self.submit_get(key, callback);
+    }
+
     fn submit_get_range_with_identity(
         &self,
         key: &str,
@@ -327,6 +349,43 @@ impl crate::storage::cloud::CloudDeleteCapability for MockCloudBackend {
 }
 
 impl crate::storage::cloud::CloudListCapability for MockCloudBackend {
+    fn list_page(
+        &self,
+        prefix: &str,
+        page: CloudListPageRequest,
+        options: CloudRequestOptions,
+        callback: CloudListPageCallback,
+    ) {
+        let result = (|| {
+            page.validate(prefix)?;
+            if options.timeout().is_some_and(|timeout| timeout.is_zero()) {
+                return Err(CloudError::Timeout(
+                    "mock LIST page exhausted deadline".into(),
+                ));
+            }
+            let storage = self.storage.lock();
+            let mut selected = std::collections::BTreeSet::new();
+            for key in storage.keys().filter(|key| {
+                key.starts_with(prefix)
+                    && page.continuation.as_ref().is_none_or(|after| *key > after)
+            }) {
+                selected.insert(key);
+                if selected.len() > page.max_keys + 1 {
+                    selected.pop_last();
+                }
+            }
+            let more = selected.len() > page.max_keys;
+            let keys = selected
+                .into_iter()
+                .take(page.max_keys)
+                .cloned()
+                .collect::<Vec<_>>();
+            let next = more.then(|| keys.last().cloned()).flatten();
+            page.accept(prefix, keys, next).map(Some)
+        })();
+        let _ = callback.send(result);
+    }
+
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         let prefix = prefix.to_string();
         let results: Vec<_> = self

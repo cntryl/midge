@@ -356,6 +356,21 @@ pub trait DynSstWriter: Send {
     /// Returns an error when finalization or atomic persistence fails.
     fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()>;
 
+    /// Finalize and return the exact encoded identity without reopening the
+    /// output. Writers without this capability return `None`; their callers
+    /// must verify the completed file before publishing metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when finalization or persistence fails.
+    fn finish_to_path_with_summary(
+        self: Box<Self>,
+        path: &Path,
+    ) -> MidgeResult<Option<FinalizedSst>> {
+        self.finish_to_path(path)?;
+        Ok(None)
+    }
+
     /// Finalize and get SST bytes
     ///
     /// # Errors
@@ -364,8 +379,24 @@ pub trait DynSstWriter: Send {
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>>;
 }
 
+/// Identity and logical bounds of a successfully finalized encoded SST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizedSst {
+    /// Empty SSTs have no logical key or sequence bounds.
+    pub summary: Option<crate::sst::fs::SstFileSummary>,
+    pub size_bytes: u64,
+    pub content_crc32c: u32,
+    pub point_count: u64,
+    pub range_count: u64,
+}
+
 /// Factory trait for creating SST writers and readers
 pub trait SstFactory: Send + Sync {
+    /// Independent scratch ownership for one background worker, retaining the
+    /// same filesystem, compression and shared I/O admission configuration.
+    fn fork_for_worker(&self) -> Option<std::sync::Arc<dyn SstFactory>> {
+        None
+    }
     /// Filesystem that owns SST outputs and their metadata, identity and cleanup.
     fn output_fs(&self) -> std::sync::Arc<dyn crate::io::Fs>;
 

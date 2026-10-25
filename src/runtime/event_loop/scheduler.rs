@@ -7,6 +7,11 @@ use std::time::Duration;
 
 impl EventLoop {
     pub(super) fn has_actionable_work(&self) -> bool {
+        if self.wal_group_in_flight() {
+            return self.pipeline.wal_commits.has_ready_work()
+                || self.pipeline.memtable_apply.is_ready()
+                || (self.routing.pending_msg.is_some() && !self.pending_message_waits_for_wal());
+        }
         if CompactionCoordinator::manual_compaction_wait_timeout(self) == Some(Duration::ZERO) {
             return true;
         }
@@ -17,16 +22,17 @@ impl EventLoop {
         if self.publication.verification_barrier.token.is_some() {
             // Verification freezes layout maintenance, but group-commit fsync
             // does not change the layout being verified.
-            let due_sync = self.actors.wal_actor.should_sync_batch()
-                && (self.actors.wal_actor.has_pending_data()
-                    || self.pipeline.durability.has_pending_waiters());
-            return due_sync
-                || self
-                    .actors
-                    .cloud_coordinator
-                    .hybrid_storage_events
-                    .as_ref()
-                    .is_some_and(|rx| !rx.is_empty());
+            return self.has_actionable_verification_work();
+        }
+
+        if self.has_ready_reserved_compaction() {
+            return true;
+        }
+        if self.flush_mirror_retry_timeout() == Some(Duration::ZERO) {
+            return true;
+        }
+        if CompactionCoordinator::capture_retry_timeout(self) == Some(Duration::ZERO) {
+            return true;
         }
 
         if self
@@ -42,8 +48,36 @@ impl EventLoop {
         if !self.pipeline.flush_worker_result_rx.is_empty() {
             return true;
         }
+        if !self.publication.publication_gate.is_active()
+            && (!self.pipeline.deferred_flush_results.is_empty()
+                || self.publication.deferred_compaction_result.is_some())
+        {
+            return true;
+        }
+        if self
+            .actors
+            .cloud_coordinator
+            .metadata_mirror
+            .has_ready_result()
+        {
+            return true;
+        }
+        if !self
+            .publication
+            .publication_gate
+            .blocks_validation_completion()
+            && self.pipeline.validation.has_ready_result()
+        {
+            return true;
+        }
 
         if !self.publication.compaction_publish_result_rx.is_empty() {
+            return true;
+        }
+        if !self.publication.publication_gate.is_active()
+            && !self.publication.compaction_publication.is_active()
+            && self.actors.compaction_actor.has_ready_compute()
+        {
             return true;
         }
 
@@ -62,8 +96,14 @@ impl EventLoop {
         if self.background_maintenance_timeout() == Duration::ZERO {
             return true;
         }
+        if self.metadata_retention_timeout() == Some(Duration::ZERO) {
+            return true;
+        }
 
-        if self.state.has_due_immutable_flush() && !self.flush_start_blocked(false) {
+        if self.state.has_due_immutable_flush_matching(|cf, id| {
+            self.actors.flush_actor.can_start_or_resume(cf, id)
+        }) && !self.flush_start_blocked(false)
+        {
             return true;
         }
 
@@ -76,7 +116,23 @@ impl EventLoop {
         false
     }
 
+    fn has_actionable_verification_work(&self) -> bool {
+        let due_sync = self.actors.wal_actor.should_sync_batch()
+            && (self.actors.wal_actor.has_pending_data()
+                || self.pipeline.durability.has_pending_waiters());
+        due_sync
+            || self
+                .actors
+                .cloud_coordinator
+                .hybrid_storage_events
+                .as_ref()
+                .is_some_and(|rx| !rx.is_empty())
+    }
+
     pub(super) fn idle_progress_timeout(&self) -> Option<Duration> {
+        if self.wal_group_in_flight() {
+            return Some(Duration::from_millis(1));
+        }
         // Lease loss can occur without a storage completion or pressure
         // change. Keep pending admission and flush barrier waiters observing
         // terminal authority even when no worker completion can arrive.
@@ -101,6 +157,7 @@ impl EventLoop {
         [
             self.actors.wal_actor.sync_deadline_timeout(),
             self.retry_deadlines().min(),
+            self.flush_mirror_retry_timeout(),
             self.actors
                 .cloud_coordinator
                 .hybrid_storage
@@ -119,10 +176,24 @@ impl EventLoop {
                 .is_inflight()
                 .then_some(Duration::from_millis(1)),
             self.actors
+                .cloud_coordinator
+                .metadata_mirror
+                .is_running()
+                .then_some(Duration::from_millis(1)),
+            self.pipeline
+                .validation
+                .is_pending()
+                .then_some(Duration::from_millis(1)),
+            self.actors
                 .compaction_publish_actor
                 .is_inflight()
                 .then_some(Duration::from_millis(1)),
+            self.actors
+                .compaction_actor
+                .has_pending_compute()
+                .then_some(Duration::from_millis(1)),
             authority_poll,
+            self.metadata_retention_timeout(),
             CompactionCoordinator::manual_compaction_wait_timeout(self),
         ]
         .into_iter()
@@ -143,6 +214,7 @@ impl EventLoop {
                 .backlog()
                 .retry_timeout(),
             self.state.flush_retry_deadline_timeout(),
+            CompactionCoordinator::capture_retry_timeout(self),
             Some(self.background_maintenance_timeout()),
         ]
         .into_iter()
@@ -170,11 +242,23 @@ impl EventLoop {
     /// writes into its batched sync; the fairness slot runs after dispatch
     /// and leaves the queue in order.
     pub(super) fn background_progress(&mut self, drain_writes_from: Option<&Receiver<RuntimeMsg>>) {
+        self.progress_wal_pipeline();
+        if self.wal_group_in_flight() {
+            self.drain_validation_results(&crossbeam::channel::never());
+            return;
+        }
         CompactionCoordinator::expire_manual_compaction_waiters(self);
         self.wake_write_stall_waiters();
+        self.reap_compaction_compute_results();
         self.wake_flush_waiters_for_terminal_fencing();
         CompactionCoordinator::drain_publish_results(self);
         self.drain_flush_worker_results();
+        self.retry_flush_mirrors_if_due();
+        if let Some(msg_rx) = drain_writes_from {
+            self.drain_validation_results(msg_rx);
+        } else {
+            self.drain_validation_results(&crossbeam::channel::never());
+        }
         match drain_writes_from {
             Some(msg_rx) => self.sync_batched_wal_if_needed(msg_rx),
             None => self.sync_batched_wal_without_draining(),
@@ -183,6 +267,7 @@ impl EventLoop {
         self.drain_cloud_wal_upload_backlog();
         self.tick_hybrid_storage();
         self.drain_hybrid_storage_events();
+        self.resume_reserved_compaction_if_ready();
         self.drain_cloud_wal_upload_backlog();
         let hybrid_storage = self.actors.cloud_coordinator.hybrid_storage.clone();
         self.actors
@@ -191,6 +276,8 @@ impl EventLoop {
         self.retry_manifest_reclamation_if_due();
         self.drain_auto_flush_memtables();
         self.run_background_compaction_maintenance_if_due();
+        self.schedule_metadata_retention_if_due();
+        self.prefetch_flush_sst_names_if_due();
     }
 
     pub(super) fn retry_manifest_reclamation_if_due(&mut self) {
@@ -225,7 +312,10 @@ impl EventLoop {
         msg: RuntimeMsg,
         msg_rx: &Receiver<RuntimeMsg>,
     ) -> HandleOutcome {
-        if self.publication.verification_barrier.token.is_none() && msg.is_mutation() {
+        if self.publication.verification_barrier.token.is_none()
+            && !self.wal_group_in_flight()
+            && msg.is_mutation()
+        {
             CompactionCoordinator::drain_publish_results(self);
             self.drain_flush_worker_results();
             self.maybe_flush_cloud_async_wal();
@@ -253,6 +343,17 @@ impl EventLoop {
             self.run_request_fairness_slot();
         }
         outcome
+    }
+
+    pub(super) fn process_pending_message(
+        &mut self,
+        msg_rx: &Receiver<RuntimeMsg>,
+    ) -> Option<HandleOutcome> {
+        if self.pending_message_waits_for_wal() {
+            return None;
+        }
+        let message = self.routing.pending_msg.take()?;
+        Some(self.process_restored_one(message, msg_rx))
     }
 
     pub(super) fn run_request_fairness_slot(&mut self) {
@@ -336,10 +437,12 @@ impl EventLoop {
             Err(TryRecvError::Disconnected) => return Some(HandleOutcome::Break),
             Err(TryRecvError::Empty) => {}
         }
-        if let Some(storage_rx) = &self.actors.cloud_coordinator.hybrid_storage_events {
-            if let Ok(event) = storage_rx.try_recv() {
-                self.handle_storage_event(event);
-                return Some(HandleOutcome::Continue);
+        if !self.wal_group_in_flight() {
+            if let Some(storage_rx) = &self.actors.cloud_coordinator.hybrid_storage_events {
+                if let Ok(event) = storage_rx.try_recv() {
+                    self.handle_storage_event(event);
+                    return Some(HandleOutcome::Continue);
+                }
             }
         }
         self.progress_pass(msg_rx);
@@ -355,6 +458,10 @@ impl EventLoop {
         const MAX_DRAIN_WRITES_ON_WAKE: usize = 64;
 
         loop {
+            // Worker completions can remain continuously ready. Settle the
+            // ordered WAL prefix before admitting another worker message so
+            // a receipt or its deadline cannot be starved by that traffic.
+            self.progress_wal_pipeline();
             if let Ok(message) = worker_msg_rx.try_recv() {
                 if RuntimeDispatcher::handle(self, message, msg_rx) == HandleOutcome::Break {
                     break;
@@ -363,8 +470,7 @@ impl EventLoop {
             }
             self.restore_verification_deferred_message();
             self.restore_publication_deferred_message();
-            if let Some(pending) = self.routing.pending_msg.take() {
-                let outcome = self.process_restored_one(pending, msg_rx);
+            if let Some(outcome) = self.process_pending_message(msg_rx) {
                 if outcome == HandleOutcome::Break {
                     break;
                 }
@@ -382,7 +488,12 @@ impl EventLoop {
             // Storage events are selected under the barrier too: the handler
             // takes only the ones that cannot change the verified layout and
             // defers the rest.
-            let selectable_storage_rx = self.actors.cloud_coordinator.hybrid_storage_events.clone();
+            // Cloud acknowledgements can retire a local WAL segment. Leave
+            // their existing queue ownership intact while a Strict root owns
+            // that segment, then resume event delivery after settlement.
+            let selectable_storage_rx = (!self.wal_group_in_flight())
+                .then(|| self.actors.cloud_coordinator.hybrid_storage_events.clone())
+                .flatten();
             let msg = if let Some(storage_rx) = selectable_storage_rx {
                 if let Some(timeout) = idle_timeout {
                     crossbeam::channel::select! {

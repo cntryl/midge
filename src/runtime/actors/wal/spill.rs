@@ -39,33 +39,29 @@ impl WalActor {
 
     /// Stream a spilled transaction through split WAL markers without
     /// reconstructing its complete write set in memory.
+    #[cfg(test)]
     pub(crate) fn append_spilled_transaction(
         &mut self,
         state: &mut RuntimeState,
         source: &crate::runtime::transaction_spill::TransactionOpSource,
-        params: super::SpilledTransactionAppendParams,
+        params: &super::SpilledTransactionAppendParams,
+    ) -> MidgeResult<(u64, usize, bool)> {
+        self.append_spilled_transaction_with_proof(state, source, params, None)
+    }
+
+    pub(crate) fn append_spilled_transaction_with_proof(
+        &mut self,
+        state: &mut RuntimeState,
+        source: &crate::runtime::transaction_spill::TransactionOpSource,
+        params: &super::SpilledTransactionAppendParams,
+        proof: Option<&super::SpilledValidationProof>,
     ) -> MidgeResult<(u64, usize, bool)> {
         self.ensure_lease_validity()?;
-        let super::SpilledTransactionAppendParams {
-            request_id,
-            assertions,
-            durability_policy,
-            start_sequence,
-            conflict_policy,
-        } = params;
-
-        if source.is_empty() {
-            self.validate_assertion_only_spill(state, &assertions, start_sequence)?;
-            return Ok((state.sequence, 0, false));
-        }
-        let cf_id = Self::validate_spilled_transaction(
-            state,
-            self.read_resources.clone(),
-            source,
-            &assertions,
-            start_sequence,
-            conflict_policy,
-        )?;
+        let Some(cf_id) = self.validate_spilled_preconditions(state, source, params, proof)? else {
+            return Ok((state.applied_sequence, 0, false));
+        };
+        let request_id = params.request_id;
+        let durability_policy = params.durability_policy;
         Self::ensure_family_accepts_writes(state, cf_id)?;
 
         let effective_durability = durability_policy.unwrap_or(self.durability_policy);
@@ -120,11 +116,10 @@ impl WalActor {
                         format!("spilled transaction WAL append failed: {error}"),
                     );
                 }
-                return Err(if wal_may_have_changed {
-                    Self::appended_unit_error(error)
-                } else {
-                    error
-                });
+                return Err(crate::common::error::classify_commit_error(
+                    error,
+                    !wal_may_have_changed,
+                ));
             }
         };
         state.wal.pending_writes = state.wal.pending_writes.saturating_add(wal_records);
@@ -153,6 +148,32 @@ impl WalActor {
         Ok((sequence_plan.commit_seq, source.len(), deferred))
     }
 
+    fn validate_spilled_preconditions(
+        &self,
+        state: &RuntimeState,
+        source: &crate::runtime::transaction_spill::TransactionOpSource,
+        params: &super::SpilledTransactionAppendParams,
+        proof: Option<&super::SpilledValidationProof>,
+    ) -> MidgeResult<Option<u32>> {
+        if let Some(proof) = proof {
+            let cf_id = proof.validate(state)?;
+            return Ok((!source.is_empty()).then_some(cf_id));
+        }
+        if source.is_empty() {
+            self.validate_assertion_only_spill(state, &params.assertions, params.start_sequence)?;
+            return Ok(None);
+        }
+        Self::validate_spilled_transaction(
+            state,
+            self.read_resources.clone(),
+            source,
+            &params.assertions,
+            params.start_sequence,
+            params.conflict_policy,
+        )
+        .map(Some)
+    }
+
     /// Make an appended spilled unit durable under its policy, then apply it.
     /// `logged` says whether its WAL frames were appended.
     fn make_durable_and_apply_spill(
@@ -167,13 +188,7 @@ impl WalActor {
         // so replay keeps or drops it whole whatever frontier a later flush
         // publishes; an appended unit's outcome is unknown.
         self.apply_transaction_durability(state, effective_durability, sequence_plan.commit_seq)
-            .map_err(|error| {
-                if logged {
-                    Self::appended_unit_error(error)
-                } else {
-                    error
-                }
-            })?;
+            .map_err(|error| crate::common::error::classify_commit_error(error, !logged))?;
         // The WAL now holds the unit and `state.sequence` is past its commit.
         // A lease that lapsed since is a failed apply.
         let mut applied_ops = 0_usize;
@@ -197,6 +212,7 @@ impl WalActor {
                 error,
             ));
         }
+        state.applied_sequence = sequence_plan.commit_seq;
         Ok(())
     }
 

@@ -6,6 +6,7 @@ mod automatic_flush_tests;
 mod automatic_retry_tests;
 mod compaction_budget_tests;
 mod controlled_storage;
+mod metadata_overlap_tests;
 mod paused_compactor;
 mod publication_orders;
 mod retained_work_tests;
@@ -68,7 +69,7 @@ fn submit_manual_flush(
 }
 
 fn flush_while_compute_is_held(el: &mut EventLoop) -> Result<(), String> {
-    for phase in ["build", "publish", "mirror"] {
+    for phase in ["build", "publish", "manifest mirror", "intent clear"] {
         let completion = el
             .pipeline
             .flush_worker_result_rx
@@ -91,7 +92,10 @@ fn journal_len(el: &EventLoop) -> MidgeResult<u64> {
     }
 }
 
-fn settle_owned_work(el: &mut EventLoop, worker: &crossbeam::channel::Receiver<RuntimeMsg>) {
+pub(super) fn settle_owned_work(
+    el: &mut EventLoop,
+    worker: &crossbeam::channel::Receiver<RuntimeMsg>,
+) {
     let (_, messages) = crossbeam::channel::unbounded();
     let deadline = Instant::now() + TEST_WAIT;
     let mut failures = Vec::new();
@@ -112,9 +116,10 @@ fn settle_owned_work(el: &mut EventLoop, worker: &crossbeam::channel::Receiver<R
         if let Some(message) = el.routing.pending_msg.take() {
             el.process_restored_one(message, &messages);
         }
-        el.tick_hybrid_storage();
-        el.drain_hybrid_storage_events();
-        el.reap_cloud_wal_prune_worker();
+        // Real idle/request progress owns capture retries, metadata mirror
+        // continuations and accepted worker reaping; a partial pump can leave
+        // a valid publication parked forever despite released provider work.
+        el.run_request_fairness_slot();
         if el.state.active_compactions.load(Ordering::Acquire) == 0
             && !el.actors.flush_actor.is_inflight()
             && !el.actors.compaction_publish_actor.is_inflight()
@@ -126,6 +131,8 @@ fn settle_owned_work(el: &mut EventLoop, worker: &crossbeam::channel::Receiver<R
                 .all(|cf| cf.immutable_flushes.is_empty())
             && el.routing.pending_msg.is_none()
             && el.publication.publication_gate.deferred_messages_is_empty()
+            && !el.actors.cloud_coordinator.metadata_mirror.is_running()
+            && el.state.pending_compaction_waits.is_empty()
         {
             // Settle already accepted ownership; another optional prune turn
             // would keep a completed fixture busy without draining its work.
@@ -180,8 +187,9 @@ fn describe_settle_state(el: &EventLoop) -> String {
         })
         .collect();
     let publication = el.publication.compaction_publication.get().is_some();
+    let capture_retry = CompactionCoordinator::capture_retry_timeout(el);
     format!(
-        "db={:?}, compute={}, flush_worker={}, publisher={}, publication={publication:?}, gate={}, deferred={:?}, pending={:?}, prune={}, flushes={flushes:?}",
+        "db={:?}, compute={}, flush_worker={}, publisher={}, publication={publication:?}, capture_retry={capture_retry:?}, gate={}, deferred={:?}, pending={:?}, prune={}, flushes={flushes:?}",
         el.state.db_path,
         el.state.active_compactions.load(Ordering::Acquire),
         el.actors.flush_actor.is_inflight(),
@@ -249,112 +257,116 @@ fn assert_acknowledged_and_recovered_rows(el: &EventLoop, cf_id: u32, sequence: 
 
 #[test]
 fn should_complete_manual_cloud_flush_while_compaction_compute_waits() -> MidgeResult<()> {
-    // Arrange: align seeded durable metadata with the next real write's allocator.
-    let (mut el, worker, _) = cloud_debt(4)?;
-    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
-    let (mut release, reached) = paused_compactor::install(&mut el);
-    let plan = el
-        .actors
-        .compaction_actor
-        .check_manual_compaction(&el.state)?
-        .expect("real cloud debt plan");
-    let cf_id = plan.cf_id;
-    let inputs = plan.input_files.clone();
-    el.launch_compaction(plan)?;
-    reached
-        .recv_timeout(TEST_WAIT)
-        .expect("actual compactor finalized and paused");
-    el.state.set_compaction_enabled(false);
-    let sequence = acknowledge_put(&mut el, cf_id, 91_301)?;
+    crate::failpoints::with_read_gate(|| {
+        // Arrange: align seeded durable metadata with the next real write's allocator.
+        let (mut el, worker, _) = cloud_debt(4)?;
+        el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
+        let (mut release, reached) = paused_compactor::install(&mut el);
+        let plan = el
+            .actors
+            .compaction_actor
+            .check_manual_compaction(&el.state)?
+            .expect("real cloud debt plan");
+        let cf_id = plan.cf_id;
+        let inputs = plan.input_files.clone();
+        el.launch_compaction(plan)?;
+        reached
+            .recv_timeout(TEST_WAIT)
+            .expect("actual compactor finalized and paused");
+        el.state.set_compaction_enabled(false);
+        let sequence = acknowledge_put(&mut el, cf_id, 91_301)?;
 
-    // Act: no synthetic waiter/active marker and no compute cancellation.
-    let response = submit_manual_flush(&mut el, cf_id, 91_302);
-    let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
-    let flushed = flush_while_compute_is_held(&mut el);
-    let before_release = response.try_recv();
-    let compactor_owned = el.state.active_compactions.load(Ordering::Acquire) == 1;
-    let inputs_retained = inputs
-        .iter()
-        .all(|name| remote_sst_path_for_test(&el, name).exists());
-    let prune_not_started = el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none();
-    let states_before_release = manifest_row_states(&el, cf_id, MANUAL_KEY);
-    let row_before_release = row_matches(&states_before_release, MANUAL_VALUE, sequence);
-    release.release();
-    settle_owned_work(&mut el, &worker);
+        // Act: no synthetic waiter/active marker and no compute cancellation.
+        let response = submit_manual_flush(&mut el, cf_id, 91_302);
+        let flush_id = el.state.get_cf(cf_id).unwrap().immutable_flushes[0].flush_id;
+        let flushed = flush_while_compute_is_held(&mut el);
+        let before_release = response.try_recv();
+        let compactor_owned = el.state.active_compactions.load(Ordering::Acquire) == 1;
+        let inputs_retained = inputs
+            .iter()
+            .all(|name| remote_sst_path_for_test(&el, name).exists());
+        let prune_not_started = el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none();
+        let states_before_release = manifest_row_states(&el, cf_id, MANUAL_KEY);
+        let row_before_release = row_matches(&states_before_release, MANUAL_VALUE, sequence);
+        release.release();
+        settle_owned_work(&mut el, &worker);
 
-    // Assert: clean up the real compactor even on the pre-fix receive timeout.
-    assert!(
-        flushed.is_ok(),
-        "accepted explicit flush must finish before compute release: {flushed:?}"
-    );
-    assert!(
-        matches!(
-            before_release,
-            Ok(RuntimeResponse::Ok { request_id: 91_302 })
-        ),
-        "acknowledged-data barrier must answer before compute release: {before_release:?}"
-    );
-    assert!(compactor_owned && inputs_retained && prune_not_started);
-    assert!(
+        // Assert: clean up the real compactor even on the pre-fix receive timeout.
+        assert!(
+            flushed.is_ok(),
+            "accepted explicit flush must finish before compute release: {flushed:?}"
+        );
+        assert!(
+            matches!(
+                before_release,
+                Ok(RuntimeResponse::Ok { request_id: 91_302 })
+            ),
+            "acknowledged-data barrier must answer before compute release: {before_release:?}"
+        );
+        assert!(compactor_owned && inputs_retained && prune_not_started);
+        assert!(
         row_before_release,
         "exact SST row must exist before compute release: cf={cf_id} key={MANUAL_KEY:?} sequence={sequence} states={states_before_release:?}"
     );
-    assert!(el.state.immutable_flush_by_id(flush_id).is_none());
-    assert!(manifest_has_row(
-        &el,
-        cf_id,
-        MANUAL_KEY,
-        MANUAL_VALUE,
-        sequence
-    ));
-    assert!(manifest_has_row(
-        &el,
-        cf_id,
-        b"prune-candidate",
-        b"value",
-        81
-    ));
-    assert_eq!(el.state.flush_metrics.publish_count, 1);
-    Ok(())
+        assert!(el.state.immutable_flush_by_id(flush_id).is_none());
+        assert!(manifest_has_row(
+            &el,
+            cf_id,
+            MANUAL_KEY,
+            MANUAL_VALUE,
+            sequence
+        ));
+        assert!(manifest_has_row(
+            &el,
+            cf_id,
+            b"prune-candidate",
+            b"value",
+            81
+        ));
+        assert_eq!(el.state.flush_metrics.publish_count, 1);
+        Ok(())
+    })
 }
 
 #[test]
 fn should_keep_optional_maintenance_blocked_when_compaction_has_no_due_immutable() -> MidgeResult<()>
 {
-    // Arrange
-    let (mut el, worker, _) = cloud_debt(4)?;
-    el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
-    let (mut release, reached) = paused_compactor::install(&mut el);
-    let plan = el
-        .actors
-        .compaction_actor
-        .check_manual_compaction(&el.state)?
-        .expect("real cloud debt plan");
-    let cf_id = plan.cf_id;
-    el.launch_compaction(plan)?;
-    reached
-        .recv_timeout(TEST_WAIT)
-        .expect("actual compute pause");
-    el.state.set_compaction_enabled(false);
-    acknowledge_put(&mut el, cf_id, 91_303)?;
-    assert!(el.state.get_cf(cf_id).unwrap().immutable_flushes.is_empty());
-    let journal_before = journal_len(&el)?;
+    crate::failpoints::with_read_gate(|| {
+        // Arrange
+        let (mut el, worker, _) = cloud_debt(4)?;
+        el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
+        let (mut release, reached) = paused_compactor::install(&mut el);
+        let plan = el
+            .actors
+            .compaction_actor
+            .check_manual_compaction(&el.state)?
+            .expect("real cloud debt plan");
+        let cf_id = plan.cf_id;
+        el.launch_compaction(plan)?;
+        reached
+            .recv_timeout(TEST_WAIT)
+            .expect("actual compute pause");
+        el.state.set_compaction_enabled(false);
+        acknowledge_put(&mut el, cf_id, 91_303)?;
+        assert!(el.state.get_cf(cf_id).unwrap().immutable_flushes.is_empty());
+        let journal_before = journal_len(&el)?;
 
-    // Act
-    let turn = el.schedule_cloud_maintenance();
-    let no_flush = !el.actors.flush_actor.is_inflight();
-    let no_prune = el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none();
-    let journal_after = journal_len(&el)?;
-    release.release();
-    settle_owned_work(&mut el, &worker);
+        // Act
+        let turn = el.schedule_cloud_maintenance();
+        let no_flush = !el.actors.flush_actor.is_inflight();
+        let no_prune = el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none();
+        let journal_after = journal_len(&el)?;
+        release.release();
+        settle_owned_work(&mut el, &worker);
 
-    // Assert
-    assert!(turn.is_none());
-    assert!(no_flush && no_prune);
-    assert_eq!(
-        journal_before, journal_after,
-        "automatic debt must not allocate an overlap name"
-    );
-    assert!(el.publication.flush_barrier_waiters.is_empty());
-    Ok(())
+        // Assert
+        assert!(turn.is_none());
+        assert!(no_flush && no_prune);
+        assert_eq!(
+            journal_before, journal_after,
+            "automatic debt must not allocate an overlap name"
+        );
+        assert!(el.publication.flush_barrier_waiters.is_empty());
+        Ok(())
+    })
 }

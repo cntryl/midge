@@ -24,6 +24,8 @@ pub(crate) struct TombstoneGcPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum CompactionEvent {
+    /// A legal partition boundary with no logical mutation.
+    Boundary(Vec<u8>),
     RangeEnd(RangeTombstone),
     RangeStart(RangeTombstone),
     Version(CompactionVersion),
@@ -32,6 +34,7 @@ pub(super) enum CompactionEvent {
 impl CompactionEvent {
     pub(super) fn key(&self) -> &[u8] {
         match self {
+            Self::Boundary(key) => key,
             Self::RangeEnd(tombstone) => &tombstone.end,
             Self::RangeStart(tombstone) => &tombstone.start,
             Self::Version(version) => &version.key,
@@ -40,6 +43,7 @@ impl CompactionEvent {
 
     fn sequence(&self) -> u64 {
         match self {
+            Self::Boundary(_) => 0,
             Self::RangeEnd(tombstone) | Self::RangeStart(tombstone) => tombstone.seq,
             Self::Version(version) => version.seq,
         }
@@ -47,6 +51,7 @@ impl CompactionEvent {
 
     fn kind_rank(&self) -> u8 {
         match self {
+            Self::Boundary(_) => 3,
             Self::RangeEnd(_) => 0,
             Self::RangeStart(_) => 1,
             Self::Version(_) => 2,
@@ -55,11 +60,12 @@ impl CompactionEvent {
 
     pub(super) fn retained_bytes(&self) -> usize {
         match self {
+            Self::Boundary(key) => std::mem::size_of::<Self>().saturating_add(key.capacity()),
             Self::RangeEnd(tombstone) | Self::RangeStart(tombstone) => std::mem::size_of::<Self>()
                 .saturating_add(tombstone.start.capacity())
                 .saturating_add(tombstone.end.capacity()),
             Self::Version(version) => std::mem::size_of::<Self>()
-                .saturating_add(version.key.capacity().saturating_mul(2))
+                .saturating_add(version.key.capacity())
                 .saturating_add(version.value.as_ref().map_or(0, Vec::capacity)),
         }
     }
@@ -71,7 +77,6 @@ pub(super) type CompactionEventCursor<'a> =
 /// One sorted input and its current merge head.
 struct EventMergeInput<'a> {
     cursor: CompactionEventCursor<'a>,
-    current: Option<RetainedEvent>,
 }
 
 struct RetainedEvent {
@@ -86,8 +91,8 @@ impl RetainedEvent {
     ) -> MidgeResult<Self> {
         // The filesystem cursor keeps a yielded-version reservation until its
         // next advance. This deliberately overlaps the merge reservation: the
-        // merge head outlives that advance, and its key is also cloned into the
-        // heap. The conservative handoff prevents either allocation from ever
+        // merge head outlives that advance. The conservative handoff prevents
+        // either allocation from ever
         // becoming unaccounted while input advancement can allocate again.
         let reservation = budget.reserve(event.retained_bytes(), "merge head")?;
         Ok(Self {
@@ -99,19 +104,16 @@ impl RetainedEvent {
 
 /// Heap item that orders compaction versions by key ascending and sequence
 /// descending. `BinaryHeap` is a max heap, so the key ordering is inverted.
-#[derive(Debug, Clone)]
 struct VersionHeapItem {
-    key: Vec<u8>,
-    seq: u64,
-    kind_rank: u8,
+    retained: RetainedEvent,
     input_idx: usize,
 }
 
 impl PartialEq for VersionHeapItem {
     fn eq(&self, other: &Self) -> bool {
-        self.key == other.key
-            && self.seq == other.seq
-            && self.kind_rank == other.kind_rank
+        self.retained.event.key() == other.retained.event.key()
+            && self.retained.event.sequence() == other.retained.event.sequence()
+            && self.retained.event.kind_rank() == other.retained.event.kind_rank()
             && self.input_idx == other.input_idx
     }
 }
@@ -126,11 +128,13 @@ impl PartialOrd for VersionHeapItem {
 
 impl Ord for VersionHeapItem {
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.key.cmp(&other.key) {
+        let event = &self.retained.event;
+        let other_event = &other.retained.event;
+        match event.key().cmp(other_event.key()) {
             Ordering::Less => Ordering::Greater,
             Ordering::Greater => Ordering::Less,
-            Ordering::Equal => match other.kind_rank.cmp(&self.kind_rank) {
-                Ordering::Equal => match self.seq.cmp(&other.seq) {
+            Ordering::Equal => match other_event.kind_rank().cmp(&event.kind_rank()) {
+                Ordering::Equal => match event.sequence().cmp(&other_event.sequence()) {
                     Ordering::Less => Ordering::Less,
                     Ordering::Greater => Ordering::Greater,
                     Ordering::Equal => self.input_idx.cmp(&other.input_idx).reverse(),
@@ -174,15 +178,13 @@ impl<'a> EventMergeIterator<'a> {
                 .transpose()?
                 .map(|event| RetainedEvent::new(event, &budget))
                 .transpose()?;
-            if let Some(entry) = &current {
+            if let Some(retained) = current {
                 heap.push(VersionHeapItem {
-                    key: entry.event.key().to_vec(),
-                    seq: entry.event.sequence(),
-                    kind_rank: entry.event.kind_rank(),
+                    retained,
                     input_idx,
                 });
             }
-            inputs.push(EventMergeInput { cursor, current });
+            inputs.push(EventMergeInput { cursor });
         }
 
         Ok(Self {
@@ -195,38 +197,27 @@ impl<'a> EventMergeIterator<'a> {
     }
 
     pub(super) fn next_event(&mut self) -> MidgeResult<Option<CompactionEvent>> {
-        let Some(head) = self.heap.pop() else {
+        let Some(mut head) = self.heap.peek_mut() else {
             return Ok(None);
         };
         let input = self.inputs.get_mut(head.input_idx).ok_or_else(|| {
             crate::common::MidgeError::Internal("compaction merge input is missing".to_string())
         })?;
-        let current = input.current.take().ok_or_else(|| {
-            crate::common::MidgeError::Internal("compaction merge head is missing".to_string())
-        })?;
-
         ensure_compaction_not_aborted(self.abort_check)?;
-        if let Some(next) = input.cursor.next().transpose()? {
+        let current = if let Some(next) = input.cursor.next().transpose()? {
             let next = RetainedEvent::new(next, &self.budget)?;
-            self.heap.push(VersionHeapItem {
-                key: next.event.key().to_vec(),
-                seq: next.event.sequence(),
-                kind_rank: next.event.kind_rank(),
-                input_idx: head.input_idx,
-            });
-            input.current = Some(next);
-        }
+            // Dropping PeekMut repairs the heap once after replacement. The
+            // key used for comparisons lives in the retained event itself.
+            std::mem::replace(&mut head.retained, next)
+        } else {
+            std::collections::binary_heap::PeekMut::pop(head).retained
+        };
 
         Ok(Some(current.event))
     }
 
     pub(super) fn peek_event(&self) -> Option<&CompactionEvent> {
-        let head = self.heap.peek()?;
-        self.inputs
-            .get(head.input_idx)?
-            .current
-            .as_ref()
-            .map(|retained| &retained.event)
+        self.heap.peek().map(|head| &head.retained.event)
     }
 }
 
@@ -509,7 +500,7 @@ pub(crate) fn merge_repair_inputs_to_run(
             CompactionEvent::RangeStart(tombstone) => {
                 writer.add_range_tombstone(&tombstone.start, &tombstone.end, tombstone.seq)?;
             }
-            CompactionEvent::RangeEnd(_) => {}
+            CompactionEvent::RangeEnd(_) | CompactionEvent::Boundary(_) => {}
         }
         if writer
             .encoded_size_upper_bound()

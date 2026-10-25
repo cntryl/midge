@@ -145,6 +145,17 @@ impl DurabilityCoordinator {
         self.cloud_seal_retry.configured_delay()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_cloud_seal_retry_clock(
+        &mut self,
+        clock: std::sync::Arc<dyn crate::runtime::retry_schedule::RetryClock>,
+    ) {
+        self.cloud_seal_retry = crate::runtime::retry_schedule::RetrySchedule::with_clock(
+            self.cloud_seal_retry.configured_delay(),
+            clock,
+        );
+    }
+
     /// Check if a sequence number is durable at the requested level.
     ///
     /// Special case: `u64::MAX` (latest available) always returns true and bypasses durability checks.

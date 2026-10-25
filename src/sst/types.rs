@@ -23,10 +23,10 @@ impl BlockHandle {
 /// RocksDB-compatible magic number for SST footer validation
 pub const SST_FOOTER_MAGIC: u64 = 0xdb47_7524_8b80_fb57;
 
-/// Current, checksummed SST format with explicit TTL-presence encoding.
-pub const SST_FORMAT_V4: u32 = 4;
+/// Current checksummed SST format with restart points and compact entry headers.
+pub const SST_FORMAT_V5: u32 = 5;
 
-/// Exact encoded size of the self-identifying V4 footer.
+/// Exact encoded size of the self-identifying V5 footer.
 pub const SST_FOOTER_SIZE: usize = 84;
 const SST_FOOTER_CHECKSUM_OFFSET: usize = 80;
 const SST_FOOTER_MAGIC_OFFSET: usize = 72;
@@ -63,7 +63,7 @@ impl Footer {
         self
     }
 
-    /// Encode the self-identifying V4 footer to exactly 84 bytes.
+    /// Encode the self-identifying V5 footer to exactly 84 bytes.
     /// Layout:
     ///   [`meta_index_handle`: 16 bytes]
     ///   [`index_handle`: 16 bytes]
@@ -94,10 +94,10 @@ impl Footer {
             buf[48..56].copy_from_slice(&block_bloom.offset.to_le_bytes());
             buf[56..64].copy_from_slice(&block_bloom.size.to_le_bytes());
         }
-        buf[64..68].copy_from_slice(&SST_FORMAT_V4.to_le_bytes());
+        buf[64..68].copy_from_slice(&SST_FORMAT_V5.to_le_bytes());
         buf[68..72].copy_from_slice(
             &u32::try_from(SST_FOOTER_SIZE)
-                .expect("V4 footer size fits in u32")
+                .expect("V5 footer size fits in u32")
                 .to_le_bytes(),
         );
         buf[SST_FOOTER_MAGIC_OFFSET..SST_FOOTER_CHECKSUM_OFFSET]
@@ -107,18 +107,18 @@ impl Footer {
         buf
     }
 
-    /// Decode one exact V4 footer.
+    /// Decode one exact V5 footer.
     ///
     /// # Errors
     ///
     /// Returns `MidgeError::Corruption` when the footer is malformed or its
     /// checksum is invalid, and `MidgeError::CompatibilityError` for a
-    /// well-formed unsupported version. V1-V3 footers are intentionally not
+    /// well-formed unsupported version. V1-V4 footers are intentionally not
     /// decoded by this build.
     pub fn decode(data: &[u8]) -> crate::common::MidgeResult<Self> {
         if data.len() != SST_FOOTER_SIZE {
             return Err(crate::common::MidgeError::Corruption(format!(
-                "SST V4 footer must be exactly {SST_FOOTER_SIZE} bytes, got {}",
+                "SST V5 footer must be exactly {SST_FOOTER_SIZE} bytes, got {}",
                 data.len()
             )));
         }
@@ -141,9 +141,9 @@ impl Footer {
         }
 
         let format_version = u32::from_le_bytes([data[64], data[65], data[66], data[67]]);
-        if format_version != SST_FORMAT_V4 {
+        if format_version != SST_FORMAT_V5 {
             return Err(crate::common::MidgeError::CompatibilityError(format!(
-                "unsupported SST format version {format_version}; this build requires V{SST_FORMAT_V4}"
+                "unsupported SST format version {format_version}; this build requires V{SST_FORMAT_V5}"
             )));
         }
         let encoded_size = u32::from_le_bytes([data[68], data[69], data[70], data[71]]);
@@ -227,7 +227,7 @@ pub struct KeyRangeMetadata {
 impl Default for SstMetadata {
     fn default() -> Self {
         Self {
-            format_version: SST_FORMAT_V4,
+            format_version: SST_FORMAT_V5,
             index_kind: IndexKind::Sparse,
             range_tombstone_handle: None,
             key_range: None,
@@ -283,14 +283,14 @@ impl SstMetadata {
         }
 
         let format_version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-        if format_version != SST_FORMAT_V4 {
+        if format_version != SST_FORMAT_V5 {
             return Err(crate::common::MidgeError::CompatibilityError(format!(
-                "unsupported SST metadata format version {format_version}; this build requires V{SST_FORMAT_V4}"
+                "unsupported SST metadata format version {format_version}; this build requires V{SST_FORMAT_V5}"
             )));
         }
         if data.len() == 20 {
             return Err(crate::common::MidgeError::CompatibilityError(
-                "legacy SST metadata layout is unsupported; V4 metadata is required".into(),
+                "legacy SST metadata layout is unsupported; V5 metadata is required".into(),
             ));
         }
 
@@ -652,7 +652,7 @@ mod tests {
     // =========== Footer Encoding/Decoding Tests ===========
 
     #[test]
-    fn should_encode_footer_to_exact_v4_size() {
+    fn should_encode_footer_to_exact_v5_size() {
         // Arrange
         let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200));
 
@@ -791,7 +791,7 @@ mod tests {
         // Arrange
         let mut encoded =
             Footer::new(BlockHandle::new(11, 101), BlockHandle::new(112, 202)).encode();
-        encoded[64..68].copy_from_slice(&5_u32.to_le_bytes());
+        encoded[64..68].copy_from_slice(&6_u32.to_le_bytes());
         let checksum = crc32c::crc32c(&encoded[..SST_FOOTER_CHECKSUM_OFFSET]);
         encoded[SST_FOOTER_CHECKSUM_OFFSET..].copy_from_slice(&checksum.to_le_bytes());
 

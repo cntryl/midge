@@ -376,7 +376,7 @@ pub(super) fn signed_azure_request(
         .to_string();
     let mut headers = vec![
         ("x-ms-date".to_string(), date),
-        ("x-ms-version".to_string(), "2025-01-05".to_string()),
+        ("x-ms-version".to_string(), "2026-10-06".to_string()),
     ];
     headers.extend(
         extra_headers
