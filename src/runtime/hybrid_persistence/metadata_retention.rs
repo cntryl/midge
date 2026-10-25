@@ -198,6 +198,7 @@ fn reclaim_candidate(
         return Ok(false);
     }
     validate_current(context, generation)?;
+    crate::failpoints::fail_point!("midge::cloud::before_metadata_retention_delete");
     delete_identity(context, key, metadata)
 }
 

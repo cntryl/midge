@@ -1512,6 +1512,19 @@ within the shared SST/WAL per-turn budgets. A generic delete failpoint first
 proved too broad because startup cleanup could fire it; the dedicated sweep
 boundary removed that false positive. The focused failpoint test passes.
 
+The same branch adds a #913 AC3 checkpoint-retention crash slice. A real
+CloudSimulated engine publishes 20 strict, flushed metadata versions; a child
+process reaches the validated identity-conditional delete boundary for the
+oldest version and aborts. The object remains after the crash. The successor
+recovers and reads every committed key, resumes collection, removes the old
+version, and reads every key again. Jev scored this evidence strong for the
+deletion-interruption slice; existing unit tests separately cover pointer
+change before delete and replacement identity. Pointer-advance checkpoint
+selection is implicit in the published history and production collector path,
+not asserted as a generation identifier. This does not cover publication racing
+collection, uncertain authority reads in a crash campaign, or ambiguous delete
+responses; #913 remains open pending those AC3 cases.
+
 These checks do not complete #907's injected-latency/A-B gates or #916's cost
 and catalog-size measurements. #913's metadata-generation GC crash acceptance
 remains open. No live-provider qualification is claimed.
