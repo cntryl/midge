@@ -1,6 +1,6 @@
 {
   "schema_version": "midge-invariant-evidence.v1",
-  "source_revision": "4c7f25f64d5adac54ace38deb4ac7f2061ee2220",
+  "source_revision": "812900422b207cd5adcd41b23c17bcd59b416a31",
   "source_revision_status": "Production/test symbols and exact assertion or behavior-helper call markers resolve at the frozen code checkpoint in source_revision. SHA256 postimages identify all referenced source and supporting documentation; refreshed documentation postimages follow the code checkpoint. This is a reference audit only: this refresh ran no Rust behavior tests or mutation experiments. Historical qualification objects remain unchanged and scoped to their recorded revisions.",
   "qualification": {
     "reference_lint_only": true,
@@ -274,7 +274,7 @@
     "unresolved_test_references_removed": 30,
     "tests_executed": false,
     "mutation_experiments_executed": false,
-    "semantic_scope": "All 65 catalog IDs reviewed against the final frozen production/test source. Actual locations, assertion/helper markers, renamed tests, selected-proof and flush retry fixes, concrete typed decode admission, raw TTL preservation, conserved spill pressure, controlled startup cancellation and genuine takeover references are indexed without inferring behavioral, mutation, crash, benchmark, native-provider or release qualification. Historical hosted qualification remains scoped to its recorded source. The #910 overlap inventory separately names controlled-storage actual-response latency probes and real-filesystem held-publication recovery schedules; no real hardware latency result is inferred. The final source also indexes manifest-proven startup visibility after successful intent repair, original-identity unpublished-output cleanup, and retained writer ownership through actual failed-compute cleanup. The #987 retained-flush FIFO regression indexes per-family head selection before readiness, unchanged retry/caller clocks, independently progressing other families and exact restart values/identities. Prior f274 Sqrzl qualification remains historical to that production revision; exact-head hosted native qualification is tracked separately.",
+    "semantic_scope": "All 65 catalog IDs reviewed against the final frozen production/test source. Actual locations, assertion/helper markers, renamed tests, selected-proof and flush retry fixes, concrete typed decode admission, raw TTL preservation, conserved spill pressure, controlled startup cancellation and genuine takeover references are indexed without inferring behavioral, mutation, crash, benchmark, native-provider or release qualification. Historical hosted qualification remains scoped to its recorded source. The #910 overlap inventory separately names controlled-storage actual-response latency probes and real-filesystem held-publication recovery schedules; no real hardware latency result is inferred. The final source also indexes manifest-proven startup visibility after successful intent repair, original-identity unpublished-output cleanup, and retained writer ownership through actual failed-compute cleanup. The #987 retained-flush FIFO regression indexes per-family head selection before readiness, unchanged retry/caller clocks, independently progressing other families and exact restart values/identities. Prior f274 Sqrzl qualification remains historical to that production revision; exact-head hosted native qualification is tracked separately. Fault-free publication-order clocks acquire the existing failpoint read scope before setup; the local fragmentation preemption reference explicitly persists and reloads all three L0 seed identities before real logical move edits. Callback-tail liveness references distinguish definitely-unsubmitted typed local admission, exact source-pool identity, the original absolute GET deadline sampled after adapter admission, unchanged charges/caps and terminal foreign/protocol/static-oversize controls. PUT and conditional CAS retry semantics are unchanged.",
     "base_source_revision": "0bb7f09df6eaadd92ebba6870434acc30ba3a69d",
     "source_postimages": "docs/development/invariant-evidence-source-sha256.json",
     "catalog_ids_reviewed": [
@@ -344,14 +344,14 @@
       "FORMAT-4",
       "FORMAT-5"
     ],
-    "active_test_symbol_count": 353,
-    "assertion_anchor_count": 2688,
+    "active_test_symbol_count": 358,
+    "assertion_anchor_count": 2760,
     "progress_regression_checkpoint": "fb06795f5224b3431b91c5ea3b37e547d2f663b0",
     "progress_regressions_are_ordinary_cargo_tests": true,
     "unresolved_historical_test_names_removed": 13,
-    "test_reference_count": 390,
+    "test_reference_count": 397,
     "test_symbols_renamed": 51,
-    "previous_reference_checkpoint": "1c74f03a818ba15611bce675e71a6e0811760d19",
+    "previous_reference_checkpoint": "ca5608695457780be0570c7877f7176950a27e09",
     "obsolete_reference_removed": {
       "id": "SST-4",
       "reason": "Former global provider-gate schedule was replaced by independently owned captured-cut publication schedules; it is not surviving evidence."
@@ -375,9 +375,9 @@
       "issue": 912,
       "scope": "Destructive TTL-driven SST reclamation is deferred; compaction preserves raw expiration metadata and the existing clock-correction behavior."
     },
-    "production_reference_count": 269,
+    "production_reference_count": 277,
     "test_symbols_renamed_since_base": 2,
-    "source_postimage_count": 224
+    "source_postimage_count": 231
   },
   "historical_reference_preparation": {
     "source_revision": "bab5b3ccdee16af9502cba4e032a41b6a0e69947",
@@ -1415,21 +1415,21 @@
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 882,
+          "line": 892,
           "symbol": "should_reject_owned_capture_when_successor_takes_writer_epoch",
           "claim": "A captured predecessor cut cannot become authoritative after the successor takes the writer epoch.",
           "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes.",
           "assertions": [
             {
-              "line": 892,
+              "line": 902,
               "marker": "assert!(matches!(publication, Err(MidgeError::Fenced(_))));"
             },
             {
-              "line": 893,
+              "line": 903,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 1);"
             },
             {
-              "line": 894,
+              "line": 904,
               "marker": "assert_eq!("
             }
           ]
@@ -6131,7 +6131,7 @@
           "line": 301,
           "symbol": "should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_race",
           "claim": "Opposite actual publication order retains the assigned flush identity and exact committed metadata.",
-          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
+          "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions The existing failpoint read scope is acquired before fixture setup and original operation clocks, excluding unrelated global test-control ownership from that timed window.",
           "assertions": [
             {
               "line": 133,
@@ -6164,23 +6164,23 @@
               "helper": "assert_committed_files"
             },
             {
-              "line": 354,
+              "line": 355,
               "marker": "assert!(names_before.bound > bound_before && sst_seq == bound_before);"
             },
             {
-              "line": 355,
+              "line": 356,
               "marker": "assert_eq!(names_after, names_before);"
             },
             {
-              "line": 356,
+              "line": 357,
               "marker": "assert!(independently_publishing && identity_unchanged && inputs_retained && no_early_ok);"
             },
             {
-              "line": 357,
+              "line": 358,
               "marker": "assert!(matches!("
             },
             {
-              "line": 362,
+              "line": 363,
               "marker": "assert_eq!(el.state.flush_metrics.publish_count, 1);"
             }
           ]
@@ -8056,25 +8056,25 @@
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 905,
+          "line": 915,
           "symbol": "should_capture_exact_checkpoint_cut_when_snapshot_installation_is_between_rename_and_truncate",
           "claim": "A capture during checkpoint installation binds the immutable snapshot and exact journal cut without discarding the newer tail.",
           "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes.",
           "assertions": [
             {
-              "line": 972,
+              "line": 982,
               "marker": "assert!(matches!(blocked, Err(MidgeError::Timeout(_))));"
             },
             {
-              "line": 973,
+              "line": 983,
               "marker": "assert_eq!(selected.next_sst_seqs[&0], 10);"
             },
             {
-              "line": 974,
+              "line": 984,
               "marker": "assert_eq!(selected.edit_checkpoint_id, id);"
             },
             {
-              "line": 980,
+              "line": 990,
               "marker": "assert_eq!(current.next_sst_seqs[&0], 20);"
             }
           ]
@@ -9338,10 +9338,10 @@
         },
         {
           "path": "src/runtime/event_loop/cloud_integration/tests/maintenance_tests/manual_flush_tests/publication_orders.rs",
-          "line": 367,
+          "line": 369,
           "symbol": "should_admit_compaction_completion_while_manual_flush_provider_task_is_owned",
           "claim": "The compaction cut can proceed while an unrelated manual flush's provider task remains owned, preserving each exact continuation.",
-          "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes.",
+          "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes. The existing failpoint read scope is acquired before fixture setup and original operation clocks, excluding unrelated global test-control ownership from that timed window.",
           "assertions": [
             {
               "line": 133,
@@ -9374,29 +9374,29 @@
               "helper": "assert_committed_files"
             },
             {
-              "line": 397,
+              "line": 400,
               "marker": "assert!(matches!(build, FlushWorkerResult::Build(_)));"
             },
             {
-              "line": 412,
+              "line": 415,
               "marker": "assert!("
             },
             {
-              "line": 419,
+              "line": 422,
               "marker": "assert!(matches!("
             },
             {
-              "line": 424,
+              "line": 427,
               "marker": "assert_eq!(el.state.flush_metrics.publish_count, 1);"
             }
           ]
         },
         {
           "path": "src/runtime/event_loop/cloud_integration/tests/maintenance_tests/manual_flush_tests/publication_orders.rs",
-          "line": 501,
+          "line": 509,
           "symbol": "should_admit_compaction_completion_while_automatic_flush_provider_task_is_owned",
           "claim": "The automatic flush owner cannot absorb or settle an unrelated compaction's captured completion.",
-          "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes.",
+          "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes. The existing failpoint read scope is acquired before fixture setup and original operation clocks, excluding unrelated global test-control ownership from that timed window.",
           "assertions": [
             {
               "line": 133,
@@ -9429,157 +9429,157 @@
               "helper": "assert_committed_files"
             },
             {
-              "line": 431,
+              "line": 435,
               "marker": "assert!(el.publication.flush_barrier_waiters.is_empty());",
               "helper": "schedule_automatic_flush"
             },
             {
-              "line": 536,
+              "line": 545,
               "marker": "assert!(matches!(build, FlushWorkerResult::Build(_)));"
             },
             {
-              "line": 552,
+              "line": 561,
               "marker": "assert!(local_turn_released && completion_admitted && compaction_publication);"
             },
             {
-              "line": 553,
+              "line": 562,
               "marker": "assert!(inputs_retained && no_early_release);"
             },
             {
-              "line": 554,
+              "line": 563,
               "marker": "assert!(no_manual_waiter && el.publication.flush_barrier_waiters.is_empty());"
             },
             {
-              "line": 555,
+              "line": 564,
               "marker": "assert!(el.state.immutable_flush_by_id(flush_id).is_none());"
             },
             {
-              "line": 557,
+              "line": 566,
               "marker": "assert_eq!(el.state.flush_metrics.publish_count, 1);"
             }
           ]
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 582,
+          "line": 592,
           "symbol": "should_coalesce_older_capture_when_later_cut_commits_during_held_provider_put",
           "claim": "Completion of an older held capture reconciles exact later-cut coverage instead of reinstalling the older manifest view.",
           "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes.",
           "assertions": [
             {
-              "line": 622,
+              "line": 632,
               "marker": "assert_eq!(after, selected);"
             },
             {
-              "line": 623,
+              "line": 633,
               "marker": "assert_eq!(actual, expected);"
             },
             {
-              "line": 624,
+              "line": 634,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             },
             {
-              "line": 646,
+              "line": 656,
               "marker": "assert!(matches!("
             },
             {
-              "line": 653,
+              "line": 663,
               "marker": "assert_eq!("
             }
           ]
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 681,
+          "line": 691,
           "symbol": "should_retain_unsettled_intent_when_new_capture_attempts_to_drop_it",
           "claim": "A newer control capture cannot omit an unsettled earlier publication intent without its exact receipt.",
           "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes.",
           "assertions": [
             {
-              "line": 695,
+              "line": 705,
               "marker": "assert!(matches!(omitted, Err(MidgeError::Busy(_))));"
             },
             {
-              "line": 696,
+              "line": 706,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 1);"
             },
             {
-              "line": 699,
+              "line": 709,
               "marker": "assert!(matches!("
             },
             {
-              "line": 731,
+              "line": 741,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             },
             {
-              "line": 732,
+              "line": 742,
               "marker": "assert!(IntentPersistence::load_with_fs_and_policy("
             }
           ]
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 810,
+          "line": 820,
           "symbol": "should_keep_unknown_capture_owned_until_exact_later_coverage_is_selected",
           "claim": "Unknown publication remains owned until authoritative selected metadata proves exact compatible coverage.",
           "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes.",
           "assertions": [
             {
-              "line": 816,
+              "line": 826,
               "marker": "assert!(weak.upgrade().is_some());"
             },
             {
-              "line": 817,
+              "line": 827,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 1);"
             },
             {
-              "line": 824,
+              "line": 834,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             },
             {
-              "line": 825,
+              "line": 835,
               "marker": "assert!(weak.upgrade().is_none());"
             },
             {
-              "line": 827,
+              "line": 837,
               "marker": "assert_eq!("
             }
           ]
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 834,
+          "line": 844,
           "symbol": "should_rebase_newer_capture_when_earlier_cut_wins_its_predecessor_cas",
           "claim": "An earlier CAS winner causes the newer captured cut to rebase from that exact selected predecessor without losing committed edits.",
           "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes.",
           "assertions": [
             {
-              "line": 873,
+              "line": 883,
               "marker": "assert_eq!(later.id, earlier.id.checked_next().unwrap());"
             },
             {
-              "line": 874,
+              "line": 884,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             },
             {
-              "line": 875,
+              "line": 885,
               "marker": "assert_eq!("
             }
           ]
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 741,
+          "line": 751,
           "symbol": "should_transfer_selected_terminal_witness_when_its_source_finishes_before_later_capture",
           "claim": "A genuinely selected terminal intent retains its exact selected witness after its original source finishes; a later unrelated journal edit and retained capture cannot prevent an authoritative intent clear.",
           "scope": "Production captured-cut protocol over MockCloud and real control files; exact recovered intent bytes are checked. Bounded source-handoff schedule, without native-provider or whole-process memory qualification.",
           "assertions": [
             {
-              "line": 785,
+              "line": 795,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             },
             {
-              "line": 801,
+              "line": 811,
               "marker": "assert!(IntentPersistence::load_with_fs_and_policy_typed("
             }
           ]
@@ -10937,6 +10937,27 @@
           "symbol": "BlockingCloud::get_optional",
           "kind": "function",
           "marker": "pub(crate) fn get_optional(&self, key: &str) -> MidgeResult<Option<Vec<u8>>> {"
+        },
+        {
+          "path": "src/storage/cloud/error.rs",
+          "line": 64,
+          "symbol": "CloudError::LocalReadAdmission",
+          "kind": "variant",
+          "marker": "LocalReadAdmission(String),"
+        },
+        {
+          "path": "src/storage/cloud/error.rs",
+          "line": 165,
+          "symbol": "contextualize_operation_error",
+          "kind": "function",
+          "marker": "pub(crate) fn contextualize_operation_error("
+        },
+        {
+          "path": "src/storage/cloud/adapter.rs",
+          "line": 82,
+          "symbol": "storage_error_from_cloud",
+          "kind": "function",
+          "marker": "pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::StorageError {"
         }
       ],
       "tests": [
@@ -11047,7 +11068,7 @@
           ]
         }
       ],
-      "preconditions": "Native deadline fixtures use real local HTTP servers/backends and positive request-arrival/cancellation observations; type-mapping unit supplies a typed error.",
+      "preconditions": "Native deadline fixtures use real local HTTP servers/backends and positive request-arrival/cancellation observations; type-mapping unit supplies a typed error. Local definitely-unsubmitted read admission has its own typed error and pool provenance, distinct from transport, protocol, provider quota and conditional mutation outcomes.",
       "uncovered": "Header-wait cancellation is not proof no provider mutation committed; PUT remains ambiguous where required. Selected tests do not establish every body-read/range bound/signing retry contract or external provider implementation. Compatibility defaults on custom backends may be callback-bounded only.",
       "catalog_review": {
         "reviewed": true,
@@ -11893,47 +11914,54 @@
           "symbol": "MetadataPublicationLock::reserve_selected_decode_workspace",
           "kind": "function",
           "marker": "pub(crate) fn reserve_selected_decode_workspace("
+        },
+        {
+          "path": "src/storage/retained_callback.rs",
+          "line": 17,
+          "symbol": "retained_callback::retain",
+          "kind": "function",
+          "marker": "pub(crate) fn retain<T: Send + 'static>("
         }
       ],
       "tests": [
         {
           "path": "src/common/resource_budget.rs",
-          "line": 853,
+          "line": 860,
           "symbol": "should_report_current_charge_until_the_last_shared_reservation_is_released",
           "claim": "7-byte shared charge remains after first owner drops, then used=0 after last owner drops.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 858,
+              "line": 865,
               "marker": "assert_eq!(budget.used(), 7);"
             },
             {
-              "line": 866,
+              "line": 873,
               "marker": "assert_eq!(shared_charge, 7);"
             },
             {
-              "line": 867,
+              "line": 874,
               "marker": "assert_eq!(budget.used(), 0);"
             }
           ]
         },
         {
           "path": "src/common/resource_budget.rs",
-          "line": 871,
+          "line": 878,
           "symbol": "should_reject_reservation_when_resource_budget_would_be_exceeded",
           "claim": "7 of 10 held bytes causes 4-byte request ResourceLimit, peak remains 7, release permits full 10.",
           "scope": "source/assertion evidence; exact fixture modes and assumptions stated in preconditions",
           "assertions": [
             {
-              "line": 880,
+              "line": 887,
               "marker": "assert!(matches!(result, Err(MidgeError::ResourceLimit(_))));"
             },
             {
-              "line": 881,
+              "line": 888,
               "marker": "assert_eq!(budget.peak(), 7);"
             },
             {
-              "line": 883,
+              "line": 890,
               "marker": "assert!(budget.reserve(10, \"test buffer\").is_ok());"
             }
           ]
@@ -12180,70 +12208,78 @@
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 317,
+          "line": 324,
           "symbol": "should_account_owned_capture_bytes_until_the_source_owner_finishes",
           "claim": "Actual control-file capture reserves shared bytes before copying and retains the same charge through the source owner's terminal lifetime.",
-          "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes.",
+          "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes. Final zero/source-only observations wait for the actual physical callback tail under a bounded cleanup observation; logical delivery alone is not resource release.",
           "assertions": [
             {
-              "line": 336,
+              "line": 343,
               "marker": "assert!(fixture.lock.capture_contention(&error));"
             },
             {
-              "line": 337,
+              "line": 344,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             },
             {
-              "line": 338,
+              "line": 345,
               "marker": "assert_eq!(memory.used(), memory.limit() - 128);"
             },
             {
-              "line": 340,
+              "line": 347,
               "marker": "assert!(!fixture.lock.capture_contention(&error));"
             },
             {
-              "line": 341,
+              "line": 348,
               "marker": "assert!("
             },
             {
-              "line": 347,
+              "line": 354,
               "marker": "assert!(source_charge > 4096);"
             },
             {
-              "line": 349,
+              "line": 356,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             },
             {
-              "line": 350,
+              "line": 360,
               "marker": "assert_eq!("
             },
             {
-              "line": 356,
-              "marker": "assert_eq!(memory.used(), 0);"
+              "line": 366,
+              "marker": "adapter_admission::wait_for_charge(&memory, 0, &completion);",
+              "helper": "adapter_admission::wait_for_charge physical-tail call",
+              "kind": "behavior_helper_call"
+            },
+            {
+              "line": 359,
+              "marker": "adapter_admission::wait_for_charge(&memory, source_charge, &completion);",
+              "helper": "adapter_admission::wait_for_charge source-only call",
+              "kind": "behavior_helper_call"
             }
           ]
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 360,
+          "line": 370,
           "symbol": "should_restore_capture_slot_availability_after_owned_sources_finish",
           "claim": "Owned metadata capture admission retries bounded slot pressure without dropping the accepted cut and releases capacity only with its owners.",
           "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes.",
           "assertions": [
             {
-              "line": 376,
+              "line": 386,
               "marker": "assert!(fixture.lock.capture_admission_retryable(&error));"
             },
             {
-              "line": 378,
+              "line": 388,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             },
             {
-              "line": 379,
+              "line": 389,
               "marker": "assert!(fixture.lock.capture_admission_retryable(&error));"
             },
             {
-              "line": 383,
+              "line": 393,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             }
           ]
@@ -12362,84 +12398,86 @@
         },
         {
           "path": "src/common/resource_budget.rs",
-          "line": 588,
+          "line": 595,
           "symbol": "should_keep_credit_exclusive_until_last_physical_callback_drops",
           "claim": "A shared witness credit cannot fund a second overlapping body while the first actual callback retains its owner; parent and child charges remain conserved and all charge releases after the last owner drops.",
           "scope": "Real ResourceBudget parent/child reservations and a spawned competing admission. This is allocator accounting proof, not whole-process RSS evidence.",
           "assertions": [
             {
-              "line": 616,
+              "line": 623,
               "marker": "assert!(matches!(overlapping, Err(MidgeError::ResourceLimit(_))));"
             },
             {
-              "line": 617,
+              "line": 624,
               "marker": "assert_eq!(while_callback_owned, (128, 128));"
             },
             {
-              "line": 618,
+              "line": 625,
               "marker": "assert_eq!((next.bytes(), child.used(), root.used()), (64, 128, 128));"
             },
             {
-              "line": 621,
+              "line": 628,
               "marker": "assert_eq!((child.used(), root.used()), (0, 0));"
             },
             {
-              "line": 622,
+              "line": 629,
               "marker": "assert!(root.peak() <= root.limit());"
             }
           ]
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 440,
+          "line": 450,
           "symbol": "should_keep_readback_payload_charged_until_its_actual_callback_finishes",
           "claim": "Logical later-cut settlement does not release an earlier readback payload or its exclusive selected-witness credit while the actual GET callback remains held; releasing that callback restores zero usage.",
           "scope": "Production metadata mirror and held MockCloud body callback with one configured shared 256 KiB pool; typed timeout and exact post-release accounting are asserted.",
           "assertions": [
             {
-              "line": 463,
+              "line": 473,
               "marker": "assert!(matches!("
             },
             {
-              "line": 476,
+              "line": 486,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             },
             {
-              "line": 484,
+              "line": 494,
               "marker": "assert!("
             },
             {
-              "line": 495,
+              "line": 505,
               "marker": "assert_eq!(memory.used(), 0);"
             }
           ]
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 194,
+          "line": 197,
           "symbol": "should_resolve_successful_unknown_pointer_cas_in_small_pool_without_second_body_allocation",
           "claim": "A successful conditional pointer CAS with a lost response reconciles from the already charged exact staged identity even when the shared pool cannot admit another body; one actual CAS and final zero ownership are required.",
-          "scope": "Production captured mirror with lost-CAS LeaderStore wrapper and shared 128 KiB pool. Exact selected pointer proof is required; no blind conditional retry or uncharged fallback body is allowed.",
+          "scope": "Production captured mirror with lost-CAS LeaderStore wrapper and shared 128 KiB pool. Exact selected pointer proof is required; no blind conditional retry or uncharged fallback body is allowed. Final zero/source-only observations wait for the actual physical callback tail under a bounded cleanup observation; logical delivery alone is not resource release.",
           "assertions": [
             {
-              "line": 233,
+              "line": 236,
               "marker": "assert_eq!(store.mutations.load(Ordering::Acquire), 1);"
             },
             {
-              "line": 234,
+              "line": 237,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             },
             {
-              "line": 235,
+              "line": 238,
               "marker": "assert_eq!(memory.used(), memory.limit());"
             },
             {
-              "line": 236,
+              "line": 239,
               "marker": "assert!(matches!("
             },
             {
-              "line": 245,
-              "marker": "assert_eq!(memory.used(), 0);"
+              "line": 248,
+              "marker": "adapter_admission::wait_for_charge(",
+              "helper": "adapter_admission::wait_for_charge physical-tail call",
+              "kind": "behavior_helper_call"
             }
           ]
         },
@@ -12719,6 +12757,73 @@
               "line": 83,
               "marker": "assert_eq!(root.used(), 0);",
               "helper": "assert_released"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/hybrid_persistence/metadata_cuts/tests/adapter_admission.rs",
+          "line": 33,
+          "symbol": "should_complete_exact_readback_when_a_prior_physical_adapter_releases_its_charge",
+          "claim": "A genuine physical adapter tail holds its64KiB stack charge in the unchanged128KiB pool. The next exact GET stays unsubmitted until that tail releases; one GET returns the exact body with a provider budget sampled after admission, no extra PUT, and charges drain only with actual owners.",
+          "scope": "Actual retained-callback thread/destructor, captured metadata source and MockCloud I/O with unchanged capacities. Logical completion precedes physical-tail cleanup; no native transport or hardware performance qualification.",
+          "assertions": [
+            {
+              "line": 29,
+              "marker": "assert_eq!(memory.used(), expected);",
+              "helper": "wait_for_charge"
+            },
+            {
+              "line": 46,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 63,
+              "marker": "assert_eq!(memory.used(), source_charge + 64 * 1024);"
+            },
+            {
+              "line": 81,
+              "marker": "assert_eq!(memory.used(), source_charge + 64 * 1024);"
+            },
+            {
+              "line": 89,
+              "marker": "assert_eq!(result.unwrap(), Some(body.to_vec()));"
+            },
+            {
+              "line": 90,
+              "marker": "assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)));"
+            },
+            {
+              "line": 91,
+              "marker": "assert_eq!(reads_before_release, Vec::<String>::new());"
+            },
+            {
+              "line": 92,
+              "marker": "assert_eq!(backend.get_downloads(), [key]);"
+            },
+            {
+              "line": 94,
+              "marker": "assert_eq!(timeouts.len(), 1);"
+            },
+            {
+              "line": 95,
+              "marker": "assert!(!timeouts[0].is_zero() && timeouts[0] <= remaining_at_release);"
+            },
+            {
+              "line": 96,
+              "marker": "assert_eq!(backend.get_uploads().len(), 1);"
+            },
+            {
+              "line": 97,
+              "marker": "assert_eq!(fixture.lock.pending_captures(), 1);"
+            },
+            {
+              "line": 101,
+              "marker": "assert_eq!(memory.used(), source_charge);"
+            },
+            {
+              "line": 104,
+              "marker": "});",
+              "helper": "wait_for_charge final physical-tail call"
             }
           ]
         }
@@ -13297,6 +13402,27 @@
           "symbol": "RuntimeState::flush_retry_deadline_timeout",
           "kind": "function",
           "marker": "pub(crate) fn flush_retry_deadline_timeout(&self) -> Option<Duration> {"
+        },
+        {
+          "path": "src/common/resource_budget.rs",
+          "line": 307,
+          "symbol": "ResourceReservation::admission_retryable",
+          "kind": "function",
+          "marker": "pub(crate) fn admission_retryable(&self, error: &MidgeError) -> bool {"
+        },
+        {
+          "path": "src/storage/cloud/backend.rs",
+          "line": 119,
+          "symbol": "retain_read_callback",
+          "kind": "function",
+          "marker": "fn retain_read_callback("
+        },
+        {
+          "path": "src/storage/cloud/blocking.rs",
+          "line": 105,
+          "symbol": "BlockingCloud::get_optional",
+          "kind": "function",
+          "marker": "pub(crate) fn get_optional(&self, key: &str) -> MidgeResult<Option<Vec<u8>>> {"
         }
       ],
       "tests": [
@@ -13422,9 +13548,175 @@
               "helper": "Fixture::verify_recovery call"
             }
           ]
+        },
+        {
+          "path": "src/runtime/hybrid_persistence/metadata_cuts/tests/adapter_admission.rs",
+          "line": 33,
+          "symbol": "should_complete_exact_readback_when_a_prior_physical_adapter_releases_its_charge",
+          "claim": "A genuine physical adapter tail holds its64KiB stack charge in the unchanged128KiB pool. The next exact GET stays unsubmitted until that tail releases; one GET returns the exact body with a provider budget sampled after admission, no extra PUT, and charges drain only with actual owners.",
+          "scope": "Actual retained-callback thread/destructor, captured metadata source and MockCloud I/O with unchanged capacities. Logical completion precedes physical-tail cleanup; no native transport or hardware performance qualification.",
+          "assertions": [
+            {
+              "line": 29,
+              "marker": "assert_eq!(memory.used(), expected);",
+              "helper": "wait_for_charge"
+            },
+            {
+              "line": 46,
+              "marker": "assert!(matches!("
+            },
+            {
+              "line": 63,
+              "marker": "assert_eq!(memory.used(), source_charge + 64 * 1024);"
+            },
+            {
+              "line": 81,
+              "marker": "assert_eq!(memory.used(), source_charge + 64 * 1024);"
+            },
+            {
+              "line": 89,
+              "marker": "assert_eq!(result.unwrap(), Some(body.to_vec()));"
+            },
+            {
+              "line": 90,
+              "marker": "assert!(matches!(premature, Err(mpsc::RecvTimeoutError::Timeout)));"
+            },
+            {
+              "line": 91,
+              "marker": "assert_eq!(reads_before_release, Vec::<String>::new());"
+            },
+            {
+              "line": 92,
+              "marker": "assert_eq!(backend.get_downloads(), [key]);"
+            },
+            {
+              "line": 94,
+              "marker": "assert_eq!(timeouts.len(), 1);"
+            },
+            {
+              "line": 95,
+              "marker": "assert!(!timeouts[0].is_zero() && timeouts[0] <= remaining_at_release);"
+            },
+            {
+              "line": 96,
+              "marker": "assert_eq!(backend.get_uploads().len(), 1);"
+            },
+            {
+              "line": 97,
+              "marker": "assert_eq!(fixture.lock.pending_captures(), 1);"
+            },
+            {
+              "line": 101,
+              "marker": "assert_eq!(memory.used(), source_charge);"
+            },
+            {
+              "line": 104,
+              "marker": "});",
+              "helper": "wait_for_charge final physical-tail call"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/hybrid_persistence/metadata_cuts/tests/adapter_admission.rs",
+          "line": 108,
+          "symbol": "should_refuse_unsubmitted_read_when_its_adapter_exceeds_the_entire_pool",
+          "claim": "A64KiB adapter cannot enter a32KiB pool: nonretryable ResourceLimit performs no GET and retains the original source charge and capture ownership.",
+          "scope": "Actual read adapter admission and captured source. This is the adapter-alone static oversize boundary, not every combined working-set shape.",
+          "assertions": [
+            {
+              "line": 126,
+              "marker": "assert!(matches!(error, MidgeError::ResourceLimit(_)));"
+            },
+            {
+              "line": 127,
+              "marker": "assert!(!source.admission_retryable(&error));"
+            },
+            {
+              "line": 128,
+              "marker": "assert_eq!(backend.get_downloads(), Vec::<String>::new());"
+            },
+            {
+              "line": 129,
+              "marker": "assert_eq!(backend.get_request_timeouts(), Vec::<Duration>::new());"
+            },
+            {
+              "line": 130,
+              "marker": "assert_eq!(fixture.lock.pending_captures(), 1);"
+            },
+            {
+              "line": 131,
+              "marker": "assert_eq!(memory.used(), source.bytes());"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/hybrid_persistence/metadata_cuts/tests/adapter_admission.rs",
+          "line": 136,
+          "symbol": "should_end_unsubmitted_read_when_original_admission_budget_expires",
+          "claim": "Contention expires the original50ms admission deadline without issuing a GET; Timeout preserves the source, held-owner charges and pending capture.",
+          "scope": "Real ResourceBudget reservations and BlockingCloud read admission with one absolute deadline; no physical provider cancellation or acknowledged write is inferred.",
+          "assertions": [
+            {
+              "line": 157,
+              "marker": "assert!(matches!(error, MidgeError::Timeout(_)));"
+            },
+            {
+              "line": 158,
+              "marker": "assert!(deadline.is_expired());"
+            },
+            {
+              "line": 159,
+              "marker": "assert_eq!(backend.get_downloads(), Vec::<String>::new());"
+            },
+            {
+              "line": 160,
+              "marker": "assert_eq!(backend.get_request_timeouts(), Vec::<Duration>::new());"
+            },
+            {
+              "line": 161,
+              "marker": "assert_eq!(fixture.lock.pending_captures(), 1);"
+            },
+            {
+              "line": 162,
+              "marker": "assert_eq!(memory.used(), source.bytes() + held.bytes());"
+            }
+          ]
+        },
+        {
+          "path": "src/runtime/hybrid_persistence/metadata_cuts/tests/adapter_admission.rs",
+          "line": 178,
+          "symbol": "should_preserve_original_admission_scope_when_cloud_error_context_is_added",
+          "claim": "Typed local refusal preserves exact pool identity after its owner finishes. Foreign-pool and Protocol errors remain nonretryable, with both ledgers exact.",
+          "scope": "Classification control built from actual ResourceBudget failures and cloud error conversion; no HTTP transport response or unknown-effect retry is simulated.",
+          "assertions": [
+            {
+              "line": 199,
+              "marker": "assert!(source.admission_retryable(&scoped));"
+            },
+            {
+              "line": 200,
+              "marker": "assert!(!source.admission_retryable(&unrelated));"
+            },
+            {
+              "line": 201,
+              "marker": "assert!(matches!(protocol, MidgeError::Internal(_)));"
+            },
+            {
+              "line": 202,
+              "marker": "assert!(!source.admission_retryable(&protocol));"
+            },
+            {
+              "line": 203,
+              "marker": "assert_eq!(own.used(), 10);"
+            },
+            {
+              "line": 204,
+              "marker": "assert_eq!(foreign.used(), 0);"
+            }
+          ]
         }
       ],
-      "preconditions": "Backoff unit uses a controllable clock; actual upload-worker test uses an intentionally failing StorageBackend and finite polling/worker progression. The dispatch, due-work and retry-wakeup paths share the same per-family head selector; readiness cannot bypass a retained generation or globally block unrelated families.",
+      "preconditions": "Backoff unit uses a controllable clock; actual upload-worker test uses an intentionally failing StorageBackend and finite polling/worker progression. The dispatch, due-work and retry-wakeup paths share the same per-family head selector; readiness cannot bypass a retained generation or globally block unrelated families. Full-GET admission retries require the source exact reservation pool and typed definitely-unsubmitted refusal. Attempts retain the same absolute read deadline and physical charges; static adapter oversize, foreign-pool and protocol/provider failures do not enter that branch.",
       "uncovered": "Attempt count/backoff assertions do not alone prove CPU utilization, fairness or every terminal error path under all fault schedules. Permanent provider failure can halt useful maintenance while retaining authoritative state.",
       "catalog_review": {
         "reviewed": true,
@@ -13469,6 +13761,13 @@
           "symbol": "EventLoop::launch_compaction",
           "kind": "function",
           "marker": "pub(super) fn launch_compaction("
+        },
+        {
+          "path": "src/storage/cloud/backend.rs",
+          "line": 263,
+          "symbol": "CloudReadCapability::read",
+          "kind": "function",
+          "marker": "fn read(&self, key: &str, mut options: CloudReadOptions, callback: CloudCallback) {"
         }
       ],
       "tests": [
@@ -14643,9 +14942,42 @@
               "helper": "ConcurrentFixture::restart"
             }
           ]
+        },
+        {
+          "path": "src/runtime/hybrid_persistence/metadata_cuts/tests/adapter_admission.rs",
+          "line": 136,
+          "symbol": "should_end_unsubmitted_read_when_original_admission_budget_expires",
+          "claim": "Contention expires the original50ms admission deadline without issuing a GET; Timeout preserves the source, held-owner charges and pending capture.",
+          "scope": "Real ResourceBudget reservations and BlockingCloud read admission with one absolute deadline; no physical provider cancellation or acknowledged write is inferred.",
+          "assertions": [
+            {
+              "line": 157,
+              "marker": "assert!(matches!(error, MidgeError::Timeout(_)));"
+            },
+            {
+              "line": 158,
+              "marker": "assert!(deadline.is_expired());"
+            },
+            {
+              "line": 159,
+              "marker": "assert_eq!(backend.get_downloads(), Vec::<String>::new());"
+            },
+            {
+              "line": 160,
+              "marker": "assert_eq!(backend.get_request_timeouts(), Vec::<Duration>::new());"
+            },
+            {
+              "line": 161,
+              "marker": "assert_eq!(fixture.lock.pending_captures(), 1);"
+            },
+            {
+              "line": 162,
+              "marker": "assert_eq!(memory.used(), source.bytes() + held.bytes());"
+            }
+          ]
         }
       ],
-      "preconditions": "Active native open cases require explicit sqrzl-tests prerequisites; the controlled late-preparation case also requires failpoints and uses manual shared-scope expiry, separately from unchanged real 600 ms discovery/recovery bounds. Compaction fixtures own a real conditional lease, genuine authoritative SST/input bytes and actual phase receipts; all setup/read-gate acquisition precedes the immutable deadline. Capture and streamed-read tests preserve the original absolute caller deadline across memory admission, worker I/O and final publication/admission.",
+      "preconditions": "Active native open cases require explicit sqrzl-tests prerequisites; the controlled late-preparation case also requires failpoints and uses manual shared-scope expiry, separately from unchanged real 600 ms discovery/recovery bounds. Compaction fixtures own a real conditional lease, genuine authoritative SST/input bytes and actual phase receipts; all setup/read-gate acquisition precedes the immutable deadline. Capture and streamed-read tests preserve the original absolute caller deadline across memory admission, worker I/O and final publication/admission. GET transport timeout is sampled only after adapter admission from the same absolute deadline.",
       "uncovered": "Production startup Some and manual compaction Some use one original deadline; None and Complete preserve ordinary operation caps. The controlled late-startup schedule proves ownership cancellation, not elapsed time; the unchanged real 600 ms discovery/recovery cases qualify that separate bound. A joining waiter cannot replace a background None or an accepted manual origin. Caller Timeout is not provider cancellation or permission to release an accepted worker, lease, body or reservation. Local syscalls are cooperative at unit boundaries, not preemptible.",
       "catalog_review": {
         "reviewed": true,
@@ -15095,9 +15427,100 @@
               "marker": "assert_eq!(reader.range_tombstones()[0].end, b\"z\");"
             }
           ]
+        },
+        {
+          "path": "src/runtime/event_loop/compaction/fragmentation_tests.rs",
+          "line": 235,
+          "symbol": "should_recover_fragmented_source_when_critical_l0_work_interrupts_promotion",
+          "claim": "Source-only fragmentation preserves exact raw source versions and untouched target identities while critical L0 work preempts promotion. Three new L0 inputs are persisted and reloaded with matching identities before publication; L0 is selected next, debt drains, and strict restart recovers the exact fifteen expected rows.",
+          "scope": "Real filesystem SST writers, compute worker, manifest publication and RuntimeState recovery. Grandparent overlap policy is explicitly disabled to exercise the legacy Fragment path; this does not claim default conforming merges fragment or establish native/performance qualification.",
+          "assertions": [
+            {
+              "line": 149,
+              "marker": "assert!(matches!(",
+              "helper": "FragmentFixture::compute"
+            },
+            {
+              "line": 160,
+              "marker": "assert!(self.el.state.intent_log.is_empty());",
+              "helper": "FragmentFixture::publish"
+            },
+            {
+              "line": 161,
+              "marker": "assert!(!self.el.publication.publication_gate.is_active());",
+              "helper": "FragmentFixture::publish"
+            },
+            {
+              "line": 162,
+              "marker": "assert!(!self.el.authority.compaction_fence.is_degraded());",
+              "helper": "FragmentFixture::publish"
+            },
+            {
+              "line": 178,
+              "marker": "assert!(recovered.intent_log.is_empty());",
+              "helper": "FragmentFixture::recover_rows"
+            },
+            {
+              "line": 266,
+              "marker": "fixture.persist()?;",
+              "helper": "FragmentFixture::persist call"
+            },
+            {
+              "line": 241,
+              "marker": "assert_eq!("
+            },
+            {
+              "line": 250,
+              "marker": "assert!(matches!(plan.purpose, CompactionPurpose::Fragment { .. }));"
+            },
+            {
+              "line": 251,
+              "marker": "assert_eq!(plan.input_files, vec![fixture.source.clone()]);"
+            },
+            {
+              "line": 252,
+              "marker": "assert_eq!((plan.source_level, plan.target_level), (1, 1));"
+            },
+            {
+              "line": 269,
+              "marker": "assert!(fixture"
+            },
+            {
+              "line": 277,
+              "marker": "assert!(fixture.el.state.has_critical_l0_debt(0));"
+            },
+            {
+              "line": 292,
+              "marker": "assert_eq!(fixture.raw_rows(&outputs)?, before);"
+            },
+            {
+              "line": 293,
+              "marker": "assert!(!fixture"
+            },
+            {
+              "line": 301,
+              "marker": "assert!(fixture"
+            },
+            {
+              "line": 310,
+              "marker": "assert_eq!(next.source_level, 0);"
+            },
+            {
+              "line": 318,
+              "marker": "assert!(!fixture.el.state.has_critical_l0_debt(0));"
+            },
+            {
+              "line": 319,
+              "marker": "assert_eq!(expected.len(), 15);"
+            },
+            {
+              "line": 320,
+              "marker": "assert_eq!(fixture.recover_rows()?, expected);"
+            }
+          ]
         }
       ],
-      "preconditions": "10,000-target test is a real stream-construction path over MockFs/names, not 10,000 populated SSTs or completed sustained compaction. Cancellation control has genuine input SST. Candidate concurrency and overlap tests use bounded job reservations and shared budgets, complete target closure and the documented grandparent soft-limit exception; the preferred scheduling byte target is not a correctness cap.",
+      "preconditions": "10,000-target test is a real stream-construction path over MockFs/names, not 10,000 populated SSTs or completed sustained compaction. Cancellation control has genuine input SST. Candidate concurrency and overlap tests use bounded job reservations and shared budgets, complete target closure and the documented grandparent soft-limit exception; the preferred scheduling byte target is not a correctness cap. Fragment preemption setup durably publishes and reloads the exact metadata identities of all three new L0 SSTs before any real MoveSsts journal edit; the optional later compaction checkpoint is not used to create fixture authority.",
       "uncovered": "Bounded merge heads and conservative canonical-mount scratch capacity are safety properties. They do not prove a global decreasing-progress measure or sustained service SLO under arbitrary admission rates. Real filesystem-issued byte accounting does not establish physical device write amplification or production capacity.",
       "catalog_review": {
         "reviewed": true,
@@ -15324,25 +15747,25 @@
         },
         {
           "path": "src/runtime/hybrid_persistence/metadata_cuts/tests.rs",
-          "line": 387,
+          "line": 397,
           "symbol": "should_keep_unknown_physical_put_charged_after_later_cut_covers_its_capture",
           "claim": "A later authoritative cut can cover an earlier logical obligation without releasing the earlier unknown physical PUT's memory/source ownership.",
           "scope": "Active Rust regression source at the frozen checkpoint. This reference audit does not execute or qualify it; behavioral, mutation, crash, provider and performance results retain their separately reported source and environment scopes.",
           "assertions": [
             {
-              "line": 409,
+              "line": 419,
               "marker": "assert!(matches!("
             },
             {
-              "line": 422,
+              "line": 432,
               "marker": "assert_eq!(fixture.lock.pending_captures(), 0);"
             },
             {
-              "line": 423,
+              "line": 433,
               "marker": "assert!("
             },
             {
-              "line": 436,
+              "line": 446,
               "marker": "assert_eq!(memory.used(), 0);"
             }
           ]
