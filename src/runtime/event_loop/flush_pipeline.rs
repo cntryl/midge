@@ -19,6 +19,9 @@ pub(super) use mirror_retry::PendingFlushMirror;
 #[cfg(test)]
 mod tests;
 
+#[cfg(all(test, feature = "failpoints"))]
+mod retry_order_tests;
+
 #[cfg(test)]
 #[path = "flush_pipeline/accounting_tests.rs"]
 mod accounting_tests;

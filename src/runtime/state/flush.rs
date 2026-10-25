@@ -61,20 +61,15 @@ impl RuntimeState {
         &mut self,
         eligible: impl Fn(u32, u64) -> bool,
     ) -> Option<ImmutableFlush> {
-        let eligible = &eligible;
         let (cf_id, flush_id) = self
-            .column_families
-            .iter()
-            .flat_map(|(cf_id, cf)| {
-                cf.immutable_flushes.iter().filter_map(move |flush| {
-                    (matches!(
-                        flush.phase,
-                        ImmutableFlushPhase::Queued | ImmutableFlushPhase::RetryPending
-                    ) && (flush.phase != ImmutableFlushPhase::RetryPending
-                        || flush.retry.is_ready())
-                        && eligible(*cf_id, flush.flush_id))
-                    .then_some((*cf_id, flush.flush_id, flush.sequence))
-                })
+            .immutable_flush_heads()
+            .filter_map(|(cf_id, flush)| {
+                (matches!(
+                    flush.phase,
+                    ImmutableFlushPhase::Queued | ImmutableFlushPhase::RetryPending
+                ) && (flush.phase != ImmutableFlushPhase::RetryPending || flush.retry.is_ready())
+                    && eligible(cf_id, flush.flush_id))
+                .then_some((cf_id, flush.flush_id, flush.sequence))
             })
             .min_by_key(|(cf_id, flush_id, sequence)| (*sequence, *flush_id, *cf_id))
             .map(|(cf_id, flush_id, _)| (cf_id, flush_id))?;
@@ -96,6 +91,15 @@ impl RuntimeState {
             ImmutableFlushPhase::Building
         };
         Some(flush.clone())
+    }
+
+    /// A retained family head owns publication order even during backoff or
+    /// another physical phase. Readiness never licenses a younger generation
+    /// to advance that family's frontier over its unpersisted predecessor.
+    fn immutable_flush_heads(&self) -> impl Iterator<Item = (u32, &ImmutableFlush)> {
+        self.column_families
+            .iter()
+            .filter_map(|(&cf_id, cf)| cf.immutable_flushes.first().map(|flush| (cf_id, flush)))
     }
 
     pub(crate) fn immutable_flush_by_id(&self, flush_id: u64) -> Option<(u32, &ImmutableFlush)> {
@@ -168,22 +172,17 @@ impl RuntimeState {
         &self,
         eligible: impl Fn(u32, u64) -> bool,
     ) -> bool {
-        self.column_families.iter().any(|(cf_id, cf)| {
-            cf.immutable_flushes.iter().any(|flush| {
-                eligible(*cf_id, flush.flush_id)
-                    && (flush.phase == ImmutableFlushPhase::Queued
-                        || (flush.phase == ImmutableFlushPhase::RetryPending
-                            && flush.retry.is_ready()))
-            })
+        self.immutable_flush_heads().any(|(cf_id, flush)| {
+            eligible(cf_id, flush.flush_id)
+                && (flush.phase == ImmutableFlushPhase::Queued
+                    || (flush.phase == ImmutableFlushPhase::RetryPending && flush.retry.is_ready()))
         })
     }
 
     pub(crate) fn flush_retry_deadline_timeout(&self) -> Option<Duration> {
-        self.column_families
-            .values()
-            .flat_map(|cf_state| cf_state.immutable_flushes.iter())
-            .filter(|flush| flush.phase == ImmutableFlushPhase::RetryPending)
-            .filter_map(|flush| flush.retry.remaining())
+        self.immutable_flush_heads()
+            .filter(|(_, flush)| flush.phase == ImmutableFlushPhase::RetryPending)
+            .filter_map(|(_, flush)| flush.retry.remaining())
             .min()
     }
 
