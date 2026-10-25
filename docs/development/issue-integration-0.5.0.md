@@ -666,9 +666,15 @@ SSTs and memtable Arcs, while GC remains excluded from the capture/register
 window. Standalone compaction plans retain the existing sequence-horizon
 behavior unless that source-retention proof is explicitly supplied.
 
-Added complete/disjoint and legacy/incomplete proof regressions. Compile
-check with failpoints passed; test execution, public snapshot/retirement
-qualification and performance evidence remain in the review pass.
+Added complete/disjoint and legacy/incomplete proof regressions. The public
+Engine snapshot/reclaim regression passed and inspects published SST contents
+before and after the old snapshot is released; it also verifies a disjoint SST
+remains selected and readable. The production planner plus real-SST execution
+test for incomplete unselected bounds passed. For mutation sensitivity, forcing
+range GC eligible despite incomplete bounds failed at the expected planner
+assertion; restored code passed. The required cloud WAL-retirement regression
+passed with failpoints enabled. These focused results cover AC1-AC4; performance
+evidence remains separate.
 
 ### #924: implemented candidate; qualification deferred
 
