@@ -16,7 +16,7 @@ currently cover these slices:
 | `19926136` | #978 asserts the spill-specific global applied cut after partial apply | Cross-family rejection plus fresh snapshot cut/key assertions passed (1/1); whole-spill restart recovery passed (1/1) | Pipeline/rotation matrices, AC1–3, crash and performance evidence |
 | `a08f0616` | #905 covers a conflicting follower queued behind held Strict fsync | The follower waits without append or visibility, then conflicts after predecessor apply with no partial effects (1/1); Jev favored the evidence (0.65) | Hot-key throughput target and records-per-append/group-window measurements |
 | `4d7a429f` | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; `cargo fmt --check` and `git diff --check` passed | Injected-provider latency/A-B evidence and completion ordering/reconciliation cases (#935/#937); no full suite or benchmark run yet |
-| `83f705bb` | #904 pins replay of intact WAL bytes synced before their exact SyncOpen floor was recorded | New post-fsync/pre-frontier failpoint regression passed on the public Strict reopen path (1/1); adjacent WAL recovery-floor tests passed (2/2); `cargo fmt --check` and `git diff --check` passed | Damage classification on both sides of the floor, queued-append floor bound, separate fsync/A-B accounting, and explicit cadence sign-off |
+| `83f705bb`, `1b49519a` | #904 pins replay of intact WAL bytes synced before their exact SyncOpen floor was recorded and bounds the floor while later Strict appends queue | Post-fsync/pre-frontier Strict reopen regression passed (1/1); adjacent WAL recovery-floor tests passed (2/2); two-held-fsync event-loop regression proves the ledger remains at the first receipt while the later append is present, then advances after its receipt (1/1); formatting and diff checks passed | Damage classification on both sides of the floor, separate fsync/A-B accounting, and explicit cadence sign-off |
 | `508df52b` | #916 proves WAL catalog storage shrinks with a 10,000-segment history's unretired backlog | Encoded catalog sizes decreased at 10,000, 5,000 and 1,000 entries; anchor, head, next ID, remaining identities and round-trip decode held; full `wal::cloud_catalog::tests` module passed (23/23) | AC2 cloud-strict A/B/provider measurements and any justified publication interval decision |
 | `efc76aa4` | #923 proves production orphan GC protects one SST shared across two pinned snapshot generations until the final release | Real CloudSimulated compaction and scheduled sweeps preserved both snapshot values and the shared SST after first release, then deleted it after final release; cold reopen and focused test passed (1/1, 91.02 s) | AC1 latency pairs and AC4 measured 10,000-snapshot unpin work |
 | `f37cc4b1` | #927 proves a failed SST inventory probe retained under salvage does not advance the watchdog's `sst_inventory` progress | Jev selected the failed-probe regression (0.74); corrected stage-specific progress test passed (1/1); `cargo fmt --check` and `git diff --check` passed | 10,000-SST cold-start A/B, late/unknown mutation and identity/provider qualification |
@@ -64,9 +64,12 @@ For #904, Jev returned the choice field without selecting among the bounded
 options on two code-grounded prompts (confidence 0.78 and 0.80); that output is
 not a design decision. The issue explicitly requires implementation sign-off
 before weakening exact SyncOpen cadence, so this branch preserves the exact
-floor contract. The new AC3 regression exercises an intact synced tail after
-the post-fsync/pre-frontier failure point and proves Strict recovery replays
-the value. It does not qualify AC4/AC5 or authorize cadence changes.
+floor contract. The AC3 regression exercises an intact synced tail after the
+post-fsync/pre-frontier failure point and proves Strict recovery replays the
+value. A separate two-held-fsync event-loop regression covers AC5: queued later
+appends cannot advance the persisted floor beyond the earlier exact sync
+receipt. AC4 damage classification, separate fsync/A-B accounting, and explicit
+cadence sign-off remain open; no cadence change is authorized.
 
 The user requested this workflow on 2026-10-24: one local branch,
 `work/0.5.0-issue-integration`, with small commits for the issues and one PR
