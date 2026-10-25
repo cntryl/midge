@@ -1359,6 +1359,15 @@ Admission delay is reported separately and zero hard stalls remains an
 independent gate. This target does not claim that the slowdown improves
 isolated latency or handles arbitrary overload. The exact A/B remains pending.
 
+The Tier 4 row now records per-successful-transaction end-to-end latency,
+admission slowdown totals/count/mean, and observed hard-stall count without
+changing the one-writer 64-write transaction workload. Candidate mode enables
+L0 soft limit 2 with a 100 μs maximum delay; Jev preferred this bounded setting
+(confidence 0.85). The benchmark compiles with the feature disabled and enabled.
+Because the base SHA predates the config API, a reproducible base run requires
+applying the benchmark-only overlay while keeping the runtime at the exact base
+SHA. No A/B has run and no AC1 performance result is claimed.
+
 #906 uses a bounded two-worker pool for captured memtable effects within one
 synced resident group. Runtime bookkeeping, source-size accounting, range
 tracking and one whole-group applied cut remain loop-owned. Reads/control stay

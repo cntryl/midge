@@ -23,11 +23,13 @@ const VALUE_SIZE: usize = 512;
 const WRITE_BATCH_SIZE: usize = 64;
 const COMPACTION_MEMTABLE_SIZE_BYTES: usize = 512 * 1024;
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default)]
 struct PhaseResult {
     elapsed: Duration,
     writes: u64,
     transactions: u64,
+    hard_stalls: u64,
+    commit_latencies: Vec<Duration>,
 }
 
 fn make_value(fill: u8) -> [u8; VALUE_SIZE] {
@@ -80,39 +82,51 @@ fn run_write_phase(
 
             let mut local_writes = 0u64;
             let mut local_transactions = 0u64;
+            let mut hard_stalls = 0u64;
+            let mut commit_latencies = Vec::new();
 
             while !stop.load(Ordering::Acquire) {
-                let mut tx = engine
-                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                    .expect("begin compaction pressure transaction");
+                let transaction_started_at = Instant::now();
+                loop {
+                    let mut tx = engine
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                        .expect("begin compaction pressure transaction");
 
-                for _ in 0..WRITE_BATCH_SIZE {
-                    let seq = next_key.fetch_add(1, Ordering::Relaxed);
-                    let key = ycsb::make_key(seq);
-                    let value = make_value((seq & 0xFF) as u8);
-                    tx.put(key.to_vec(), value.to_vec(), None)
-                        .expect("put compaction pressure value");
-                }
+                    for _ in 0..WRITE_BATCH_SIZE {
+                        let seq = next_key.fetch_add(1, Ordering::Relaxed);
+                        let key = ycsb::make_key(seq);
+                        let value = make_value((seq & 0xFF) as u8);
+                        tx.put(key.to_vec(), value.to_vec(), None)
+                            .expect("put compaction pressure value");
+                    }
 
-                match tx.commit(write_options()) {
-                    Ok(()) => {
-                        if count {
-                            local_writes = local_writes.wrapping_add(WRITE_BATCH_SIZE as u64);
-                            local_transactions = local_transactions.wrapping_add(1);
+                    match tx.commit(write_options()) {
+                        Ok(()) => {
+                            if count {
+                                local_writes = local_writes.wrapping_add(WRITE_BATCH_SIZE as u64);
+                                local_transactions = local_transactions.wrapping_add(1);
+                                commit_latencies.push(transaction_started_at.elapsed());
+                            }
+                            break;
                         }
+                        Err(MidgeError::WriteStall(_)) => {
+                            if count {
+                                hard_stalls = hard_stalls.saturating_add(1);
+                            }
+                            let _ = engine
+                                .wait_for_write_stall_clear(cf_id, Duration::from_millis(500))
+                                .expect("wait for compaction pressure stall");
+                        }
+                        Err(error) => panic!("commit compaction pressure transaction: {error}"),
                     }
-                    Err(MidgeError::WriteStall(_)) => {
-                        let _ = engine
-                            .wait_for_write_stall_clear(cf_id, Duration::from_millis(500))
-                            .expect("wait for compaction pressure stall");
-                    }
-                    Err(error) => panic!("commit compaction pressure transaction: {error}"),
                 }
             }
 
             PhaseResult {
                 writes: local_writes,
                 transactions: local_transactions,
+                hard_stalls,
+                commit_latencies,
                 ..PhaseResult::default()
             }
         }));
@@ -134,6 +148,8 @@ fn run_write_phase(
             .expect("compaction pressure worker should finish");
         out.writes = out.writes.wrapping_add(result.writes);
         out.transactions = out.transactions.wrapping_add(result.transactions);
+        out.hard_stalls = out.hard_stalls.saturating_add(result.hard_stalls);
+        out.commit_latencies.extend(result.commit_latencies);
     }
 
     out
@@ -148,6 +164,20 @@ fn run_compaction_backpressure_case(
     stress_config::init_benchmark_telemetry().expect("initialize benchmark telemetry");
 
     let measured_duration = stress_config::tier4_measured_duration(MEASURED);
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    let opts = {
+        let opts = stress_config::opts_for_mode(mode);
+        if mode == "local" {
+            opts.with_write_backpressure(cntryl_midge::WriteBackpressureConfig {
+                l0_soft_limit: Some(2),
+                max_admission_delay: Duration::from_micros(100),
+                ..Default::default()
+            })
+        } else {
+            opts
+        }
+    };
+    #[cfg(not(feature = "candidate-write-backpressure-bench"))]
     let opts = stress_config::opts_for_mode(mode);
     let compaction_concurrency = compaction_concurrency();
     let engine = Arc::new(open_compaction_engine(opts, compaction_concurrency));
@@ -167,6 +197,10 @@ fn run_compaction_backpressure_case(
     );
 
     let start = ycsb::capture_runtime_perf_snapshot(&engine);
+    let metrics_before = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("capture backpressure metrics before measurement");
     let gate_before = engine
         .metrics()
         .get_runtime_metrics()
@@ -182,6 +216,10 @@ fn run_compaction_backpressure_case(
         true,
     );
     let perf = ycsb::runtime_perf_report(&engine, start);
+    let metrics_after = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("capture backpressure metrics after measurement");
     let gate_after = engine
         .metrics()
         .get_runtime_metrics()
@@ -198,6 +236,15 @@ fn run_compaction_backpressure_case(
         },
     );
     ctx.parameter("measurement_window_shape", "continuous_same_owner");
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    ctx.parameter("candidate_soft_limits_enabled", mode == "local");
+    #[cfg(not(feature = "candidate-write-backpressure-bench"))]
+    ctx.parameter("candidate_soft_limits_enabled", false);
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    if mode == "local" {
+        ctx.parameter("l0_soft_limit", 2);
+        ctx.parameter("max_admission_delay_us", 100);
+    }
     ctx.parameter("writers", WRITERS);
     ctx.parameter("compaction_concurrency", compaction_concurrency);
     ctx.parameter("write_batch_size", WRITE_BATCH_SIZE);
@@ -221,6 +268,45 @@ fn run_compaction_backpressure_case(
         OperationOutcome::success(measured.writes),
     );
     ycsb::record_runtime_correctness(ctx, &perf);
+    for latency in measured.commit_latencies.iter().copied() {
+        ctx.record_latency(latency);
+    }
+    ctx.parameter(
+        "end_to_end_commit_latency_sample_count",
+        measured.transactions,
+    );
+    let slowdown_ns = metrics_after
+        .write_slowdown_ns_total
+        .saturating_sub(metrics_before.write_slowdown_ns_total);
+    let slowdown_count = metrics_after
+        .write_slowdown_count
+        .saturating_sub(metrics_before.write_slowdown_count);
+    ctx.record_observation(
+        "admission_delay_total_ns",
+        slowdown_ns as f64,
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "admission_delay_submission_count",
+        slowdown_count as f64,
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    if slowdown_count > 0 {
+        ctx.record_observation(
+            "admission_delay_mean_ns_per_submission",
+            slowdown_ns as f64 / slowdown_count as f64,
+            ObservationUnit::Nanoseconds,
+            ObservationDirection::Informational,
+        );
+    }
+    ctx.record_observation(
+        "hard_stall_count",
+        measured.hard_stalls as f64,
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
     let deferrals = gate_after.saturating_sub(gate_before);
     let high = u32::try_from(deferrals >> 32).expect("upper counter bits fit u32");
     let low = u32::try_from(deferrals & u64::from(u32::MAX)).expect("lower counter bits fit u32");

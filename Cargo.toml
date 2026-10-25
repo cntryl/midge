@@ -145,6 +145,10 @@ telemetry = [
 telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
 stress-soak = ["cloud-all"]
 checkpoint-bench = ["internal-testing"]
+# Enables the candidate-only #908 admission configuration in the Tier 4
+# compaction backpressure benchmark. Keep this disabled for the preregistered
+# base revision, whose public API predates WriteBackpressureConfig.
+candidate-write-backpressure-bench = []
 
 # Cloud storage backend support enabled by default for current deployment profiles.
 cloud-common = [

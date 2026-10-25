@@ -48,6 +48,9 @@ pub struct MidgeOptions {
     pub cloud_write_policy: Option<cntryl_midge::CloudWritePolicy>,
     /// Internal simulated-cloud storage tuning used only by tests.
     pub simulated_cloud_overrides: Option<SimulatedCloudOverrides>,
+    /// Candidate-only admission settings for the #908 Tier 4 benchmark.
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    pub write_backpressure: Option<cntryl_midge::WriteBackpressureConfig>,
 }
 
 impl Default for MidgeOptions {
@@ -62,6 +65,8 @@ impl Default for MidgeOptions {
             memory_budget: None,
             cloud_write_policy: None,
             simulated_cloud_overrides: None,
+            #[cfg(feature = "candidate-write-backpressure-bench")]
+            write_backpressure: None,
         }
     }
 }
@@ -89,6 +94,16 @@ impl MidgeOptions {
             .simulated_cloud_overrides
             .get_or_insert_with(SimulatedCloudOverrides::default);
         overrides.local_storage_budget_bytes = Some(bytes);
+        self
+    }
+
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    #[must_use]
+    pub fn with_write_backpressure(
+        mut self,
+        config: cntryl_midge::WriteBackpressureConfig,
+    ) -> Self {
+        self.write_backpressure = Some(config);
         self
     }
 
@@ -156,6 +171,11 @@ impl MidgeOptions {
         {
             open_opts =
                 open_opts.with_simulated_cloud_local_storage_budget(local_storage_budget_bytes);
+        }
+
+        #[cfg(feature = "candidate-write-backpressure-bench")]
+        if let Some(config) = self.write_backpressure.clone() {
+            open_opts = open_opts.write_backpressure(config);
         }
 
         open_opts.build().expect("build benchmark open options")
@@ -255,6 +275,8 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             memory_budget: None,
             cloud_write_policy: None,
             simulated_cloud_overrides: None,
+            #[cfg(feature = "candidate-write-backpressure-bench")]
+            write_backpressure: None,
         },
         "local" => {
             let timestamp = std::time::SystemTime::now()
@@ -277,6 +299,8 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 memory_budget: None,
                 cloud_write_policy: None,
                 simulated_cloud_overrides: None,
+                #[cfg(feature = "candidate-write-backpressure-bench")]
+                write_backpressure: None,
             }
         }
         "cloud" => {
@@ -306,6 +330,8 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 memory_budget: None,
                 cloud_write_policy: None,
                 simulated_cloud_overrides: None,
+                #[cfg(feature = "candidate-write-backpressure-bench")]
+                write_backpressure: None,
             }
         }
         "hybrid" => {
@@ -342,6 +368,8 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 simulated_cloud_overrides: Some(SimulatedCloudOverrides {
                     local_storage_budget_bytes: Some(local_storage_budget_bytes),
                 }),
+                #[cfg(feature = "candidate-write-backpressure-bench")]
+                write_backpressure: None,
             }
         }
         _ => panic!("unknown storage mode: {mode}"),
@@ -396,6 +424,8 @@ pub fn compaction_test_opts() -> MidgeOptions {
         memory_budget: None,
         cloud_write_policy: None,
         simulated_cloud_overrides: None,
+        #[cfg(feature = "candidate-write-backpressure-bench")]
+        write_backpressure: None,
     }
 }
 
@@ -414,6 +444,8 @@ pub fn manual_compaction_test_opts() -> MidgeOptions {
         memory_budget: None,
         cloud_write_policy: None,
         simulated_cloud_overrides: None,
+        #[cfg(feature = "candidate-write-backpressure-bench")]
+        write_backpressure: None,
     }
 }
 
@@ -432,5 +464,7 @@ pub fn durability_opts() -> MidgeOptions {
         memory_budget: None,
         cloud_write_policy: None,
         simulated_cloud_overrides: None,
+        #[cfg(feature = "candidate-write-backpressure-bench")]
+        write_backpressure: None,
     }
 }
