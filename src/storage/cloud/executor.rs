@@ -973,7 +973,7 @@ mod tests {
         release
     }
 
-    fn read_complete_http_request(stream: &mut TcpStream) {
+    fn read_complete_http_request(stream: &mut TcpStream) -> Vec<u8> {
         stream
             .set_nonblocking(false)
             .expect("configure blocking HTTP request stream");
@@ -1011,6 +1011,7 @@ mod tests {
             }
             bytes.extend_from_slice(&chunk[..read]);
         }
+        bytes
     }
 
     #[test]
@@ -1469,6 +1470,77 @@ mod tests {
             request_count, 1,
             "an ambiguous conditional mutation requires caller reconciliation before replay"
         );
+    }
+
+    #[test]
+    fn should_not_replay_conditional_delete_given_lost_successful_response() {
+        // Arrange: the server applies the conditional delete, then drops the
+        // connection before acknowledging it. The caller cannot infer whether
+        // the object remains from the transport failure.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure nonblocking test server");
+        let endpoint = format!(
+            "http://{}/object",
+            listener.local_addr().expect("server address")
+        );
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let server_request_finished = Arc::clone(&request_finished);
+        let deleted = Arc::new(AtomicBool::new(false));
+        let server_deleted = Arc::clone(&deleted);
+        let server = std::thread::spawn(move || {
+            let mut served = 0;
+            let mut last_request: Option<Instant> = None;
+            let mut conditional_request = false;
+            while !server_request_finished.load(Ordering::Acquire)
+                || last_request.is_some_and(|last| last.elapsed() < Duration::from_millis(250))
+            {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_complete_http_request(&mut stream);
+                        let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                        conditional_request |= request.starts_with("delete ")
+                            && request.contains("if-match: \"object-v1\"");
+                        server_deleted.store(true, Ordering::Release);
+                        served += 1;
+                        last_request = Some(Instant::now());
+                        // Dropping the socket simulates a successful provider
+                        // effect whose response was lost in transit.
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept test request: {error}"),
+                }
+            }
+            (served, conditional_request)
+        });
+        let request = CloudRequest::new(Method::DELETE, endpoint)
+            .with_header("If-Match", "\"object-v1\"")
+            .with_retry_policy(crate::storage::cloud::CloudRetryPolicy {
+                max_retries: 2,
+                base_delay: Duration::ZERO,
+            });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let result = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        request_finished.store(true, Ordering::Release);
+        let (request_count, conditional_request) = server.join().expect("join test server");
+
+        // Assert: a repeated DELETE could observe a precondition failure after
+        // the first operation already succeeded, so the mutation is never replayed.
+        assert!(result.is_err(), "the lost response must remain ambiguous");
+        assert!(
+            conditional_request,
+            "the request must carry its identity fence"
+        );
+        assert!(deleted.load(Ordering::Acquire));
+        assert_eq!(request_count, 1, "ambiguous DELETE must not be replayed");
     }
 
     #[test]
