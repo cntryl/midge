@@ -7030,6 +7030,10 @@ mod cloud_crash_recovery {
             "cloud_async_after_rename_writer_loss" => {
                 child_cloud_async_after_rename_writer_loss(&db_path);
             }
+            #[cfg(feature = "failpoints")]
+            "cloud_orphan_sweep_before_delete" => {
+                child_cloud_orphan_sweep_before_delete(&db_path);
+            }
             "buffered_eventual_flush_after_publish" => {
                 child_buffered_eventual_flush_after_publish(&db_path);
             }
@@ -7282,6 +7286,105 @@ mod cloud_crash_recovery {
         }
     }
 
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_recover_selected_sst_and_retry_orphan_sweep_after_child_abort() {
+        // Arrange: retire a real predecessor SST, then restore its exact remote
+        // bytes to model a delete obligation lost with the prior process.
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        let mut engine = open_cloud_engine(db_path, None);
+        let cf = default_cf(&engine);
+        commit_value(
+            &engine,
+            b"orphan-sweep-recovery-key",
+            b"selected-before-compaction",
+            WriteOptions::cloud_strict(),
+        );
+        engine.flush_cf(&cf).expect("flush predecessor SST");
+        let old_sst = remote_sst_paths(db_path)
+            .into_iter()
+            .next()
+            .expect("predecessor SST");
+        let old_sst_bytes = std::fs::read(&old_sst).expect("read predecessor SST");
+        let orphan_sst = db_path
+            .join("cloud_store/sst")
+            .join("000000_01_00000000000000000000.sst");
+        commit_value(
+            &engine,
+            b"orphan-sweep-recovery-key",
+            b"selected-after-compaction",
+            WriteOptions::cloud_strict(),
+        );
+        engine.flush_cf(&cf).expect("flush successor SST");
+        engine.compact_all().expect("retire predecessor SST");
+        let layout = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("read selected layout");
+        let old_name = old_sst
+            .file_name()
+            .expect("SST file name")
+            .to_string_lossy();
+        assert!(layout
+            .levels
+            .iter()
+            .flat_map(|level| &level.files)
+            .all(|file| { file.name != old_name }));
+        engine
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown before restoring orphan");
+        std::fs::write(&orphan_sst, old_sst_bytes).expect("seed unselected SST object");
+
+        // Act: the child crashes at the sweeper's identity-conditional delete
+        // boundary. A new owner must rediscover and complete the same work.
+        run_child_expect_abort("cloud_orphan_sweep_before_delete", db_path);
+        assert!(
+            orphan_sst.exists(),
+            "the injected pre-delete crash retains the orphan"
+        );
+        expire_crashed_process_lease(db_path);
+        let reopened = open_cloud_engine(db_path, None);
+        assert_value_visible(
+            &reopened,
+            b"orphan-sweep-recovery-key",
+            b"selected-after-compaction",
+        );
+        let layout = reopened
+            .metrics()
+            .get_storage_layout()
+            .expect("read recovered selected layout");
+        assert!(layout
+            .levels
+            .iter()
+            .flat_map(|level| &level.files)
+            .all(|file| {
+                file.name != old_name && file.name != "000000_01_00000000000000000000.sst"
+            }));
+        wait_for_metrics(&reopened, Duration::from_secs(90), |metrics| {
+            metrics.cloud_orphan_delete_attempts > 0
+        });
+        assert!(
+            !orphan_sst.exists(),
+            "the restarted sweep reclaims the orphan"
+        );
+
+        // Assert: one bounded sweep both preserves selected authority and
+        // rediscovers the old object after the process-local obligation died.
+        let metrics = reopened
+            .metrics()
+            .get_runtime_metrics()
+            .expect("read orphan sweep metrics");
+        assert!(metrics.cloud_orphan_list_attempts > 0);
+        assert!(metrics.cloud_orphan_probes > 0);
+        assert!(metrics.cloud_orphan_delete_attempts > 0);
+        // One task can inventory SSTs and then retired WAL separately; each
+        // path is bounded to one page and shares this cumulative counter.
+        assert!(metrics.cloud_orphan_list_attempts <= 2);
+        assert!(metrics.cloud_orphan_probes <= 8);
+        assert!(metrics.cloud_orphan_delete_attempts <= 8);
+    }
+
     fn child_cloud_strict_after_ack(db_path: &Path) {
         let engine = open_cloud_engine(db_path, None);
         commit_value(
@@ -7304,6 +7407,16 @@ mod cloud_crash_recovery {
         );
 
         abort_after_marking_ready(db_path, "cloud_async_active_after_ack");
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn child_cloud_orphan_sweep_before_delete(db_path: &Path) {
+        crash::configure_abort_failpoint(
+            "midge::cloud::before_orphan_sweep_delete",
+            "cloud_orphan_sweep_before_delete",
+        );
+        let engine = open_cloud_engine(db_path, None);
+        wait_for_orphan_sweep_crash(&engine);
     }
 
     #[cfg(feature = "failpoints")]
@@ -7588,8 +7701,43 @@ mod cloud_crash_recovery {
             "buffered_eventual_flush_after_publish" => {
                 "manual::buffered_eventual_flush_after_publish"
             }
+            "cloud_orphan_sweep_before_delete" => "midge::cloud::before_orphan_sweep_delete",
             other => panic!("unknown cloud crash scenario: {other}"),
         }
+    }
+
+    #[cfg(feature = "failpoints")]
+    fn wait_for_orphan_sweep_crash(engine: &Engine) -> ! {
+        let deadline = Instant::now() + Duration::from_secs(90);
+        loop {
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("read orphan sweep metrics");
+            assert!(
+                Instant::now() < deadline,
+                "SST orphan delete failpoint did not fire: lists={}, probes={}, deletes={}, retained={}",
+                metrics.cloud_orphan_list_attempts,
+                metrics.cloud_orphan_probes,
+                metrics.cloud_orphan_delete_attempts,
+                metrics.cloud_orphan_retained
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    fn remote_sst_paths(db_path: &Path) -> Vec<PathBuf> {
+        let directory = db_path.join("cloud_store/sst");
+        let mut paths = std::fs::read_dir(directory)
+            .expect("list remote SST directory")
+            .map(|entry| entry.expect("read remote SST entry").path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
     }
 
     /// Simulated cloud keeps its lease document in the shared object store.

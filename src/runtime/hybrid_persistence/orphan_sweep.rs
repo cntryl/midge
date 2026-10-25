@@ -173,6 +173,7 @@ pub(crate) fn sweep_sst_orphans_within(
             m.cloud_orphan_delete_attempts
                 .fetch_add(1, Ordering::Relaxed);
         });
+        crate::failpoints::fail_point!("midge::cloud::before_orphan_sweep_delete");
         match context
             .storage
             .delete_remote_object_by_identity_blocking_within(&key, &metadata, context.deadline)

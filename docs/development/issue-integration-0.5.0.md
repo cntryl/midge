@@ -1502,7 +1502,16 @@ tests), orphan suites (18 tests), hybrid-persistence suite (108 tests),
 four-ACK prefix test, retry campaign, and focused failpoint authority tests
 also pass. `cargo fmt --check` passes.
 
+Branch `work/cloud-reclamation-crash-campaigns` adds a sweep-specific crash
+campaign for #943 AC6. It compacts a real SST, copies those bytes to a valid
+unselected sequence-zero SST identity, and aborts a child process immediately
+before the scheduled sweep's identity-conditional delete. The orphan remains
+after the crash; a cold successor reads the selected value, retries the sweep,
+and reclaims the orphan. The test observes positive LIST/probe/delete metrics
+within the shared SST/WAL per-turn budgets. A generic delete failpoint first
+proved too broad because startup cleanup could fire it; the dedicated sweep
+boundary removed that false positive. The focused failpoint test passes.
+
 These checks do not complete #907's injected-latency/A-B gates or #916's cost
-and catalog-size measurements. The cold reopen is not a process-crash
-campaign: #913's GC-enabled crash acceptance and #943's sweep-enabled crash
-budget acceptance remain open. No live-provider qualification is claimed.
+and catalog-size measurements. #913's metadata-generation GC crash acceptance
+remains open. No live-provider qualification is claimed.
