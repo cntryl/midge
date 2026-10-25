@@ -300,6 +300,100 @@ fn should_recover_exactly_once_when_append_races_paused_checkpoint_construction(
     Ok(())
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_recover_exactly_once_when_tail_replacement_sync_fails_after_rename() -> MidgeResult<()> {
+    // Arrange: append a newer committed edit while an immutable checkpoint is
+    // paused, then fail the tail replacement's directory sync after rename.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let mock = crate::io::MockFs::new();
+    let fs: Arc<dyn Fs> = Arc::new(mock.clone());
+    let store = Arc::new(ManifestStore::new(Arc::clone(&fs)));
+    let first = flush_edit(1);
+    let first_id = store.append(&first)?;
+    let mut captured = Manifest::default();
+    captured.apply_edit(&first)?;
+    assert!(captured.note_applied_journal_edit(first_id));
+
+    let (encoded_tx, encoded_rx) = crossbeam::channel::bounded(1);
+    let (release_encode_tx, release_encode_rx) = crossbeam::channel::bounded(1);
+    fail::cfg_callback(
+        "midge::manifest::after_captured_checkpoint_encoded",
+        move || {
+            encoded_tx.send(()).unwrap();
+            release_encode_rx.recv().unwrap();
+        },
+    )
+    .expect("pause after immutable checkpoint encoding");
+
+    let (installed_tx, installed_rx) = crossbeam::channel::bounded(1);
+    let (release_install_tx, release_install_rx) = crossbeam::channel::bounded(1);
+    fail::cfg_callback(
+        "midge::manifest::after_snapshot_rename_before_journal_truncate",
+        move || {
+            installed_tx.send(()).unwrap();
+            release_install_rx.recv().unwrap();
+        },
+    )
+    .expect("pause after snapshot installation");
+
+    let worker_store = Arc::clone(&store);
+    let worker_gate = crate::failpoints::worker_gate();
+    let worker = std::thread::spawn(move || {
+        worker_gate
+            .run(|| worker_store.save_captured_snapshot_for(Origin::CompactionBeforeGc, &captured))
+    });
+    encoded_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("checkpoint encoding reached pause");
+    let second_id = store.append(&flush_edit(2))?;
+    release_encode_tx
+        .send(())
+        .expect("release checkpoint encoding");
+    installed_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("snapshot installed before tail replacement");
+
+    // Act: journal replacement renames the retained tail, then this injected
+    // directory-sync failure makes publication return an ambiguous error.
+    mock.set_sync_dir_failure(true);
+    release_install_tx
+        .send(())
+        .expect("release journal-tail replacement");
+    let checkpoint = worker.join().expect("join checkpoint worker");
+    mock.set_sync_dir_failure(false);
+    fail::remove("midge::manifest::after_captured_checkpoint_encoded");
+    fail::remove("midge::manifest::after_snapshot_rename_before_journal_truncate");
+    scenario.teardown();
+
+    // Assert: cold recovery accepts the installed snapshot and renamed tail,
+    // preserving both committed edits exactly once despite the reported error.
+    let recovered =
+        ManifestPersistence::load_with_fs_and_policy(&fs, crate::config::RecoveryPolicy::Strict)
+            .map_err(MidgeError::RecoveryFailed)?;
+    assert!(checkpoint.is_err());
+    assert_eq!(recovered.edit_checkpoint_id, second_id);
+    assert_eq!(recovered.files.len(), 2);
+    assert_eq!(
+        recovered
+            .files
+            .iter()
+            .filter(|file| file.name == crate::cloud_layout::file_name(0, 0, 1))
+            .count(),
+        1
+    );
+    assert_eq!(
+        recovered
+            .files
+            .iter()
+            .filter(|file| file.name == crate::cloud_layout::file_name(0, 0, 2))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
 #[test]
 fn should_refuse_flush_append_when_manifest_edit_ids_are_exhausted() {
     for prime_cache in [false, true] {
