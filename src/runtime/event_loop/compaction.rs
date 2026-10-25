@@ -415,6 +415,9 @@ mod name_budget_tests;
 #[cfg(test)]
 mod fragmentation_tests;
 
+#[cfg(test)]
+mod streaming_publication_tests;
+
 pub(super) struct CompactionCoordinator;
 
 pub(super) struct CompactionCompleteRequest {
