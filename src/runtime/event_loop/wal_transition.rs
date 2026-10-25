@@ -67,6 +67,11 @@ impl super::EventLoop {
 
     /// Rotate a local WAL only through the paired lifecycle protocol.
     pub(super) fn rotate_local_wal_transition(&mut self) -> MidgeResult<WalRotationReceipt> {
+        if self.wal_group_in_flight() && !self.pipeline.wal_transition.is_fenced() {
+            return Err(MidgeError::WriteStall(
+                "local WAL rotation is deferred while WAL work is in flight".into(),
+            ));
+        }
         self.pipeline.wal_transition.ensure_ready()?;
         let segment_id = self.state.wal.open_segment();
         let next_segment_id = self.state.wal.history.ledger().next_segment_id();

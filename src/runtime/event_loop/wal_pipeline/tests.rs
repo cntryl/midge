@@ -246,6 +246,47 @@ fn should_drain_in_flight_group_before_rotate_given_pending_group() -> MidgeResu
 }
 
 #[test]
+fn should_reject_direct_rotation_when_strict_group_owns_writer_root() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let response = event_loop
+        .routing
+        .router
+        .register(97_802, "rotation while strict group owns writer root");
+    let segment = event_loop.state.wal.open_segment();
+    event_loop.process_one(
+        write(97_802, &[b"direct-rotation-barrier"], true),
+        &crossbeam::channel::never(),
+    );
+    wait_for_hold(&mut event_loop, &held);
+    assert!(event_loop.wal_group_in_flight());
+
+    // Act: a direct transition request must not consume the parked writer.
+    let rotation = event_loop.rotate_local_wal_transition();
+
+    // Assert: reject without moving or fencing the WAL, then allow it after
+    // the group completion has been processed.
+    assert!(
+        matches!(rotation, Err(crate::common::MidgeError::WriteStall(_))),
+        "unexpected rotation result while a strict group owns the writer: {rotation:?}"
+    );
+    assert_eq!(event_loop.state.wal.open_segment(), segment);
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    assert!(response.try_recv().is_err());
+    held.release.send(()).expect("release strict group sync");
+    applied_cut(&mut event_loop, &response);
+    event_loop
+        .rotate_local_wal_transition()
+        .expect("retry rotation after strict group settles");
+    assert_eq!(event_loop.state.wal.open_segment(), segment + 1);
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    Ok(())
+}
+
+#[test]
 fn should_reject_conflicting_follower_after_held_strict_group_applies() -> MidgeResult<()> {
     // Arrange: a follower observes the original cut and conflicts with a
     // point write whose strict group is still waiting for physical fsync.

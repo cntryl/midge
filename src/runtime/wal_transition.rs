@@ -524,7 +524,6 @@ impl WalTransitionProtocol {
         self.segments.contains_key(&segment_id)
     }
 
-    #[cfg(test)]
     pub(crate) fn is_fenced(&self) -> bool {
         matches!(self.phase, WalLifecyclePhase::Fenced { .. })
     }
