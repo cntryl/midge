@@ -5799,6 +5799,9 @@ mod shutdown_orchestration {
         let default_cf = engine
             .get_column_family("default")
             .expect("default column family");
+        let leaked = engine
+            .begin_tx(default_cf.id(), TransactionMode::ReadOnly)
+            .expect("begin live transaction that outlives the engine");
         let mut transaction = engine
             .begin_tx(default_cf.id(), TransactionMode::ReadWrite)
             .expect("begin cloud transaction");
@@ -5817,6 +5820,10 @@ mod shutdown_orchestration {
         drain_timed_out_rx
             .recv_timeout(Duration::from_secs(30))
             .expect("runtime cloud drain reached its deadline");
+        assert!(matches!(
+            leaked.get(b"drop-key"),
+            Err(MidgeError::Fenced(_))
+        ));
         let blocked_until = Instant::now() + Duration::from_millis(500);
         loop {
             let competing = Engine::open(cloud_options(&db_path, Arc::clone(&lease_loss_calls)));
@@ -5858,6 +5865,7 @@ mod shutdown_orchestration {
         );
         drop(read);
         assert_eq!(lease_loss_calls.load(Ordering::SeqCst), 0);
+        drop(leaked);
         reopened
             .shutdown(Duration::from_secs(5))
             .expect("shutdown reopened engine");
@@ -5883,6 +5891,7 @@ mod shutdown_orchestration {
         shutdown_cloud_drain_timeout: Duration,
     ) -> cntryl_midge::OpenOptions {
         OpenOptions::cloud_simulated(db_path, "shutdown-bucket", "shutdown/")
+            .drop_transaction_wait_timeout(Duration::from_millis(20))
             .background_compaction(false)
             .cloud_write_policy(CloudWritePolicy {
                 eventual_flush_segment_gap: 128,
