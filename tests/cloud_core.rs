@@ -1161,6 +1161,24 @@ mod cloud_snapshot_orphan_sweep {
         }
     }
 
+    fn wait_for_retained_sweep(engine: &Engine, previous_retained: u64) {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("read retained sweep metrics");
+            if metrics.cloud_orphan_retained > previous_retained {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "idle sweeper did not observe the remaining snapshot SST protection"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     fn assert_cold_reopen_after_reclaim(options: OpenOptions, root: &Path, old_sst: &str) {
         let mut reopened = Engine::open(options).expect("reopen after scheduled sweep");
         let cf = reopened
@@ -1184,7 +1202,7 @@ mod cloud_snapshot_orphan_sweep {
     }
 
     #[test]
-    fn should_keep_public_snapshot_source_until_scheduled_sweep_after_release() {
+    fn should_keep_shared_sst_pinned_across_snapshot_generations_until_final_release() {
         // Arrange: predecessor epoch publishes an SST that the successor may sweep.
         let directory = tempfile::tempdir().expect("database directory");
         let root = directory.path();
@@ -1233,6 +1251,27 @@ mod cloud_snapshot_orphan_sweep {
             .commit(WriteOptions::cloud_strict())
             .expect("strict overwrite commit");
         successor.flush_cf(&cf).expect("publish successor SST");
+        let later_snapshot = successor
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin later snapshot generation");
+        assert_eq!(
+            later_snapshot
+                .get(b"snapshot-key")
+                .expect("read later snapshot value"),
+            Some(bytes::Bytes::from_static(b"after"))
+        );
+        let later_layout = successor
+            .metrics()
+            .get_storage_layout()
+            .expect("read later generation layout");
+        assert!(
+            later_layout
+                .levels
+                .iter()
+                .flat_map(|level| &level.files)
+                .any(|file| file.name == old_sst),
+            "later snapshot generation must still include the shared predecessor SST"
+        );
         successor.compact_all().expect("compact successor SSTs");
         let layout = successor
             .metrics()
@@ -1268,8 +1307,28 @@ mod cloud_snapshot_orphan_sweep {
             snapshot.get(b"snapshot-key").expect("read pinned value"),
             Some(bytes::Bytes::from_static(b"before"))
         );
+        assert_eq!(
+            later_snapshot
+                .get(b"snapshot-key")
+                .expect("read later pinned value"),
+            Some(bytes::Bytes::from_static(b"after"))
+        );
 
+        // Drop the original generation. The later generation was captured
+        // before compaction from a manifest that still named old_sst, so its
+        // shared filename remains protected until this second pin is released.
         drop(snapshot);
+        let after_first_release = successor
+            .metrics()
+            .get_runtime_metrics()
+            .expect("read partial-release metrics");
+        wait_for_retained_sweep(&successor, after_first_release.cloud_orphan_retained);
+        assert!(
+            root.join("cloud_store/sst").join(&old_sst).exists(),
+            "shared SST must remain while the later source generation is pinned"
+        );
+
+        drop(later_snapshot);
         let metrics = successor
             .metrics()
             .get_runtime_metrics()
