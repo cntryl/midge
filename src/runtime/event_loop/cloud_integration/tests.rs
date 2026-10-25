@@ -6007,6 +6007,44 @@ fn should_retain_cloud_seal_ownership_at_every_cross_component_boundary(
     Ok(())
 }
 
+#[test]
+fn should_defer_direct_cloud_seal_while_async_seal_is_in_flight() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let sequence = append_cloud_async_put(&mut event_loop)?;
+    let segment_id = event_loop.state.wal.open_segment();
+    let request_id = 98_010;
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(10));
+    assert!(event_loop.start_cloud_seal_for_request(&deadline, request_id, sequence, false,)?);
+    assert!(event_loop.pipeline.pending_cloud_seal.is_some());
+
+    // Act
+    let duplicate_seal = event_loop.seal_current_cloud_segment();
+
+    // Assert: a second path cannot enter the transition owned by the async
+    // seal, and the existing seal can finish without fencing the runtime.
+    assert!(
+        matches!(
+            duplicate_seal,
+            Err(crate::common::MidgeError::WriteStall(_))
+        ),
+        "unexpected direct seal result while async seal owns the WAL: {duplicate_seal:?}"
+    );
+    assert_eq!(event_loop.state.wal.open_segment(), segment_id);
+    assert!(!event_loop.pipeline.wal_transition.is_fenced());
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while event_loop.pipeline.pending_cloud_seal.is_some() {
+        event_loop.progress_cloud_seal();
+        assert!(Instant::now() < deadline, "async cloud seal did not settle");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 fn assert_reversible_cloud_seal(
     event_loop: &mut EventLoop,
