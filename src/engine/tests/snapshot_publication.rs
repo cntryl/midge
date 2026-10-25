@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn should_allocate_one_read_snapshot_when_committing_one_of_one_hundred_families() -> MidgeResult<()>
+{
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let mut engine = Engine::open(
+        OpenOptions::local(directory.path())
+            .background_compaction(false)
+            .build()?,
+    )?;
+    let mut families = vec![engine
+        .get_column_family("default")
+        .expect("default family exists")];
+    for index in 1..100 {
+        families.push(engine.create_column_family(&format!("family-{index}"))?);
+    }
+    let snapshots = Arc::clone(&engine.runtime_handle.snapshot_cache);
+    let before = families
+        .iter()
+        .map(|family| {
+            (
+                family.id(),
+                snapshots
+                    .load_family(family.id())
+                    .expect("published family snapshot")
+                    .1,
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    engine
+        .runtime_handle
+        .diagnostics
+        .reset_read_snapshot_builds();
+
+    // Act: the public transaction path takes its TTL-time wrapper clone, then
+    // publishes a write to only one family.
+    let mut transaction = engine.begin_tx(families[0].id(), TransactionMode::ReadWrite)?;
+    transaction.put(b"one-family".to_vec(), b"visible".to_vec(), None)?;
+    transaction.commit(WriteOptions::buffered())?;
+
+    // Assert: the only new wrapper is the shallow clone made by begin_tx;
+    // publication constructs no replacement snapshot for any family.
+    assert_eq!(
+        engine.runtime_handle.diagnostics.read_snapshot_builds(),
+        1,
+        "begin_tx should allocate one TTL-time wrapper and publication should reuse source Arcs"
+    );
+    for family in &families {
+        let current = snapshots
+            .load_family(family.id())
+            .expect("published family snapshot")
+            .1;
+        assert!(
+            Arc::ptr_eq(&before[&family.id()], &current),
+            "snapshot sources changed for family {}",
+            family.id()
+        );
+    }
+    let (sequence, current) = snapshots
+        .load_family(families[0].id())
+        .expect("published write family snapshot");
+    assert_eq!(
+        current.get(b"one-family", sequence)?,
+        Some(b"visible".to_vec())
+    );
+
+    engine.shutdown(Duration::from_secs(5))
+}
+
+#[test]
 fn should_keep_captured_family_snapshot_and_pin_across_drop_recreation() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;

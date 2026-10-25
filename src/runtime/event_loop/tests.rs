@@ -3543,7 +3543,7 @@ fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
 fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::common::MidgeResult<()>
 {
     // Arrange
-    let mut event_loop = create_test_event_loop()?;
+    let mut event_loop = create_test_local_event_loop()?;
     for index in 1..100 {
         event_loop.state.create_cf(format!("family-{index}"))?;
     }
@@ -3555,6 +3555,7 @@ fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::co
         .keys()
         .map(|&id| (id, cache.load_family(id).expect("published family").1))
         .collect::<std::collections::HashMap<_, _>>();
+    event_loop.state.diagnostics.reset_read_snapshot_builds();
     let (_sender, receiver) = crossbeam::channel::unbounded();
 
     // Act
@@ -3579,6 +3580,11 @@ fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::co
     );
 
     // Assert: source-stable families allocate no replacement ReadSnapshot.
+    assert_eq!(
+        event_loop.state.diagnostics.read_snapshot_builds(),
+        0,
+        "an in-place memtable update reuses all 100 family ReadSnapshots"
+    );
     for (&id, previous) in &before {
         let (sequence, current) = cache.load_family(id).expect("published family");
         assert!(Arc::ptr_eq(previous, &current), "source changed for {id}");

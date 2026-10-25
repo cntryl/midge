@@ -24,7 +24,6 @@ use std::sync::Arc;
 ///
 /// This struct captures all necessary state to perform read operations
 /// without holding references to mutable runtime state.
-#[derive(Clone)]
 pub struct ReadSnapshot {
     sources: Arc<ReadSnapshotSources>,
     /// Wall-clock captured when this snapshot was created. TTL visibility is
