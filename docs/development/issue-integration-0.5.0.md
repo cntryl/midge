@@ -31,7 +31,7 @@ boundaries with the final outcome.
 
 The implementation-pass runtime/test source checkpoint was
 `0bb7f09df6eaadd92ebba6870434acc30ba3a69d`. Its initial evidence map and checks
-are historical; the final reference map is pinned to `1c74f03a`, after the
+are historical; the final reference map is pinned to `4c7f25f6`, after the
 review fixes recorded below.
 Validation at that historical source checkpoint:
 
@@ -272,9 +272,10 @@ on failure, and verifies all original rows plus the latest anchor on restart.
 Both acquisition-lock crash cases use the actual V4/Pending acquisition prefix
 and pass 2/2 (0.34 s); production acquisition creates the separate pointer.
 
-Production source is frozen at
-`f27419f92d5c1cf06524e6aac882cfb6b7ee12b7`; later commits are test-only. The final
-code/reference checkpoint is `1c74f03a818ba15611bce675e71a6e0811760d19`.
+The renewed local native campaign's production source is
+`f27419f92d5c1cf06524e6aac882cfb6b7ee12b7`; later changes through the prior
+code/reference checkpoint `1c74f03a818ba15611bce675e71a6e0811760d19` are tests
+and documentation. The following static results belong to that checkpoint.
 Strict all-target/all-feature pedantic Clippy passes with zero warnings
 (20.84 s); all-target/all-feature check and build pass (22.91 s and 59.83 s).
 Formatting passes, 4,542 test declarations are structurally compliant and all
@@ -291,6 +292,40 @@ assertions. Exact focused cases pass 1/1 each (1.67 s and 0.16 s). Original
 10 s/1 s/100 ms/3 s bounds and authority/manifest assertions remain unchanged.
 The failed aggregate remains attributed to its source; final full-suite hosted
 verification is recorded separately on PR #983.
+
+### Final hosted review correction: per-family flush retry order
+
+At PR head `9a87959f`, hosted Core passed the entire workspace test step and
+then passed 197/198 serial fault tests. The remaining unchanged public
+`should_preserve_flush_identity_order_when_oldest_publication_retries` case
+failed with a correctly rejected regressing manifest frontier. Readiness
+filtering had excluded an oldest `RetryPending` immutable during its 10 ms
+backoff, allowing a younger queued generation from the same family to publish
+a higher frontier first. The local 512 KiB younger commit often exceeded that
+backoff and hid the interval. This confirmed defect is tracked in #987.
+
+Commit `4c7f25f64d5adac54ace38deb4ac7f2061ee2220` selects each family's oldest
+outstanding generation before phase/readiness/actor eligibility. Dispatch,
+due-work and retry-deadline queries use the same family heads. Other families
+remain independently schedulable; clocks, identities, deadlines and the
+nonregressing-frontier guard are unchanged. Jev favored this narrow decision,
+and independent source review confirmed the append/remove queue ordering.
+
+The deterministic real-worker regression was RED with frontier2 over the held
+older generation (expected0, 0.20 s), then GREEN (0.32 s) with actual other-family
+publication, exact retained identities, original caller deadline and public
+Engine reopen. The original public retry/restart case passes unchanged
+(0.48 s), the flush pipeline group passes 40/40, and runtime state passes 86/86.
+Strict all-target/all-feature pedantic Clippy passes (19.86 s).
+
+This is the final code/reference checkpoint. Earlier local pinned-Sqrzl
+campaigns remain attributed to `f27419f9` and their actual clean discovery
+head `9a87959f`; they are not relabeled as results for the FIFO correction.
+The existing hosted provider jobs each run provider contracts, full engine,
+takeover and discovery commands against Sqrzl. Their final exact-head results
+and observed container digest are recorded on PR #983. The workflows are
+unchanged; their `latest` image and the separately pinned local campaign are
+distinct evidence boundaries.
 
 The implementation retains Midge's ordered whole-unit applied prefix, exact
 WAL durable floors, storage-enforced epoch fencing and conservative physical
