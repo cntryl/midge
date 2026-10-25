@@ -402,6 +402,16 @@ fn upload_fixture(
     if let Some(maximum_read) = maximum_read {
         assert!(maximum_read <= crate::storage::FILE_UPLOAD_PART_BYTES as u64);
     }
+    if through_hybrid {
+        let part_bounded_workspace = crate::storage::FILE_UPLOAD_PART_BYTES
+            .saturating_mul(1 + storage.write_payload_copies())
+            .saturating_add(1024 * 1024);
+        assert!(
+            budget.peak() <= part_bounded_workspace,
+            "streaming upload peak {} exceeded the part-derived budget {part_bounded_workspace}",
+            budget.peak()
+        );
+    }
     assert!(budget.peak() <= 16 * 1024 * 1024);
     Ok(())
 }
