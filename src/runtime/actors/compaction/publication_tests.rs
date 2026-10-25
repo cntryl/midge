@@ -6,6 +6,100 @@ use crate::io::FsError;
 use crate::sst::SstStateReader;
 use crate::types::EntryType;
 
+struct ReadCountingFs {
+    inner: crate::io::MockFs,
+    read_opens: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::io::ReadFs for ReadCountingFs {
+    fn open_read(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.read_opens
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.open_read(path)
+    }
+
+    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
+impl crate::io::Fs for ReadCountingFs {
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        Some(self)
+    }
+
+    fn open(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        if options.mode == crate::io::OpenMode::ReadOnly {
+            self.read_opens
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.open(path, options)
+    }
+
+    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_dir_all(path)
+    }
+
+    fn sync_dir(
+        &self,
+        path: &crate::io::FsPath,
+        durability: crate::io::Durability,
+    ) -> crate::io::FsResult<()> {
+        self.inner.sync_dir(path, durability)
+    }
+
+    fn rename_atomic(
+        &self,
+        from: &crate::io::FsPath,
+        to: &crate::io::FsPath,
+    ) -> crate::io::FsResult<()> {
+        self.inner.rename_atomic(from, to)
+    }
+}
+
+impl crate::io::PersistentHandleFs for ReadCountingFs {
+    fn open_persistent(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+        if options.mode == crate::io::OpenMode::ReadOnly {
+            self.read_opens
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        crate::io::PersistentHandleFs::open_persistent(&self.inner, path, options)
+    }
+}
+
 struct DeadlineInputFactory {
     delegate: Arc<dyn SstFactory>,
     deadline: parking_lot::Mutex<Option<OperationDeadline>>,
@@ -254,6 +348,76 @@ fn should_summarize_compaction_output_through_injected_mock_fs() -> MidgeResult<
         mock.get_file(name).unwrap().len()
     );
     assert!(prepared.metadata.content_crc32c.is_some());
+    Ok(())
+}
+
+#[test]
+fn should_not_read_finalized_output_before_local_publication_staging() -> MidgeResult<()> {
+    // Arrange
+    let counting_fs = Arc::new(ReadCountingFs {
+        inner: crate::io::MockFs::new(),
+        read_opens: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let factory = crate::sst::FsSstFactoryIo::new(counting_fs.clone(), 4096);
+    let mut writer = factory.create()?;
+    writer.add_with_meta(b"source", Some(b"value"), 7, EntryType::Put, None)?;
+    writer.finish_to_path(std::path::Path::new("input.sst"))?;
+    counting_fs
+        .read_opens
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(949);
+    plan.add_test_source("input.sst");
+    let output_fs = factory.output_fs();
+    let prepared: PreparedCompactionOutputs =
+        Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+    let sink = |name: &str,
+                path: &std::path::Path,
+                budget: &ResourceBudget,
+                finalized: Option<&crate::sst::traits::FinalizedSst>| {
+        // The writer has finalized the output at this callback boundary.
+        counting_fs
+            .read_opens
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        record_staged_output_partition(
+            None,
+            &output_fs,
+            &prepared,
+            0,
+            1,
+            name,
+            path,
+            CompactionOutputAdmission {
+                budget,
+                manual_deadline: None,
+                finalized,
+            },
+        )?;
+        assert_eq!(
+            counting_fs
+                .read_opens
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "finalized output must not be reopened to derive publication metadata"
+        );
+        Ok(())
+    };
+
+    // Act
+    let outputs = crate::compaction::execute_compaction_with_output_sink(
+        &plan,
+        &factory,
+        std::path::Path::new("output"),
+        None,
+        Some(&sink),
+        None,
+    )?;
+
+    // Assert
+    assert_eq!(outputs.len(), 1);
+    let published = prepared.lock();
+    let metadata = &published.values().next().expect("staged output").metadata;
+    assert_eq!(metadata.smallest_key.as_deref(), Some(b"source".as_slice()));
+    assert!(metadata.content_crc32c.is_some());
     Ok(())
 }
 
