@@ -13,6 +13,9 @@ mod wal_authority_regressions;
 #[path = "fault_injection/compaction_deadline.rs"]
 mod compaction_deadline;
 
+#[path = "fault_injection/concurrent_compaction_crash.rs"]
+mod concurrent_compaction_crash;
+
 #[path = "fault_injection/local_wal_gc.rs"]
 mod local_wal_gc;
 
