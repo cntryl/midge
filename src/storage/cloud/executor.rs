@@ -859,7 +859,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Barrier,
+        Arc, Barrier, Mutex,
     };
     use std::time::{Duration, Instant};
 
@@ -1469,6 +1469,89 @@ mod tests {
         assert_eq!(
             request_count, 1,
             "an ambiguous conditional mutation requires caller reconciliation before replay"
+        );
+    }
+
+    #[test]
+    fn should_preserve_replacement_when_conditional_mutation_has_stale_identity() {
+        // Arrange: the object is replaced after the writer chose its identity
+        // fence but before the provider evaluates the mutation.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure nonblocking test server");
+        let endpoint = format!(
+            "http://{}/object",
+            listener.local_addr().expect("server address")
+        );
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let server_request_finished = Arc::clone(&request_finished);
+        let object = Arc::new(Mutex::new(("old-etag".to_string(), b"old-value".to_vec())));
+        let server_object = Arc::clone(&object);
+        let server = std::thread::spawn(move || {
+            let mut served = 0;
+            let mut last_request: Option<Instant> = None;
+            while !server_request_finished.load(Ordering::Acquire)
+                || last_request.is_some_and(|last| last.elapsed() < Duration::from_millis(250))
+            {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_complete_http_request(&mut stream);
+                        let split = request
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .expect("request headers");
+                        let headers =
+                            String::from_utf8_lossy(&request[..split]).to_ascii_lowercase();
+                        let body = request[split + 4..].to_vec();
+                        let status = {
+                            let mut object = server_object.lock().expect("lock test object");
+                            *object = ("replacement-etag".into(), b"replacement".to_vec());
+                            if headers.starts_with("put ")
+                                && headers.contains("if-match: \"old-etag\"")
+                            {
+                                412
+                            } else {
+                                *object = ("new-etag".into(), body);
+                                200
+                            }
+                        };
+                        write!(stream, "HTTP/1.1 {status} Response\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .expect("write test response");
+                        served += 1;
+                        last_request = Some(Instant::now());
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept test request: {error}"),
+                }
+            }
+            served
+        });
+        let request = CloudRequest::new(Method::PUT, endpoint)
+            .with_header("If-Match", "\"old-etag\"")
+            .with_body(b"new-value".to_vec())
+            .with_retry_policy(crate::storage::cloud::CloudRetryPolicy {
+                max_retries: 2,
+                base_delay: Duration::ZERO,
+            });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let response = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        request_finished.store(true, Ordering::Release);
+        let request_count = server.join().expect("join test server");
+
+        // Assert: the stale If-Match rejects the write and preserves v2.
+        assert_eq!(response.expect("precondition response").status, 412);
+        assert_eq!(request_count, 1, "stale identity must not be replayed");
+        assert_eq!(
+            *object.lock().expect("lock final test object"),
+            ("replacement-etag".into(), b"replacement".to_vec())
         );
     }
 
