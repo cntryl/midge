@@ -19,7 +19,8 @@ currently cover these slices:
 | `83f705bb` | #904 pins replay of intact WAL bytes synced before their exact SyncOpen floor was recorded | New post-fsync/pre-frontier failpoint regression passed on the public Strict reopen path (1/1); adjacent WAL recovery-floor tests passed (2/2); `cargo fmt --check` and `git diff --check` passed | Damage classification on both sides of the floor, queued-append floor bound, separate fsync/A-B accounting, and explicit cadence sign-off |
 | `508df52b` | #916 proves WAL catalog storage shrinks with a 10,000-segment history's unretired backlog | Encoded catalog sizes decreased at 10,000, 5,000 and 1,000 entries; anchor, head, next ID, remaining identities and round-trip decode held; focused test passed (1/1) | AC2 cloud-strict A/B/provider measurements and any justified publication interval decision |
 | `efc76aa4` | #923 proves production orphan GC protects one SST shared across two pinned snapshot generations until the final release | Real CloudSimulated compaction and scheduled sweeps preserved both snapshot values and the shared SST after first release, then deleted it after final release; cold reopen and focused test passed (1/1, 91.02 s) | AC1 latency pairs and AC4 measured 10,000-snapshot unpin work |
-| `f37cc4b1` | #927 proves a failed SST inventory probe retained under salvage does not advance the watchdog's `sst_inventory` progress | Jev selected this regression over out-of-order completion (0.74); corrected stage-specific progress test passed (1/1); `cargo fmt --check` and `git diff --check` passed | 10,000-SST cold-start A/B, out-of-order completion, late/unknown mutation and identity/provider qualification |
+| `f37cc4b1` | #927 proves a failed SST inventory probe retained under salvage does not advance the watchdog's `sst_inventory` progress | Jev selected the failed-probe regression (0.74); corrected stage-specific progress test passed (1/1); `cargo fmt --check` and `git diff --check` passed | 10,000-SST cold-start A/B, late/unknown mutation and identity/provider qualification |
+| `58926c85` | #927 verifies salvage reconciliation when inventory results arrive in C/A/B order | Jev selected direct C/A/B completion-iterator coverage over a test-only worker hook (confidence 1.0); only missing B is removed and A/C order/identity are preserved; focused test passed (1/1) | 10,000-SST cold-start A/B, late/unknown mutation and identity/provider qualification |
 
 Jev judgments informed the design reviews; implementation source and behavior
 tests remain the correctness evidence. Parallel Jev-reviewed slices found
@@ -52,9 +53,12 @@ from their remaining measurements. The new catalog history test measures
 encoded size against 10k/5k/1k unretired entries. The shared-SST GC test holds
 two actual snapshot source generations and waits for scheduled sweeps before
 and after final release. The failed-probe test observes only `sst_inventory`
-completion events, excluding legitimate local `sst_crc` work; Jev favored
-that test over the still-missing out-of-order completion case. These focused
-tests passed, but they do not complete provider or A/B acceptance.
+completion events, excluding legitimate local `sst_crc` work. A second
+#927 regression feeds the actual reconciliation function a deterministic
+C/A/B completion stream with a definitive missing middle entry; only that
+entry is removed and original A/C manifest order is restored. Jev selected
+this direct seam over adding a test-only worker hook (confidence 1.0). These
+focused tests passed, but they do not complete provider or A/B acceptance.
 
 For #904, Jev returned the choice field without selecting among the bounded
 options on two code-grounded prompts (confidence 0.78 and 0.80); that output is
