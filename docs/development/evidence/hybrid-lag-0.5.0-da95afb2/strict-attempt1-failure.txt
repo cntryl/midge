@@ -1,0 +1,4 @@
+Command: cargo bench --locked --bench tier2_subsystem_hybrid_durability_lag -- --workload tier2_hybrid_cloud_strict_commit_vs_durable_lag_1_client --no-progress --require-quiet-env
+Exit: 101
+Failure: benches/bench_support/hybrid_lag.rs:390:5: cloud lag sampler gap 68ms exceeds 40ms; row is inconclusive
+No benchmark artifact was emitted by the harness.

@@ -535,7 +535,11 @@ runs at source `72dcb0bc`, recorded as diagnostic context because the benchmark
 still declares diagnostic trust. Strict local commit latency has three
 acceptable runs per row at source `330c67a`, including 1/16/64 writers and 4 KiB
 rotation; one noisy 64-writer run is retained and excluded. Hybrid lag, YCSB
-A–F, recovery and compaction CPU remain unmeasured. #937 provider runs,
+A–F, recovery and compaction CPU remain incomplete. At source `da95afb2`, the
+simulator `cloud_async` row and local `sync()` floor have three acceptable runs
+each. The `cloud_strict` row remains inconclusive after isolated attempts hit
+the 40 ms sampler-gap guard (64 and 68 ms); the complete suite also failed that
+guard twice. No threshold was relaxed. #937 provider runs,
 remaining relative A/B targets,
 runtime/crash campaigns, assurance compute budgets and qualification of the
 eventual release SHA remain due. The executed Sqrzl results above qualify their recorded runtime
