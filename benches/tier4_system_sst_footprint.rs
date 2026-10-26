@@ -104,7 +104,7 @@ fn exact_metric_value(value: u64) -> f64 {
     f64::from(high) * 4_294_967_296.0 + f64::from(low)
 }
 
-fn record_metrics(ctx: &mut StressContext, fixture: &PreparedFixture) {
+fn record_metrics(ctx: &mut StressContext, files_count: usize, total_sst_bytes: u64) {
     ctx.parameter("format", "small_pair_sst");
     ctx.parameter("unique_keys", UNIQUE_KEYS);
     ctx.parameter("repeated_versions", REPEATED_VERSIONS);
@@ -112,25 +112,36 @@ fn record_metrics(ctx: &mut StressContext, fixture: &PreparedFixture) {
     ctx.parameter("value_bytes", VALUE_BYTES);
     ctx.record_observation(
         "sst_files",
-        exact_metric_value(u64::try_from(fixture.files_count).expect("file count fits in u64")),
+        exact_metric_value(u64::try_from(files_count).expect("file count fits in u64")),
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );
     ctx.record_observation(
         "sst_footprint_bytes",
-        exact_metric_value(fixture.total_sst_bytes),
+        exact_metric_value(total_sst_bytes),
         ObservationUnit::Bytes,
         ObservationDirection::Informational,
     );
 }
 
 fn run(ctx: &mut StressContext) {
-    let mut fixture = ctx.measure("fixture_build_and_flush", prepare_fixture);
-    record_metrics(ctx, &fixture);
-    fixture
-        .engine
-        .shutdown(Duration::from_secs(30))
-        .expect("shutdown SST footprint benchmark database");
+    let mut footprints = Vec::with_capacity(6);
+    ctx.benchmark("fixture_build_and_flush")
+        .samples(5)
+        .warmup(1)
+        .operations_per_sample(1)
+        .measure(|| {
+            let mut fixture = prepare_fixture();
+            footprints.push((fixture.files_count, fixture.total_sst_bytes));
+            fixture
+                .engine
+                .shutdown(Duration::from_secs(30))
+                .expect("shutdown SST footprint benchmark database");
+        });
+    let (files_count, total_sst_bytes) = *footprints
+        .last()
+        .expect("benchmark records at least one fixture");
+    record_metrics(ctx, files_count, total_sst_bytes);
 }
 
 #[stress(
