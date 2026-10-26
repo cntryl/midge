@@ -7,12 +7,16 @@ use crate::storage::cloud::{CloudReadCapability, CloudWriteCapability};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+type RequestHeaders = Vec<(String, String)>;
+type PutRequest = (String, RequestHeaders);
+type PutRequestHistory = std::sync::Mutex<Vec<PutRequest>>;
+
 struct ReceiptBackend {
     inner: MockCloudBackend,
     reads: AtomicUsize,
     writes: AtomicUsize,
     generations: std::sync::Mutex<HashMap<String, u64>>,
-    put_requests: std::sync::Mutex<Vec<(String, Vec<(String, String)>)>>,
+    put_requests: PutRequestHistory,
 }
 
 impl CloudReadCapability for ReceiptBackend {
@@ -140,6 +144,42 @@ impl crate::storage::cloud::CloudHeadCapability for ReceiptBackend {
 }
 impl CloudBackend for ReceiptBackend {}
 
+fn assert_metadata_publication_request_history(backend: &ReceiptBackend) {
+    assert_eq!(backend.writes.load(Ordering::Relaxed), 2);
+    assert_eq!(backend.reads.load(Ordering::Relaxed), 0);
+    let put_requests = backend
+        .put_requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(put_requests.len(), 2);
+    let edit_put = put_requests
+        .iter()
+        .find(|(key, _)| key.starts_with("metadata-cache/manifest/"))
+        .expect("one immutable manifest edit PUT");
+    assert!(edit_put
+        .1
+        .iter()
+        .any(|(name, value)| { name.eq_ignore_ascii_case("if-none-match") && value == "*" }));
+    let pointer_cas = put_requests
+        .iter()
+        .find(|(key, _)| key == "metadata-cache/metadata/committed-pointer.v1")
+        .expect("one committed-pointer CAS");
+    assert!(pointer_cas.1.iter().any(|(name, _)| {
+        name.eq_ignore_ascii_case("if-match")
+            || name.eq_ignore_ascii_case("x-goog-if-generation-match")
+    }));
+    assert!(
+        backend.inner.get_downloads().is_empty(),
+        "mock transport observed unexpected GETs: {:?}",
+        backend.inner.get_downloads()
+    );
+    assert!(
+        backend.inner.get_range_downloads().is_empty(),
+        "mock transport observed unexpected range GETs: {:?}",
+        backend.inner.get_range_downloads()
+    );
+}
+
 #[test]
 fn should_bound_changed_metadata_publication_to_two_requests_when_receipts_are_cached() {
     // Arrange
@@ -204,41 +244,8 @@ fn should_bound_changed_metadata_publication_to_two_requests_when_receipts_are_c
     // Act
     mirror().unwrap();
 
-    // Assert: count calls at the provider boundary after first-publication
-    // admission, then independently read the actual selected immutable chain.
-    assert_eq!(backend.writes.load(Ordering::Relaxed), 2);
-    assert_eq!(backend.reads.load(Ordering::Relaxed), 0);
-    let put_requests = backend
-        .put_requests
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(put_requests.len(), 2);
-    let edit_put = put_requests
-        .iter()
-        .find(|(key, _)| key.starts_with("metadata-cache/manifest/"))
-        .expect("one immutable manifest edit PUT");
-    assert!(edit_put
-        .1
-        .iter()
-        .any(|(name, value)| { name.eq_ignore_ascii_case("if-none-match") && value == "*" }));
-    let pointer_cas = put_requests
-        .iter()
-        .find(|(key, _)| key == "metadata-cache/metadata/committed-pointer.v1")
-        .expect("one committed-pointer CAS");
-    assert!(pointer_cas.1.iter().any(|(name, _)| {
-        name.eq_ignore_ascii_case("if-match")
-            || name.eq_ignore_ascii_case("x-goog-if-generation-match")
-    }));
-    assert!(
-        backend.inner.get_downloads().is_empty(),
-        "mock transport observed unexpected GETs: {:?}",
-        backend.inner.get_downloads()
-    );
-    assert!(
-        backend.inner.get_range_downloads().is_empty(),
-        "mock transport observed unexpected range GETs: {:?}",
-        backend.inner.get_range_downloads()
-    );
+    // Assert: count provider calls, then independently read the selected chain.
+    assert_metadata_publication_request_history(&backend);
     let CloudMetadataHead::Committed(generation) = store
         .read_committed_metadata(std::time::Duration::from_secs(5))
         .unwrap()

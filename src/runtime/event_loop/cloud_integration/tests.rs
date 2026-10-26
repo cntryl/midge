@@ -1520,6 +1520,19 @@ fn progress_cloud_seal_with_waiters_until_inflight(
     }
 }
 
+fn assert_cloud_seal_waiting_for_durability(el: &EventLoop, sequence: u64) {
+    assert!(el.pipeline.pending_cloud_seal.is_some());
+    assert!(
+        el.state.wal.pending_writes > 0 || el.state.wal.frontiers.local_durable() < sequence,
+        "the second request must still take the pending-seal admission path"
+    );
+    assert!(el
+        .pipeline
+        .durability
+        .inflight_segment_for_sequence(sequence)
+        .is_none());
+}
+
 #[test]
 fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment(
 ) -> crate::common::MidgeResult<()> {
@@ -1552,16 +1565,7 @@ fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment
         second_rx.try_recv(),
         Err(crossbeam::channel::TryRecvError::Empty)
     ));
-    assert!(el.pipeline.pending_cloud_seal.is_some());
-    assert!(
-        el.state.wal.pending_writes > 0 || el.state.wal.frontiers.local_durable() < sequence,
-        "the second request must still take the pending-seal admission path"
-    );
-    assert!(el
-        .pipeline
-        .durability
-        .inflight_segment_for_sequence(sequence)
-        .is_none());
+    assert_cloud_seal_waiting_for_durability(&el, sequence);
     let pending_ids = el.pending_cloud_seal_waiter_request_ids();
     let deferred_ids = el.deferred_wal_request_ids();
     let mut accounted_ids = pending_ids.clone();
@@ -1591,7 +1595,7 @@ fn should_notify_all_waiters_given_multiple_seal_requests_for_same_cloud_segment
         el.process_pending_message(&msg_rx),
         Some(super::super::HandleOutcome::Continue)
     );
-    assert!(el.deferred_wal_request_ids().is_empty());
+    assert_eq!(el.deferred_wal_request_ids(), Vec::<u64>::new());
     let mut waiter_ids = el
         .pipeline
         .durability

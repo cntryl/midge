@@ -118,12 +118,12 @@ fn should_settle_parked_strict_group_before_shutdown_wal_barrier() -> crate::com
     }
 
     // Act: shutdown must drain this owned barrier before requesting its final sync.
-    let releaser = std::thread::spawn(move || {
+    let release_worker = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(25));
         release.send(()).expect("release held sync");
     });
     event_loop.handle_shutdown(Some(94_051));
-    releaser.join().expect("join WAL sync releaser");
+    release_worker.join().expect("join WAL sync releaser");
 
     // Assert: the accepted Strict write settles before shutdown acknowledges.
     assert!(matches!(

@@ -198,7 +198,7 @@ impl CloudWriteCapability for HeartbeatMetadataBackend {
             let gate = self.overlap_gate.lock().unwrap();
             let _ = self
                 .overlap_changed
-                .wait_timeout_while(gate, Duration::from_secs(2), |_| {
+                .wait_timeout_while(gate, Duration::from_secs(2), |()| {
                     self.renewals_during_pointer_put.load(Ordering::Acquire) == overlap_before
                 })
                 .unwrap();

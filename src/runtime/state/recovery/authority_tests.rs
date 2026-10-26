@@ -306,9 +306,8 @@ fn should_enforce_sync_floor_recovery_policy_for_window_damage() -> MidgeResult<
         below_floor.wal.as_ref(),
         below_floor.history,
     );
-    let error = match result {
-        Err(error) => error,
-        Ok(_) => panic!("strict recovery accepted damage below the retained floor"),
+    let Err(error) = result else {
+        panic!("strict recovery accepted damage below the retained floor");
     };
     assert!(matches!(error, MidgeError::Corruption(_)), "{error:?}");
     let bytes =

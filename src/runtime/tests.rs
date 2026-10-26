@@ -68,7 +68,7 @@ fn should_slow_commit_inside_l0_soft_band_without_hard_stall() -> crate::common:
             .write_admission
             .slowdown_ns
             .load(std::sync::atomic::Ordering::Relaxed)
-            >= delay.as_nanos() as u64
+            >= u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX)
     );
     handle.shutdown(Duration::from_secs(2))?;
     assert!(runtime.wait_for_exit(Duration::from_secs(2)));

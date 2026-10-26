@@ -42,13 +42,18 @@ const MEASURED: Duration = Duration::from_secs(8);
 const COMPACTION_CONCURRENCY_ENV: &str = "MIDGE_COMPACTION_CONCURRENCY";
 
 fn compaction_concurrency() -> usize {
-    std::env::var(COMPACTION_CONCURRENCY_ENV)
-        .map(|value| {
-            value.parse().unwrap_or_else(|error| {
-                panic!("{COMPACTION_CONCURRENCY_ENV} must be an integer: {error}")
-            })
-        })
-        .unwrap_or(1)
+    match std::env::var(COMPACTION_CONCURRENCY_ENV) {
+        Ok(value) => value.parse().unwrap_or_else(|error| {
+            panic!("{COMPACTION_CONCURRENCY_ENV} must be an integer: {error}")
+        }),
+        Err(_) => 1,
+    }
+}
+
+fn counter_as_f64(value: u64) -> f64 {
+    let high = u32::try_from(value >> 32).expect("upper counter bits fit u32");
+    let low = u32::try_from(value & u64::from(u32::MAX)).expect("lower counter bits fit u32");
+    f64::from(high) * 4_294_967_296.0 + f64::from(low)
 }
 
 fn open_compaction_engine(mut opts: MidgeOptions, compaction_concurrency: usize) -> Engine {
@@ -226,33 +231,7 @@ fn run_compaction_backpressure_case(
         .expect("capture publication deferrals after measurement")
         .flush_publication_deferred_by_gate;
 
-    ctx.parameter("storage_profile", mode);
-    ctx.parameter(
-        "provider_evidence",
-        if mode == "cloud" {
-            "simulated_cloud_no_live_provider"
-        } else {
-            "local_filesystem"
-        },
-    );
-    ctx.parameter("measurement_window_shape", "continuous_same_owner");
-    #[cfg(feature = "candidate-write-backpressure-bench")]
-    ctx.parameter("candidate_soft_limits_enabled", mode == "local");
-    #[cfg(not(feature = "candidate-write-backpressure-bench"))]
-    ctx.parameter("candidate_soft_limits_enabled", false);
-    #[cfg(feature = "candidate-write-backpressure-bench")]
-    if mode == "local" {
-        ctx.parameter("l0_soft_limit", 2);
-        ctx.parameter("max_admission_delay_us", 100);
-    }
-    ctx.parameter("writers", WRITERS);
-    ctx.parameter("compaction_concurrency", compaction_concurrency);
-    ctx.parameter("write_batch_size", WRITE_BATCH_SIZE);
-    ctx.parameter("value_size_bytes", VALUE_SIZE);
-    ctx.parameter("memtable_size_bytes", COMPACTION_MEMTABLE_SIZE_BYTES);
-    ctx.parameter("logical_bytes_per_operation", ycsb::KEY_SIZE + VALUE_SIZE);
-    ctx.parameter("warmup_secs", WARMUP.as_secs_f64());
-    ctx.parameter("measured_secs", measured_duration.as_secs_f64());
+    record_backpressure_parameters(ctx, mode, compaction_concurrency, measured_duration);
     assert_eq!(
         measured.writes,
         measured
@@ -281,38 +260,87 @@ fn run_compaction_backpressure_case(
     let slowdown_count = metrics_after
         .write_slowdown_count
         .saturating_sub(metrics_before.write_slowdown_count);
+    let deferrals = gate_after.saturating_sub(gate_before);
+    record_backpressure_observations(
+        ctx,
+        slowdown_ns,
+        slowdown_count,
+        measured.hard_stalls,
+        deferrals,
+    );
+}
+
+fn record_backpressure_parameters(
+    ctx: &mut StressContext,
+    mode: &'static str,
+    compaction_concurrency: usize,
+    measured_duration: Duration,
+) {
+    ctx.parameter("storage_profile", mode);
+    ctx.parameter(
+        "provider_evidence",
+        if mode == "cloud" {
+            "simulated_cloud_no_live_provider"
+        } else {
+            "local_filesystem"
+        },
+    );
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    ctx.parameter("candidate_soft_limits_enabled", mode == "local");
+    #[cfg(not(feature = "candidate-write-backpressure-bench"))]
+    ctx.parameter("candidate_soft_limits_enabled", false);
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    if mode == "local" {
+        ctx.parameter("l0_soft_limit", 2);
+        ctx.parameter("max_admission_delay_us", 100);
+    }
+    ctx.parameter("writers", WRITERS);
+    ctx.parameter("compaction_concurrency", compaction_concurrency);
+    ctx.parameter("write_batch_size", WRITE_BATCH_SIZE);
+    ctx.parameter("value_size_bytes", VALUE_SIZE);
+    ctx.parameter("memtable_size_bytes", COMPACTION_MEMTABLE_SIZE_BYTES);
+    ctx.parameter("logical_bytes_per_operation", ycsb::KEY_SIZE + VALUE_SIZE);
+    ctx.parameter("warmup_secs", WARMUP.as_secs_f64());
+    ctx.parameter("measured_secs", measured_duration.as_secs_f64());
+}
+
+fn record_backpressure_observations(
+    ctx: &mut StressContext,
+    slowdown_ns: u64,
+    slowdown_count: u64,
+    hard_stalls: u64,
+    deferrals: u64,
+) {
     ctx.record_observation(
         "admission_delay_total_ns",
-        slowdown_ns as f64,
+        counter_as_f64(slowdown_ns),
         ObservationUnit::Nanoseconds,
         ObservationDirection::Informational,
     );
     ctx.record_observation(
         "admission_delay_submission_count",
-        slowdown_count as f64,
+        counter_as_f64(slowdown_count),
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );
     if slowdown_count > 0 {
         ctx.record_observation(
             "admission_delay_mean_ns_per_submission",
-            slowdown_ns as f64 / slowdown_count as f64,
+            counter_as_f64(slowdown_ns) / counter_as_f64(slowdown_count),
             ObservationUnit::Nanoseconds,
             ObservationDirection::Informational,
         );
     }
     ctx.record_observation(
         "hard_stall_count",
-        measured.hard_stalls as f64,
+        counter_as_f64(hard_stalls),
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );
-    let deferrals = gate_after.saturating_sub(gate_before);
-    let high = u32::try_from(deferrals >> 32).expect("upper counter bits fit u32");
-    let low = u32::try_from(deferrals & u64::from(u32::MAX)).expect("lower counter bits fit u32");
     ctx.record_observation(
         "flush_publication_deferred_by_gate",
-        f64::from(high) * 4_294_967_296.0 + f64::from(low),
+        counter_as_f64(deferrals),
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );

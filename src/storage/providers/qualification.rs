@@ -85,7 +85,10 @@ fn assert_sqrzl_streamed_receipt(label: &str, provider: &CloudProviderConfig) {
     let prefix = format!("qualification/{label}/{}/", uuid::Uuid::new_v4());
     let size = FILE_UPLOAD_PART_BYTES + 1;
     let bytes: Vec<u8> = (0..size)
-        .map(|index| (index.wrapping_mul(131).wrapping_add(17) & 0xff) as u8)
+        .map(|index| {
+            u8::try_from(index.wrapping_mul(131).wrapping_add(17) & 0xff)
+                .expect("masked byte fits in u8")
+        })
         .collect();
     let directory = tempfile::tempdir().expect("create streamed receipt source");
     std::fs::write(directory.path().join("source"), &bytes).expect("write streamed receipt source");

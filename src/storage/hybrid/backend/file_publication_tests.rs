@@ -424,7 +424,9 @@ impl CloudWriteCapability for ReceiptPublication {
         callback: CloudCallback,
     ) {
         use crate::storage::cloud::CloudError;
-        let mut bytes = Vec::with_capacity(source.size as usize);
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(source.size).expect("test upload size fits in memory"),
+        );
         let mut offset = 0;
         while offset < source.size {
             let end = offset

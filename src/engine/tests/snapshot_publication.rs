@@ -21,7 +21,7 @@ struct SnapshotReader<'a> {
     rejected_tx: std::sync::mpsc::Sender<()>,
 }
 
-fn run_snapshot_reader(reader: SnapshotReader<'_>) {
+fn run_snapshot_reader(reader: &SnapshotReader<'_>) {
     reader.start.wait();
     let mut reported_rejection = false;
     while !reader.stop.load(std::sync::atomic::Ordering::Acquire) {
@@ -238,7 +238,7 @@ fn should_capture_only_the_live_generation_during_family_recreation() -> MidgeRe
         let reader_old_rejections = Arc::clone(&old_rejections);
         let reader_start = Arc::clone(&start_reader);
         let reader = scope.spawn(move || {
-            run_snapshot_reader(SnapshotReader {
+            run_snapshot_reader(&SnapshotReader {
                 engine: reader_engine,
                 old_id,
                 active_id: reader_active_id,
