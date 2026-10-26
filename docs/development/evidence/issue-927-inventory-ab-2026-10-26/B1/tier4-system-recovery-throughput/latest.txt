@@ -1,0 +1,10 @@
+Benchmark Suite: tier4-system-recovery-throughput
+Schema: cntryl-stress.v2
+Profile: release
+Completed: 01793002278965299000-0000086485-00000000000000000000
+Samples: measured=5 warmup=1 cooldown=0
+Total time: 8.71s
+
+Summary
+-------
+  tier4_recovery_cloud_inventory_10k       18.13K sst/s  tier=4 trust=diagnostic mode=duration quality=acceptable samples=5 wall=8.71s question=mode=duration

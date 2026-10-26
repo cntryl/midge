@@ -82,6 +82,7 @@ pub struct PreparedRecoveryProgressFixture {
     remote: Arc<dyn StorageBackend>,
     input: PreparedInput,
     setup_elapsed: Duration,
+    inventory_head_delay: Duration,
 }
 
 /// Prepare actual startup inventory or catalog planner/replay input.
@@ -95,6 +96,51 @@ pub fn prepare_recovery_progress_fixture(
     mode: RecoveryProgressFixtureMode,
     setup_delay: Duration,
 ) -> MidgeResult<PreparedRecoveryProgressFixture> {
+    prepare_recovery_progress_fixture_with_inventory_count(
+        root,
+        mode,
+        setup_delay,
+        16,
+        Duration::from_millis(250),
+        true,
+    )
+}
+
+/// Prepare an actual metadata-inventory recovery fixture with the requested
+/// manifest size. Benchmark setup remains outside the measured recovery call.
+#[doc(hidden)]
+pub fn prepare_inventory_progress_fixture(
+    root: &Path,
+    inventory_entries: usize,
+    head_delay: Duration,
+) -> MidgeResult<PreparedRecoveryProgressFixture> {
+    prepare_recovery_progress_fixture_with_inventory_count(
+        root,
+        RecoveryProgressFixtureMode::MetadataInventory,
+        Duration::ZERO,
+        inventory_entries,
+        head_delay,
+        false,
+    )
+}
+
+fn prepare_recovery_progress_fixture_with_inventory_count(
+    root: &Path,
+    mode: RecoveryProgressFixtureMode,
+    setup_delay: Duration,
+    inventory_entries: usize,
+    inventory_head_delay: Duration,
+    persist_inventory_progress: bool,
+) -> MidgeResult<PreparedRecoveryProgressFixture> {
+    if matches!(
+        mode,
+        RecoveryProgressFixtureMode::MetadataInventory | RecoveryProgressFixtureMode::HeldInventory
+    ) && inventory_entries == 0
+    {
+        return Err(MidgeError::InvalidArgument(
+            "recovery inventory fixture requires at least one SST".into(),
+        ));
+    }
     let started = Instant::now();
     // Keep the regression delay in the component that actually seeds input.
     // Moving this component back under the watchdog must time out.
@@ -106,7 +152,12 @@ pub fn prepare_recovery_progress_fixture(
             "recovery fixture requires an empty local WAL directory".into(),
         ));
     }
-    let observations = Arc::new(FixtureObservations::new(root, mode, 0)?);
+    let observations = Arc::new(FixtureObservations::new(
+        root,
+        mode,
+        0,
+        persist_inventory_progress,
+    )?);
     let remote: Arc<dyn StorageBackend> = Arc::new(ObservedBackend::new(
         root.join("cloud"),
         mode,
@@ -117,7 +168,7 @@ pub fn prepare_recovery_progress_fixture(
         | RecoveryProgressFixtureMode::HeldInventory => {
             #[cfg(any(test, feature = "cloud-common"))]
             {
-                let inventory = seed_inventory(root)?;
+                let inventory = seed_inventory(root, inventory_entries)?;
                 observations.set_expected_inventory(inventory.len())?;
                 PreparedInput::Inventory(inventory)
             }
@@ -156,6 +207,7 @@ pub fn prepare_recovery_progress_fixture(
         remote,
         input,
         setup_elapsed: started.elapsed(),
+        inventory_head_delay,
     })
 }
 
@@ -191,6 +243,7 @@ impl PreparedRecoveryProgressFixture {
                 &local,
                 &self.observations,
                 inventory,
+                self.inventory_head_delay,
                 started,
             ),
         }
@@ -281,6 +334,7 @@ fn inventory_fixture(
     local: &Path,
     observations: &Arc<FixtureObservations>,
     files: Vec<crate::metadata::FileMeta>,
+    inventory_head_delay: Duration,
     started: Instant,
 ) -> MidgeResult<RecoveryProgressFixtureResult> {
     let expected_inventory = serde_json::to_vec(&files)
@@ -290,6 +344,7 @@ fn inventory_fixture(
         mode,
         &files,
         Arc::clone(observations),
+        inventory_head_delay,
     )?;
     let cloud = crate::storage::cloud::CloudStorage::new_with_timeout(
         Arc::new(backend),
@@ -339,7 +394,10 @@ fn inventory_fixture(
 }
 
 #[cfg(any(test, feature = "cloud-common"))]
-fn seed_inventory(root: &Path) -> MidgeResult<Vec<crate::metadata::FileMeta>> {
+fn seed_inventory(
+    root: &Path,
+    inventory_entries: usize,
+) -> MidgeResult<Vec<crate::metadata::FileMeta>> {
     let directory = root.join("inventory-sst");
     std::fs::create_dir_all(directory.join("sst"))?;
     let fs: Arc<dyn Fs> =
@@ -358,8 +416,10 @@ fn seed_inventory(root: &Path) -> MidgeResult<Vec<crate::metadata::FileMeta>> {
     let path = directory.join("sst/inventory.sst");
     writer.finish_to_path(&path)?;
     let bytes = std::fs::read(path)?;
-    let mut files = Vec::with_capacity(16);
-    for sequence in 1..=16 {
+    let mut files = Vec::with_capacity(inventory_entries);
+    for sequence in 1..=inventory_entries {
+        let sequence = u64::try_from(sequence)
+            .map_err(|_| MidgeError::InvalidArgument("inventory size exceeds u64".into()))?;
         let name = crate::cloud_layout::file_name(0, 0, sequence);
         let cloud_path = root
             .join("cloud")

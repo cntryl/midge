@@ -199,8 +199,9 @@ pub mod __internal {
         };
         pub use crate::metadata::ManifestPersistence;
         pub use crate::runtime::cloud_startup::recovery_progress_fixture::{
-            prepare_recovery_progress_fixture, PreparedRecoveryProgressFixture,
-            RecoveryProgressFixtureMode, RecoveryProgressFixtureResult,
+            prepare_inventory_progress_fixture, prepare_recovery_progress_fixture,
+            PreparedRecoveryProgressFixture, RecoveryProgressFixtureMode,
+            RecoveryProgressFixtureResult,
         };
         pub use crate::runtime::{IntentLogEntry, IntentPersistence};
     }

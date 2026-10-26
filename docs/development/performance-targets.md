@@ -136,6 +136,13 @@ Hybrid:
   stall signals while compaction is active.
 - `tier4_system_recovery_throughput` owns recovery throughput after flush and
   compaction in the supported storage modes.
+- Its `tier4_recovery_cloud_inventory_10k` row measures production manifest
+  SST validation over 10,000 filesystem-mock objects with 1 ms simulated HEAD
+  delay; fixture seeding is outside the row's explicit timer. This fixed-work
+  row is intentionally diagnostic because the stress harness classifies its
+  throughput as capped. Keep its source-pinned A/B results and trust boundary
+  explicit in
+  `evidence/issue-927-inventory-ab-2026-10-26/README.md`.
 - Tier 4 YCSB workloads own long-running workload regressions and hybrid
   backlog health tags.
 
