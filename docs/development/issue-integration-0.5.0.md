@@ -1490,15 +1490,17 @@ seeds, with additional footer/range and binary metadata/journal seeds.
 
 The new `tier4_system_sst_v5` fixture uses the production reader through a
 hidden benchmark facade to report unique-key, latest repeated-version and
-older-snapshot decode work, plus small-value SST footprint. Its optimized
+older-snapshot decode work. Its optimized
 smoke observed 22 decoded entries for the unique-key lookup, 150 for both
 latest and older snapshots of the 128-version key group, and 358,941 SST bytes
 for 8,192 16-byte-key/32-byte-value keys plus that version group. This was a
-one-sample diagnostic run (the harness marked it untrustworthy), not A/B or
-footprint qualification. Jev favored deterministic high-entropy values,
-numeric decode ceilings (23 and 150), and reporting footprint until a
-representative baseline supports a minimum reduction. Three alternating
-base/candidate pairs and exact baseline compatibility remain required. The
+one-sample diagnostic run (the harness marked it untrustworthy), not A/B
+qualification. `tier4_system_sst_footprint` now reports the same fixture's
+SST bytes through the public API, so its benchmark source also builds on the
+V4 baseline. Jev favored deterministic high-entropy values, numeric decode
+ceilings (23 and 150), and reporting footprint until a representative baseline
+supports a minimum reduction. Three alternating base/candidate footprint
+pairs and exact baseline compatibility remain required. The
 exact `f659e903` source artifact is
 `target/stress/midge918-f659e903-smoke/tier4-system-sst-v5/latest.json`;
 the run used `cargo bench --locked --features internal-testing --bench

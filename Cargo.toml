@@ -408,6 +408,11 @@ harness = false
 required-features = ["internal-testing"]
 
 [[bench]]
+name = "tier4_system_sst_footprint"
+path = "benches/tier4_system_sst_footprint.rs"
+harness = false
+
+[[bench]]
 name = "tier4_ycsb_workload_b"
 path = "benches/tier4_ycsb_workload_b.rs"
 harness = false
