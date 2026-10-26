@@ -199,6 +199,61 @@ fn should_preserve_ordered_visibility_when_strict_fsync_is_held() -> MidgeResult
 }
 
 #[test]
+fn should_record_later_write_latency_when_strict_fsync_is_delayed() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let strict = event_loop
+        .routing
+        .router
+        .register(94_014, "50ms delayed strict group");
+    let later = event_loop
+        .routing
+        .router
+        .register(94_015, "later best effort after delayed group");
+    let old = event_loop
+        .create_read_snapshot(0)
+        .expect("capture old immutable snapshot");
+    let empty = crossbeam::channel::never();
+    event_loop.process_one(write(94_014, &[b"delayed-prefix"], true), &empty);
+    wait_for_hold(&mut event_loop, &held);
+
+    // Act: queue a later write while its predecessor's physical fsync is held
+    // for the separately measured 50ms delay.
+    let later_started = Instant::now();
+    event_loop.process_one(write(94_015, &[b"after-delay"], false), &empty);
+    assert!(strict.try_recv().is_err());
+    assert!(later.try_recv().is_err());
+    assert_eq!(event_loop.state.applied_sequence, 0);
+    std::thread::sleep(Duration::from_millis(50));
+    held.release.send(()).expect("release delayed strict sync");
+    let strict_cut = applied_cut(&mut event_loop, &strict);
+    let later_cut = applied_cut(&mut event_loop, &later);
+    let later_latency = later_started.elapsed();
+
+    // Assert: the observation records ordered completion after the injected
+    // delay. It is diagnostic; no low-latency threshold is a correctness gate.
+    assert!(later_cut > strict_cut);
+    let current = event_loop
+        .create_read_snapshot(0)
+        .expect("capture completed snapshot");
+    assert_eq!(
+        current.get(b"delayed-prefix", later_cut)?,
+        Some(b"value".to_vec())
+    );
+    assert_eq!(
+        current.get(b"after-delay", later_cut)?,
+        Some(b"value".to_vec())
+    );
+    assert_eq!(old.get(b"delayed-prefix", 0)?, None);
+    assert_eq!(old.get(b"after-delay", 0)?, None);
+    println!("AC1 injected 50ms Strict fsync delay: later BestEffort completion latency {later_latency:?} (diagnostic; no 5ms threshold)");
+    Ok(())
+}
+
+#[test]
 fn should_read_cold_sst_at_applied_cut_while_strict_fsync_is_held() -> MidgeResult<()> {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
