@@ -503,16 +503,16 @@ fn upload_fixture(
         assert!(result.is_ok(), "upload failed: {result:?}");
         assert_eq!(state.bytes, bytes);
         if let Some(bytes_read) = bytes_read {
-            assert_eq!(
-                bytes_read,
-                u64::try_from(size).expect("fixture size fits in u64")
-            );
+            assert_eq!(bytes_read, finalized_size);
         }
         assert_eq!(state.range_gets, 0, "publication must not read back ranges");
         let request_overhead = if through_hybrid { 3 } else { 2 };
         assert!(
             state.requests
-                <= size.div_ceil(crate::storage::FILE_UPLOAD_PART_BYTES) + request_overhead,
+                <= usize::try_from(finalized_size)
+                    .expect("finalized upload size fits in usize")
+                    .div_ceil(crate::storage::FILE_UPLOAD_PART_BYTES)
+                    + request_overhead,
             "unexpected provider request count: {}",
             state.requests
         );
@@ -545,6 +545,28 @@ fn should_stream_exact_bytes_with_bounded_parts_when_native_providers_publish_la
             64 * 1024 * 1024,
             UploadPath::Hybrid,
             UploadSource::Bytes,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn should_stream_finalized_sst_once_when_native_providers_publish_files() -> MidgeResult<()> {
+    // Arrange: use a production finalized SST and the counted file handle.
+    for protocol in [
+        Protocol::S3,
+        Protocol::Azure,
+        Protocol::GcsJson,
+        Protocol::GcsXml,
+    ] {
+        // Act: stream the finalized bytes through each native multipart path.
+        // Assert: upload_fixture verifies exact bytes and one source pass.
+        upload_fixture(
+            protocol,
+            UploadFault::None,
+            0,
+            UploadPath::Provider,
+            UploadSource::FinalizedSst,
         )?;
     }
     Ok(())
