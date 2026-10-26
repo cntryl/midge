@@ -60,6 +60,10 @@ impl ValidationCompletion {
             Self::Spilled { job, .. } => job.request.request_id,
         }
     }
+
+    fn requires_worker_acknowledgement(&self) -> bool {
+        matches!(self, Self::Spilled { .. })
+    }
 }
 
 impl ValidationTask {
@@ -124,13 +128,16 @@ impl ValidationWorker {
             .spawn(move || {
                 gate.run(|| {
                     for job in incoming {
-                        if completed.send(job.read(&cancellation)).is_err() {
+                        let completion = job.read(&cancellation);
+                        let requires_acknowledgement = completion.requires_worker_acknowledgement();
+                        if completed.send(completion).is_err() {
                             break;
                         }
-                        // One streaming workspace may survive in a completed
-                        // first-error key. Wait until the loop consumes it
-                        // before reading another job's payloads.
-                        if continued.recv().is_err() {
+                        // Spilled completions retain streaming state and stay
+                        // serialized. Resident proofs retain only bounded
+                        // metadata charged to their job reservations, so let
+                        // the worker start the next read immediately.
+                        if requires_acknowledgement && continued.recv().is_err() {
                             break;
                         }
                     }
@@ -407,6 +414,7 @@ impl EventLoop {
         completion: ValidationCompletion,
         msg_rx: &Receiver<RuntimeMsg>,
     ) {
+        let requires_worker_acknowledgement = completion.requires_worker_acknowledgement();
         self.pipeline.validation.pending = self.pipeline.validation.pending.saturating_sub(1);
         if !self
             .pipeline
@@ -415,7 +423,9 @@ impl EventLoop {
             .remove(&completion.request_id())
         {
             drop(completion);
-            self.release_validation_worker();
+            if requires_worker_acknowledgement {
+                self.release_validation_worker();
+            }
             return;
         }
         match completion {
@@ -426,7 +436,9 @@ impl EventLoop {
                 self.complete_spilled_validation(job, proof, msg_rx);
             }
         }
-        self.release_validation_worker();
+        if requires_worker_acknowledgement {
+            self.release_validation_worker();
+        }
     }
 
     fn release_validation_worker(&self) {
