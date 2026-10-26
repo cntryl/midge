@@ -10,6 +10,7 @@ use crate::storage::cloud::{
 };
 use crate::storage::{StorageFileUpload, StorageWriteReceipt};
 use crate::types::EntryType;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
@@ -24,15 +25,142 @@ struct CorruptingMultipartBackend {
     inner: MockCloudBackend,
     corrupted_parts: AtomicUsize,
     uploaded: parking_lot::Mutex<Vec<(String, usize)>>,
+    output_read_opens: Arc<AtomicUsize>,
+    output_read_opens_before_upload: AtomicUsize,
 }
 
 impl CorruptingMultipartBackend {
-    fn new() -> Self {
+    fn new(output_read_opens: Arc<AtomicUsize>) -> Self {
         Self {
             inner: MockCloudBackend::new(),
             corrupted_parts: AtomicUsize::new(0),
             uploaded: parking_lot::Mutex::new(Vec::new()),
+            output_read_opens,
+            output_read_opens_before_upload: AtomicUsize::new(0),
         }
+    }
+}
+
+struct CompactionOutputReadCountingFs {
+    inner: Arc<dyn crate::io::Fs>,
+    output_paths: parking_lot::Mutex<HashSet<String>>,
+    read_opens: Arc<AtomicUsize>,
+}
+
+impl CompactionOutputReadCountingFs {
+    fn reset(&self) {
+        self.output_paths.lock().clear();
+        self.read_opens.store(0, Ordering::Release);
+    }
+
+    fn record_read_open(&self, path: &crate::io::FsPath) {
+        if self.output_paths.lock().contains(&path.0) {
+            self.read_opens.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn is_sst_path(path: &crate::io::FsPath) -> bool {
+        Path::new(&path.0)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
+    }
+}
+
+impl crate::io::ReadFs for CompactionOutputReadCountingFs {
+    fn open_read(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.record_read_open(path);
+        self.inner.open_read(path)
+    }
+
+    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
+impl crate::io::Fs for CompactionOutputReadCountingFs {
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        Some(self)
+    }
+
+    fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+        self.inner.host_addressing()
+    }
+
+    fn open(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        if options.mode == crate::io::OpenMode::ReadOnly {
+            self.record_read_open(path);
+        } else if Self::is_sst_path(path) && (options.create || options.create_new) {
+            self.output_paths.lock().insert(path.0.clone());
+        }
+        self.inner.open(path, options)
+    }
+
+    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_dir_all(path)
+    }
+
+    fn sync_dir(
+        &self,
+        path: &crate::io::FsPath,
+        durability: crate::io::Durability,
+    ) -> crate::io::FsResult<()> {
+        self.inner.sync_dir(path, durability)
+    }
+
+    fn rename_atomic(
+        &self,
+        from: &crate::io::FsPath,
+        to: &crate::io::FsPath,
+    ) -> crate::io::FsResult<()> {
+        self.inner.rename_atomic(from, to)?;
+        if Self::is_sst_path(to) {
+            self.output_paths.lock().insert(to.0.clone());
+        }
+        Ok(())
+    }
+}
+
+impl crate::io::PersistentHandleFs for CompactionOutputReadCountingFs {
+    fn open_persistent(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+        if options.mode == crate::io::OpenMode::ReadOnly {
+            self.record_read_open(path);
+        } else if Self::is_sst_path(path) && (options.create || options.create_new) {
+            self.output_paths.lock().insert(path.0.clone());
+        }
+        crate::io::open_persistent_handle(self.inner.as_ref(), path, options)
     }
 }
 
@@ -56,6 +184,11 @@ impl CloudWriteCapability for CorruptingMultipartBackend {
         callback: CloudCallback,
     ) {
         use crate::storage::cloud::CloudError;
+
+        self.output_read_opens_before_upload.store(
+            self.output_read_opens.load(Ordering::Acquire),
+            Ordering::Release,
+        );
 
         let Ok(capacity) = usize::try_from(source.size) else {
             let _ = callback.send(CloudEvent::PutReceipt {
@@ -224,19 +357,25 @@ fn manifest_names(manifest: &crate::metadata::Manifest) -> Vec<String> {
 fn event_loop_with_corrupting_storage(
     path: &Path,
     backend: &Arc<CorruptingMultipartBackend>,
-) -> MidgeResult<EventLoop> {
+) -> MidgeResult<(EventLoop, Arc<CompactionOutputReadCountingFs>)> {
     let cloud_backend: Arc<dyn crate::storage::cloud::CloudBackend> = backend.clone();
     let cloud = Arc::new(CloudStorage::new(cloud_backend, String::new()));
     let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
         cloud,
         crate::storage::hybrid::policy::StorageBudgetPolicy::new(128 * 1024 * 1024),
     ));
-    let state = RuntimeState::new(path.to_path_buf(), false);
+    let mut state = RuntimeState::new(path.to_path_buf(), false);
+    let counting_fs = Arc::new(CompactionOutputReadCountingFs {
+        inner: Arc::clone(&state.fs),
+        output_paths: parking_lot::Mutex::new(HashSet::new()),
+        read_opens: Arc::clone(&backend.output_read_opens),
+    });
+    state.fs = counting_fs.clone();
     crate::metadata::ensure_or_create_format_marker(&state.fs, path)?;
     crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
         .map_err(MidgeError::Internal)?;
     let (wake_tx, _wake_rx) = crossbeam::channel::unbounded();
-    EventLoop::new(
+    let event_loop = EventLoop::new(
         state,
         false,
         Arc::new(ResponseRouter::new()),
@@ -249,7 +388,8 @@ fn event_loop_with_corrupting_storage(
             ..RuntimeConfig::default()
         },
         crate::runtime::event_loop::FlushWorkerMode::Background(wake_tx),
-    )
+    )?;
+    Ok((event_loop, counting_fs))
 }
 
 fn add_large_inputs_and_plan(
@@ -313,8 +453,12 @@ fn should_keep_compaction_manifest_unchanged_when_streaming_upload_corrupts_a_pa
     // Arrange: the merge output exceeds two multipart chunks, forcing the real
     // streaming SST publication path through the injected mock provider.
     let directory = tempfile::tempdir()?;
-    let backend = Arc::new(CorruptingMultipartBackend::new());
-    let mut event_loop = event_loop_with_corrupting_storage(directory.path(), &backend)?;
+    let output_read_opens = Arc::new(AtomicUsize::new(0));
+    let backend = Arc::new(CorruptingMultipartBackend::new(Arc::clone(
+        &output_read_opens,
+    )));
+    let (mut event_loop, counting_fs) =
+        event_loop_with_corrupting_storage(directory.path(), &backend)?;
     let hybrid = event_loop
         .actors
         .cloud_coordinator
@@ -322,6 +466,7 @@ fn should_keep_compaction_manifest_unchanged_when_streaming_upload_corrupts_a_pa
         .clone()
         .expect("injected hybrid storage");
     let (initial_names, plan) = add_large_inputs_and_plan(&mut event_loop, hybrid.as_ref())?;
+    counting_fs.reset();
 
     // Act: corrupt an actual uploaded part and return the checksum of the
     // corrupted body. The storage receipt therefore disagrees with the
@@ -333,6 +478,13 @@ fn should_keep_compaction_manifest_unchanged_when_streaming_upload_corrupts_a_pa
     // Assert: the failed output has no manifest authority, while original SSTs
     // remain the complete persisted authority and source of recovery.
     assert_eq!(backend.corrupted_parts.load(Ordering::Acquire), 1);
+    assert_eq!(
+        backend
+            .output_read_opens_before_upload
+            .load(Ordering::Acquire),
+        1,
+        "cloud publication should open the finalized output once for upload, with no metadata reread"
+    );
     let uploaded = backend.uploaded.lock();
     assert_eq!(uploaded.len(), 1);
     assert!(uploaded[0].1 > 2 * crate::storage::FILE_UPLOAD_PART_BYTES);
