@@ -41,12 +41,29 @@ Accepted pair 1:
 The raw rows passed the harness with gate trust. This is one accepted pair,
 not a completed three-pair gate.
 
-An attempted A2 was excluded: it had 20.1% throughput RSD and the 1-minute
+The original A2 was excluded: it had 20.1% throughput RSD and the 1-minute
 load rose to 16.85 by completion. Its raw result is preserved as
 [`A2-base-c6-noisy.json`](A2-base-c6-noisy.json) and
-[`A2-base-c6-noisy.md`](A2-base-c6-noisy.md). No matching B2 was run under
-that load. Repeat A2 after the host settles, then continue with A2/B2 and
-A3/B3. Do not infer AC2 from the accepted first pair or the excluded attempt.
+[`A2-base-c6-noisy.md`](A2-base-c6-noisy.md).
+
+### Repeat pair 2 attempt
+
+The repeated A2 base run passed the individual harness quality gate at
+12,537,920.81 logical B/s (4.2% RSD), with 488,951,409 output bytes, four
+compactions, and four final SSTs. The matching B2 candidate run completed but
+was noisy at 53.5% RSD (diagnostic trust); one measured sample fell to about
+1.27 MB/s. Its median, 12,223,625.83 logical B/s, is not a valid pair result.
+Do not compute or report a pair delta from it. The artifacts are
+[`A2-repeat-base-c6.json`](A2-repeat-base-c6.json),
+[`A2-repeat-base-c6.md`](A2-repeat-base-c6.md),
+[`B2-candidate-c6-noisy.json`](B2-candidate-c6-noisy.json), and
+[`B2-candidate-c6-noisy.md`](B2-candidate-c6-noisy.md). Their JSON SHA-256
+values are `29a38b1f4c85433463438427b9f2addb28d8e4959e5fdef19bbf7bfa3da0bf88`
+and `d13cc3ad54ee951d3bcf02dbc78a63f1c189bdbc1eef92c30d03809af1b67507`.
+The benchmark source hash was `957a655c8aea573f71ef4ba16d82a05c21d71c0545443674f356484cf61c73d6` at both base and candidate. The host was under elevated system load during this continuation; the sampled load history is in [`uptime.txt`](uptime.txt).
+
+Pair 2 remains unaccepted. Rerun both A2 and B2 after the host settles, then
+complete A3/B3. Do not infer AC2 from the accepted first pair or noisy attempts.
 
 Accepted pair artifacts: [`A1-base-c6.json`](A1-base-c6.json),
 [`A1-base-c6.md`](A1-base-c6.md),

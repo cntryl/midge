@@ -1,0 +1,11 @@
+Continuation on 2026-10-26, America/New_York, Apple M5 / 10 cores.
+
+Before the repeated A2 base run, `uptime` at 10:45 reported load averages
+8.36, 11.59, 9.63. The machine had active unrelated processes; this run still
+passed the benchmark's individual quality guard at 4.2% RSD.
+
+During the B2 candidate build, `uptime` at 10:52 reported 21.24, 13.48, 10.74.
+During the candidate measurement, `uptime` at 10:56 reported 17.65, 15.49,
+12.24. The candidate run completed with 53.5% RSD and failed the quality gate.
+These snapshots are approximate context, not a per-sample load trace; the raw
+stress artifacts do not expose load averages on this host.
