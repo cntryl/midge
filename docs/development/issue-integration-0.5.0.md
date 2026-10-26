@@ -1387,18 +1387,15 @@ same ticket/coordinator path commits receipt then applies/publishes in order.
 Three existing thread fixtures construct EventLoop on its owning thread to
 preserve the lexical root's !Send bound.
 
-An active physical-fsync gate regression checks old-cut read/control progress,
-blocked later BestEffort success, ordered visibility and stale-snapshot behavior.
-Failpoint test targets compile cleanly; no behavioral test execution is claimed.
-Async next-group append, writer encoding/copy work, concurrent apply, spilled
-proof/sync handoff and oversized Strict compatibility remain unfinished. #904's
-explicit recovery-window decision is still pending.
-
-The writer publishes its completed-write prefix before append acknowledgement,
-then releases its queue/sync locks before notifying the caller. This closes the
-window where immediate typed sync admission could reject an append the caller
-had already been told completed. The held-fsync stage regression exercises that
-handoff; its execution remains pending with the rest of the implementation pass.
+The WAL pipeline module passes 15/15 with failpoints enabled, including old-cut
+read/control progress, queued resident sync sharing, rotation lookahead,
+ordered visibility and stale-snapshot behavior. The WAL actor module passes
+72/72, including the typed append/sync handoff and recovery after failed sync.
+The write-batch module passes 50/50, including overlapping strict group
+recovery and fencing when spilled apply or lease validation fails. The earlier
+implementation-pass list of unfinished async/coalesced paths is superseded by
+these current source results. #940 remains open on its preregistered AC3/AC6
+performance gates; #904's explicit recovery-window decision remains pending.
 
 #913 adds bounded metadata-generation retirement under the same publication
 lock used from head capture through body decoding. The selected chain closure
