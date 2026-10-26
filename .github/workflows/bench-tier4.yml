@@ -21,6 +21,10 @@ on:
         description: cntryl-stress workload name for targeted mode
         type: string
         default: ""
+      source_ref:
+        description: Source branch or commit SHA to benchmark (blank uses the selected workflow ref)
+        type: string
+        default: ""
       samples:
         description: Measured samples per workload
         type: choice
@@ -237,6 +241,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
 
       - name: Update Rust to stable
         run: rustup update stable
@@ -248,7 +254,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: bench-tier4-${{ inputs.workload }}-${{ github.sha }}
+          name: bench-tier4-${{ inputs.workload }}-${{ inputs.source_ref || github.sha }}
           path: |
             target/stress/**
             target/midge-stress/**
