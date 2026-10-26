@@ -1554,9 +1554,10 @@ covers bounded scratch/final write chunks, bypasses under hard pressure and
 remains bypassed through shutdown drain. New metrics separate delay and charged
 bytes from hard stalls. Active public regressions cover soft L0 success/reopen,
 hard L0 rejection, pending-byte rejection and unchanged defaults; internal
-regressions cover pre-admission expiry and shared real-writer rate/identity.
-The latest shared check is in concurrent #909/#906 declarations; execution and
-sustainable-load A/B qualification remain pending.
+regressions cover pre-admission expiry and shared real-writer rate/identity. At
+the current head, the public target passes 4/4, caller-deadline admission passes
+1/1, and shared background writer-rate accounting passes 1/1. These checks
+establish behavior, not sustainable-load performance; the A/B remains pending.
 
 Jev selected a bounded-latency target for AC1: on
 `tier4_system_compaction_backpressure` local with soft limits enabled under a
