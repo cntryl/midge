@@ -1,0 +1,10 @@
+Benchmark Suite: tier4-system-strict-group-commit
+Schema: cntryl-stress.v2
+Profile: default
+Completed: 01792987815741030000-0000041951-00000000000000000000
+Samples: measured=5 warmup=1 cooldown=0
+Total time: 170.10s
+
+Summary
+-------
+  tier4_complete_local_strict_group_commit_total 1.17K transaction/s  tier=4 trust=diagnostic mode=duration quality=acceptable samples=5 wall=170.10s question=mode=duration
