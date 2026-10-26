@@ -5,6 +5,12 @@ use crate::runtime::RuntimeMsg;
 use crossbeam::channel::{Receiver, TryRecvError};
 use std::time::Duration;
 
+enum EventLoopWait {
+    Message(RuntimeMsg),
+    Continue,
+    Closed,
+}
+
 impl EventLoop {
     pub(super) fn has_actionable_work(&self) -> bool {
         if self.wal_group_in_flight() {
@@ -451,6 +457,59 @@ impl EventLoop {
         Some(HandleOutcome::Continue)
     }
 
+    fn wait_for_runtime_event(
+        &mut self,
+        msg_rx: &Receiver<RuntimeMsg>,
+        worker_msg_rx: &Receiver<RuntimeMsg>,
+    ) -> EventLoopWait {
+        let timeout = self.idle_progress_timeout();
+        let validation_rx = self
+            .validation_completion_receiver()
+            .unwrap_or_else(crossbeam::channel::never);
+        let storage_rx = (!self.wal_group_in_flight())
+            .then(|| self.actors.cloud_coordinator.hybrid_storage_events.clone())
+            .flatten();
+        let mut select = crossbeam::channel::Select::new();
+        let validation_index = select.recv(&validation_rx);
+        let worker_index = select.recv(worker_msg_rx);
+        let message_index = select.recv(msg_rx);
+        let storage_index = storage_rx.as_ref().map(|receiver| select.recv(receiver));
+        let selected = if let Some(timeout) = timeout {
+            select.select_timeout(timeout)
+        } else {
+            Ok(select.select())
+        };
+        let Ok(operation) = selected else {
+            self.progress_pass(msg_rx);
+            return EventLoopWait::Continue;
+        };
+        let index = operation.index();
+        if index == validation_index {
+            if let Ok(completion) = operation.recv(&validation_rx) {
+                self.handle_validation_completion(completion, msg_rx);
+            }
+            return EventLoopWait::Continue;
+        }
+        if index == worker_index {
+            return operation
+                .recv(worker_msg_rx)
+                .map_or(EventLoopWait::Closed, EventLoopWait::Message);
+        }
+        if index == message_index {
+            return operation
+                .recv(msg_rx)
+                .map_or(EventLoopWait::Closed, EventLoopWait::Message);
+        }
+        if storage_index == Some(index) {
+            match operation.recv(storage_rx.as_ref().expect("registered storage receiver")) {
+                Ok(event) => self.handle_storage_event(event),
+                Err(_) => self.actors.cloud_coordinator.disconnect_storage_events(),
+            }
+            return EventLoopWait::Continue;
+        }
+        unreachable!("selected index must identify a registered receiver");
+    }
+
     /// Main event loop — runs until Shutdown message or channel close.
     pub fn run(&mut self, msg_rx: &Receiver<RuntimeMsg>, worker_msg_rx: &Receiver<RuntimeMsg>) {
         // Bound write coalescing by a fairness quantum. Thousands of local
@@ -485,72 +544,12 @@ impl EventLoop {
                 continue;
             }
 
-            let idle_timeout = self.idle_progress_timeout();
-            // Storage events are selected under the barrier too: the handler
-            // takes only the ones that cannot change the verified layout and
-            // defers the rest.
-            // Cloud acknowledgements can retire a local WAL segment. Leave
-            // their existing queue ownership intact while a Strict root owns
-            // that segment, then resume event delivery after settlement.
-            let selectable_storage_rx = (!self.wal_group_in_flight())
-                .then(|| self.actors.cloud_coordinator.hybrid_storage_events.clone())
-                .flatten();
-            let msg = if let Some(storage_rx) = selectable_storage_rx {
-                if let Some(timeout) = idle_timeout {
-                    crossbeam::channel::select! {
-                        recv(worker_msg_rx) -> msg => msg.ok(),
-                        recv(msg_rx) -> msg => msg.ok(),
-                        recv(storage_rx) -> ev => {
-                            match ev {
-                                Ok(ev) => {
-                                    self.handle_storage_event(ev);
-                                }
-                                Err(_) => {
-                                    self.actors.cloud_coordinator.disconnect_storage_events();
-                                }
-                            }
-                            continue;
-                        }
-                        default(timeout) => {
-                            self.progress_pass(msg_rx);
-                            continue;
-                        }
-                    }
-                } else {
-                    crossbeam::channel::select! {
-                        recv(worker_msg_rx) -> msg => msg.ok(),
-                        recv(msg_rx) -> msg => msg.ok(),
-                        recv(storage_rx) -> ev => {
-                            match ev {
-                                Ok(ev) => {
-                                    self.handle_storage_event(ev);
-                                }
-                                Err(_) => {
-                                    self.actors.cloud_coordinator.disconnect_storage_events();
-                                }
-                            }
-                            continue;
-                        }
-                    }
-                }
-            } else if let Some(timeout) = idle_timeout {
-                crossbeam::channel::select! {
-                    recv(worker_msg_rx) -> msg => msg.ok(),
-                    recv(msg_rx) -> msg => msg.ok(),
-                    default(timeout) => {
-                        self.progress_pass(msg_rx);
-                        continue;
-                    }
-                }
-            } else {
-                crossbeam::channel::select! {
-                    recv(worker_msg_rx) -> msg => msg.ok(),
-                    recv(msg_rx) -> msg => msg.ok(),
-                }
-            };
-
-            let Some(msg) = msg else {
-                break;
+            // Storage events are selected under the barrier too: their handler
+            // takes only work that cannot change the verified layout.
+            let msg = match self.wait_for_runtime_event(msg_rx, worker_msg_rx) {
+                EventLoopWait::Message(msg) => msg,
+                EventLoopWait::Continue => continue,
+                EventLoopWait::Closed => break,
             };
 
             let outcome = self.process_wake_msg(msg, msg_rx, MAX_DRAIN_WRITES_ON_WAKE);

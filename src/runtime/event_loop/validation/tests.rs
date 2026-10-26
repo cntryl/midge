@@ -268,39 +268,51 @@ fn should_retry_detached_validation_when_intervening_conflicting_write_is_flushe
 }
 
 #[test]
-fn should_wake_event_loop_when_detached_validation_finishes() -> MidgeResult<()> {
+fn should_select_detached_validation_completion_without_event_loop_sst_reads() -> MidgeResult<()> {
     // Arrange
     let (_directory, mut event_loop, sst_opens) = create_counted_event_loop()?;
     apply_and_flush(&mut event_loop, request(94_600, b"seed", false));
-    let (wake_tx, wake_rx) = crossbeam::channel::unbounded();
-    event_loop.pipeline.worker_msg_tx = Some(wake_tx);
     sst_opens.event_loop_opens.store(0, Ordering::SeqCst);
     let mut checked = request(94_601, b"new-key", true);
     checked.start_sequence = Some(event_loop.state.applied_sequence);
     checked.durability_policy = Some(crate::wal::DurabilityPolicy::BestEffort);
-    let response = event_loop
-        .routing
-        .router
-        .register(94_601, "detached validation wake");
+    let router = Arc::clone(&event_loop.routing.router);
+    let client_router = Arc::clone(&router);
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let (worker_msg_tx, worker_msg_rx) = crossbeam::channel::unbounded();
+    event_loop.pipeline.worker_msg_tx = Some(worker_msg_tx);
+    let client_thread = std::thread::spawn(move || {
+        let response = client_router.register(94_601, "detached validation completion select");
+        msg_tx
+            .send(RuntimeMsg::ApplyTransaction {
+                request_id: checked.request_id,
+                ops: checked.ops,
+                assertions: checked.assertions,
+                durability_policy: checked.durability_policy,
+                start_sequence: checked.start_sequence,
+                conflict_policy: checked.conflict_policy,
+                response_tx: None,
+            })
+            .expect("submit checked transaction to event loop");
+        let result = response.recv_timeout(Duration::from_secs(10));
+        msg_tx
+            .send(RuntimeMsg::Shutdown)
+            .expect("request event loop shutdown after validation completion");
+        result
+    });
 
     // Act
-    WalCoordinator::apply_transaction(&mut event_loop, &crossbeam::channel::never(), checked, None);
-    let wake = wake_rx
-        .recv_timeout(Duration::from_secs(10))
-        .expect("validation worker must wake the event loop");
+    event_loop.run(&msg_rx, &worker_msg_rx);
+    let result = client_thread
+        .join()
+        .expect("validation client exits after receiving the response");
 
     // Assert
-    assert!(matches!(&wake, RuntimeMsg::ValidationReady));
-    assert!(event_loop.pipeline.validation.has_ready_result());
-    crate::runtime::event_loop::dispatch::RuntimeDispatcher::handle(
-        &mut event_loop,
-        wake,
-        &crossbeam::channel::never(),
-    );
     assert!(matches!(
-        response.recv_timeout(Duration::from_secs(10)),
+        result,
         Ok(RuntimeResponse::TransactionApplied { .. })
     ));
+    assert_eq!(router.pending_len(), 0);
     assert_eq!(sst_opens.event_loop_opens.load(Ordering::SeqCst), 0);
     Ok(())
 }

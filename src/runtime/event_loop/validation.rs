@@ -27,7 +27,7 @@ use spilled::SpilledValidationJob;
 #[cfg(all(test, feature = "failpoints"))]
 mod tests;
 
-struct ValidationJob {
+pub(super) struct ValidationJob {
     request: ApplyTransactionRequest,
     snapshots: HashMap<u32, Arc<ReadSnapshot>>,
     applied_sequence: u64,
@@ -42,7 +42,7 @@ enum ValidationTask {
     Spilled(SpilledValidationJob),
 }
 
-enum ValidationCompletion {
+pub(super) enum ValidationCompletion {
     Resident {
         job: ValidationJob,
         proof: MidgeResult<CommitValidationProof>,
@@ -111,7 +111,7 @@ struct ValidationWorker {
 }
 
 impl ValidationWorker {
-    fn new(wake: Option<Sender<RuntimeMsg>>) -> MidgeResult<Self> {
+    fn new() -> MidgeResult<Self> {
         let (requests, incoming) =
             crossbeam::channel::bounded::<ValidationTask>(MAX_VALIDATION_JOBS);
         let (completed, completions) = crossbeam::channel::unbounded();
@@ -126,9 +126,6 @@ impl ValidationWorker {
                     for job in incoming {
                         if completed.send(job.read(&cancellation)).is_err() {
                             break;
-                        }
-                        if let Some(wake) = &wake {
-                            let _ = wake.send(RuntimeMsg::ValidationReady);
                         }
                         // One streaming workspace may survive in a completed
                         // first-error key. Wait until the loop consumes it
@@ -305,8 +302,7 @@ impl EventLoop {
             .reserve(metadata_bytes, "detached transaction validation")?;
         let job = self.capture_validation_job(request, reservation)?;
         if self.pipeline.validation.worker.is_none() {
-            self.pipeline.validation.worker =
-                Some(ValidationWorker::new(self.pipeline.worker_msg_tx.clone())?);
+            self.pipeline.validation.worker = Some(ValidationWorker::new()?);
         }
         let worker = self
             .pipeline
@@ -365,12 +361,7 @@ impl EventLoop {
     }
 
     pub(super) fn drain_validation_results(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
-        if self
-            .publication
-            .publication_gate
-            .blocks_validation_completion()
-            || self.publication.verification_barrier.is_active()
-        {
+        if self.validation_completion_blocked() {
             return;
         }
         loop {
@@ -383,27 +374,59 @@ impl EventLoop {
             let Some(completion) = completion else {
                 break;
             };
-            self.pipeline.validation.pending = self.pipeline.validation.pending.saturating_sub(1);
-            if !self
-                .pipeline
-                .validation
-                .callers
-                .remove(&completion.request_id())
-            {
-                drop(completion);
-                self.release_validation_worker();
-                continue;
-            }
-            match completion {
-                ValidationCompletion::Resident { job, proof } => {
-                    self.complete_validation(job, proof, msg_rx);
-                }
-                ValidationCompletion::Spilled { job, proof } => {
-                    self.complete_spilled_validation(job, proof, msg_rx);
-                }
-            }
-            self.release_validation_worker();
+            self.handle_validation_completion(completion, msg_rx);
         }
+    }
+
+    pub(super) fn validation_completion_receiver(&self) -> Option<Receiver<ValidationCompletion>> {
+        if self.validation_completion_blocked() {
+            return None;
+        }
+        self.pipeline
+            .validation
+            .worker
+            .as_ref()
+            .filter(|worker| {
+                !worker
+                    .handle
+                    .as_ref()
+                    .is_some_and(std::thread::JoinHandle::is_finished)
+            })
+            .map(|worker| worker.completions.clone())
+    }
+
+    fn validation_completion_blocked(&self) -> bool {
+        self.publication
+            .publication_gate
+            .blocks_validation_completion()
+            || self.publication.verification_barrier.is_active()
+    }
+
+    pub(super) fn handle_validation_completion(
+        &mut self,
+        completion: ValidationCompletion,
+        msg_rx: &Receiver<RuntimeMsg>,
+    ) {
+        self.pipeline.validation.pending = self.pipeline.validation.pending.saturating_sub(1);
+        if !self
+            .pipeline
+            .validation
+            .callers
+            .remove(&completion.request_id())
+        {
+            drop(completion);
+            self.release_validation_worker();
+            return;
+        }
+        match completion {
+            ValidationCompletion::Resident { job, proof } => {
+                self.complete_validation(job, proof, msg_rx);
+            }
+            ValidationCompletion::Spilled { job, proof } => {
+                self.complete_spilled_validation(job, proof, msg_rx);
+            }
+        }
+        self.release_validation_worker();
     }
 
     fn release_validation_worker(&self) {
