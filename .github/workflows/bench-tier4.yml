@@ -25,6 +25,10 @@ on:
         description: Source branch or commit SHA to benchmark (blank uses the selected workflow ref)
         type: string
         default: ""
+      benchmark_ref:
+        description: Optional ref supplying the same benchmark source when it is absent from source_ref
+        type: string
+        default: ""
       samples:
         description: Measured samples per workload
         type: choice
@@ -40,7 +44,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: bench-tier4-${{ github.ref }}
+  group: bench-tier4-${{ github.ref }}-${{ inputs.run_mode == 'targeted' && github.run_id || 'matrix' }}
   cancel-in-progress: false
 
 jobs:
@@ -243,6 +247,26 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ inputs.source_ref || github.sha }}
+
+      - name: Checkout benchmark source overlay
+        if: inputs.benchmark_ref != ''
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.benchmark_ref }}
+          path: .benchmark-overlay
+
+      - name: Install benchmark source overlay
+        if: inputs.benchmark_ref != ''
+        env:
+          BENCH_NAME: ${{ inputs.bench }}
+        run: |
+          set -euo pipefail
+          [[ "$BENCH_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]
+          cp ".benchmark-overlay/benches/${BENCH_NAME}.rs" "benches/${BENCH_NAME}.rs"
+          if ! rg -Fq "name = \"${BENCH_NAME}\"" Cargo.toml; then
+            printf '\n[[bench]]\nname = "%s"\npath = "benches/%s.rs"\nharness = false\n' \
+              "$BENCH_NAME" "$BENCH_NAME" >> Cargo.toml
+          fi
 
       - name: Update Rust to stable
         run: rustup update stable
