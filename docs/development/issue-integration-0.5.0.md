@@ -1880,3 +1880,14 @@ merged; issue closure is pending its exact-head gates.
 These checks do not complete #907's injected-latency/A-B gates or #916's cost
 and catalog-size measurements. #913's metadata-generation GC crash acceptance
 remains open. No live-provider qualification is claimed.
+
+### Current #910 execution checkpoint (2026-10-26)
+
+The `manual_flush_tests::metadata_overlap_tests` module passed 7/7 with
+failpoints enabled. It includes the 100 ms later-flush progress assertion while
+a compaction immutable PUT is held for two seconds, plus late/duplicated and
+lost successful pointer-CAS callbacks and cold-recovery cases. The metadata
+publication cut tests passed 3/3, covering bounded witness storage and
+admission of a later capture and selected-body read after the final source
+drop. These are local behavioral results; they do not establish hosted
+provider latency or the independent-flush performance target.
