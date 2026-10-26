@@ -1332,17 +1332,19 @@ The remaining #907 metadata mirror now captures an immutable local control-file
 cut and submits provider work to an owned worker. Operation/epoch completion
 retains the caller's original deadline and continuation. DDL response, flush
 cursor/backoff, GC deletion and SST-name coverage change only after matching
-successful unfenced completion. Manual compaction plans/waiters remain pending
-through name reservation rather than being rejected or falsely completed.
+successful unfenced completion. Manual compaction plans and waiters retain the
+accepted generation and original deadline while name reservation is pending.
 Read and resident validation progress is permitted under the mirror owner.
 Shutdown retains and drains admitted work.
 
-Five active regressions cover held-provider local progress, stale names,
-original flush ownership, abandoned callers and failure backoff. Shared failpoint
-test targets compile after the related fixture/interface updates. Behavioral,
-crash, latency and provider qualification remain pending. Sealing itself keeps
-its required local append/fsync/rotation barrier; remote upload/publication is
-off loop. Publication independence between flush and compaction remains #910.
+The active regressions cover held-provider local progress, stale names, original
+flush ownership, abandoned callers and failure backoff. Manual compaction plans
+now retain the accepted generation and original caller
+deadline while its name reservation mirror is pending, then resume after the
+publication owner releases the gate; the six-test metadata-mirror module passes
+6/6. Crash, latency and provider qualification remain pending. Sealing itself
+keeps its required local append/fsync/rotation barrier; remote upload/publication
+is off loop. Publication independence between flush and compaction remains #910.
 
 The #914 cached common path now reuses receipt-validated pointer identity under
 monotonic writer validity and the takeover claim. Reduced manifest authority
