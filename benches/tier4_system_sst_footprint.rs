@@ -15,6 +15,7 @@ const VALUE_BYTES: usize = 32;
 struct PreparedFixture {
     _directory: TempDir,
     engine: Engine,
+    cf_id: u32,
     files_count: usize,
     total_sst_bytes: u64,
 }
@@ -88,6 +89,7 @@ fn prepare_fixture() -> PreparedFixture {
     PreparedFixture {
         _directory: directory,
         engine,
+        cf_id: cf.id(),
         files_count: files.len(),
         total_sst_bytes,
     }
@@ -125,21 +127,26 @@ fn record_metrics(ctx: &mut StressContext, files_count: usize, total_sst_bytes: 
 }
 
 fn run(ctx: &mut StressContext) {
-    let mut footprints = Vec::with_capacity(6);
-    ctx.benchmark("fixture_build_and_flush")
-        .samples(5)
-        .measure(|| {
-            let mut fixture = prepare_fixture();
-            footprints.push((fixture.files_count, fixture.total_sst_bytes));
-            fixture
-                .engine
-                .shutdown(Duration::from_secs(30))
-                .expect("shutdown SST footprint benchmark database");
-        });
-    let (files_count, total_sst_bytes) = *footprints
-        .last()
-        .expect("benchmark records at least one fixture");
-    record_metrics(ctx, files_count, total_sst_bytes);
+    let mut fixture = prepare_fixture();
+    let snapshot = fixture
+        .engine
+        .begin_tx(fixture.cf_id, TransactionMode::ReadOnly)
+        .expect("begin SST footprint benchmark read snapshot");
+    let probe = key(UNIQUE_KEYS / 2);
+    ctx.measure("small_pair_point_lookup", || {
+        snapshot
+            .get(&probe)
+            .expect("read SST footprint benchmark probe")
+            .expect("SST footprint benchmark key exists");
+    });
+    record_metrics(ctx, fixture.files_count, fixture.total_sst_bytes);
+    snapshot
+        .rollback()
+        .expect("close SST footprint benchmark read snapshot");
+    fixture
+        .engine
+        .shutdown(Duration::from_secs(30))
+        .expect("shutdown SST footprint benchmark database");
 }
 
 #[stress(
