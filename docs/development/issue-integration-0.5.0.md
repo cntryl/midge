@@ -17,11 +17,11 @@ currently cover these slices:
 | `4cfbacb3` | #918 directly checks the legacy SST rejection boundary | Focused V4 fixture reader test passed (1/1) | Tier 4 footprint and #935 decode measurements |
 | `f8c14a1c`, `cf60f580` | #914 removes hidden reads from the metadata request-count test double and covers 100 metadata commits during real lease heartbeats | The zero-read/two-PUT test was red on two inner GETs, then passed (1/1) with actual mock GET/range history and conditional-header assertions; Jev favored the test design (0.98). The new AC6 regression passed (1/1): 100 pointer PUTs, zero pointer precondition failures, provider-backed heartbeat renewals and a deterministic overlapping renewal/pointer mutation | Cold-start before/after, live-provider qualification, and #937/#935 performance evidence |
 | `27fe25d0`, `8aacf76a`, `24b733de` | #911 checks captured-checkpoint recovery across concurrent journal append, pre-install failure, and ambiguous journal-tail replacement | Three focused failpoint tests passed (1/1 each): cold strict recovery preserves edits exactly once after failure before install, after snapshot rename before tail rewrite, and after tail-replacement rename with directory-sync failure; Jev judged a post-successful-replacement bookkeeping boundary redundant (confidence 0.58) because durable state is already complete | AC1 metadata-byte comparison; AC3 full-tail recovery throughput |
-| `19926136` | #978 asserts the spill-specific global applied cut after partial apply | Cross-family rejection plus fresh snapshot cut/key assertions passed (1/1); whole-spill restart recovery passed (1/1). At head `1f1e843e`, `should_publish_applied_sequence_given_failed_group_when_snapshot_published` passed with failpoints (1/1); `should_drain_in_flight_group_before_rotate_given_pending_group` passed (1/1); actor filesystem-boundary, local transition-view, and cloud cross-component seal-boundary matrices each passed (1/1) | Crash/restart qualification and AC3 strict group-commit performance result |
-| `6035e70e` | #978 defers local WAL pruning until pending strict groups and memtable apply settle | New held-sync regression was red before the deferral and passes after it; WAL pipeline tests passed 11/11, local rotation-boundary matrix 1/1, cloud seal-boundary matrix 1/1; AC1/AC2 focused tests and local/cloud matrices pass at head `1f1e843e` | Transition-specific crash/restart qualification |
-| `1a161dcb` | #978 rejects direct local WAL rotation while a Strict group owns the writer root, then allows retry after apply | New held-sync regression was red on the prior path (`WalTransitionProtocol::Syncing` error instead of deferral), then passed with the guard; WAL pipeline module passed 12/12 and local rotation-boundary matrix passed 1/1. Jev selected the method-boundary defer and recommended preserving fenced-state error precedence (0.69); `is_fenced` is checked before translating in-flight work to `WriteStall` | Full transition/crash evidence, including cloud rotation with a parked group |
-| `70e05b72`, revalidated at `af93abaa` | #978 covers direct CloudAsync seal collision while the pending seal owns the writer root | New regression holds the pending seal at physical sync, requires direct sealing to return retryable `WriteStall` without segment movement, fencing or loss of the existing owner, then verifies the owner completes and the retry does not rotate twice; current WAL pipeline tests passed 15/15, local rotation boundary matrix 1/1, cloud cross-component seal boundary matrix 1/1, and WAL crash campaigns 15/15 | Transition-specific crash/restart evidence; CloudAsync seal performance is not part of the local AC3 comparison |
-| `9f24a588` → `1a161dcb` | #978 AC3 complete-system local Strict comparison for pruning and direct-rotation changes | Three alternating Tier 4 pairs, identical benchmark source SHA, five samples each; exact p50 changes +5.91%, +0.61%, and −6.52% (median +0.61%); worst pair is within the 15% Tier 4 investigation guardrail; all 163,840 operations per run completed with zero failures and zero write stalls. Jev supported the narrow AC3 no-regression disposition (0.98). Full artifacts and method limits are in `docs/development/evidence/issue-978-strict-group-commit-ab-2026-10-26/` | Diagnostic trust is retained; CloudAsync seal performance is not measured; transition-specific crash/restart evidence remains open |
+| `19926136` | #978 asserts the spill-specific global applied cut after partial apply | Cross-family rejection plus fresh snapshot cut/key assertions passed (1/1); whole-spill restart recovery passed (1/1). The AC1 applied-cut and pending-group rotation-drain regressions passed (1/1 each); the failpoint-gated WAL pipeline module passed 15/15; actor filesystem-boundary, local transition-view, and cloud cross-component seal-boundary matrices passed (1/1 each). Process-abort recovery passed for a shared Strict group (1/1), local replacement-writer rotation failures (2/2), CloudAsync coordinator drift (1/1), and orphaned sealed CloudAsync WAL (1/1) | No remaining issue acceptance work identified; AC3 evidence and diagnostic limits are recorded separately |
+| `6035e70e` | #978 defers local WAL pruning until pending strict groups and memtable apply settle | New held-sync regression was red before the deferral and passes after it; WAL pipeline tests passed 11/11, local rotation-boundary matrix 1/1, cloud seal-boundary matrix 1/1; AC1/AC2 focused tests and local/cloud matrices pass at head `1f1e843e` | No remaining issue acceptance work identified |
+| `1a161dcb` | #978 rejects direct local WAL rotation while a Strict group owns the writer root, then allows retry after apply | New held-sync regression was red on the prior path (`WalTransitionProtocol::Syncing` error instead of deferral), then passed with the guard; WAL pipeline module passed 12/12 and local rotation-boundary matrix passed 1/1. Jev selected the method-boundary defer and recommended preserving fenced-state error precedence (0.69); `is_fenced` is checked before translating in-flight work to `WriteStall` | No remaining issue acceptance work identified |
+| `70e05b72`, revalidated at `af93abaa` | #978 covers direct CloudAsync seal collision while the pending seal owns the writer root | New regression holds the pending seal at physical sync, requires direct sealing to return retryable `WriteStall` without segment movement, fencing or loss of the existing owner, then verifies the owner completes and the retry does not rotate twice; current WAL pipeline tests passed 15/15, local rotation boundary matrix 1/1, cloud cross-component seal boundary matrix 1/1, and WAL crash campaigns 15/15. CloudAsync excludes Strict from its coalesced sync path, so the parked-Strict-root case belongs to local mode; cloud coverage holds an async seal owner | No remaining issue acceptance work identified; CloudAsync seal performance is outside AC3's local Strict workload |
+| `9f24a588` → `1a161dcb` | #978 AC3 complete-system local Strict comparison for pruning and direct-rotation changes | Three alternating Tier 4 pairs, identical benchmark source SHA, five samples each; exact p50 changes +5.91%, +0.61%, and −6.52% (median +0.61%); worst pair is within the 15% Tier 4 investigation guardrail; all 163,840 operations per run completed with zero failures and zero write stalls. Jev supported the narrow AC3 no-regression disposition (0.98). Full artifacts and method limits are in `docs/development/evidence/issue-978-strict-group-commit-ab-2026-10-26/` | Diagnostic trust and the absence of per-run uptime snapshots remain explicit evidence limits; no sustained regression found |
 | `a08f0616`, `b11d407e` | #905 covers a conflicting follower queued behind held Strict fsync and same-key Strict writes across a process crash | The follower waits without append or visibility, then conflicts after predecessor apply with no partial effects (1/1); the new child-process regression verifies both overlapping writes share one WAL append and sync, abruptly exits, and recovers the later value; write-batch tests passed 50/50. Jev narrowly preferred fixture drop/reopen (0.57) over a child process (0.42); the stronger crash-specific test is verified against the production Strict group/replay path | Hot-key/disjoint measurement, three alternating A/B pairs and measured records per append remain pending |
 | Revalidated at `ec87aa90` | #906 verifies ordered concurrent memtable apply and authority fencing at the event-loop boundary | `memtable_apply` tests passed 2/2; compaction concurrency tests passed 14/14; WAL crash campaigns passed 15/15; #808 WAL authority failpoints passed 5/5, transient replay-I/O recovery 1/1, and WAL retention regressions 4/4; engine differential target passed 5/5 tests (default 256 proptest cases plus corpus); Loom skiplist models passed 5/5; Loom Clippy and strict all-feature workspace Clippy pass | AC1 three-pair throughput A/B and AC5 four-hour differential fuzz campaign remain due |
 | `4d7a429f`, `d3ccdd33`, `49dcfd50` | #907 moves CloudAsync WAL prefix sync, footer append, and footer sync onto ticketed writer-worker stages; event-loop ownership retains rotation and ledger publication | Three focused failpoint regressions passed (3/3), including control progress during both sync barriers, lease loss after prefix sync, and footer-transition failure; timeout-after-catalog-CAS proves frontier waits for completion and advances once (1/1); matching operation ID with stale epoch is ignored before the valid completion advances once (1/1); formatting and diff checks passed | AC1 injected-provider progress, AC2 mirror completion after lease loss, AC3 provider-latency A/B, AC4 publication crash campaigns, and broader AC5 reorder/duplicate matrix |
@@ -822,42 +822,41 @@ The capture loop tolerates only the exact transient bounded-queue `WriteStall`
 with a short retry; all semantic assertions remain unchanged. The
 flush/publication overlap matrix and A/B targets remain for qualification.
 
-### #978: applied-cut prerequisite implemented; pipeline remainder pending
+### #978: applied-cut, transition, recovery, and AC3 evidence complete
 
 Runtime state now separates allocated and completely applied sequences.
 Resident groups advance the applied cut only after each whole unit applies;
 spilled units advance it only after their final operation succeeds. Recovery
 initializes the cut from replay. Both snapshot publication and fallback
 BeginTransaction use this boundary; assertion-only requests return it too.
-An active regression injects a strict group sync failure after a successful
-unit and requires the published cut and reads to remain at the applied unit.
-Compile checks pass; execution is deferred.
+The regression injects a strict group sync failure after a successful unit and
+requires the published cut and reads to remain at the applied unit. It passes
+with the failpoints feature.
 
 Strict ticket unification, loop-owned parked roots and transition drains are
-still required with #940/#946. No append/fsync concurrency has been enabled
-by this prerequisite commit.
+implemented across #940/#946/#978. This issue adds no independent append/fsync
+concurrency claim.
 
 The local prune-time rotation now defers while a strict group or its memtable
 apply is pending, avoiding a second sync transition against the parked writer
 root. The exact held-sync regression and both local/cloud transition boundary
-tests pass; the WAL pipeline module passed 11/11 at the original implementation stage. The AC1/AC2 local and cloud rotation matrices now pass at head
-`1f1e843e`; transition-specific crash/restart qualification and the Tier 4
-strict group-commit guardrail remain open.
+tests pass; the WAL pipeline module passed 11/11 at the original implementation
+stage. AC1/AC2 local and cloud rotation matrices pass at the current head.
 
 The cloud transition test now parks the real CloudAsync seal at physical sync
 and verifies a competing direct seal defers without moving or fencing the WAL.
-At head `1f1e843e`, the AC1 applied-cut regression, pending-group rotation
-drain regression, and actor/local/cloud rotation matrices all pass with the
-`failpoints` feature. The existing seal owner then completes, and retrying
-cannot rotate a second time. CloudAsync excludes Strict from its coalesced
-sync-submission path, so the test holds the cloud seal transition itself. The
-WAL pipeline module passed 14/14 during the original slice; current direct
-local rotation and cloud transition boundary matrices also pass. A release
-profile Tier 4 base run at
-`e9a0d86b7be0c1b298ef8f546326c5893aedba04` failed the harness quality gate
-(throughput RSD 10.0%, stall-recovery RSD 15.6%; host load reached 20.49); its
-raw artifact and pre-run uptime are preserved under `docs/development/evidence/`.
-This run is inconclusive; AC3 still needs an acceptable three-pair comparison.
+The AC1 applied-cut regression, pending-group rotation-drain regression, and
+actor/local/cloud rotation matrices pass with the `failpoints` feature. The
+existing cloud-seal owner completes after a competing direct request defers;
+retrying cannot rotate a second time. CloudAsync excludes Strict from its
+coalesced sync-submission path, so the cloud test holds the seal transition
+itself while the local test holds a Strict group. Process-abort recovery passes
+for a shared Strict group, both local replacement-writer rotation failures,
+CloudAsync coordinator drift, and an orphaned sealed CloudAsync WAL. The
+three-pair Tier 4 AC3 comparison has a +0.61% median local Strict throughput
+change, with each pair within the 15% guardrail; it remains explicitly
+diagnostic-trust evidence. Exact artifacts and limits are in
+`docs/development/evidence/issue-978-strict-group-commit-ab-2026-10-26/`.
 
 ### #949: merge-heap slice implemented; writer identity pending
 

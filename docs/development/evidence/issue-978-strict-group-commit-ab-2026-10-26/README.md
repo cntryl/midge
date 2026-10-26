@@ -12,6 +12,14 @@
 - The benchmark declares `role = diagnostic` and `diagnostic_reason = strict_group_commit_promotion_probe`. Artifacts therefore have diagnostic trust, despite acceptable quality and zero diagnostics. An initial forced `--profile release` run is excluded because the harness correctly returned `QualityFailed` with no intended gate rows.
 - No per-run uptime snapshots were retained. The source range covers the local prune and direct-rotation changes; CloudAsync seal integration (`6a417384`) is outside this local-only benchmark and remains supported by its separate boundary matrix.
 
+## Correctness and recovery qualification
+
+- The failpoint-gated WAL pipeline module passed 15/15, including the held Strict group before local rotation, direct local rotation rejection while the Strict group owns the writer root, and direct CloudAsync seal deferral while another seal owns the transition.
+- The applied-cut regression and pending-group rotation drain regression passed 1/1 each.
+- The actor filesystem-boundary, local transition-view, and cloud cross-component seal-boundary matrices passed 1/1 each.
+- Process-abort recovery passed for the shared Strict group (1/1), both local replacement-writer rotation failures (2/2), CloudAsync coordinator drift (1/1), and orphaned sealed CloudAsync WAL after writer loss (1/1).
+- A CloudAsync actor cannot also have an in-flight Strict sync group: `WalActor::coalesced_transaction_durability` excludes Strict coalescing when `is_cloud_async()` is true, while CloudAsync sealing requires that mode. An attempted held-Strict-group cloud test therefore did not create a pending group and was discarded. The valid cloud ownership case is the existing pending CloudAsync seal regression; the local Strict group regression exercises the parked writer root directly. Jev independently selected this mode-boundary interpretation (confidence 0.97); the source predicates and executed tests are the evidence.
+
 ## Results
 
 The paired metric is complete-system throughput in transactions per second. Deltas use exact artifact p50 values.
