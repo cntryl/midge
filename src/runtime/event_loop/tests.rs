@@ -335,6 +335,16 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_reserved
     storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
     next_sst: Option<u64>,
 ) -> crate::common::MidgeResult<EventLoop> {
+    create_test_cloud_event_loop_with_store_factory(storage_policy, next_sst, |cloud| cloud)
+}
+
+pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_store_factory(
+    storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
+    next_sst: Option<u64>,
+    store_factory: impl FnOnce(
+        Arc<crate::storage::filesystem::FileSystem>,
+    ) -> Arc<dyn crate::storage::inventory::ObjectStore>,
+) -> crate::common::MidgeResult<EventLoop> {
     let db_path = unique_test_db_path("midge_event_loop_cloud");
     std::fs::create_dir_all(&db_path).expect("create temp cloud event loop dir");
     if let Some(next) = next_sst {
@@ -354,8 +364,9 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_reserved
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
             .expect("create cloud backend"),
     );
+    let shared_metadata_store = store_factory(Arc::clone(&cloud));
     let shared_metadata = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
-        cloud.clone(),
+        shared_metadata_store,
         Duration::from_secs(5),
     ));
     let inventory: Arc<dyn crate::storage::inventory::ObjectInventory> = cloud.clone();

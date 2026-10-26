@@ -41,6 +41,83 @@ impl Drop for HeldMirror {
     }
 }
 
+struct HeldMetadataObjectStore {
+    inner: Arc<crate::storage::filesystem::FileSystem>,
+    entered: crossbeam::channel::Sender<()>,
+    release: crossbeam::channel::Receiver<()>,
+    armed: Arc<AtomicBool>,
+    held: AtomicBool,
+}
+
+impl crate::storage::StorageBackend for HeldMetadataObjectStore {
+    crate::storage::forward_storage_backend!(inner;
+        submit_range_read_request,
+        submit_range_head_request,
+        submit_metadata_read_request,
+        submit_head_request,
+        submit_delete_request,
+    );
+
+    fn submit_write_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        data: Vec<u8>,
+        callback: crate::storage::StorageCallback,
+    ) {
+        if self.armed.load(Ordering::Acquire) && !self.held.swap(true, Ordering::AcqRel) {
+            self.entered.send(()).expect("signal provider write");
+            self.release
+                .recv_timeout(Duration::from_secs(10))
+                .expect("release held provider write");
+        }
+        self.inner.submit_write_request(request, data, callback);
+    }
+}
+
+impl crate::storage::inventory::ObjectInventory for HeldMetadataObjectStore {
+    fn keys_page(
+        &self,
+        prefix: &str,
+        page: crate::storage::cloud::CloudListPageRequest,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> MidgeResult<Option<crate::storage::cloud::CloudListPage>> {
+        crate::storage::inventory::ObjectInventory::keys_page(&*self.inner, prefix, page, scope)
+    }
+
+    fn object_size(
+        &self,
+        key: &str,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> MidgeResult<Option<u64>> {
+        crate::storage::inventory::ObjectInventory::object_size(&*self.inner, key, scope)
+    }
+
+    fn keys_under(
+        &self,
+        prefix: &str,
+        scope: Option<&crate::common::DeadlineScope>,
+    ) -> MidgeResult<Vec<String>> {
+        crate::storage::inventory::ObjectInventory::keys_under(&*self.inner, prefix, scope)
+    }
+}
+
+impl HeldMetadataObjectStore {
+    fn wrap(
+        inner: Arc<crate::storage::filesystem::FileSystem>,
+        entered: crossbeam::channel::Sender<()>,
+        release: crossbeam::channel::Receiver<()>,
+        armed: Arc<AtomicBool>,
+    ) -> Arc<dyn crate::storage::inventory::ObjectStore> {
+        Arc::new(Self {
+            inner,
+            entered,
+            release,
+            armed,
+            held: AtomicBool::new(false),
+        })
+    }
+}
+
 fn seed_compaction_name_source(event_loop: &mut EventLoop) -> MidgeResult<String> {
     use crate::sst::SstFactory as _;
     let name = crate::cloud_layout::file_name(0, 0, 1);
@@ -170,14 +247,19 @@ fn should_preserve_accepted_compaction_reservation_when_its_mirror_finishes_unde
 
 #[test]
 fn should_keep_foreground_progress_available_while_metadata_provider_is_held() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
-    let scenario = fail::FailScenario::setup();
     // Arrange
-    let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
-    )?;
+    let (entered, entered_rx) = crossbeam::channel::bounded(1);
+    let (release_tx, release_rx) = crossbeam::channel::bounded(1);
+    let armed = Arc::new(AtomicBool::new(false));
+    let store_armed = Arc::clone(&armed);
+    let mut event_loop =
+        crate::runtime::event_loop::tests::create_test_cloud_event_loop_with_store_factory(
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            None,
+            move |inner| HeldMetadataObjectStore::wrap(inner, entered, release_rx, store_armed),
+        )?;
+    armed.store(true, Ordering::Release);
     event_loop.pipeline.inline_flush_worker = false;
-    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
     let persisted = event_loop
         .routing
         .router
@@ -191,10 +273,12 @@ fn should_keep_foreground_progress_available_while_metadata_provider_is_held() -
         90701,
         crate::metadata::accounting::Origin::Administration,
     );
-    held.await_entry();
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("metadata mirror entered the injected provider");
     let (_sender, messages) = crossbeam::channel::unbounded();
 
-    // Act: no provider release is available until both local outcomes exist.
+    // Act: hold the provider request while local transaction progress continues.
     let started = Instant::now();
     WalCoordinator::apply_transaction(
         &mut event_loop,
@@ -239,7 +323,7 @@ fn should_keep_foreground_progress_available_while_metadata_provider_is_held() -
         .cloud_coordinator
         .metadata_mirror
         .is_running());
-    held.release.try_send(()).unwrap();
+    release_tx.try_send(()).unwrap();
     event_loop
         .drain_metadata_mirror_within(&OperationDeadline::from_budget(Duration::from_secs(5)))?;
     assert!(matches!(
@@ -248,8 +332,6 @@ fn should_keep_foreground_progress_available_while_metadata_provider_is_held() -
     ));
     event_loop.complete_metadata_mirror(1, epoch); // duplicate is inert
     assert!(!event_loop.publication.publication_gate.is_active());
-    fail::remove("midge::metadata_mirror::before_provider");
-    scenario.teardown();
     Ok(())
 }
 
