@@ -318,6 +318,50 @@ fn should_select_detached_validation_completion_without_event_loop_sst_reads() -
 }
 
 #[test]
+fn should_keep_resident_validation_worker_running_between_completed_jobs() -> MidgeResult<()> {
+    // Arrange
+    let (_directory, mut event_loop, _) = create_counted_event_loop()?;
+    apply_and_flush(&mut event_loop, request(94_619, b"seed", false));
+    let first_reservation = event_loop
+        .pipeline
+        .validation
+        .memory
+        .reserve(1024, "resident validation worker test")?;
+    let first = event_loop
+        .capture_validation_job(request(94_620, b"first-key", true), first_reservation)?;
+    let second_reservation = event_loop
+        .pipeline
+        .validation
+        .memory
+        .reserve(1024, "resident validation worker test")?;
+    let second = event_loop
+        .capture_validation_job(request(94_621, b"second-key", true), second_reservation)?;
+    let worker = ValidationWorker::new()?;
+    let requests = worker.requests.as_ref().expect("validation worker open");
+    requests
+        .send(ValidationTask::Resident(first))
+        .expect("send first resident validation");
+    requests
+        .send(ValidationTask::Resident(second))
+        .expect("send second resident validation");
+
+    // Act: leave the first completion unread while the worker processes the second job.
+    let first = worker
+        .completions
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first resident validation completion");
+    let second = worker
+        .completions
+        .recv_timeout(Duration::from_secs(5))
+        .expect("resident worker continues without a completion acknowledgement");
+
+    // Assert
+    assert_eq!(first.request_id(), 94_620);
+    assert_eq!(second.request_id(), 94_621);
+    Ok(())
+}
+
+#[test]
 fn should_retry_detached_insert_only_validation_when_intervening_write_is_flushed(
 ) -> MidgeResult<()> {
     // Arrange
