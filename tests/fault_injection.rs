@@ -7449,6 +7449,7 @@ mod cloud_crash_recovery {
             .all(|file| {
                 file.name != old_name && file.name != "000000_01_00000000000000000000.sst"
             }));
+        // Assert: bounded cleanup completes after a fresh owner recovers.
         wait_for_orphan_sweep_recovery(&reopened, &orphan_ssts);
     }
 

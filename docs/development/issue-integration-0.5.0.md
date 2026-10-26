@@ -1936,6 +1936,13 @@ These checks do not complete #907's injected-latency/A-B gates or #916's cost
 and catalog-size measurements. #913's metadata-generation GC crash acceptance
 remains open pending exact-head gates. No live-provider qualification is claimed.
 
+On exact source `c23401c9`, the #913 failpoint regressions were rerun: metadata
+retention after process abort passed 1/1; `cloud_crash_recovery::should_recover`
+passed 5/5, including interrupted metadata publication and pending flush plus
+compaction recovery; uncertain-authority retention passed 1/1. These focused
+crash results support AC3 but do not replace exact-head hosted checks or close
+the issue.
+
 ### Current #910 execution checkpoint (2026-10-26)
 
 The `manual_flush_tests::metadata_overlap_tests` module passed 7/7 with
