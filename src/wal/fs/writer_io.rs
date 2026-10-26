@@ -1528,6 +1528,49 @@ mod tests {
     }
 
     #[test]
+    fn should_match_sealed_identity_to_independent_written_segment_bytes() -> MidgeResult<()> {
+        // Arrange: use a raw 4 KiB value so the production writer exercises
+        // the borrowed WAL value path before final framing.
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+        let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs))?;
+        let value: Vec<_> = (0_usize..4096)
+            .map(|index| {
+                let value = index.wrapping_mul(73).wrapping_add(index / 3);
+                u8::try_from(value % 251).expect("fixture byte fits in u8")
+            })
+            .collect();
+        assert_eq!(crate::codec::compress_wal_value(&value).1, None);
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"raw-value"),
+            Some(Bytes::from(value)),
+            7,
+        );
+
+        // Act: append and obtain the real writer's seal facts, then compute
+        // the segment digest independently from the persisted prefix bytes.
+        writer
+            .append_record_accounted(&record)
+            .map_err(|failure| failure.error)?;
+        writer.sync_with_timeout(Duration::from_secs(5))?;
+        let facts = writer.seal_facts(Duration::from_secs(5))?;
+        let bytes = crate::io::read_all(fs.as_ref(), &FsPath::new("wal.log"))
+            .map_err(crate::io::FsError::into_midge)?;
+        let data_len =
+            usize::try_from(facts.data_len).expect("segment prefix length fits in address space");
+        let expected_digest = SegmentDigest::of(&bytes[..data_len]);
+
+        // Assert: segment identity and length bind the exact independently
+        // read header and frame bytes written through the production path.
+        assert_eq!(data_len, bytes.len());
+        assert_eq!(facts.link.id, writer.header.id);
+        assert_eq!(facts.link.last_seq, record.seq);
+        assert_eq!(facts.link.digest, expected_digest.value());
+        assert_eq!(expected_digest.data_len(), facts.data_len);
+        Ok(())
+    }
+
+    #[test]
     fn should_reject_physical_fsync_when_validity_expires_without_watchdog() -> MidgeResult<()> {
         // Arrange
         let fs = Arc::new(SyncCountingFs::default());

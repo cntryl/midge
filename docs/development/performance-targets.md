@@ -196,12 +196,19 @@ Held-worker read/control progress, byte-compatible WAL, ordered whole-transactio
 visibility, fencing and terminal memory ownership remain hard correctness gates.
 
 #947 uses `90eb0b5c` as its writer-encoding reference. Its raw/fallback value
-path targets one fewer allocation and 4096 fewer copied value bytes for the
+path targets one fewer allocation and 4,096 fewer copied value bytes for the
 deterministic incompressible 4 KiB fixture before final frame construction.
-Borrowed pointer identity and byte-equal frames cover the construction claim;
-allocation/copy measurements remain required where existing facilities expose
-them. The rotation benchmark uses compressible repeated bytes, so its A/B
-result is an end-to-end guardrail and does not prove this raw-value saving.
+Borrowed pointer identity and byte-equal frames cover the construction claim. A
+dedicated public Strict 4 KiB commit test now counts process allocation events
+over 16 commits. Three alternating pairs at reference
+`90eb0b5c684267f45605e1f2d42580b4da45cbf9` and candidate
+`c1e6e9423fdd55f7f2766c3d83220c8eadc96f7e` show a median reduction of 19
+allocations per 16 commits (1.188 per commit). Evidence and host load snapshots
+are in `docs/development/evidence/issue-947-public-strict-allocation-ab-2026-10-25/`.
+The source path removes the intermediate 4,096-byte raw-value copy; no runtime
+copy-byte counter is available. The rotation benchmark uses compressible
+repeated bytes, so its A/B result remains a separate end-to-end guardrail and
+does not prove this raw-value saving.
 
 Run focused checks before broad suites:
 

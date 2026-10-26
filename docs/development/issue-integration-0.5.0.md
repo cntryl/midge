@@ -1387,13 +1387,21 @@ The focused `cargo test --locked --test wal_encoding_allocations
 --features internal-testing -- --nocapture` run passed. Its isolated test-binary
 allocator observes zero allocations across 16 preallocated production encoder
 calls and exactly one owned intermediate allocation per 4 KiB value in the
-legacy reference construction; emitted payload bytes match. This measures the
-encoder construction boundary, not full-commit allocations or copied-byte
-volume. Before/after per-commit measurements and all three A/B pair deltas
-remain unqualified.
-The preregistered construction target is one allocation and 4096 copied value
-bytes on the incompressible 4 KiB fixture; the existing rotation row is
-compressible and cannot establish that saving.
+legacy reference construction; emitted payload bytes match. A new public Strict
+commit test counts allocations around 16 real 4 KiB commits. Three alternating
+release pairs at reference `90eb0b5c` and candidate `c1e6e942` measured
+reductions of 20, 19, and 19 allocation events per 16 commits (median 19, or
+1.188 per commit). All committed values read back exactly. Raw run details and
+load snapshots are in
+`docs/development/evidence/issue-947-public-strict-allocation-ab-2026-10-25/`.
+The source path removes one 4,096-byte intermediate copy for each raw value;
+this byte count is established by the exact reference/candidate code paths,
+not by a runtime copy counter. Exact frame/CRC, replay, partial append rollback,
+ambiguous append, authority-loss, deadline-expiry, and writer-position tests
+passed. The real writer seal facts match an independently recomputed digest over the persisted header and frame. A bounded 41-run WAL frame recovery fuzz smoke passed from 20 corpus
+inputs; a separate 1,000-run attempt stopped at 64 iterations as sanitizer RSS
+reached 339 MiB and is not qualification evidence. The existing rotation row
+is compressible and remains a separate end-to-end guardrail.
 
 #943 persists known-retired SST deletion obligations in the manifest decision
 and checkpoints, then hydrates them after a cold restart. Deletion requires

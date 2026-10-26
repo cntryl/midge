@@ -1,0 +1,12 @@
+A1 before: 23:55 up 4:58, 3 users, load averages: 2.21 3.38 2.99
+A1 after:  23:55 up 4:58, 3 users, load averages: 1.88 3.20 2.93
+B1 before: 23:55 up 4:58, 3 users, load averages: 1.81 3.17 2.92
+B1 after:  23:55 up 4:59, 3 users, load averages: 2.75 3.28 2.97
+A2 before: 23:55 up 4:59, 3 users, load averages: 2.77 3.28 2.97
+A2 after:  23:55 up 4:59, 3 users, load averages: 2.77 3.28 2.97
+B2 before: 23:56 up 4:59, 3 users, load averages: 2.77 3.28 2.97
+B2 after:  23:56 up 4:59, 3 users, load averages: 2.77 3.28 2.97
+A3 before: 23:56 up 4:59, 3 users, load averages: 2.71 3.25 2.96
+A3 after:  23:56 up 4:59, 3 users, load averages: 2.71 3.25 2.96
+B3 before: 23:56 up 4:59, 3 users, load averages: 2.71 3.25 2.96
+B3 after:  23:56 up 4:59, 3 users, load averages: 2.71 3.25 2.96
