@@ -11,7 +11,7 @@ use std::time::Duration;
 
 const CHILD_ENV: &str = "MIDGE_CONCURRENT_COMPACTION_CRASH_DB";
 const CHILD_TEST: &str =
-    "concurrent_compaction_crash::should_abort_child_when_two_compactions_are_active";
+    "concurrent_compaction_crash::should_abort_child_at_concurrent_compaction_publication_boundary";
 const SCENARIO: &str = "two_compactions_before_manifest_publish";
 const PUBLICATION_HOOK: &str = "slice7::after_compaction_output_durable_before_manifest_publish";
 const BATCHES: usize = 4;

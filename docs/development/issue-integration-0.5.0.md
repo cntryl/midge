@@ -1310,16 +1310,23 @@ It binds input identities/order and source/target publication ranges. Conflictin
 ranges are excluded even with disjoint input names; unknown bounds reserve
 conservatively, one L0 job per family is enforced, and repair/fragment jobs
 remain exclusive. Publication rechecks captured identity and L0 ordering fields.
-The production slot limit remains1 until the bounded pool/coordinator is wired.
+The runtime wires configurable compaction slots and a shared reusable worker
+pool. The public option accepts 1..=64; the default remains one pending workload
+evidence for a larger default. Each ordinary slot receives a child quota charged
+to the shared maintenance memory pool, while exclusive repair work can use the
+full pool.
 
 Every successful publication requests the next normal picker turn, including
 deep-level debt with no critical L0 pressure. Active coverage includes range
 conflicts, unknown bounds, disjoint levels/families and stale input ordering.
-A real compute/publication/restart regression requires a second deep-level job
-before a deliberately one-hour timer, without another flush. The shared check
-currently stops in concurrent metadata-cache and !Send fixture updates; no test
-execution is claimed. Configurable multi-job scheduling, shared memory admission
-and per-family flush concurrency remain pending.
+A real compute/publication regression schedules the second deep-level job before
+a deliberately one-hour timer, without another flush. At the current head, the
+event-loop compaction concurrency module passes 14/14, worker-pool and shared
+reservation modules pass 4/4 each, flush phase and retry-order tests pass 1/1
+each, concurrent flush recovery passes 1/1, and concurrent compaction crash
+recovery passes 1/1. The crash test's stale child-test selector was corrected
+after the first run demonstrated that it executed zero child tests. Throughput,
+fairness and larger-default qualification remain pending.
 
 The remaining #907 metadata mirror now captures an immutable local control-file
 cut and submits provider work to an owned worker. Operation/epoch completion
@@ -1347,14 +1354,14 @@ Unknown outcomes, replacement identities, cache invalidation and provider/crash
 qualification remain gates. The two-request count is a coded assertion for the
 supported receipt path, not a measured provider result.
 
-#909 compute now runs on a bounded reusable worker pool instead of creating an
-OS thread per job. Owned task tickets join terminal work, pool teardown closes
+#909 compute runs on a bounded reusable worker pool instead of creating an OS
+thread per job. Owned task tickets join terminal work, pool teardown closes
 admission and joins all workers, and worker panics remain terminal results
-without killing the reusable worker. Active regressions cover physical thread
-reuse, a held worker with a full queue, and post-panic progress. The existing
-single production slot is preserved until the multi-job coordinator/shared
-budget handoff is ready. The latest shared compile is in concurrent name-
-prefetch/interface edits; these tests have not executed.
+without killing the reusable worker. The four pool tests pass, covering thread
+reuse, a held worker with a full queue, failpoint propagation and post-panic
+progress. Configured multi-slot scheduling and shared memory admission are
+wired; the production default remains one until throughput and fairness are
+qualified.
 
 #940's ordered resident Strict fsync stage now parks one exact-prefix physical
 sync, native root and transition ticket on the loop. Reads/control/validation
