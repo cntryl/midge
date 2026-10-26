@@ -542,6 +542,8 @@ isolated attempts hit the 40 ms sampler-gap guard (64 and 68 ms); the complete
 suite also failed that guard twice. No threshold was relaxed. The local
 after-flush recovery probe now has three acceptable diagnostic runs at source
 `f726628c`; compacted/cloud recovery and inventory rows remain unmeasured.
+The compaction CPU row has one acceptable and three noisy default runs plus one
+noisy batching trial at source `c2929e8e`; it remains inconclusive.
 #937 provider runs,
 remaining relative A/B targets,
 runtime/crash campaigns, assurance compute budgets and qualification of the
