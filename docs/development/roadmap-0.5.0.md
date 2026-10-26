@@ -68,8 +68,11 @@ The read-path work has since merged; the status below is recorded at
 ## Baseline
 
 The Phase 0 baseline runs on an Apple Silicon macOS machine with APFS. Its
-evidence records the hardware and load around every run. The evidence matrix
-is still outstanding at the revision above. Alternating A/B measurements
+evidence records the hardware and load around every run. The checkpoint at
+`f64d6e60` lists every absolute row and marks them unmeasured; the qualified
+evidence matrix is still outstanding. See
+[the matrix status](evidence/performance-baseline-0.5.0-f64d6e60.md).
+Alternating A/B measurements
 govern performance PRs even when a quiet absolute baseline is unavailable;
 noise remains grounds for an inconclusive result. The first matrix is
 Midge-only. RocksDB `db_bench` context is deferred and cannot support a parity
