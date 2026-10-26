@@ -671,22 +671,25 @@ impl WalActor {
         context: &SpilledTransactionContext<'_>,
         applied_ops: &mut usize,
     ) -> MidgeResult<()> {
-        context
-            .source
-            .for_each_bounded(context.memory, |ordinal, op| {
-                crate::failpoints::fail_point!("midge::wal::spilled_apply_op", |_| Err(
-                    MidgeError::Io(std::io::Error::other(
-                        "failpoint: spilled transaction apply read failed"
-                    ))
-                ));
-                let sequence = context.sequence_plan.first_op_seq.saturating_add(ordinal);
-                let apply_op =
-                    TransactionApplyOp::from_source(op, sequence, context.commit_time_millis);
-                self.ensure_lease_validity()?;
-                Self::apply_transaction_op_to_memtable(state, apply_op)?;
-                *applied_ops += 1;
-                Ok(())
-            })?;
+        // Decoded values become memtable-owned here. The memtable accounts
+        // their retained bytes through `state.total_memtable_bytes`; charging
+        // them to the bounded per-pass spill workspace would keep that
+        // workspace reservation alive with each Bytes value and could exhaust
+        // it after the transaction is already durable.
+        context.source.for_each(|ordinal, op| {
+            crate::failpoints::fail_point!("midge::wal::spilled_apply_op", |_| Err(
+                MidgeError::Io(std::io::Error::other(
+                    "failpoint: spilled transaction apply read failed"
+                ))
+            ));
+            let sequence = context.sequence_plan.first_op_seq.saturating_add(ordinal);
+            let apply_op =
+                TransactionApplyOp::from_source(op, sequence, context.commit_time_millis);
+            self.ensure_lease_validity()?;
+            Self::apply_transaction_op_to_memtable(state, apply_op)?;
+            *applied_ops += 1;
+            Ok(())
+        })?;
         tracing::trace!(
             commit_sequence = context.sequence_plan.commit_seq,
             apply_op_count = context.source.len(),
