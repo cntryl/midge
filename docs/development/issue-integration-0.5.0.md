@@ -754,9 +754,11 @@ Added a production writer pre-enqueue failpoint and public engine restart
 regressions for resident and spilled commits. The old helper-only engine
 remap tests were replaced by this path coverage; the existing routed-wait
 test now expects the truthful unknown outcome. `cargo check --locked --tests
---features failpoints` passed. Execution of the regressions, broad tests,
-adversarial review and performance measurements is deferred per the user's
-implementation-first request.
+--features failpoints` passed. The focused public fault-injection module passed
+3/3, covering proven-unchanged timeout on resident and spilled commits, an
+admitted write whose response arrives late and survives restart, and unchanged
+backpressure when no write was admitted. Broad tests, adversarial review and
+performance measurements remain pending.
 
 ### #981: implemented locally; Azure Sqrzl checks complete
 
