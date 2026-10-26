@@ -106,7 +106,9 @@ Hybrid:
   0.5.0 performance change is judged against: fillseq, fillrandom (buffered and
   sync), readrandom hot and cold, and seekrandom, with 16-byte keys and
   100-byte values on production defaults. Baselines are taken with
-  [the baseline procedure](baseline-procedure.md).
+  [the baseline procedure](baseline-procedure.md). The current three-run
+  values for these six rows are in the
+  [0.5.0 baseline matrix](evidence/performance-baseline-0.5.0-64389f99.md).
 - `tier2_subsystem_transaction_latency` owns public transaction lifecycle
   latency, commit percentile reporting, and buffered coalescing.
 - `tier2_subsystem_durability_commit_latency` owns 1-, 16-, and 64-writer local

@@ -529,9 +529,12 @@ The remaining milestone obligations are review and evidence, plus explicitly
 gated decisions. #904 has accounting preparation while its weaker floor cadence
 remains unapproved and unimplemented. #939 consumes the commit-path measurements
 before its design decision; it has no speculative production sharding change.
-The absolute #929 matrix, #937 provider runs, relative A/B targets, runtime/crash
-campaigns, assurance compute budgets and qualification of the eventual release
-SHA remain due. The executed Sqrzl results above qualify their recorded runtime
+The #929 matrix now has three acceptable runs for each of its six Tier 2
+baseline rows at source `64389f99`; point-read amplification, strict commit
+latency at 1/16/64 writers, hybrid lag, YCSB A–F, recovery and compaction CPU
+remain unmeasured. #937 provider runs, remaining relative A/B targets,
+runtime/crash campaigns, assurance compute budgets and qualification of the
+eventual release SHA remain due. The executed Sqrzl results above qualify their recorded runtime
 source; they do not replace continuous-lag benchmark or release evidence.
 Conditional #916 interval and #918 hash-index choices require measurements.
 Deferred #922/#925/#928/#958 retain their existing gates.

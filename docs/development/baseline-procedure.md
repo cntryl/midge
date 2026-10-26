@@ -58,7 +58,7 @@ rejects `--quiet`; use `--no-progress`.
 mkdir -p target/stress
 for run in 1 2 3; do
   uptime >> target/stress/baseline-uptime.txt
-  cargo bench --bench tier2_subsystem_baseline_matrix -- --no-progress
+  cargo bench --locked --bench tier2_subsystem_baseline_matrix -- --no-progress --require-quiet-env
   cp target/stress/tier2-subsystem-baseline-matrix/latest.json \
      "target/stress/baseline-matrix-run$run.json"
   uptime >> target/stress/baseline-uptime.txt
@@ -69,7 +69,7 @@ Repeat for `tier2_subsystem_read_amplification`,
 `tier2_subsystem_durability_commit_latency`,
 `tier2_subsystem_hybrid_durability_lag`, and
 `tier4_system_recovery_throughput`. For the YCSB targets run
-`BENCH_RUNS=3 cargo bench --bench tier4_ycsb_workload_a -- --no-progress`
+`BENCH_RUNS=3 cargo bench --locked --bench tier4_ycsb_workload_a -- --no-progress --require-quiet-env`
 and the same for `_b` through `_f`.
 
 `--save-baseline` saves only runs without diagnostics; a row with a variance

@@ -70,8 +70,11 @@ The read-path work has since merged; the status below is recorded at
 The Phase 0 baseline runs on an Apple Silicon macOS machine with APFS. Its
 evidence records the hardware and load around every run. The checkpoint at
 `f64d6e60` lists every absolute row and marks them unmeasured; the qualified
-evidence matrix is still outstanding. See
-[the matrix status](evidence/performance-baseline-0.5.0-f64d6e60.md).
+evidence matrix is still outstanding. The six Tier 2 baseline rows now have
+three acceptable runs each at `64389f99`; their medians and variability are
+recorded, and the other planned rows remain due. See
+[the current matrix status](evidence/performance-baseline-0.5.0-64389f99.md)
+and [the earlier missing-row checkpoint](evidence/performance-baseline-0.5.0-f64d6e60.md).
 Alternating A/B measurements
 govern performance PRs even when a quiet absolute baseline is unavailable;
 noise remains grounds for an inconclusive result. The first matrix is
