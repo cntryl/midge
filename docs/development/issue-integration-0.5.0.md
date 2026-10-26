@@ -1900,4 +1900,8 @@ pending-group apply, TTL/error ordering, deadline and epoch checks, and
 consumed-workspace memory ownership. The public `transactions` integration
 target passed 153/153. This covers the recorded behavior paths; the three-pair
 #935 latency comparison and remaining full-system crash schedules are still
-separate qualification gates.
+separate qualification gates. A 64-case generated staged-overlay regression
+also compares production memtable state after apply with overlay point/range
+sequence and existence answers across two families; it passes, with the
+shrunk absence-fallback case retained in
+`proptest-regressions/runtime/actors/wal/staged_writes.txt`.
