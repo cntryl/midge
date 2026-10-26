@@ -238,11 +238,11 @@ mod tests {
         Ok(())
     }
 
-    fn state_sequence(state: crate::types::KeyState) -> Option<u64> {
+    fn state_sequence(state: &crate::types::KeyState) -> Option<u64> {
         match state {
             crate::types::KeyState::Absent => None,
             crate::types::KeyState::Tombstone(sequence)
-            | crate::types::KeyState::Value(_, sequence, _, _) => Some(sequence),
+            | crate::types::KeyState::Value(_, sequence, _, _) => Some(*sequence),
         }
     }
 
@@ -250,8 +250,7 @@ mod tests {
         overlay: &StagedWriteOverlay,
         memtables: &[crate::memtable::SkipListMemtable; 2],
     ) -> MidgeResult<()> {
-        for cf_id in 0..2 {
-            let memtable = &memtables[cf_id];
+        for (cf_id, memtable) in (0u32..).zip(memtables.iter()) {
             let ranges = memtable.range_tombstones_at(u64::MAX);
             for key in 0u8..=8 {
                 let key = [key];
@@ -261,14 +260,11 @@ mod tests {
                     .filter(|range| range.covers(&key))
                     .map(|range| range.seq)
                     .max();
-                let expected_sequence = state_sequence(point.clone())
+                let expected_sequence = state_sequence(&point)
                     .into_iter()
                     .chain(range_sequence)
                     .max();
-                assert_eq!(
-                    overlay.latest_key_sequence(cf_id as u32, &key),
-                    expected_sequence
-                );
+                assert_eq!(overlay.latest_key_sequence(cf_id, &key), expected_sequence);
                 for read_time in [0, 10, 25, 100] {
                     let point = memtable.get_key_state_at_with_time(&key, u64::MAX, read_time)?;
                     let covered = ranges
@@ -284,9 +280,7 @@ mod tests {
                         _ => false,
                     };
                     assert_eq!(
-                        overlay
-                            .key_exists(cf_id as u32, &key, read_time)
-                            .unwrap_or(false),
+                        overlay.key_exists(cf_id, &key, read_time).unwrap_or(false),
                         exists
                     );
                 }
@@ -296,7 +290,7 @@ mod tests {
                     let point_sequence = memtable
                         .range_state_at_with_time(Some(&[start]), Some(&[end]), u64::MAX, 25)
                         .into_iter()
-                        .filter_map(|(_, state)| state_sequence(state))
+                        .filter_map(|(_, state)| state_sequence(&state))
                         .max();
                     let range_sequence = ranges
                         .iter()
@@ -307,7 +301,7 @@ mod tests {
                         .map(|range| range.seq)
                         .max();
                     assert_eq!(
-                        overlay.latest_range_sequence(cf_id as u32, &[start], &[end]),
+                        overlay.latest_range_sequence(cf_id, &[start], &[end]),
                         point_sequence.into_iter().chain(range_sequence).max()
                     );
                 }
