@@ -308,13 +308,12 @@ sampled active warmup candidates and then idle; earlier warmup retries remain
 outside measurement while each selected final query is included. Every chosen
 Persistent endpoint and both final owners passed the unchanged integrity gate.
 
-The [original readback JSON](evidence/checkpoint-715-readback.json) is copied
-byte for byte, SHA256 **`443395a3c19159b8113b5da98762c5b65d4b8cc6a78fe73286470c0ae0563c92`**. It retains
-original identities, captured paths, native diagnostics and all nine records;
-its paths describe the originating capture. Original raw ZIPs and captures
-are also retained, including both invalid campaigns. All seven exact measured
-head [CI](https://github.com/cntryl/midge/actions/runs/37273523451) and
-[CodeQL](https://github.com/cntryl/midge/actions/runs/37273520361) checks passed.
+The original run identities, readback, and native diagnostics are tracked on
+[issue #711](https://github.com/cntryl/midge/issues/711). Raw run files remain
+with their GitHub Actions records rather than in the repository. All seven
+exact measured-head [CI](https://github.com/cntryl/midge/actions/runs/37273523451)
+and [CodeQL](https://github.com/cntryl/midge/actions/runs/37273520361) checks
+passed.
 The results documentation was added after measurement; the measured source
 identity is preserved.
 

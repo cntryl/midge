@@ -74,8 +74,8 @@ evidence records the hardware and load around every run. The checkpoint at
 evidence matrix is still outstanding. The six Tier 2 baseline rows now have
 three acceptable runs each at `64389f99`; their medians and variability are
 recorded, and the other planned rows remain due. See
-[the current matrix status](evidence/performance-baseline-0.5.0-64389f99.md)
-and [the earlier missing-row checkpoint](evidence/performance-baseline-0.5.0-f64d6e60.md).
+[the current matrix status](https://github.com/cntryl/midge/issues/929)
+and [the earlier matrix discussion](https://github.com/cntryl/midge/issues/929).
 Alternating A/B measurements
 govern performance PRs even when a quiet absolute baseline is unavailable;
 noise remains grounds for an inconclusive result. The first matrix is

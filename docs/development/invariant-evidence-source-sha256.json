@@ -5,7 +5,6 @@
   "benches/bench_support/stress_scenarios/recovery_progress.rs": "525a9b0f6184e8a2ec2d44708c9632e1db55984060986d1e24c3ca59db869c52",
   "benches/tier4_system_checkpoint_write_amplification.rs": "95ad744d248616392331226dec881ffbbbee2bc1a2d5c980a00baa0382bf33b9",
   "docs/development/checkpoint-write-amplification.md": "661e67cb84113a5aa2ab203f9a47c6ca75df9ca5764c6a57c2bf27bb7d0552aa",
-  "docs/development/evidence/checkpoint-715-readback.json": "443395a3c19159b8113b5da98762c5b65d4b8cc6a78fe73286470c0ae0563c92",
   "docs/development/format-compatibility.md": "058cab1a05d940b17f25e12a8d49bf9a95e54d2306abbbd77428fd60ecec2922",
   "docs/development/invariant-catalog.md": "2e2017c2e3f6ff08daa9c2959bb6a9e417fc8e63f290c7be327890575a5093a8",
   "docs/development/metadata-publication-910.md": "d775c2dee0298b218c655518b9471c5d08e3d2782dfccd2d09ff5e7a63abbf41",

@@ -139,3 +139,6 @@ scripts/*.json
 stress_results.txt
 bench_results.txt
 inventory.md
+
+# Local benchmark and qualification artifacts
+docs/development/evidence/

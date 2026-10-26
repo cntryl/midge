@@ -1,8 +1,0 @@
-Command:
-RUSTC=/Users/jrepanich/.rustup/toolchains/nightly-2026-08-20-aarch64-apple-darwin/bin/rustc CARGO=/Users/jrepanich/.rustup/toolchains/nightly-2026-08-20-aarch64-apple-darwin/bin/cargo cargo fuzz run wal_frame_recovery /tmp/midge947-wal-fuzz-corpus -- -runs=40 -rss_limit_mb=512
-
-Result:
-INFO: 20 corpus files found; 80 bytes total
-#41 DONE cov: 8150 ft: 8425 corp: 19/76b lim: 4 rss: 243Mb
-Done 41 runs in 9 second(s)
-No crash artifact was produced.
