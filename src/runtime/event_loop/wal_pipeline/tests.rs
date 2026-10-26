@@ -346,6 +346,72 @@ fn should_reject_direct_rotation_when_strict_group_owns_writer_root() -> MidgeRe
 }
 
 #[test]
+fn should_defer_direct_cloud_seal_until_pending_seal_completes() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let mut cloud_write = write(97_802, &[b"cloud-rotation-barrier"], false);
+    if let RuntimeMsg::ApplyTransaction {
+        durability_policy, ..
+    } = &mut cloud_write
+    {
+        *durability_policy = Some(crate::wal::DurabilityPolicy::CloudAsync);
+    }
+    event_loop.process_one(cloud_write, &crossbeam::channel::never());
+    let sequence = event_loop.state.sequence;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let segment = event_loop.state.wal.open_segment();
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(10));
+    assert!(event_loop.start_cloud_seal_for_request(&deadline, 97_803, sequence, false)?);
+    wait_for_hold(&mut event_loop, &held);
+    assert!(event_loop.pipeline.pending_cloud_seal.is_some());
+
+    // Act: a direct cloud seal must defer before rotating the segment owned by
+    // the pending CloudAsync seal's writer root.
+    let rotation = event_loop.seal_current_cloud_segment();
+
+    // Assert: preserve the current segment and its retry obligation.
+    assert!(
+        matches!(rotation, Err(crate::common::MidgeError::WriteStall(_))),
+        "unexpected cloud rotation result while an async seal is in flight: {rotation:?}"
+    );
+    assert_eq!(event_loop.state.wal.open_segment(), segment);
+    assert!(event_loop.pipeline.durability.cloud_seal_retry_needed());
+    assert!(!event_loop.pipeline.wal_transition.is_fenced());
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    assert!(event_loop
+        .pending_cloud_seal_waiter_request_ids()
+        .contains(&97_803));
+
+    // Complete the owned seal, then retry the same cloud rotation.
+    held.release
+        .send(())
+        .expect("release pending cloud seal sync");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while event_loop.pipeline.pending_cloud_seal.is_some() {
+        event_loop.progress_cloud_seal();
+        assert!(
+            Instant::now() < deadline,
+            "pending cloud seal did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let retried = event_loop
+        .seal_current_cloud_segment()
+        .expect("retry cloud rotation after async seal settles");
+
+    // Assert: the completed owner rotated exactly once and the retry has no
+    // further segment to seal.
+    assert_eq!(retried, None);
+    assert_eq!(event_loop.state.wal.open_segment(), segment + 1);
+    assert!(!event_loop.pipeline.wal_transition.is_fenced());
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    Ok(())
+}
+
+#[test]
 fn should_reject_conflicting_follower_after_held_strict_group_applies() -> MidgeResult<()> {
     // Arrange: a follower observes the original cut and conflicts with a
     // point write whose strict group is still waiting for physical fsync.
