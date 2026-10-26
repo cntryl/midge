@@ -148,8 +148,7 @@ fn should_promote_existing_l0_identity_without_reading_or_writing_sst_bytes() ->
 }
 
 #[test]
-fn should_preserve_range_tombstone_visibility_during_identity_move_and_restart() -> MidgeResult<()>
-{
+fn should_preserve_range_tombstone_visibility_after_identity_move() -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
