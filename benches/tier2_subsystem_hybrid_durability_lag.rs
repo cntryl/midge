@@ -23,6 +23,16 @@ fn tier2_hybrid_cloud_strict_commit_vs_durable_lag_1_client(ctx: &mut StressCont
 }
 
 #[stress(tier = 2)]
+fn tier2_hybrid_cloud_strict_commit_vs_durable_lag_4_clients(ctx: &mut StressContext) {
+    hybrid_lag::run_case_with_writers(
+        ctx,
+        "tier2_hybrid_cloud_strict_commit_vs_durable_lag_4_clients",
+        CommitMode::CloudStrict,
+        4,
+    );
+}
+
+#[stress(tier = 2)]
 fn tier2_hybrid_local_sync_commit_floor_1_client(ctx: &mut StressContext) {
     run_case(
         ctx,
