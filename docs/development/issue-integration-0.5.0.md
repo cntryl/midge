@@ -954,6 +954,11 @@ and is process-local, so a separate crash hook there would not add recovery
 coverage. Ahead-of-use name reservation is implemented; AC1 metadata-byte
 comparison and AC3 full-tail recovery throughput remain measurement gates.
 
+At the current integration head, failpoint-enabled SST-name cursor tests pass
+5/5, compaction name-budget tests pass 2/2, cloud replacement name recovery
+passes 1/1, and flush mirror-retry tests pass 3/3. This confirms the current
+behavioral slice; it does not qualify AC1 or AC3 performance.
+
 ### #946/#905: staged validation and overlapping strict groups implemented; qualification pending
 
 A sequenced staged-write overlay now supplies same-group point/range write
