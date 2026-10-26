@@ -259,22 +259,18 @@ jobs:
           ref: ${{ inputs.source_ref || github.sha }}
           persist-credentials: false
 
-      - name: Checkout benchmark source overlay
-        if: inputs.benchmark_ref != ''
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.benchmark_ref }}
-          path: .benchmark-overlay
-          persist-credentials: false
-
       - name: Install benchmark source overlay
         if: inputs.benchmark_ref != ''
         env:
           BENCH_NAME: ${{ inputs.bench }}
+          BENCHMARK_SOURCE_REF: ${{ inputs.benchmark_ref }}
         run: |
           set -euo pipefail
           [[ "$BENCH_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]
-          cp ".benchmark-overlay/benches/${BENCH_NAME}.rs" "benches/${BENCH_NAME}.rs"
+          [[ "$BENCHMARK_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
+          git fetch origin "$BENCHMARK_SOURCE_REF"
+          git show "${BENCHMARK_SOURCE_REF}:benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/${BENCH_NAME}.rs"
+          cp "$RUNNER_TEMP/${BENCH_NAME}.rs" "benches/${BENCH_NAME}.rs"
           if ! grep -Fq "name = \"${BENCH_NAME}\"" Cargo.toml; then
             printf '\n[[bench]]\nname = "%s"\npath = "benches/%s.rs"\nharness = false\n' \
               "$BENCH_NAME" "$BENCH_NAME" >> Cargo.toml
@@ -326,13 +322,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Checkout benchmark source overlay
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.benchmark_ref }}
-          path: .benchmark-overlay
-          persist-credentials: false
-
       - name: Prepare exact source checkouts and shared benchmark
         run: |
           set -euo pipefail
@@ -342,12 +331,14 @@ jobs:
           [[ "$BASE_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
           [[ "$CANDIDATE_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
           [[ "$BENCHMARK_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
+          git fetch origin "$BENCHMARK_SOURCE_REF"
           git fetch origin "$BASE_SOURCE_REF" "$CANDIDATE_SOURCE_REF"
           mkdir -p "$RUNNER_TEMP/midge-ab"
+          git show "${BENCHMARK_SOURCE_REF}:benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/midge-ab/${BENCH_NAME}.rs"
           git worktree add --detach "$RUNNER_TEMP/midge-ab/base" "$BASE_SOURCE_REF"
           git worktree add --detach "$RUNNER_TEMP/midge-ab/candidate" "$CANDIDATE_SOURCE_REF"
           for source in "$RUNNER_TEMP/midge-ab/base" "$RUNNER_TEMP/midge-ab/candidate"; do
-            cp ".benchmark-overlay/benches/${BENCH_NAME}.rs" "$source/benches/${BENCH_NAME}.rs"
+            cp "$RUNNER_TEMP/midge-ab/${BENCH_NAME}.rs" "$source/benches/${BENCH_NAME}.rs"
             if ! grep -Fq "name = \"${BENCH_NAME}\"" "$source/Cargo.toml"; then
               printf '\n[[bench]]\nname = "%s"\npath = "benches/%s.rs"\nharness = false\n' \
                 "$BENCH_NAME" "$BENCH_NAME" >> "$source/Cargo.toml"
