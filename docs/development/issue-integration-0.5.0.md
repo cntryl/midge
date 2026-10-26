@@ -1341,16 +1341,18 @@ before the existing ordered commit/apply handoff. The writer owns nested
 encoding, LZ4, outer framing, CRC and XXH3; the loop owns sequence allocation
 and bookkeeping. Admission charges simultaneous raw and encoded/compressor/
 coalescing ownership through physical termination, including abandoned waiters.
-Focused execution with failpoints now passes the held-encoder ordered visibility
+Focused execution with failpoints passes the held-encoder ordered visibility
 regression (1/1), byte-identical legacy frame/replay checks across six payload
 sizes and mixed TTL/insert/delete/range operations (1/1), too-small raw budget
-rejection (1/1), and abandoned-waiter ownership until writer termination (1/1).
-The sequenced-submissions module passes 3/3 and WAL pipeline module 15/15. This
-does not establish cancellation, writer-failure and shutdown cases for the new
-sequenced path, nor AC1 loop CPU/writer service timings or its A/B targets. Large/
-spilled/non-filesystem paths retain their drained synchronous compatibility
-barriers. Next-group append remains ordered behind the active group; no
-multi-group pipeline is claimed.
+rejection (1/1), abandoned-waiter ownership until terminal completion (1/1),
+writer I/O failure after held encoding with reservation release (1/1), and
+shutdown drain while encoding is held (1/1). The sequenced-submissions module
+passes 5/5 and WAL pipeline module 15/15. Caller abandonment covers the path
+where a wait ends before the worker effect; no separate cancellation token is
+part of this submission API. AC1 loop CPU/writer service timings and A/B targets
+remain open. Large/spilled/non-filesystem paths retain their drained synchronous
+compatibility barriers. Next-group append remains ordered behind the active
+group; no multi-group pipeline is claimed.
 
 #918/#952 add SSTV5 varint entries, optional TTL headers and sixteen-entry
 restart directories with continued-version markers. Point seeks use binary
