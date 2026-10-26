@@ -1861,7 +1861,7 @@ separate complementary layers.
 
 The public #943 scheduled-sweep snapshot regression now cold-reopens after the
 old SST is reclaimed and verifies the selected metadata still recovers the
-current value. It passes on CloudSimulated. The metadata retention suite (7
+current value. It passes on CloudSimulated. The metadata retention suite (9
 tests), orphan suites (18 tests), hybrid-persistence suite (108 tests),
 four-ACK prefix test, retry campaign, and focused failpoint authority tests
 also pass. `cargo fmt --check` passes.
@@ -1885,15 +1885,14 @@ version, and reads every key again. Jev scored this evidence strong for the
 deletion-interruption slice; existing unit tests separately cover pointer
 change before delete and replacement identity. Pointer-advance checkpoint
 selection is implicit in the published history and production collector path,
-not asserted as a generation identifier. This does not cover publication racing
-collection, uncertain authority reads in a crash campaign, or ambiguous delete
-responses. Two focused collector regressions additionally hold a real pending
-metadata capture and corrupt the selected pointer: retention performs no
-deletes while capture ownership is pending or the authority read is uncertain,
-and the exact committed pointer restores readable history. Removing both
-pending-capture guards makes the capture regression fail because the candidate
-is deleted. These unit checks complement but do not replace the remaining AC3
-process-crash cases.
+not asserted as a generation identifier. The failpoint-enabled metadata-
+retention module passes 9/9. All three focused crash campaigns pass: deletion
+after process abort, immutable upload before pointer CAS, and an uncertain
+authority read before delete. Each successor reopens every committed value and
+resumes safe cleanup. Two focused collector regressions also hold a real pending
+metadata capture and corrupt the selected pointer; retention performs no deletes
+while capture ownership is pending or authority is uncertain. Ambiguous delete
+responses and publication racing collection remain open gates.
 
 Branch `work/metadata-retention-crash-acceptance` completes those AC3 cases.
 One child aborts after immutable chain upload but before pointer CAS; restart
@@ -1901,14 +1900,14 @@ reads the last committed checkpoint and keeps the higher unselected object
 unselected. A second child injects an `Indeterminate` selected-authority read
 and aborts at the collector's error boundary; an eligible old version survives,
 then a successor reopens every committed value and resumes cleanup. Together
-with the merged post-pointer-advance delete crash, these tests cover in-flight
+with the post-pointer-advance delete crash, these tests cover in-flight
 publication, checkpoint recovery, uncertain authority and safe reclamation.
 Jev favored closing #913 against its written AC1-AC3. This branch is not yet
 merged; issue closure is pending its exact-head gates.
 
 These checks do not complete #907's injected-latency/A-B gates or #916's cost
 and catalog-size measurements. #913's metadata-generation GC crash acceptance
-remains open. No live-provider qualification is claimed.
+remains open pending exact-head gates. No live-provider qualification is claimed.
 
 ### Current #910 execution checkpoint (2026-10-26)
 
