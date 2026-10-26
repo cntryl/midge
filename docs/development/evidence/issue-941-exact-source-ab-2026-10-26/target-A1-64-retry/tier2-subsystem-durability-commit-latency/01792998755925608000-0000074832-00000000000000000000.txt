@@ -1,0 +1,14 @@
+Benchmark Suite: tier2-subsystem-durability-commit-latency
+Schema: cntryl-stress.v2
+Profile: release
+Completed: 01792998755925608000-0000074832-00000000000000000000
+Samples: measured=5 warmup=1 cooldown=0
+Total time: 42.49s
+
+Summary
+-------
+  tier2_durability_commit_sync_local_64_writers 5.24K transaction/s  tier=2 trust=diagnostic mode=fixed_ops quality=noisy samples=5 wall=42.49s question=mode=fixed_ops
+
+Noisy Or Untrustworthy
+----------------------
+  tier2_durability_commit_sync_local_64_writers quality=noisy correctness=true

@@ -520,23 +520,6 @@ fn record_rotation_observations(
         .iter()
         .map(|sample| sample.flush_publish_ns_total)
         .sum::<u64>();
-    let event_loop_write_service_ns_total = samples
-        .iter()
-        .map(|sample| sample.event_loop_write_service_ns_total)
-        .sum::<u64>();
-    let wal_encode_ns_total = samples
-        .iter()
-        .map(|sample| sample.wal_encode_ns_total)
-        .sum::<u64>();
-    let wal_write_syscall_ns_total = samples
-        .iter()
-        .map(|sample| sample.wal_write_syscall_ns_total)
-        .sum::<u64>();
-    let measured_commits = u64::try_from(samples.len())
-        .unwrap_or(u64::MAX)
-        .saturating_mul(u64::try_from(ROTATION_TRANSACTIONS_PER_RUN).unwrap_or(u64::MAX));
-    let per_commit_ns = |total: u64| u64_to_f64(total) / u64_to_f64(measured_commits.max(1));
-
     for latency_us in [
         median_u64(samples.iter().map(|sample| sample.commit_p50_us)),
         median_u64(samples.iter().map(|sample| sample.commit_p95_us)),
@@ -601,6 +584,27 @@ fn record_rotation_observations(
         ObservationUnit::Nanoseconds,
         ObservationDirection::Informational,
     );
+    record_rotation_service_observations(ctx, samples);
+}
+
+fn record_rotation_service_observations(ctx: &mut StressContext, samples: &[RotationRunSample]) {
+    let event_loop_write_service_ns_total = samples
+        .iter()
+        .map(|sample| sample.event_loop_write_service_ns_total)
+        .sum::<u64>();
+    let wal_encode_ns_total = samples
+        .iter()
+        .map(|sample| sample.wal_encode_ns_total)
+        .sum::<u64>();
+    let wal_write_syscall_ns_total = samples
+        .iter()
+        .map(|sample| sample.wal_write_syscall_ns_total)
+        .sum::<u64>();
+    let measured_commits = u64::try_from(samples.len())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(ROTATION_TRANSACTIONS_PER_RUN).unwrap_or(u64::MAX));
+    let per_commit_ns = |total: u64| u64_to_f64(total) / u64_to_f64(measured_commits.max(1));
+
     for (name, value) in [
         (
             "event_loop_write_service_ns_per_4k_commit",

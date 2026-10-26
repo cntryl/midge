@@ -1,0 +1,1692 @@
+{
+  "schema_version": "cntryl-stress.v2",
+  "tool_version": "0.5.1",
+  "suite": "tier2-subsystem-durability-commit-latency",
+  "run_profile": "release",
+  "environment": {
+    "cpu_model": "Apple M5",
+    "core_count": 10,
+    "os": "macos aarch64",
+    "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "allocator": "cntryl-stress allocator not installed",
+    "build_profile": "release",
+    "git_commit": "e9a0d86b7be0c1b298ef8f546326c5893aedba04",
+    "tool_version": "0.5.1",
+    "command_line": [
+      "/private/tmp/midge-941-final-base/target/release/deps/tier2_subsystem_durability_commit_latency-fb60dd87e27850e4",
+      "--profile",
+      "release",
+      "--samples",
+      "5",
+      "--warmup-samples",
+      "1",
+      "--workload",
+      "tier2_durability_commit_sync_local_4k_rotation",
+      "--output-dir",
+      "/private/tmp/midge-941-evidence/A3",
+      "--no-progress",
+      "--bench"
+    ],
+    "profile_config": {
+      "profile": "release",
+      "measured_samples": 5,
+      "warmup_samples": 1,
+      "cooldown_samples": 0,
+      "min_quality": "acceptable",
+      "fail_on_quality": true,
+      "fail_on_regression": true,
+      "regression_threshold": 0.05,
+      "sample_duration": 1000000000,
+      "operations_per_sample": 1,
+      "micro_sample_duration": 100000000,
+      "report_depth": "gated",
+      "console_names": "compact",
+      "progress": false
+    },
+    "timer_resolution_ns": 41,
+    "observations": [
+      {
+        "key": "power_source",
+        "value": "ac",
+        "adverse": false
+      }
+    ]
+  },
+  "benchmark_specs": [
+    {
+      "id": "tier2-subsystem-durability-commit-latency/tier2_subsystem_durability_commit_latency::tier2_durability_commit_sync_local_4k_rotation/tier2_durability_commit_sync_local_4k_rotation",
+      "name": "tier2_durability_commit_sync_local_4k_rotation",
+      "tier": 2,
+      "mode": {
+        "type": "fixed_operations",
+        "operations_per_sample": 1
+      },
+      "intent": "external",
+      "budgets": {},
+      "parameters": {
+        "background_compaction": "true",
+        "commit_mode": "sync",
+        "independent_runs": "5",
+        "logical_batch_size": "512",
+        "logical_unit": "transaction",
+        "measured_transactions_per_run": "512",
+        "measurement_mode": "fixed_ops",
+        "memtable_flush_threshold_bytes": "131072",
+        "storage_profile": "local_durable",
+        "value_size_bytes": "4096",
+        "warmup_transactions_per_run": "64",
+        "writers": "1"
+      },
+      "metadata": {
+        "cntryl_stress_observation_topology": "rotation_commit_p95_us:Microseconds:Informational|non_rotation_commit_p95_us:Microseconds:Informational|wal_fsyncs:Count:Informational|wal_fsync_ns_total:Nanoseconds:Informational|wal_fsync_ns_max:Nanoseconds:Informational|rotation_commits:Count:Informational|flush_build_count:Count:Informational|flush_build_ns_total:Nanoseconds:Informational|flush_publish_count:Count:Informational|flush_publish_ns_total:Nanoseconds:Informational|elapsed_ns:Nanoseconds:Informational|event_loop_write_service_ns_per_4k_commit:Nanoseconds:Informational|wal_encode_ns_per_4k_commit:Nanoseconds:Informational|wal_append_service_ns_per_4k_commit:Nanoseconds:Informational|wal_encode_and_append_service_ns_per_4k_commit:Nanoseconds:Informational"
+      }
+    }
+  ],
+  "samples": [
+    {
+      "benchmark_id": "tier2-subsystem-durability-commit-latency/tier2_subsystem_durability_commit_latency::tier2_durability_commit_sync_local_4k_rotation/tier2_durability_commit_sync_local_4k_rotation",
+      "intent": "external",
+      "sample_number": 0,
+      "phase": "warmup",
+      "elapsed_ns": 26763246918,
+      "wall_clock_ns": 30672393208,
+      "operations_attempted": 2560,
+      "operations_completed": 2560,
+      "throughput": 95.65356579654151,
+      "latency_ns": [
+        8487000,
+        12311000,
+        16687000
+      ],
+      "observations": [
+        {
+          "name": "rotation_commit_p95_us",
+          "value": 8911.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "non_rotation_commit_p95_us",
+          "value": 12311.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsyncs",
+          "value": 2730.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_total",
+          "value": 10112807261.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_max",
+          "value": 9223708.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "rotation_commits",
+          "value": 80.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_ns_total",
+          "value": 1553806746.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_ns_total",
+          "value": 440729296.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "elapsed_ns",
+          "value": 26763246918.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "event_loop_write_service_ns_per_4k_commit",
+          "value": 8168879.181640625,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_ns_per_4k_commit",
+          "value": 5680.0171875,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_append_service_ns_per_4k_commit",
+          "value": 117053.234765625,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_and_append_service_ns_per_4k_commit",
+          "value": 122733.251953125,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "background_compaction": "true",
+        "commit_mode": "sync",
+        "independent_runs": "5",
+        "logical_batch_size": "512",
+        "logical_unit": "transaction",
+        "measured_transactions_per_run": "512",
+        "memtable_flush_threshold_bytes": "131072",
+        "storage_profile": "local_durable",
+        "value_size_bytes": "4096",
+        "warmup_transactions_per_run": "64",
+        "writers": "1"
+      },
+      "counters": {
+        "attempted": 2560,
+        "completed": 2560,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "e9a0d86b7be0c1b298ef8f546326c5893aedba04",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/private/tmp/midge-941-final-base/target/release/deps/tier2_subsystem_durability_commit_latency-fb60dd87e27850e4",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--workload",
+          "tier2_durability_commit_sync_local_4k_rotation",
+          "--output-dir",
+          "/private/tmp/midge-941-evidence/A3",
+          "--no-progress",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-durability-commit-latency/tier2_subsystem_durability_commit_latency::tier2_durability_commit_sync_local_4k_rotation/tier2_durability_commit_sync_local_4k_rotation",
+      "intent": "external",
+      "sample_number": 1,
+      "phase": "measured",
+      "elapsed_ns": 27618099458,
+      "wall_clock_ns": 31702176916,
+      "operations_attempted": 2560,
+      "operations_completed": 2560,
+      "throughput": 92.69283731464213,
+      "latency_ns": [
+        8495000,
+        12383000,
+        16767000
+      ],
+      "observations": [
+        {
+          "name": "rotation_commit_p95_us",
+          "value": 8703.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "non_rotation_commit_p95_us",
+          "value": 12391.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsyncs",
+          "value": 2730.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_total",
+          "value": 10381251700.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_max",
+          "value": 9081792.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "rotation_commits",
+          "value": 80.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_ns_total",
+          "value": 1675925876.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_ns_total",
+          "value": 481064210.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "elapsed_ns",
+          "value": 27618099458.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "event_loop_write_service_ns_per_4k_commit",
+          "value": 8435295.00625,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_ns_per_4k_commit",
+          "value": 5828.9578125,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_append_service_ns_per_4k_commit",
+          "value": 125201.473828125,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_and_append_service_ns_per_4k_commit",
+          "value": 131030.431640625,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "background_compaction": "true",
+        "commit_mode": "sync",
+        "independent_runs": "5",
+        "logical_batch_size": "512",
+        "logical_unit": "transaction",
+        "measured_transactions_per_run": "512",
+        "memtable_flush_threshold_bytes": "131072",
+        "storage_profile": "local_durable",
+        "value_size_bytes": "4096",
+        "warmup_transactions_per_run": "64",
+        "writers": "1"
+      },
+      "counters": {
+        "attempted": 2560,
+        "completed": 2560,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "e9a0d86b7be0c1b298ef8f546326c5893aedba04",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/private/tmp/midge-941-final-base/target/release/deps/tier2_subsystem_durability_commit_latency-fb60dd87e27850e4",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--workload",
+          "tier2_durability_commit_sync_local_4k_rotation",
+          "--output-dir",
+          "/private/tmp/midge-941-evidence/A3",
+          "--no-progress",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-durability-commit-latency/tier2_subsystem_durability_commit_latency::tier2_durability_commit_sync_local_4k_rotation/tier2_durability_commit_sync_local_4k_rotation",
+      "intent": "external",
+      "sample_number": 2,
+      "phase": "measured",
+      "elapsed_ns": 25181073501,
+      "wall_clock_ns": 29012725458,
+      "operations_attempted": 2560,
+      "operations_completed": 2560,
+      "throughput": 101.66365623365249,
+      "latency_ns": [
+        8487000,
+        12303000,
+        16751000
+      ],
+      "observations": [
+        {
+          "name": "rotation_commit_p95_us",
+          "value": 8751.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "non_rotation_commit_p95_us",
+          "value": 12319.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsyncs",
+          "value": 2730.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_total",
+          "value": 9395909639.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_max",
+          "value": 9063500.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "rotation_commits",
+          "value": 80.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_ns_total",
+          "value": 1450200044.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_ns_total",
+          "value": 412592292.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "elapsed_ns",
+          "value": 25181073501.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "event_loop_write_service_ns_per_4k_commit",
+          "value": 7610570.169140625,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_ns_per_4k_commit",
+          "value": 5297.1578125,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_append_service_ns_per_4k_commit",
+          "value": 109130.79921875,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_and_append_service_ns_per_4k_commit",
+          "value": 114427.95703125,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "background_compaction": "true",
+        "commit_mode": "sync",
+        "independent_runs": "5",
+        "logical_batch_size": "512",
+        "logical_unit": "transaction",
+        "measured_transactions_per_run": "512",
+        "memtable_flush_threshold_bytes": "131072",
+        "storage_profile": "local_durable",
+        "value_size_bytes": "4096",
+        "warmup_transactions_per_run": "64",
+        "writers": "1"
+      },
+      "counters": {
+        "attempted": 2560,
+        "completed": 2560,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "e9a0d86b7be0c1b298ef8f546326c5893aedba04",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/private/tmp/midge-941-final-base/target/release/deps/tier2_subsystem_durability_commit_latency-fb60dd87e27850e4",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--workload",
+          "tier2_durability_commit_sync_local_4k_rotation",
+          "--output-dir",
+          "/private/tmp/midge-941-evidence/A3",
+          "--no-progress",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-durability-commit-latency/tier2_subsystem_durability_commit_latency::tier2_durability_commit_sync_local_4k_rotation/tier2_durability_commit_sync_local_4k_rotation",
+      "intent": "external",
+      "sample_number": 3,
+      "phase": "measured",
+      "elapsed_ns": 30346322750,
+      "wall_clock_ns": 34701722500,
+      "operations_attempted": 2560,
+      "operations_completed": 2560,
+      "throughput": 84.35947976596275,
+      "latency_ns": [
+        8519000,
+        12335000,
+        19935000
+      ],
+      "observations": [
+        {
+          "name": "rotation_commit_p95_us",
+          "value": 9519.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "non_rotation_commit_p95_us",
+          "value": 12399.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsyncs",
+          "value": 2730.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_total",
+          "value": 11539834287.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_max",
+          "value": 43054750.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "rotation_commits",
+          "value": 80.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_ns_total",
+          "value": 1710410541.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_ns_total",
+          "value": 483075585.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "elapsed_ns",
+          "value": 30346322750.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "event_loop_write_service_ns_per_4k_commit",
+          "value": 9331833.8140625,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_ns_per_4k_commit",
+          "value": 6023.64765625,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_append_service_ns_per_4k_commit",
+          "value": 131046.469140625,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_and_append_service_ns_per_4k_commit",
+          "value": 137070.116796875,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "background_compaction": "true",
+        "commit_mode": "sync",
+        "independent_runs": "5",
+        "logical_batch_size": "512",
+        "logical_unit": "transaction",
+        "measured_transactions_per_run": "512",
+        "memtable_flush_threshold_bytes": "131072",
+        "storage_profile": "local_durable",
+        "value_size_bytes": "4096",
+        "warmup_transactions_per_run": "64",
+        "writers": "1"
+      },
+      "counters": {
+        "attempted": 2560,
+        "completed": 2560,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "e9a0d86b7be0c1b298ef8f546326c5893aedba04",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/private/tmp/midge-941-final-base/target/release/deps/tier2_subsystem_durability_commit_latency-fb60dd87e27850e4",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--workload",
+          "tier2_durability_commit_sync_local_4k_rotation",
+          "--output-dir",
+          "/private/tmp/midge-941-evidence/A3",
+          "--no-progress",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-durability-commit-latency/tier2_subsystem_durability_commit_latency::tier2_durability_commit_sync_local_4k_rotation/tier2_durability_commit_sync_local_4k_rotation",
+      "intent": "external",
+      "sample_number": 4,
+      "phase": "measured",
+      "elapsed_ns": 28427573625,
+      "wall_clock_ns": 32614977083,
+      "operations_attempted": 2560,
+      "operations_completed": 2560,
+      "throughput": 90.05341200659717,
+      "latency_ns": [
+        8503000,
+        12447000,
+        17455000
+      ],
+      "observations": [
+        {
+          "name": "rotation_commit_p95_us",
+          "value": 8791.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "non_rotation_commit_p95_us",
+          "value": 12463.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsyncs",
+          "value": 2730.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_total",
+          "value": 10723662947.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_max",
+          "value": 12705542.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "rotation_commits",
+          "value": 80.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_ns_total",
+          "value": 1674578708.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_ns_total",
+          "value": 465173168.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "elapsed_ns",
+          "value": 28427573625.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "event_loop_write_service_ns_per_4k_commit",
+          "value": 8657954.559375,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_ns_per_4k_commit",
+          "value": 5877.258203125,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_append_service_ns_per_4k_commit",
+          "value": 124996.015234375,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_and_append_service_ns_per_4k_commit",
+          "value": 130873.2734375,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "background_compaction": "true",
+        "commit_mode": "sync",
+        "independent_runs": "5",
+        "logical_batch_size": "512",
+        "logical_unit": "transaction",
+        "measured_transactions_per_run": "512",
+        "memtable_flush_threshold_bytes": "131072",
+        "storage_profile": "local_durable",
+        "value_size_bytes": "4096",
+        "warmup_transactions_per_run": "64",
+        "writers": "1"
+      },
+      "counters": {
+        "attempted": 2560,
+        "completed": 2560,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "e9a0d86b7be0c1b298ef8f546326c5893aedba04",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/private/tmp/midge-941-final-base/target/release/deps/tier2_subsystem_durability_commit_latency-fb60dd87e27850e4",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--workload",
+          "tier2_durability_commit_sync_local_4k_rotation",
+          "--output-dir",
+          "/private/tmp/midge-941-evidence/A3",
+          "--no-progress",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-durability-commit-latency/tier2_subsystem_durability_commit_latency::tier2_durability_commit_sync_local_4k_rotation/tier2_durability_commit_sync_local_4k_rotation",
+      "intent": "external",
+      "sample_number": 5,
+      "phase": "measured",
+      "elapsed_ns": 27371933666,
+      "wall_clock_ns": 31407764416,
+      "operations_attempted": 2560,
+      "operations_completed": 2560,
+      "throughput": 93.52645783954604,
+      "latency_ns": [
+        8495000,
+        12375000,
+        17503000
+      ],
+      "observations": [
+        {
+          "name": "rotation_commit_p95_us",
+          "value": 8687.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "non_rotation_commit_p95_us",
+          "value": 12415.0,
+          "unit": "microseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsyncs",
+          "value": 2730.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_total",
+          "value": 10212448452.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_fsync_ns_max",
+          "value": 9332791.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "rotation_commits",
+          "value": 80.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_build_ns_total",
+          "value": 1718563041.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_count",
+          "value": 85.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "flush_publish_ns_total",
+          "value": 519063033.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "elapsed_ns",
+          "value": 27371933666.0,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "event_loop_write_service_ns_per_4k_commit",
+          "value": 8335927.665625,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_ns_per_4k_commit",
+          "value": 5899.787109375,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_append_service_ns_per_4k_commit",
+          "value": 122393.158984375,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        },
+        {
+          "name": "wal_encode_and_append_service_ns_per_4k_commit",
+          "value": 128292.94609375,
+          "unit": "nanoseconds",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "background_compaction": "true",
+        "commit_mode": "sync",
+        "independent_runs": "5",
+        "logical_batch_size": "512",
+        "logical_unit": "transaction",
+        "measured_transactions_per_run": "512",
+        "memtable_flush_threshold_bytes": "131072",
+        "storage_profile": "local_durable",
+        "value_size_bytes": "4096",
+        "warmup_transactions_per_run": "64",
+        "writers": "1"
+      },
+      "counters": {
+        "attempted": 2560,
+        "completed": 2560,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "e9a0d86b7be0c1b298ef8f546326c5893aedba04",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/private/tmp/midge-941-final-base/target/release/deps/tier2_subsystem_durability_commit_latency-fb60dd87e27850e4",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--workload",
+          "tier2_durability_commit_sync_local_4k_rotation",
+          "--output-dir",
+          "/private/tmp/midge-941-evidence/A3",
+          "--no-progress",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    }
+  ],
+  "summaries": [
+    {
+      "benchmark_id": "tier2-subsystem-durability-commit-latency/tier2_subsystem_durability_commit_latency::tier2_durability_commit_sync_local_4k_rotation/tier2_durability_commit_sync_local_4k_rotation",
+      "name": "tier2_durability_commit_sync_local_4k_rotation",
+      "tier": 2,
+      "intent": "external",
+      "primary_metric": "throughput",
+      "measured_samples": 5,
+      "warmup_samples": 1,
+      "cooldown_samples": 0,
+      "stats": {
+        "mean": 92.45916863208012,
+        "median": 92.69283731464213,
+        "min": 84.35947976596275,
+        "max": 101.66365623365249,
+        "std_dev": 6.271142718477307,
+        "relative_std_dev": 0.06782607729723235,
+        "confidence_interval_95": {
+          "lower": 86.96226967735383,
+          "upper": 97.95606758680641
+        },
+        "p50": 92.69283731464213,
+        "p95": 100.0362165548312,
+        "p99": 101.33816829788823
+      },
+      "wall_clock": {
+        "mean": 31887873274.6,
+        "median": 31702176916.0,
+        "min": 29012725458.0,
+        "max": 34701722500.0,
+        "std_dev": 2060211762.9310102,
+        "relative_std_dev": 0.0646080014552759,
+        "confidence_interval_95": {
+          "lower": 30082018043.016296,
+          "upper": 33693728506.1837
+        },
+        "p50": 31702176916.0,
+        "p95": 34284373416.6,
+        "p99": 34618252683.32
+      },
+      "total_wall_clock_ns": 190111759581,
+      "ns_per_op": {
+        "mean": 10855078.359375,
+        "median": 10788320.10078125,
+        "min": 9836356.836328125,
+        "max": 11854032.32421875,
+        "std_dev": 729541.4157955066,
+        "relative_std_dev": 0.06720738364504181,
+        "confidence_interval_95": {
+          "lower": 10215607.113711884,
+          "upper": 11494549.605038116
+        },
+        "p50": 10788320.10078125,
+        "p95": 11704130.048828125,
+        "p99": 11824051.869140625
+      },
+      "observations": [
+        {
+          "name": "rotation_commit_p95_us",
+          "unit": "microseconds",
+          "direction": "informational",
+          "stats": {
+            "mean": 8890.2,
+            "median": 8751.0,
+            "min": 8687.0,
+            "max": 9519.0,
+            "std_dev": 353.8858573043009,
+            "relative_std_dev": 0.039806287519324746,
+            "confidence_interval_95": {
+              "lower": 8580.005369382383,
+              "upper": 9200.394630617619
+            },
+            "p50": 8751.0,
+            "p95": 9373.4,
+            "p99": 9489.88
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 9519.0,
+            "p99": 9519.0,
+            "max": 9519.0
+          }
+        },
+        {
+          "name": "non_rotation_commit_p95_us",
+          "unit": "microseconds",
+          "direction": "informational",
+          "stats": {
+            "mean": 12397.4,
+            "median": 12399.0,
+            "min": 12319.0,
+            "max": 12463.0,
+            "std_dev": 51.96922166051749,
+            "relative_std_dev": 0.004191945219200598,
+            "confidence_interval_95": {
+              "lower": 12351.846968750697,
+              "upper": 12442.953031249303
+            },
+            "p50": 12399.0,
+            "p95": 12453.4,
+            "p99": 12461.08
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 12463.0,
+            "p99": 12463.0,
+            "max": 12463.0
+          }
+        },
+        {
+          "name": "wal_fsyncs",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 2730.0,
+            "median": 2730.0,
+            "min": 2730.0,
+            "max": 2730.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 2730.0,
+              "upper": 2730.0
+            },
+            "p50": 2730.0,
+            "p95": 2730.0,
+            "p99": 2730.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 2730.0,
+            "p99": 2730.0,
+            "max": 2730.0
+          }
+        },
+        {
+          "name": "wal_fsync_ns_total",
+          "unit": "nanoseconds",
+          "direction": "informational",
+          "stats": {
+            "mean": 10450621405.0,
+            "median": 10381251700.0,
+            "min": 9395909639.0,
+            "max": 11539834287.0,
+            "std_dev": 780206992.8589222,
+            "relative_std_dev": 0.07465651683503143,
+            "confidence_interval_95": {
+              "lower": 9766739822.95913,
+              "upper": 11134502987.04087
+            },
+            "p50": 10381251700.0,
+            "p95": 11376600019.0,
+            "p99": 11507187433.4
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 11539834287.0,
+            "p99": 11539834287.0,
+            "max": 11539834287.0
+          }
+        },
+        {
+          "name": "wal_fsync_ns_max",
+          "unit": "nanoseconds",
+          "direction": "informational",
+          "stats": {
+            "mean": 16647675.0,
+            "median": 9332791.0,
+            "min": 9063500.0,
+            "max": 43054750.0,
+            "std_dev": 14842033.60880075,
+            "relative_std_dev": 0.8915379239924344,
+            "confidence_interval_95": {
+              "lower": 3638058.939142922,
+              "upper": 29657291.06085708
+            },
+            "p50": 9332791.0,
+            "p95": 36984908.39999999,
+            "p99": 41840781.68
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 43054750.0,
+            "p99": 43054750.0,
+            "max": 43054750.0
+          }
+        },
+        {
+          "name": "rotation_commits",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 80.0,
+            "median": 80.0,
+            "min": 80.0,
+            "max": 80.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 80.0,
+              "upper": 80.0
+            },
+            "p50": 80.0,
+            "p95": 80.0,
+            "p99": 80.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 80.0,
+            "p99": 80.0,
+            "max": 80.0
+          }
+        },
+        {
+          "name": "flush_build_count",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 85.0,
+            "median": 85.0,
+            "min": 85.0,
+            "max": 85.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 85.0,
+              "upper": 85.0
+            },
+            "p50": 85.0,
+            "p95": 85.0,
+            "p99": 85.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 85.0,
+            "p99": 85.0,
+            "max": 85.0
+          }
+        },
+        {
+          "name": "flush_build_ns_total",
+          "unit": "nanoseconds",
+          "direction": "informational",
+          "stats": {
+            "mean": 1645935642.0,
+            "median": 1675925876.0,
+            "min": 1450200044.0,
+            "max": 1718563041.0,
+            "std_dev": 111202535.24115144,
+            "relative_std_dev": 0.06756189756364206,
+            "confidence_interval_95": {
+              "lower": 1548462322.196744,
+              "upper": 1743408961.803256
+            },
+            "p50": 1675925876.0,
+            "p95": 1716932541.0,
+            "p99": 1718236941.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 1718563041.0,
+            "p99": 1718563041.0,
+            "max": 1718563041.0
+          }
+        },
+        {
+          "name": "flush_publish_count",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 85.0,
+            "median": 85.0,
+            "min": 85.0,
+            "max": 85.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 85.0,
+              "upper": 85.0
+            },
+            "p50": 85.0,
+            "p95": 85.0,
+            "p99": 85.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 85.0,
+            "p99": 85.0,
+            "max": 85.0
+          }
+        },
+        {
+          "name": "flush_publish_ns_total",
+          "unit": "nanoseconds",
+          "direction": "informational",
+          "stats": {
+            "mean": 472193657.6,
+            "median": 481064210.0,
+            "min": 412592292.0,
+            "max": 519063033.0,
+            "std_dev": 38715150.29615252,
+            "relative_std_dev": 0.0819899837133105,
+            "confidence_interval_95": {
+              "lower": 438258332.13404334,
+              "upper": 506128983.0659567
+            },
+            "p50": 481064210.0,
+            "p95": 511865543.4,
+            "p99": 517623535.08
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 519063033.0,
+            "p99": 519063033.0,
+            "max": 519063033.0
+          }
+        },
+        {
+          "name": "elapsed_ns",
+          "unit": "nanoseconds",
+          "direction": "informational",
+          "stats": {
+            "mean": 27789000600.0,
+            "median": 27618099458.0,
+            "min": 25181073501.0,
+            "max": 30346322750.0,
+            "std_dev": 1867626024.4364965,
+            "relative_std_dev": 0.0672073836450418,
+            "confidence_interval_95": {
+              "lower": 26151954211.102425,
+              "upper": 29426046988.897575
+            },
+            "p50": 27618099458.0,
+            "p95": 29962572925.0,
+            "p99": 30269572785.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 30346322750.0,
+            "p99": 30346322750.0,
+            "max": 30346322750.0
+          }
+        },
+        {
+          "name": "event_loop_write_service_ns_per_4k_commit",
+          "unit": "nanoseconds",
+          "direction": "informational",
+          "stats": {
+            "mean": 8474316.242890624,
+            "median": 8435295.00625,
+            "min": 7610570.169140625,
+            "max": 9331833.8140625,
+            "std_dev": 619635.1247498071,
+            "relative_std_dev": 0.07311918826131121,
+            "confidence_interval_95": {
+              "lower": 7931182.108897269,
+              "upper": 9017450.37688398
+            },
+            "p50": 8435295.00625,
+            "p95": 9197057.963125,
+            "p99": 9304878.643875001
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 9331833.8140625,
+            "p99": 9331833.8140625,
+            "max": 9331833.8140625
+          }
+        },
+        {
+          "name": "wal_encode_ns_per_4k_commit",
+          "unit": "nanoseconds",
+          "direction": "informational",
+          "stats": {
+            "mean": 5785.361718749999,
+            "median": 5877.258203125,
+            "min": 5297.1578125,
+            "max": 6023.64765625,
+            "std_dev": 282.20648262329144,
+            "relative_std_dev": 0.04877940159016811,
+            "confidence_interval_95": {
+              "lower": 5537.9968302459765,
+              "upper": 6032.726607254022
+            },
+            "p50": 5877.258203125,
+            "p95": 5998.8755468750005,
+            "p99": 6018.693234375
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 6023.64765625,
+            "p99": 6023.64765625,
+            "max": 6023.64765625
+          }
+        },
+        {
+          "name": "wal_append_service_ns_per_4k_commit",
+          "unit": "nanoseconds",
+          "direction": "informational",
+          "stats": {
+            "mean": 122553.58328125,
+            "median": 124996.015234375,
+            "min": 109130.79921875,
+            "max": 131046.469140625,
+            "std_dev": 8144.058821585519,
+            "relative_std_dev": 0.06645304530097337,
+            "confidence_interval_95": {
+              "lower": 115415.00097922375,
+              "upper": 129692.16558327625
+            },
+            "p50": 124996.015234375,
+            "p95": 129877.470078125,
+            "p99": 130812.669328125
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 131046.469140625,
+            "p99": 131046.469140625,
+            "max": 131046.469140625
+          }
+        },
+        {
+          "name": "wal_encode_and_append_service_ns_per_4k_commit",
+          "unit": "nanoseconds",
+          "direction": "informational",
+          "stats": {
+            "mean": 128338.94499999999,
+            "median": 130873.2734375,
+            "min": 114427.95703125,
+            "max": 137070.116796875,
+            "std_dev": 8417.511272318154,
+            "relative_std_dev": 0.06558812893715274,
+            "confidence_interval_95": {
+              "lower": 120960.67105674054,
+              "upper": 135717.21894325945
+            },
+            "p50": 130873.2734375,
+            "p95": 135862.17976562498,
+            "p99": 136828.529390625
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 137070.116796875,
+            "p99": 137070.116796875,
+            "max": 137070.116796875
+          }
+        }
+      ],
+      "quality": "acceptable",
+      "trust_class": "gate",
+      "budgets": {},
+      "correctness": {
+        "passed": true,
+        "counters": {
+          "attempted": 12800,
+          "completed": 12800,
+          "failures": 0,
+          "timeouts": 0,
+          "duplicates": 0,
+          "dropped": 0,
+          "validation_errors": 0
+        },
+        "errors": []
+      },
+      "parameters": {
+        "background_compaction": "true",
+        "commit_mode": "sync",
+        "independent_runs": "5",
+        "logical_batch_size": "512",
+        "logical_unit": "transaction",
+        "measured_transactions_per_run": "512",
+        "measurement_mode": "fixed_ops",
+        "memtable_flush_threshold_bytes": "131072",
+        "storage_profile": "local_durable",
+        "value_size_bytes": "4096",
+        "warmup_transactions_per_run": "64",
+        "writers": "1"
+      },
+      "metadata": {
+        "cntryl_stress_observation_topology": "rotation_commit_p95_us:Microseconds:Informational|non_rotation_commit_p95_us:Microseconds:Informational|wal_fsyncs:Count:Informational|wal_fsync_ns_total:Nanoseconds:Informational|wal_fsync_ns_max:Nanoseconds:Informational|rotation_commits:Count:Informational|flush_build_count:Count:Informational|flush_build_ns_total:Nanoseconds:Informational|flush_publish_count:Count:Informational|flush_publish_ns_total:Nanoseconds:Informational|elapsed_ns:Nanoseconds:Informational|event_loop_write_service_ns_per_4k_commit:Nanoseconds:Informational|wal_encode_ns_per_4k_commit:Nanoseconds:Informational|wal_append_service_ns_per_4k_commit:Nanoseconds:Informational|wal_encode_and_append_service_ns_per_4k_commit:Nanoseconds:Informational"
+      },
+      "source": {
+        "file": "benches/tier2_subsystem_durability_commit_latency.rs",
+        "line": 80
+      },
+      "peak_rss_bytes": 14630912,
+      "latency_distribution": {
+        "count": 15,
+        "p90": 17432575.5,
+        "p99": 19935000.0,
+        "max": 19935000.0
+      }
+    }
+  ],
+  "comparisons": [],
+  "diagnostics_summary": [],
+  "started_at": "01792996807064230000-0000068172-00000000000000000000",
+  "total_elapsed_ns": 190112224042,
+  "metadata": {
+    "allow_codes_src": "default",
+    "baseline_dir_src": "default",
+    "baseline_runs_src": "default",
+    "baseline_src": "default",
+    "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+    "confirm_regressions_src": "default",
+    "console_names_src": "default",
+    "cooldown_samples_src": "default",
+    "deny_codes_src": "default",
+    "deny_diagnostics_src": "default",
+    "fail_on_quality_src": "default",
+    "fail_on_regression_src": "default",
+    "filter_src": "cli --workload",
+    "git_sha_src": "auto_detect",
+    "include_ignored_src": "default",
+    "json_stdout_src": "default",
+    "micro_sample_duration_src": "default",
+    "min_quality_src": "default",
+    "no_progress_timeout_secs_src": "default",
+    "operations_per_sample_src": "default",
+    "output_dir_src": "cli --output-dir",
+    "profile_src": "cli --profile",
+    "progress_src": "cli --no-progress",
+    "require_quiet_env_src": "default",
+    "sample_duration_src": "default",
+    "samples_src": "cli --samples",
+    "save_baseline_src": "default",
+    "threshold_src": "default",
+    "tier_src": "default",
+    "timeout_secs_src": "default",
+    "warmup_samples_src": "cli --warmup-samples"
+  }
+}

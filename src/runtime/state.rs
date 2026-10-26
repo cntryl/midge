@@ -811,21 +811,6 @@ impl RuntimeState {
             write_conflicts_total: telemetry.write_conflicts,
             write_conflicts_point_total: telemetry.write_conflicts_point,
             write_conflicts_range_total: telemetry.write_conflicts_range,
-            cache_hits: read_path.sst_block_cache_hits,
-            cache_misses: read_path.sst_block_cache_misses,
-            wal_append_count: telemetry.wal_append_count,
-            wal_flush_count: telemetry.wal_flush_count,
-            wal_fsync_count: telemetry.wal_fsync_count,
-            wal_append_ns_total: telemetry.wal_append_ns_total,
-            wal_encode_ns_total: telemetry.wal_encode_ns_total,
-            wal_write_syscall_ns_total: telemetry.wal_write_syscall_ns_total,
-            event_loop_write_service_ns_total: telemetry.event_loop_write_service_ns_total,
-            wal_fsync_ns_total: telemetry.wal_fsync_ns_total,
-            wal_fsync_ns_max: telemetry.wal_fsync_ns_max,
-            latency: telemetry.latency,
-            sst_bloom_rejects_total: read_path.bloom_rejects,
-            sst_bloom_checks_total: read_path.bloom_checks,
-            sst_data_blocks_read_total: read_path.data_blocks_read,
             flush_queue_depth: gauges.flush_queue_depth,
             flush_inflight: gauges.flush_inflight,
             flush_enqueued_total: self.flush_metrics.enqueued_total,
@@ -858,6 +843,30 @@ impl RuntimeState {
             wal_recovery_bytes_replayed: self.recovery_stats.wal_recovery_bytes_replayed,
             intent_log_replay_runs: self.recovery_stats.intent_log_replay_runs,
             intent_log_entries_replayed: self.recovery_stats.intent_log_entries_replayed,
+            ..Self::io_runtime_metrics(telemetry, read_path)
+        }
+    }
+
+    fn io_runtime_metrics(
+        telemetry: &crate::telemetry::metrics::MetricsSnapshot,
+        read_path: &crate::diagnostics::ReadPathDiagnosticsSnapshot,
+    ) -> crate::types::RuntimeMetricsSnapshot {
+        crate::types::RuntimeMetricsSnapshot {
+            cache_hits: read_path.sst_block_cache_hits,
+            cache_misses: read_path.sst_block_cache_misses,
+            wal_append_count: telemetry.wal_append_count,
+            wal_flush_count: telemetry.wal_flush_count,
+            wal_fsync_count: telemetry.wal_fsync_count,
+            wal_append_ns_total: telemetry.wal_append_ns_total,
+            wal_encode_ns_total: telemetry.wal_encode_ns_total,
+            wal_write_syscall_ns_total: telemetry.wal_write_syscall_ns_total,
+            event_loop_write_service_ns_total: telemetry.event_loop_write_service_ns_total,
+            wal_fsync_ns_total: telemetry.wal_fsync_ns_total,
+            wal_fsync_ns_max: telemetry.wal_fsync_ns_max,
+            latency: telemetry.latency,
+            sst_bloom_rejects_total: read_path.bloom_rejects,
+            sst_bloom_checks_total: read_path.bloom_checks,
+            sst_data_blocks_read_total: read_path.data_blocks_read,
             ..Default::default()
         }
     }
