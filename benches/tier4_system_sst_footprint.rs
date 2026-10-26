@@ -128,7 +128,6 @@ fn run(ctx: &mut StressContext) {
     let mut footprints = Vec::with_capacity(6);
     ctx.benchmark("fixture_build_and_flush")
         .samples(5)
-        .warmup(1)
         .measure(|| {
             let mut fixture = prepare_fixture();
             footprints.push((fixture.files_count, fixture.total_sst_bytes));
