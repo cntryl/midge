@@ -89,8 +89,11 @@ the core transition and progress behavior; provider latency, reordered or
 duplicate completion and caller-timeout reconciliation remain open acceptance
 gates.
 
-GitHub currently reports 30 open issues in the 0.5.0 backlog, including #912,
+GitHub currently reports 32 open issues in the 0.5.0 backlog, including #912,
 which remains deliberately deferred to preserve clock-correction recovery.
+#913 and #943 were reopened on 2026-10-26 after PR #989's partial-evidence
+merge had left both issues closed despite their explicit remaining crash and
+request-budget gates.
 #978 and #905 are closed after their separate acceptance evidence. #940 remains
 open because its preregistered AC3/AC6 performance gates failed or remain
 incomplete. No aggregate gate or merge is claimed at this checkpoint. The historical
@@ -1890,10 +1893,15 @@ campaign for #943 AC6. It compacts a real SST, copies those bytes to a valid
 unselected sequence-zero SST identity, and aborts a child process immediately
 before the scheduled sweep's identity-conditional delete. The orphan remains
 after the crash; a cold successor reads the selected value, retries the sweep,
-and reclaims the orphan. The test observes positive LIST/probe/delete metrics
-within the shared SST/WAL per-turn budgets. A generic delete failpoint first
-proved too broad because startup cleanup could fire it; the dedicated sweep
-boundary removed that false positive. The focused failpoint test passes.
+and reclaims the orphan. The original one-orphan test observed positive
+LIST/probe/delete metrics. The current #992 branch extends it to nine
+unselected identities, forcing recovery across two scheduled turns after the
+child abort. It checks each live counter delta against the shared per-turn
+limits (two LISTs, eight probes, eight deletes), then asserts all nine
+identities were probed and deleted exactly once while selected data remained
+readable. The dedicated sweep delete boundary avoids startup-cleanup false
+positives. The failpoint test passes 1/1 on 2026-10-26; #943 remains open for
+the broader campaign acceptance.
 
 The same branch adds a #913 AC3 checkpoint-retention crash slice. A real
 CloudSimulated engine publishes 20 strict, flushed metadata versions; a child

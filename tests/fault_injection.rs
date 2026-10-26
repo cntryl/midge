@@ -7392,9 +7392,13 @@ mod cloud_crash_recovery {
             .next()
             .expect("predecessor SST");
         let old_sst_bytes = std::fs::read(&old_sst).expect("read predecessor SST");
-        let orphan_sst = db_path
-            .join("cloud_store/sst")
-            .join("000000_01_00000000000000000000.sst");
+        let orphan_ssts = (0..9)
+            .map(|level| {
+                db_path
+                    .join("cloud_store/sst")
+                    .join(format!("000000_{level:02}_00000000000000000000.sst"))
+            })
+            .collect::<Vec<_>>();
         commit_value(
             &engine,
             b"orphan-sweep-recovery-key",
@@ -7419,15 +7423,14 @@ mod cloud_crash_recovery {
         engine
             .shutdown(Duration::from_secs(30))
             .expect("shutdown before restoring orphan");
-        std::fs::write(&orphan_sst, old_sst_bytes).expect("seed unselected SST object");
+        for orphan_sst in &orphan_ssts {
+            std::fs::write(orphan_sst, &old_sst_bytes).expect("seed unselected SST object");
+        }
 
         // Act: the child crashes at the sweeper's identity-conditional delete
         // boundary. A new owner must rediscover and complete the same work.
         run_child_expect_abort("cloud_orphan_sweep_before_delete", db_path);
-        assert!(
-            orphan_sst.exists(),
-            "the injected pre-delete crash retains the orphan"
-        );
+        assert!(orphan_ssts.iter().all(|orphan_sst| orphan_sst.exists()));
         expire_crashed_process_lease(db_path);
         let reopened = open_cloud_engine(db_path, None);
         assert_value_visible(
@@ -7446,28 +7449,51 @@ mod cloud_crash_recovery {
             .all(|file| {
                 file.name != old_name && file.name != "000000_01_00000000000000000000.sst"
             }));
-        wait_for_metrics(&reopened, Duration::from_secs(90), |metrics| {
-            metrics.cloud_orphan_delete_attempts > 0
-        });
-        assert!(
-            !orphan_sst.exists(),
-            "the restarted sweep reclaims the orphan"
-        );
+        wait_for_orphan_sweep_recovery(&reopened, &orphan_ssts);
+    }
 
-        // Assert: one bounded sweep both preserves selected authority and
-        // rediscovers the old object after the process-local obligation died.
-        let metrics = reopened
+    fn wait_for_orphan_sweep_recovery(engine: &Engine, orphan_ssts: &[PathBuf]) {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let mut previous = engine
             .metrics()
             .get_runtime_metrics()
-            .expect("read orphan sweep metrics");
-        assert!(metrics.cloud_orphan_list_attempts > 0);
-        assert!(metrics.cloud_orphan_probes > 0);
-        assert!(metrics.cloud_orphan_delete_attempts > 0);
-        // One task can inventory SSTs and then retired WAL separately; each
-        // path is bounded to one page and shares this cumulative counter.
-        assert!(metrics.cloud_orphan_list_attempts <= 2);
-        assert!(metrics.cloud_orphan_probes <= 8);
-        assert!(metrics.cloud_orphan_delete_attempts <= 8);
+            .expect("read initial restarted sweep metrics");
+        loop {
+            thread::sleep(Duration::from_millis(25));
+            let current = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("read restarted sweep metrics");
+            assert!(
+                current.cloud_orphan_list_attempts - previous.cloud_orphan_list_attempts <= 2,
+                "one sweep turn may list SST and WAL inventories once each"
+            );
+            assert!(
+                current.cloud_orphan_probes - previous.cloud_orphan_probes <= 8,
+                "one sweep turn must stay within its shared probe budget"
+            );
+            assert!(
+                current.cloud_orphan_delete_attempts - previous.cloud_orphan_delete_attempts <= 8,
+                "one sweep turn must stay within its shared delete budget"
+            );
+            if orphan_ssts.iter().all(|orphan_sst| !orphan_sst.exists()) {
+                assert!(current.cloud_orphan_list_attempts > 0);
+                assert_eq!(current.cloud_orphan_probes, orphan_ssts.len() as u64);
+                assert_eq!(
+                    current.cloud_orphan_delete_attempts,
+                    orphan_ssts.len() as u64,
+                    "every rediscovered identity must be deleted exactly once"
+                );
+                // One task can inventory SST and retired WAL separately.
+                assert!(current.cloud_orphan_list_attempts <= 2);
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "restarted sweeper did not reclaim all orphan identities; metrics={current:?}"
+            );
+            previous = current;
+        }
     }
 
     #[cfg(feature = "failpoints")]
@@ -8173,10 +8199,8 @@ mod cloud_crash_recovery {
             "cloud_metadata_retention_before_delete" => {
                 "midge::cloud::before_metadata_retention_delete"
             }
-            "cloud_metadata_publication_before_pointer_cas" => {
-                "midge::cloud::after_metadata_chain_upload_before_pointer_cas"
-            }
-            "cloud_flush_and_compaction_pending_before_pointer_cas" => {
+            "cloud_metadata_publication_before_pointer_cas"
+            | "cloud_flush_and_compaction_pending_before_pointer_cas" => {
                 "midge::cloud::after_metadata_chain_upload_before_pointer_cas"
             }
             "cloud_metadata_retention_authority_read_failed" => {
