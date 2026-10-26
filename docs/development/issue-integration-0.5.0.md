@@ -1075,9 +1075,12 @@ compatibility fixture tests 9/9, and verification CLI tests 7/7. The populated
 FORMAT 9 and empty FORMAT 9 fixtures round-trip; the future FORMAT 10 fixture
 is rejected by both the storage open and verification CLI paths. The footprint
 test measured 6,377,947 JSON bytes and 4,479,374 FORMAT 9 bytes for 20,000
-bounded files. Fuzz execution and external compatibility assumptions remain
-pending. Existing FORMAT 8 bytes stay as an explicit rejected fixture. #914's
-new committed cloud chain is not part of this codec commit.
+bounded files. The existing `manifest_journal_replay` target completed a
+60-second unsanitized (`-s none`) smoke from 17 seeds with 299 executions and
+no crash. Sanitized/longer fuzz qualification and external compatibility
+assumptions remain pending. Existing FORMAT 8 bytes stay as an explicit
+rejected fixture. #914's new committed cloud chain is not part of this codec
+commit.
 
 ### #912: destructive TTL reclamation deferred
 
