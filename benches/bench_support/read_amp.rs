@@ -72,6 +72,8 @@ pub struct ReadWorkload {
     point_keys: Vec<Vec<u8>>,
     scan_queries: Vec<Query>,
     rows_per_scan: usize,
+    expected_point_hits: u64,
+    expected_point_misses: u64,
 }
 
 impl ReadWorkload {
@@ -95,6 +97,25 @@ impl ReadWorkload {
             point_keys,
             scan_queries,
             rows_per_scan: SCAN_WIDTH,
+            expected_point_hits: u64::try_from(point_reads * 3 / 4)
+                .expect("point-hit count fits in u64"),
+            expected_point_misses: u64::try_from(point_reads / 4)
+                .expect("point-miss count fits in u64"),
+        }
+    }
+
+    /// Point misses only, for measuring per-miss SST filter work (#922).
+    #[must_use]
+    pub fn misses_only(point_misses: usize) -> Self {
+        Self {
+            point_keys: (0..point_misses)
+                .map(|index| key((index % KEYS_PER_SST) * 2 + 1))
+                .collect(),
+            scan_queries: Vec::new(),
+            rows_per_scan: SCAN_WIDTH,
+            expected_point_hits: 0,
+            expected_point_misses: u64::try_from(point_misses)
+                .expect("point-miss count fits in u64"),
         }
     }
 
@@ -108,6 +129,8 @@ impl ReadWorkload {
             point_keys: Vec::new(),
             scan_queries: (0..scans).map(|_| Query::new()).collect(),
             rows_per_scan: KEYS_PER_SST,
+            expected_point_hits: 0,
+            expected_point_misses: 0,
         }
     }
 
@@ -119,6 +142,16 @@ impl ReadWorkload {
     #[must_use]
     pub fn expected_scans(&self) -> u64 {
         u64::try_from(self.scan_queries.len()).expect("scan count fits in u64")
+    }
+
+    #[must_use]
+    pub fn expected_point_hits(&self) -> u64 {
+        self.expected_point_hits
+    }
+
+    #[must_use]
+    pub fn expected_point_misses(&self) -> u64 {
+        self.expected_point_misses
     }
 }
 
