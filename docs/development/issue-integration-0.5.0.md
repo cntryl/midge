@@ -1349,12 +1349,14 @@ is off loop. Publication independence between flush and compaction remains #910.
 The #914 cached common path now reuses receipt-validated pointer identity under
 monotonic writer validity and the takeover claim. Reduced manifest authority
 and fixed-size SHA fingerprints avoid retaining another SST inventory or full
-control-body cache. An active receipt-backend regression requires exactly an
-edit PUT plus pointer CAS with zero reads, then reconstructs the committed
-intents. Failpoint test targets compile; that regression has not executed.
-Unknown outcomes, replacement identities, cache invalidation and provider/crash
-qualification remain gates. The two-request count is a coded assertion for the
-supported receipt path, not a measured provider result.
+control-body cache. The receipt-backend regression passed 1/1: a changed
+metadata publication makes exactly an immutable edit PUT and pointer CAS, with
+zero reads, and reconstructs the committed intents. The provider-backed
+heartbeat overlap regression passed 1/1 across 100 metadata edits, with zero
+pointer precondition conflicts. Unknown outcomes, replacement identities,
+cache invalidation and provider/crash qualification remain gates. The two-request
+count is a coded assertion for the supported receipt path, not a measured
+provider result.
 
 #909 compute runs on a bounded reusable worker pool instead of creating an OS
 thread per job. Owned task tickets join terminal work, pool teardown closes
