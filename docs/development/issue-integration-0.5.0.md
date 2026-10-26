@@ -1069,13 +1069,15 @@ explicitly rejected by the FORMAT 9 candidate, with no JSON fallback.
 
 Active property/corruption, intent replay/torn-tail and 20,000-file footprint
 regressions are included, and the existing manifest fuzz target reaches the
-new snapshot decoder. Direct JSON unit fixtures were updated. Library compile
-checks pass through this slice; execution/fuzzing and recording actual byte
-counts remain pending. The populated FORMAT 9 and future FORMAT 10 golden
-fixtures plus external compatibility/CLI assumptions still need updating
-before the compatibility gate can pass. Existing FORMAT 8 bytes stay as an
-explicit rejected fixture. #914's new committed cloud chain is not part of
-this codec commit.
+new snapshot decoder. Direct JSON unit fixtures were updated. At the current
+head, codec tests pass 9/9, intent persistence 20/20, FORMAT marker tests 9/9,
+compatibility fixture tests 9/9, and verification CLI tests 7/7. The populated
+FORMAT 9 and empty FORMAT 9 fixtures round-trip; the future FORMAT 10 fixture
+is rejected by both the storage open and verification CLI paths. The footprint
+test measured 6,377,947 JSON bytes and 4,479,374 FORMAT 9 bytes for 20,000
+bounded files. Fuzz execution and external compatibility assumptions remain
+pending. Existing FORMAT 8 bytes stay as an explicit rejected fixture. #914's
+new committed cloud chain is not part of this codec commit.
 
 ### #912: destructive TTL reclamation deferred
 
