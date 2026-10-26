@@ -18,7 +18,7 @@ remaining work are recorded in
 | readrandom hot | Median 2,550,846.86 ops/s; 3 acceptable runs, gate trust |
 | readrandom cold | Median 1,383,835.64 ops/s; 3 acceptable runs, gate trust |
 | seekrandom | Median 59,246.93 ops/s; 3 acceptable runs, gate trust |
-| point-read amplification | Not measured |
+| point-read amplification | Three acceptable runs for all rows at source `72dcb0bc`; diagnostic trust only, not a qualified gate baseline (see [run evidence](baseline-0.5.0-72dcb0bc/README.md)) |
 | strict commit latency, 1 writer | Not measured |
 | strict commit latency, 16 writers | Not measured |
 | strict commit latency, 64 writers | Not measured |

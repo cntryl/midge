@@ -530,7 +530,9 @@ gated decisions. #904 has accounting preparation while its weaker floor cadence
 remains unapproved and unimplemented. #939 consumes the commit-path measurements
 before its design decision; it has no speculative production sharding change.
 The #929 matrix now has three acceptable runs for each of its six Tier 2
-baseline rows at source `64389f99`; point-read amplification, strict commit
+baseline rows at source `64389f99`. Point-read amplification has three clean
+runs at source `72dcb0bc`, recorded as diagnostic context because the benchmark
+still declares diagnostic trust; strict commit
 latency at 1/16/64 writers, hybrid lag, YCSB A–F, recovery and compaction CPU
 remain unmeasured. #937 provider runs, remaining relative A/B targets,
 runtime/crash campaigns, assurance compute budgets and qualification of the

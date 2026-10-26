@@ -1,0 +1,3806 @@
+{
+  "schema_version": "cntryl-stress.v2",
+  "tool_version": "0.5.1",
+  "suite": "tier2-subsystem-read-amplification",
+  "run_profile": "default",
+  "environment": {
+    "cpu_model": "Apple M5",
+    "core_count": 10,
+    "os": "macos aarch64",
+    "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "allocator": "cntryl-stress allocator installed",
+    "build_profile": "release",
+    "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+    "tool_version": "0.5.1",
+    "command_line": [
+      "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+      "--no-progress",
+      "--require-quiet-env",
+      "--bench"
+    ],
+    "profile_config": {
+      "profile": "default",
+      "measured_samples": 5,
+      "warmup_samples": 1,
+      "cooldown_samples": 0,
+      "min_quality": "noisy",
+      "fail_on_quality": false,
+      "fail_on_regression": false,
+      "regression_threshold": 0.05,
+      "sample_duration": 500000000,
+      "operations_per_sample": 1,
+      "micro_sample_duration": 25000000,
+      "report_depth": "default",
+      "console_names": "compact",
+      "progress": false,
+      "require_quiet_env": true
+    },
+    "timer_resolution_ns": 41,
+    "observations": [
+      {
+        "key": "power_source",
+        "value": "ac",
+        "adverse": false
+      }
+    ]
+  },
+  "benchmark_specs": [
+    {
+      "id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::long_scan/long_scan",
+      "name": "long_scan",
+      "tier": 2,
+      "mode": {
+        "type": "fixed_operations",
+        "operations_per_sample": 1
+      },
+      "intent": "external",
+      "budgets": {},
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "scan_row",
+        "measurement_mode": "fixed_ops",
+        "scans": "64",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "metadata": {
+        "cntryl_stress_observation_topology": "scan_rows:Count:Informational",
+        "component": "engine_read_amplification",
+        "diagnostic_reason": "pending_three_clean_baselines",
+        "scenario": "long_scan",
+        "trust_class": "diagnostic"
+      }
+    },
+    {
+      "id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::point_hit_miss/point_hit_miss",
+      "name": "point_hit_miss",
+      "tier": 2,
+      "mode": {
+        "type": "fixed_operations",
+        "operations_per_sample": 1
+      },
+      "intent": "external",
+      "budgets": {},
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "measurement_mode": "fixed_ops",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "0",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "metadata": {
+        "cntryl_stress_observation_topology": "point_reads:Count:Informational|point_hits:Count:Informational|point_misses:Count:Informational|scans:Count:Informational|scan_rows:Count:Informational|ssts_touched:Count:Informational|l0_ssts_touched:Count:Informational|blocks_read:Count:Informational|cache_hits:Count:Informational|cache_misses:Count:Informational|bloom_checks:Count:Informational|bloom_rejects:Count:Informational|candidate_sst_files_checked:Count:Informational|ssts_touched_per_point_read:Ratio:Informational|blocks_read_per_point_read:Ratio:Informational|block_cache_hit_rate:Ratio:Informational",
+        "component": "engine_read_amplification",
+        "diagnostic_reason": "pending_three_clean_baselines",
+        "scenario": "point_hit_miss",
+        "trust_class": "diagnostic"
+      }
+    },
+    {
+      "id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::mixed_point_short_scan/mixed_point_short_scan",
+      "name": "mixed_point_short_scan",
+      "tier": 2,
+      "mode": {
+        "type": "fixed_operations",
+        "operations_per_sample": 1
+      },
+      "intent": "external",
+      "budgets": {},
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "measurement_mode": "fixed_ops",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "1024",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "metadata": {
+        "cntryl_stress_observation_topology": "point_reads:Count:Informational|point_hits:Count:Informational|point_misses:Count:Informational|scans:Count:Informational|scan_rows:Count:Informational|ssts_touched:Count:Informational|l0_ssts_touched:Count:Informational|blocks_read:Count:Informational|cache_hits:Count:Informational|cache_misses:Count:Informational|bloom_checks:Count:Informational|bloom_rejects:Count:Informational|candidate_sst_files_checked:Count:Informational|ssts_touched_per_point_read:Ratio:Informational|blocks_read_per_point_read:Ratio:Informational|block_cache_hit_rate:Ratio:Informational",
+        "component": "engine_read_amplification",
+        "diagnostic_reason": "pending_three_clean_baselines",
+        "scenario": "mixed_point_short_scan",
+        "trust_class": "diagnostic"
+      }
+    }
+  ],
+  "samples": [
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::long_scan/long_scan",
+      "intent": "external",
+      "sample_number": 0,
+      "phase": "warmup",
+      "elapsed_ns": 15337667,
+      "wall_clock_ns": 259722000,
+      "operations_attempted": 16384,
+      "operations_completed": 16384,
+      "throughput": 1068219.8276960896,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "scan_rows",
+          "value": 16384.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "scan_row",
+        "scans": "64",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 16384,
+        "completed": 16384,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::long_scan/long_scan",
+      "intent": "external",
+      "sample_number": 1,
+      "phase": "measured",
+      "elapsed_ns": 15436167,
+      "wall_clock_ns": 261016958,
+      "operations_attempted": 16384,
+      "operations_completed": 16384,
+      "throughput": 1061403.3911397823,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "scan_rows",
+          "value": 16384.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "scan_row",
+        "scans": "64",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 16384,
+        "completed": 16384,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::long_scan/long_scan",
+      "intent": "external",
+      "sample_number": 2,
+      "phase": "measured",
+      "elapsed_ns": 15444417,
+      "wall_clock_ns": 264105500,
+      "operations_attempted": 16384,
+      "operations_completed": 16384,
+      "throughput": 1060836.4174575189,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "scan_rows",
+          "value": 16384.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "scan_row",
+        "scans": "64",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 16384,
+        "completed": 16384,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::long_scan/long_scan",
+      "intent": "external",
+      "sample_number": 3,
+      "phase": "measured",
+      "elapsed_ns": 15050125,
+      "wall_clock_ns": 267026833,
+      "operations_attempted": 16384,
+      "operations_completed": 16384,
+      "throughput": 1088628.8319864452,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "scan_rows",
+          "value": 16384.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "scan_row",
+        "scans": "64",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 16384,
+        "completed": 16384,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::long_scan/long_scan",
+      "intent": "external",
+      "sample_number": 4,
+      "phase": "measured",
+      "elapsed_ns": 14270417,
+      "wall_clock_ns": 264922083,
+      "operations_attempted": 16384,
+      "operations_completed": 16384,
+      "throughput": 1148109.4070341461,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "scan_rows",
+          "value": 16384.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "scan_row",
+        "scans": "64",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 16384,
+        "completed": 16384,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::long_scan/long_scan",
+      "intent": "external",
+      "sample_number": 5,
+      "phase": "measured",
+      "elapsed_ns": 14232583,
+      "wall_clock_ns": 260190208,
+      "operations_attempted": 16384,
+      "operations_completed": 16384,
+      "throughput": 1151161.3879223468,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "scan_rows",
+          "value": 16384.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "scan_row",
+        "scans": "64",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 16384,
+        "completed": 16384,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::point_hit_miss/point_hit_miss",
+      "intent": "external",
+      "sample_number": 0,
+      "phase": "warmup",
+      "elapsed_ns": 27444292,
+      "wall_clock_ns": 304344500,
+      "operations_attempted": 32768,
+      "operations_completed": 32768,
+      "throughput": 1193982.3406630422,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 24575.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 1.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9999593098958334,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "0",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 32768,
+        "completed": 32768,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::point_hit_miss/point_hit_miss",
+      "intent": "external",
+      "sample_number": 1,
+      "phase": "measured",
+      "elapsed_ns": 38021167,
+      "wall_clock_ns": 298263958,
+      "operations_attempted": 32768,
+      "operations_completed": 32768,
+      "throughput": 861835.7242953642,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 24575.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 1.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9999593098958334,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "0",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 32768,
+        "completed": 32768,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::point_hit_miss/point_hit_miss",
+      "intent": "external",
+      "sample_number": 2,
+      "phase": "measured",
+      "elapsed_ns": 37666042,
+      "wall_clock_ns": 301231208,
+      "operations_attempted": 32768,
+      "operations_completed": 32768,
+      "throughput": 869961.3301551568,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 24575.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 1.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9999593098958334,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "0",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 32768,
+        "completed": 32768,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::point_hit_miss/point_hit_miss",
+      "intent": "external",
+      "sample_number": 3,
+      "phase": "measured",
+      "elapsed_ns": 36982417,
+      "wall_clock_ns": 302431542,
+      "operations_attempted": 32768,
+      "operations_completed": 32768,
+      "throughput": 886042.6834730678,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 24575.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 1.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9999593098958334,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "0",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 32768,
+        "completed": 32768,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::point_hit_miss/point_hit_miss",
+      "intent": "external",
+      "sample_number": 4,
+      "phase": "measured",
+      "elapsed_ns": 37733709,
+      "wall_clock_ns": 308945792,
+      "operations_attempted": 32768,
+      "operations_completed": 32768,
+      "throughput": 868401.2483373951,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 24575.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 1.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9999593098958334,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "0",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 32768,
+        "completed": 32768,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::point_hit_miss/point_hit_miss",
+      "intent": "external",
+      "sample_number": 5,
+      "phase": "measured",
+      "elapsed_ns": 32205208,
+      "wall_clock_ns": 294153958,
+      "operations_attempted": 32768,
+      "operations_completed": 32768,
+      "throughput": 1017475.1860009723,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 0.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 24575.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 1.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9999593098958334,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "0",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 32768,
+        "completed": 32768,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::mixed_point_short_scan/mixed_point_short_scan",
+      "intent": "external",
+      "sample_number": 0,
+      "phase": "warmup",
+      "elapsed_ns": 71177208,
+      "wall_clock_ns": 341819250,
+      "operations_attempted": 33792,
+      "operations_completed": 33792,
+      "throughput": 474758.7177063759,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 1024.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 27645.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 51840.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9998914930555556,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "1024",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 33792,
+        "completed": 33792,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::mixed_point_short_scan/mixed_point_short_scan",
+      "intent": "external",
+      "sample_number": 1,
+      "phase": "measured",
+      "elapsed_ns": 68693875,
+      "wall_clock_ns": 319449375,
+      "operations_attempted": 33792,
+      "operations_completed": 33792,
+      "throughput": 491921.5868954838,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 1024.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 27645.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 51840.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9998914930555556,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "1024",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 33792,
+        "completed": 33792,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::mixed_point_short_scan/mixed_point_short_scan",
+      "intent": "external",
+      "sample_number": 2,
+      "phase": "measured",
+      "elapsed_ns": 69522292,
+      "wall_clock_ns": 310685333,
+      "operations_attempted": 33792,
+      "operations_completed": 33792,
+      "throughput": 486059.92449155735,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 1024.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 27645.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 51840.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9998914930555556,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "1024",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 33792,
+        "completed": 33792,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::mixed_point_short_scan/mixed_point_short_scan",
+      "intent": "external",
+      "sample_number": 3,
+      "phase": "measured",
+      "elapsed_ns": 66912834,
+      "wall_clock_ns": 310052292,
+      "operations_attempted": 33792,
+      "operations_completed": 33792,
+      "throughput": 505015.2262270045,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 1024.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 27645.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 51840.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9998914930555556,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "1024",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 33792,
+        "completed": 33792,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::mixed_point_short_scan/mixed_point_short_scan",
+      "intent": "external",
+      "sample_number": 4,
+      "phase": "measured",
+      "elapsed_ns": 67663000,
+      "wall_clock_ns": 314200000,
+      "operations_attempted": 33792,
+      "operations_completed": 33792,
+      "throughput": 499416.22452448163,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 1024.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 27645.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 51840.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9998914930555556,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "1024",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 33792,
+        "completed": 33792,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::mixed_point_short_scan/mixed_point_short_scan",
+      "intent": "external",
+      "sample_number": 5,
+      "phase": "measured",
+      "elapsed_ns": 69238459,
+      "wall_clock_ns": 321805250,
+      "operations_attempted": 33792,
+      "operations_completed": 33792,
+      "throughput": 488052.45651119994,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "point_reads",
+          "value": 32768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_hits",
+          "value": 24576.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "point_misses",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scans",
+          "value": 1024.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "scan_rows",
+          "value": 8192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "l0_ssts_touched",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read",
+          "value": 73344.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_hits",
+          "value": 27645.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "cache_misses",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_checks",
+          "value": 48768.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "bloom_rejects",
+          "value": 24192.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "value": 51840.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "value": 1.48828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "value": 2.23828125,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "value": 0.9998914930555556,
+          "unit": "ratio",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "1024",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "counters": {
+        "attempted": 33792,
+        "completed": 33792,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "Apple M5",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator installed",
+        "build_profile": "release",
+        "git_commit": "72dcb0bcadd80a2851c528384573b5269b9a4691",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/Users/jrepanich/Code/cntryl/midge/target/release/deps/tier2_subsystem_read_amplification-9638d29f035a0bf4",
+          "--no-progress",
+          "--require-quiet-env",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "default",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "noisy",
+          "fail_on_quality": false,
+          "fail_on_regression": false,
+          "regression_threshold": 0.05,
+          "sample_duration": 500000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 25000000,
+          "report_depth": "default",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    }
+  ],
+  "summaries": [
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::long_scan/long_scan",
+      "name": "long_scan",
+      "tier": 2,
+      "intent": "external",
+      "primary_metric": "throughput",
+      "measured_samples": 5,
+      "warmup_samples": 1,
+      "cooldown_samples": 0,
+      "stats": {
+        "mean": 1102027.8871080477,
+        "median": 1088628.8319864452,
+        "min": 1060836.4174575189,
+        "max": 1151161.3879223468,
+        "std_dev": 44900.52589827299,
+        "relative_std_dev": 0.04074354780267982,
+        "confidence_interval_95": {
+          "lower": 1062670.8408795088,
+          "upper": 1141384.9333365867
+        },
+        "p50": 1088628.8319864452,
+        "p95": 1150550.9917447066,
+        "p99": 1151039.3086868187
+      },
+      "wall_clock": {
+        "mean": 263452316.4,
+        "median": 264105500.0,
+        "min": 260190208.0,
+        "max": 267026833.0,
+        "std_dev": 2825612.9134782953,
+        "relative_std_dev": 0.010725329547636862,
+        "confidence_interval_95": {
+          "lower": 260975557.47936565,
+          "upper": 265929075.32063437
+        },
+        "p50": 264105500.0,
+        "p95": 266605883.0,
+        "p99": 266942643.0
+      },
+      "total_wall_clock_ns": 1576983582,
+      "ns_per_op": {
+        "mean": 908.6146118164063,
+        "median": 918.5867309570312,
+        "min": 868.6879272460938,
+        "max": 942.6524047851562,
+        "std_dev": 36.71435552847339,
+        "relative_std_dev": 0.0404069613794543,
+        "confidence_interval_95": {
+          "lower": 876.4330602893957,
+          "upper": 940.7961633434169
+        },
+        "p50": 918.5867309570312,
+        "p95": 942.5516967773438,
+        "p99": 942.6322631835938
+      },
+      "observations": [
+        {
+          "name": "scan_rows",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 16384.0,
+            "median": 16384.0,
+            "min": 16384.0,
+            "max": 16384.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 16384.0,
+              "upper": 16384.0
+            },
+            "p50": 16384.0,
+            "p95": 16384.0,
+            "p99": 16384.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 16384.0,
+            "p99": 16384.0,
+            "max": 16384.0
+          }
+        }
+      ],
+      "quality": "acceptable",
+      "trust_class": "diagnostic",
+      "budgets": {},
+      "correctness": {
+        "passed": true,
+        "counters": {
+          "attempted": 81920,
+          "completed": 81920,
+          "failures": 0,
+          "timeouts": 0,
+          "duplicates": 0,
+          "dropped": 0,
+          "validation_errors": 0
+        },
+        "errors": []
+      },
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "scan_row",
+        "measurement_mode": "fixed_ops",
+        "scans": "64",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "metadata": {
+        "cntryl_stress_observation_topology": "scan_rows:Count:Informational",
+        "component": "engine_read_amplification",
+        "diagnostic_reason": "pending_three_clean_baselines",
+        "scenario": "long_scan",
+        "trust_class": "diagnostic"
+      },
+      "source": {
+        "file": "benches/tier2_subsystem_read_amplification.rs",
+        "line": 204
+      },
+      "peak_rss_bytes": 15335424
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::point_hit_miss/point_hit_miss",
+      "name": "point_hit_miss",
+      "tier": 2,
+      "intent": "external",
+      "primary_metric": "throughput",
+      "measured_samples": 5,
+      "warmup_samples": 1,
+      "cooldown_samples": 0,
+      "stats": {
+        "mean": 900743.2344523913,
+        "median": 869961.3301551568,
+        "min": 861835.7242953642,
+        "max": 1017475.1860009723,
+        "std_dev": 65859.27944504446,
+        "relative_std_dev": 0.07311659630181264,
+        "confidence_interval_95": {
+          "lower": 843015.0307433879,
+          "upper": 958471.4381613947
+        },
+        "p50": 869961.3301551568,
+        "p95": 991188.6854953914,
+        "p99": 1012217.8858998561
+      },
+      "wall_clock": {
+        "mean": 301005291.6,
+        "median": 301231208.0,
+        "min": 294153958.0,
+        "max": 308945792.0,
+        "std_dev": 5467916.811516686,
+        "relative_std_dev": 0.01816551723211196,
+        "confidence_interval_95": {
+          "lower": 296212451.19514084,
+          "upper": 305798132.0048592
+        },
+        "p50": 301231208.0,
+        "p95": 307642942.0,
+        "p99": 308685222.0
+      },
+      "total_wall_clock_ns": 1809370958,
+      "ns_per_op": {
+        "mean": 1114.5540954589844,
+        "median": 1149.4763793945312,
+        "min": 982.824951171875,
+        "max": 1160.3139343261719,
+        "std_dev": 74.55171548537656,
+        "relative_std_dev": 0.06688927508240453,
+        "confidence_interval_95": {
+          "lower": 1049.2066356224905,
+          "upper": 1179.9015552954784
+        },
+        "p50": 1149.4763793945312,
+        "p95": 1158.5594299316406,
+        "p99": 1159.9630334472656
+      },
+      "observations": [
+        {
+          "name": "point_reads",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 32768.0,
+            "median": 32768.0,
+            "min": 32768.0,
+            "max": 32768.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 32768.0,
+              "upper": 32768.0
+            },
+            "p50": 32768.0,
+            "p95": 32768.0,
+            "p99": 32768.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 32768.0,
+            "p99": 32768.0,
+            "max": 32768.0
+          }
+        },
+        {
+          "name": "point_hits",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 24576.0,
+            "median": 24576.0,
+            "min": 24576.0,
+            "max": 24576.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 24576.0,
+              "upper": 24576.0
+            },
+            "p50": 24576.0,
+            "p95": 24576.0,
+            "p99": 24576.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 24576.0,
+            "p99": 24576.0,
+            "max": 24576.0
+          }
+        },
+        {
+          "name": "point_misses",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 8192.0,
+            "median": 8192.0,
+            "min": 8192.0,
+            "max": 8192.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 8192.0,
+              "upper": 8192.0
+            },
+            "p50": 8192.0,
+            "p95": 8192.0,
+            "p99": 8192.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 8192.0,
+            "p99": 8192.0,
+            "max": 8192.0
+          }
+        },
+        {
+          "name": "scans",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 0.0,
+              "upper": 0.0
+            },
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "name": "scan_rows",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 0.0,
+            "median": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 0.0,
+              "upper": 0.0
+            },
+            "p50": 0.0,
+            "p95": 0.0,
+            "p99": 0.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 0.0,
+            "p99": 0.0,
+            "max": 0.0
+          }
+        },
+        {
+          "name": "ssts_touched",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 48768.0,
+            "median": 48768.0,
+            "min": 48768.0,
+            "max": 48768.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 48768.0,
+              "upper": 48768.0
+            },
+            "p50": 48768.0,
+            "p95": 48768.0,
+            "p99": 48768.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 48768.0,
+            "p99": 48768.0,
+            "max": 48768.0
+          }
+        },
+        {
+          "name": "l0_ssts_touched",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 48768.0,
+            "median": 48768.0,
+            "min": 48768.0,
+            "max": 48768.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 48768.0,
+              "upper": 48768.0
+            },
+            "p50": 48768.0,
+            "p95": 48768.0,
+            "p99": 48768.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 48768.0,
+            "p99": 48768.0,
+            "max": 48768.0
+          }
+        },
+        {
+          "name": "blocks_read",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 73344.0,
+            "median": 73344.0,
+            "min": 73344.0,
+            "max": 73344.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 73344.0,
+              "upper": 73344.0
+            },
+            "p50": 73344.0,
+            "p95": 73344.0,
+            "p99": 73344.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 73344.0,
+            "p99": 73344.0,
+            "max": 73344.0
+          }
+        },
+        {
+          "name": "cache_hits",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 24575.0,
+            "median": 24575.0,
+            "min": 24575.0,
+            "max": 24575.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 24575.0,
+              "upper": 24575.0
+            },
+            "p50": 24575.0,
+            "p95": 24575.0,
+            "p99": 24575.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 24575.0,
+            "p99": 24575.0,
+            "max": 24575.0
+          }
+        },
+        {
+          "name": "cache_misses",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 1.0,
+            "median": 1.0,
+            "min": 1.0,
+            "max": 1.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 1.0,
+              "upper": 1.0
+            },
+            "p50": 1.0,
+            "p95": 1.0,
+            "p99": 1.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 1.0,
+            "p99": 1.0,
+            "max": 1.0
+          }
+        },
+        {
+          "name": "bloom_checks",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 48768.0,
+            "median": 48768.0,
+            "min": 48768.0,
+            "max": 48768.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 48768.0,
+              "upper": 48768.0
+            },
+            "p50": 48768.0,
+            "p95": 48768.0,
+            "p99": 48768.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 48768.0,
+            "p99": 48768.0,
+            "max": 48768.0
+          }
+        },
+        {
+          "name": "bloom_rejects",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 24192.0,
+            "median": 24192.0,
+            "min": 24192.0,
+            "max": 24192.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 24192.0,
+              "upper": 24192.0
+            },
+            "p50": 24192.0,
+            "p95": 24192.0,
+            "p99": 24192.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 24192.0,
+            "p99": 24192.0,
+            "max": 24192.0
+          }
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 48768.0,
+            "median": 48768.0,
+            "min": 48768.0,
+            "max": 48768.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 48768.0,
+              "upper": 48768.0
+            },
+            "p50": 48768.0,
+            "p95": 48768.0,
+            "p99": 48768.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 48768.0,
+            "p99": 48768.0,
+            "max": 48768.0
+          }
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "unit": "ratio",
+          "direction": "informational",
+          "stats": {
+            "mean": 1.48828125,
+            "median": 1.48828125,
+            "min": 1.48828125,
+            "max": 1.48828125,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 1.48828125,
+              "upper": 1.48828125
+            },
+            "p50": 1.48828125,
+            "p95": 1.48828125,
+            "p99": 1.48828125
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 1.48828125,
+            "p99": 1.48828125,
+            "max": 1.48828125
+          }
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "unit": "ratio",
+          "direction": "informational",
+          "stats": {
+            "mean": 2.23828125,
+            "median": 2.23828125,
+            "min": 2.23828125,
+            "max": 2.23828125,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 2.23828125,
+              "upper": 2.23828125
+            },
+            "p50": 2.23828125,
+            "p95": 2.23828125,
+            "p99": 2.23828125
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 2.23828125,
+            "p99": 2.23828125,
+            "max": 2.23828125
+          }
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "unit": "ratio",
+          "direction": "informational",
+          "stats": {
+            "mean": 0.9999593098958334,
+            "median": 0.9999593098958334,
+            "min": 0.9999593098958334,
+            "max": 0.9999593098958334,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 0.9999593098958334,
+              "upper": 0.9999593098958334
+            },
+            "p50": 0.9999593098958334,
+            "p95": 0.9999593098958334,
+            "p99": 0.9999593098958334
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 0.9999593098958334,
+            "p99": 0.9999593098958334,
+            "max": 0.9999593098958334
+          }
+        }
+      ],
+      "quality": "acceptable",
+      "trust_class": "diagnostic",
+      "budgets": {},
+      "correctness": {
+        "passed": true,
+        "counters": {
+          "attempted": 163840,
+          "completed": 163840,
+          "failures": 0,
+          "timeouts": 0,
+          "duplicates": 0,
+          "dropped": 0,
+          "validation_errors": 0
+        },
+        "errors": []
+      },
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "measurement_mode": "fixed_ops",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "0",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "metadata": {
+        "cntryl_stress_observation_topology": "point_reads:Count:Informational|point_hits:Count:Informational|point_misses:Count:Informational|scans:Count:Informational|scan_rows:Count:Informational|ssts_touched:Count:Informational|l0_ssts_touched:Count:Informational|blocks_read:Count:Informational|cache_hits:Count:Informational|cache_misses:Count:Informational|bloom_checks:Count:Informational|bloom_rejects:Count:Informational|candidate_sst_files_checked:Count:Informational|ssts_touched_per_point_read:Ratio:Informational|blocks_read_per_point_read:Ratio:Informational|block_cache_hit_rate:Ratio:Informational",
+        "component": "engine_read_amplification",
+        "diagnostic_reason": "pending_three_clean_baselines",
+        "scenario": "point_hit_miss",
+        "trust_class": "diagnostic"
+      },
+      "source": {
+        "file": "benches/tier2_subsystem_read_amplification.rs",
+        "line": 137
+      },
+      "peak_rss_bytes": 16777216
+    },
+    {
+      "benchmark_id": "tier2-subsystem-read-amplification/tier2_subsystem_read_amplification::mixed_point_short_scan/mixed_point_short_scan",
+      "name": "mixed_point_short_scan",
+      "tier": 2,
+      "intent": "external",
+      "primary_metric": "throughput",
+      "measured_samples": 5,
+      "warmup_samples": 1,
+      "cooldown_samples": 0,
+      "stats": {
+        "mean": 494093.0837299454,
+        "median": 491921.5868954838,
+        "min": 486059.92449155735,
+        "max": 505015.2262270045,
+        "std_dev": 7958.7255212713635,
+        "relative_std_dev": 0.016107745247495378,
+        "confidence_interval_95": {
+          "lower": 487116.95322825393,
+          "upper": 501069.2142316369
+        },
+        "p50": 491921.5868954838,
+        "p95": 503895.4258864999,
+        "p99": 504791.2661589036
+      },
+      "wall_clock": {
+        "mean": 315238450.0,
+        "median": 314200000.0,
+        "min": 310052292.0,
+        "max": 321805250.0,
+        "std_dev": 5233551.356745675,
+        "relative_std_dev": 0.0166018813908826,
+        "confidence_interval_95": {
+          "lower": 310651039.9738115,
+          "upper": 319825860.0261885
+        },
+        "p50": 314200000.0,
+        "p95": 321334075.0,
+        "p99": 321711015.0
+      },
+      "total_wall_clock_ns": 1918011500,
+      "ns_per_op": {
+        "mean": 2024.328006628788,
+        "median": 2032.8443122632575,
+        "min": 1980.1383167613637,
+        "max": 2057.359493371212,
+        "std_dev": 32.42931574217635,
+        "relative_std_dev": 0.01601979305526799,
+        "confidence_interval_95": {
+          "lower": 1995.9024580791704,
+          "upper": 2052.753555178406
+        },
+        "p50": 2032.8443122632575,
+        "p95": 2055.679610558712,
+        "p99": 2057.023516808712
+      },
+      "observations": [
+        {
+          "name": "point_reads",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 32768.0,
+            "median": 32768.0,
+            "min": 32768.0,
+            "max": 32768.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 32768.0,
+              "upper": 32768.0
+            },
+            "p50": 32768.0,
+            "p95": 32768.0,
+            "p99": 32768.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 32768.0,
+            "p99": 32768.0,
+            "max": 32768.0
+          }
+        },
+        {
+          "name": "point_hits",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 24576.0,
+            "median": 24576.0,
+            "min": 24576.0,
+            "max": 24576.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 24576.0,
+              "upper": 24576.0
+            },
+            "p50": 24576.0,
+            "p95": 24576.0,
+            "p99": 24576.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 24576.0,
+            "p99": 24576.0,
+            "max": 24576.0
+          }
+        },
+        {
+          "name": "point_misses",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 8192.0,
+            "median": 8192.0,
+            "min": 8192.0,
+            "max": 8192.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 8192.0,
+              "upper": 8192.0
+            },
+            "p50": 8192.0,
+            "p95": 8192.0,
+            "p99": 8192.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 8192.0,
+            "p99": 8192.0,
+            "max": 8192.0
+          }
+        },
+        {
+          "name": "scans",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 1024.0,
+            "median": 1024.0,
+            "min": 1024.0,
+            "max": 1024.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 1024.0,
+              "upper": 1024.0
+            },
+            "p50": 1024.0,
+            "p95": 1024.0,
+            "p99": 1024.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 1024.0,
+            "p99": 1024.0,
+            "max": 1024.0
+          }
+        },
+        {
+          "name": "scan_rows",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 8192.0,
+            "median": 8192.0,
+            "min": 8192.0,
+            "max": 8192.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 8192.0,
+              "upper": 8192.0
+            },
+            "p50": 8192.0,
+            "p95": 8192.0,
+            "p99": 8192.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 8192.0,
+            "p99": 8192.0,
+            "max": 8192.0
+          }
+        },
+        {
+          "name": "ssts_touched",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 48768.0,
+            "median": 48768.0,
+            "min": 48768.0,
+            "max": 48768.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 48768.0,
+              "upper": 48768.0
+            },
+            "p50": 48768.0,
+            "p95": 48768.0,
+            "p99": 48768.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 48768.0,
+            "p99": 48768.0,
+            "max": 48768.0
+          }
+        },
+        {
+          "name": "l0_ssts_touched",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 48768.0,
+            "median": 48768.0,
+            "min": 48768.0,
+            "max": 48768.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 48768.0,
+              "upper": 48768.0
+            },
+            "p50": 48768.0,
+            "p95": 48768.0,
+            "p99": 48768.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 48768.0,
+            "p99": 48768.0,
+            "max": 48768.0
+          }
+        },
+        {
+          "name": "blocks_read",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 73344.0,
+            "median": 73344.0,
+            "min": 73344.0,
+            "max": 73344.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 73344.0,
+              "upper": 73344.0
+            },
+            "p50": 73344.0,
+            "p95": 73344.0,
+            "p99": 73344.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 73344.0,
+            "p99": 73344.0,
+            "max": 73344.0
+          }
+        },
+        {
+          "name": "cache_hits",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 27645.0,
+            "median": 27645.0,
+            "min": 27645.0,
+            "max": 27645.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 27645.0,
+              "upper": 27645.0
+            },
+            "p50": 27645.0,
+            "p95": 27645.0,
+            "p99": 27645.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 27645.0,
+            "p99": 27645.0,
+            "max": 27645.0
+          }
+        },
+        {
+          "name": "cache_misses",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 3.0,
+            "median": 3.0,
+            "min": 3.0,
+            "max": 3.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 3.0,
+              "upper": 3.0
+            },
+            "p50": 3.0,
+            "p95": 3.0,
+            "p99": 3.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          }
+        },
+        {
+          "name": "bloom_checks",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 48768.0,
+            "median": 48768.0,
+            "min": 48768.0,
+            "max": 48768.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 48768.0,
+              "upper": 48768.0
+            },
+            "p50": 48768.0,
+            "p95": 48768.0,
+            "p99": 48768.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 48768.0,
+            "p99": 48768.0,
+            "max": 48768.0
+          }
+        },
+        {
+          "name": "bloom_rejects",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 24192.0,
+            "median": 24192.0,
+            "min": 24192.0,
+            "max": 24192.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 24192.0,
+              "upper": 24192.0
+            },
+            "p50": 24192.0,
+            "p95": 24192.0,
+            "p99": 24192.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 24192.0,
+            "p99": 24192.0,
+            "max": 24192.0
+          }
+        },
+        {
+          "name": "candidate_sst_files_checked",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 51840.0,
+            "median": 51840.0,
+            "min": 51840.0,
+            "max": 51840.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 51840.0,
+              "upper": 51840.0
+            },
+            "p50": 51840.0,
+            "p95": 51840.0,
+            "p99": 51840.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 51840.0,
+            "p99": 51840.0,
+            "max": 51840.0
+          }
+        },
+        {
+          "name": "ssts_touched_per_point_read",
+          "unit": "ratio",
+          "direction": "informational",
+          "stats": {
+            "mean": 1.48828125,
+            "median": 1.48828125,
+            "min": 1.48828125,
+            "max": 1.48828125,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 1.48828125,
+              "upper": 1.48828125
+            },
+            "p50": 1.48828125,
+            "p95": 1.48828125,
+            "p99": 1.48828125
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 1.48828125,
+            "p99": 1.48828125,
+            "max": 1.48828125
+          }
+        },
+        {
+          "name": "blocks_read_per_point_read",
+          "unit": "ratio",
+          "direction": "informational",
+          "stats": {
+            "mean": 2.23828125,
+            "median": 2.23828125,
+            "min": 2.23828125,
+            "max": 2.23828125,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 2.23828125,
+              "upper": 2.23828125
+            },
+            "p50": 2.23828125,
+            "p95": 2.23828125,
+            "p99": 2.23828125
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 2.23828125,
+            "p99": 2.23828125,
+            "max": 2.23828125
+          }
+        },
+        {
+          "name": "block_cache_hit_rate",
+          "unit": "ratio",
+          "direction": "informational",
+          "stats": {
+            "mean": 0.9998914930555556,
+            "median": 0.9998914930555556,
+            "min": 0.9998914930555556,
+            "max": 0.9998914930555556,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 0.9998914930555556,
+              "upper": 0.9998914930555556
+            },
+            "p50": 0.9998914930555556,
+            "p95": 0.9998914930555556,
+            "p99": 0.9998914930555556
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 0.9998914930555556,
+            "p99": 0.9998914930555556,
+            "max": 0.9998914930555556
+          }
+        }
+      ],
+      "quality": "acceptable",
+      "trust_class": "diagnostic",
+      "budgets": {},
+      "correctness": {
+        "passed": true,
+        "counters": {
+          "attempted": 168960,
+          "completed": 168960,
+          "failures": 0,
+          "timeouts": 0,
+          "duplicates": 0,
+          "dropped": 0,
+          "validation_errors": 0
+        },
+        "errors": []
+      },
+      "parameters": {
+        "fixture_keys_per_sst": "256",
+        "logical_unit": "read_query",
+        "measurement_mode": "fixed_ops",
+        "point_reads": "32768",
+        "scan_width": "8",
+        "scans": "1024",
+        "sst_layout": "three_overlapping_l0_ssts",
+        "storage_profile": "local"
+      },
+      "metadata": {
+        "cntryl_stress_observation_topology": "point_reads:Count:Informational|point_hits:Count:Informational|point_misses:Count:Informational|scans:Count:Informational|scan_rows:Count:Informational|ssts_touched:Count:Informational|l0_ssts_touched:Count:Informational|blocks_read:Count:Informational|cache_hits:Count:Informational|cache_misses:Count:Informational|bloom_checks:Count:Informational|bloom_rejects:Count:Informational|candidate_sst_files_checked:Count:Informational|ssts_touched_per_point_read:Ratio:Informational|blocks_read_per_point_read:Ratio:Informational|block_cache_hit_rate:Ratio:Informational",
+        "component": "engine_read_amplification",
+        "diagnostic_reason": "pending_three_clean_baselines",
+        "scenario": "mixed_point_short_scan",
+        "trust_class": "diagnostic"
+      },
+      "source": {
+        "file": "benches/tier2_subsystem_read_amplification.rs",
+        "line": 137
+      },
+      "peak_rss_bytes": 16957440
+    }
+  ],
+  "comparisons": [],
+  "diagnostics_summary": [],
+  "started_at": "01793007227200560000-0000089009-00000000000000000000",
+  "total_elapsed_ns": 5305157625,
+  "metadata": {
+    "allow_codes_src": "default",
+    "baseline_dir_src": "default",
+    "baseline_runs_src": "default",
+    "baseline_src": "default",
+    "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+    "confirm_regressions_src": "default",
+    "console_names_src": "default",
+    "cooldown_samples_src": "default",
+    "deny_codes_src": "default",
+    "deny_diagnostics_src": "default",
+    "fail_on_quality_src": "default",
+    "fail_on_regression_src": "default",
+    "filter_src": "default",
+    "git_sha_src": "auto_detect",
+    "include_ignored_src": "default",
+    "json_stdout_src": "default",
+    "micro_sample_duration_src": "default",
+    "min_quality_src": "default",
+    "no_progress_timeout_secs_src": "default",
+    "operations_per_sample_src": "default",
+    "output_dir_src": "default",
+    "profile_src": "default",
+    "progress_src": "cli --no-progress",
+    "require_quiet_env_src": "cli --require-quiet-env",
+    "sample_duration_src": "default",
+    "samples_src": "default",
+    "save_baseline_src": "default",
+    "threshold_src": "default",
+    "tier_src": "default",
+    "timeout_secs_src": "default",
+    "warmup_samples_src": "default"
+  }
+}
