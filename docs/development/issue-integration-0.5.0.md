@@ -1398,7 +1398,10 @@ The source path removes one 4,096-byte intermediate copy for each raw value;
 this byte count is established by the exact reference/candidate code paths,
 not by a runtime copy counter. Exact frame/CRC, replay, partial append rollback,
 ambiguous append, authority-loss, deadline-expiry, and writer-position tests
-passed. The real writer seal facts match an independently recomputed digest over the persisted header and frame. A bounded 41-run WAL frame recovery fuzz smoke passed from 20 corpus
+passed. The real writer seal facts match an independently recomputed digest
+over the persisted header and frame. AC4 passed: raw memory remains retained
+until terminal completion after waiter abandonment, and too-small admission
+budgets reject before enqueue. A bounded 41-run WAL frame recovery fuzz smoke passed from 20 corpus
 inputs; a separate 1,000-run attempt stopped at 64 iterations as sanitizer RSS
 reached 339 MiB and is not qualification evidence. The existing rotation row
 is compressible and remains a separate end-to-end guardrail.
