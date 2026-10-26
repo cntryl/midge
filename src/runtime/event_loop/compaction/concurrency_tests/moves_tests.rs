@@ -50,6 +50,42 @@ fn move_fixture() -> MidgeResult<(ConcurrentFixture, String)> {
     Ok((fixture, name))
 }
 
+fn range_tombstone_file(fixture: &mut ConcurrentFixture) -> MidgeResult<String> {
+    let name = crate::cloud_layout::file_name(0, 0, 1);
+    let factory = FsSstFactoryIo::new(
+        crate::io::subdirectory(Arc::clone(&fixture.event_loop.state.fs), "sst"),
+        64 * 1024,
+    );
+    let mut writer = factory.create()?;
+    writer.add_sorted_with_meta(b"m", Some(b"stale"), 1, EntryType::Put, None)?;
+    writer.add_range_tombstone(b"a", b"z", 2)?;
+    let finalized = writer
+        .finish_to_path_with_summary(std::path::Path::new(&name))?
+        .expect("range tombstone SST summary");
+    let summary = finalized.summary.expect("range tombstone key bounds");
+    fixture
+        .event_loop
+        .state
+        .manifest
+        .test_mut()
+        .files
+        .push(crate::metadata::FileMeta {
+            name: name.clone(),
+            level: 0,
+            cf_id: 0,
+            sst_seq: 1,
+            size_bytes: finalized.size_bytes,
+            content_crc32c: Some(finalized.content_crc32c),
+            smallest_key: Some(summary.smallest_key),
+            largest_key: Some(summary.largest_key),
+            smallest_seq: Some(summary.smallest_seq),
+            largest_seq: Some(summary.largest_seq),
+            key_bounds_complete: true,
+            ..Default::default()
+        });
+    Ok(name)
+}
+
 fn current_level(fixture: &ConcurrentFixture, name: &str) -> u32 {
     let files = &fixture.event_loop.state.manifest.files;
     assert_eq!(files.len(), 1);
@@ -107,6 +143,59 @@ fn should_promote_existing_l0_identity_without_reading_or_writing_sst_bytes() ->
     assert!(fixture.event_loop.state.intent_log.is_empty());
     fixture.assert_rows(&[(b"key", b"value")])?;
     fixture.restart(&[(b"key", b"value")])?;
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_preserve_range_tombstone_visibility_during_identity_move_and_restart() -> MidgeResult<()>
+{
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange
+    let mut fixture = ConcurrentFixture::new(16 * 1024 * 1024, false)?;
+    let name = range_tombstone_file(&mut fixture)?;
+    let factory = Arc::new(NoRewriteFactory(crate::io::subdirectory(
+        Arc::clone(&fixture.event_loop.state.fs),
+        "sst",
+    )));
+    let mut actor = crate::runtime::actors::CompactionActor::new_with_config(
+        factory,
+        crate::compaction::LeveledCompactionConfig::default(),
+    );
+    actor.set_execution_limits(64 * 1024, 16 * 1024 * 1024);
+    actor.configure_concurrency(2)?;
+    fixture.event_loop.actors.compaction_actor = actor;
+    fixture.persist()?;
+    fixture.assert_rows(&[])?;
+    let source = fixture
+        .event_loop
+        .state
+        .manifest
+        .files
+        .iter()
+        .find(|file| file.name == name)
+        .unwrap()
+        .clone();
+    assert!(!crate::metadata::manifest::validate_sst_move(
+        &fixture.event_loop.state.manifest.files,
+        &[source],
+        1,
+    )?);
+    let path = fixture.directory.path().join("sst").join(&name);
+    let original = std::fs::read(&path)?;
+
+    // Act
+    fixture
+        .event_loop
+        .launch_compaction(fixture.plan(&name, 0, 1))?;
+    fixture.drain();
+
+    // Assert
+    assert_eq!(current_level(&fixture, &name), 1);
+    assert_eq!(std::fs::read(path)?, original);
+    fixture.assert_rows(&[])?;
+    fixture.restart(&[])?;
     scenario.teardown();
     Ok(())
 }
