@@ -310,8 +310,11 @@ fn run(ctx: &mut StressContext) {
 
 #[stress(
     tier = 4,
-    role = "diagnostic",
-    metadata(component = "engine_compaction", scenario = "grandparent_output_cuts")
+    metadata(
+        component = "engine_compaction",
+        scenario = "grandparent_output_cuts",
+        measurement_shape = "fixed_workload"
+    )
 )]
 fn tier4_compaction_grandparent_cuts(ctx: &mut StressContext) {
     run(ctx);
