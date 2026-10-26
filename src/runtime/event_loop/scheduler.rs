@@ -469,45 +469,95 @@ impl EventLoop {
         let storage_rx = (!self.wal_group_in_flight())
             .then(|| self.actors.cloud_coordinator.hybrid_storage_events.clone())
             .flatten();
-        let mut select = crossbeam::channel::Select::new();
-        let validation_index = select.recv(&validation_rx);
-        let worker_index = select.recv(worker_msg_rx);
-        let message_index = select.recv(msg_rx);
-        let storage_index = storage_rx.as_ref().map(|receiver| select.recv(receiver));
-        let selected = if let Some(timeout) = timeout {
-            select.select_timeout(timeout)
+        if let Some(storage_rx) = storage_rx {
+            if let Some(timeout) = timeout {
+                crossbeam::channel::select! {
+                    recv(validation_rx) -> completion => {
+                        if let Ok(completion) = completion {
+                            self.handle_validation_completion(completion, msg_rx);
+                        }
+                        EventLoopWait::Continue
+                    }
+                    recv(worker_msg_rx) -> msg => {
+                        msg.map_or(EventLoopWait::Closed, EventLoopWait::Message)
+                    }
+                    recv(msg_rx) -> msg => {
+                        msg.map_or(EventLoopWait::Closed, EventLoopWait::Message)
+                    }
+                    recv(storage_rx) -> event => {
+                        self.handle_selected_storage_event(event);
+                        EventLoopWait::Continue
+                    }
+                    default(timeout) => {
+                        self.progress_pass(msg_rx);
+                        EventLoopWait::Continue
+                    }
+                }
+            } else {
+                crossbeam::channel::select! {
+                    recv(validation_rx) -> completion => {
+                        if let Ok(completion) = completion {
+                            self.handle_validation_completion(completion, msg_rx);
+                        }
+                        EventLoopWait::Continue
+                    }
+                    recv(worker_msg_rx) -> msg => {
+                        msg.map_or(EventLoopWait::Closed, EventLoopWait::Message)
+                    }
+                    recv(msg_rx) -> msg => {
+                        msg.map_or(EventLoopWait::Closed, EventLoopWait::Message)
+                    }
+                    recv(storage_rx) -> event => {
+                        self.handle_selected_storage_event(event);
+                        EventLoopWait::Continue
+                    }
+                }
+            }
+        } else if let Some(timeout) = timeout {
+            crossbeam::channel::select! {
+                recv(validation_rx) -> completion => {
+                    if let Ok(completion) = completion {
+                        self.handle_validation_completion(completion, msg_rx);
+                    }
+                    EventLoopWait::Continue
+                }
+                recv(worker_msg_rx) -> msg => {
+                    msg.map_or(EventLoopWait::Closed, EventLoopWait::Message)
+                }
+                recv(msg_rx) -> msg => {
+                    msg.map_or(EventLoopWait::Closed, EventLoopWait::Message)
+                }
+                default(timeout) => {
+                    self.progress_pass(msg_rx);
+                    EventLoopWait::Continue
+                }
+            }
         } else {
-            Ok(select.select())
-        };
-        let Ok(operation) = selected else {
-            self.progress_pass(msg_rx);
-            return EventLoopWait::Continue;
-        };
-        let index = operation.index();
-        if index == validation_index {
-            if let Ok(completion) = operation.recv(&validation_rx) {
-                self.handle_validation_completion(completion, msg_rx);
+            crossbeam::channel::select! {
+                recv(validation_rx) -> completion => {
+                    if let Ok(completion) = completion {
+                        self.handle_validation_completion(completion, msg_rx);
+                    }
+                    EventLoopWait::Continue
+                }
+                recv(worker_msg_rx) -> msg => {
+                    msg.map_or(EventLoopWait::Closed, EventLoopWait::Message)
+                }
+                recv(msg_rx) -> msg => {
+                    msg.map_or(EventLoopWait::Closed, EventLoopWait::Message)
+                }
             }
-            return EventLoopWait::Continue;
         }
-        if index == worker_index {
-            return operation
-                .recv(worker_msg_rx)
-                .map_or(EventLoopWait::Closed, EventLoopWait::Message);
+    }
+
+    fn handle_selected_storage_event(
+        &mut self,
+        event: Result<crate::storage::StorageEvent, crossbeam::channel::RecvError>,
+    ) {
+        match event {
+            Ok(event) => self.handle_storage_event(event),
+            Err(_) => self.actors.cloud_coordinator.disconnect_storage_events(),
         }
-        if index == message_index {
-            return operation
-                .recv(msg_rx)
-                .map_or(EventLoopWait::Closed, EventLoopWait::Message);
-        }
-        if storage_index == Some(index) {
-            match operation.recv(storage_rx.as_ref().expect("registered storage receiver")) {
-                Ok(event) => self.handle_storage_event(event),
-                Err(_) => self.actors.cloud_coordinator.disconnect_storage_events(),
-            }
-            return EventLoopWait::Continue;
-        }
-        unreachable!("selected index must identify a registered receiver");
     }
 
     /// Main event loop — runs until Shutdown message or channel close.
