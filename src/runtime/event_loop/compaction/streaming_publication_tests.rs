@@ -27,6 +27,10 @@ struct CorruptingMultipartBackend {
     uploaded: parking_lot::Mutex<Vec<(String, usize)>>,
     output_read_opens: Arc<AtomicUsize>,
     output_read_opens_before_upload: AtomicUsize,
+    corrupt_uploaded_part: std::sync::atomic::AtomicBool,
+    mutate_local_output_before_upload: std::sync::atomic::AtomicBool,
+    output_fs: parking_lot::Mutex<Option<Arc<CompactionOutputReadCountingFs>>>,
+    local_output_mutations: AtomicUsize,
 }
 
 impl CorruptingMultipartBackend {
@@ -37,7 +41,35 @@ impl CorruptingMultipartBackend {
             uploaded: parking_lot::Mutex::new(Vec::new()),
             output_read_opens,
             output_read_opens_before_upload: AtomicUsize::new(0),
+            corrupt_uploaded_part: std::sync::atomic::AtomicBool::new(true),
+            mutate_local_output_before_upload: std::sync::atomic::AtomicBool::new(false),
+            output_fs: parking_lot::Mutex::new(None),
+            local_output_mutations: AtomicUsize::new(0),
         }
+    }
+
+    fn mutate_local_output_before_upload(&self) {
+        self.corrupt_uploaded_part.store(false, Ordering::Release);
+        self.mutate_local_output_before_upload
+            .store(true, Ordering::Release);
+    }
+
+    fn mutate_local_output_if_requested(&self) {
+        if !self
+            .mutate_local_output_before_upload
+            .swap(false, Ordering::AcqRel)
+        {
+            return;
+        }
+        let fs = self
+            .output_fs
+            .lock()
+            .as_ref()
+            .cloned()
+            .expect("test backend has the compaction output filesystem");
+        fs.mutate_latest_output()
+            .expect("mutate finalized local SST before provider upload");
+        self.local_output_mutations.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -63,6 +95,28 @@ impl CompactionOutputReadCountingFs {
         Path::new(&path.0)
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
+    }
+
+    fn mutate_latest_output(&self) -> crate::io::FsResult<()> {
+        let output_path = self
+            .output_paths
+            .lock()
+            .iter()
+            .next()
+            .cloned()
+            .ok_or_else(|| crate::io::FsError::Io("no finalized compaction output".into()))?;
+        let mut file = self.inner.open(
+            &crate::io::FsPath::new(output_path),
+            crate::io::OpenOptions {
+                mode: crate::io::OpenMode::ReadWrite,
+                create: false,
+                create_new: false,
+                truncate: false,
+            },
+        )?;
+        let first_byte = file.read_at(0, 1)?[0] ^ 1;
+        file.write_at(0, crate::Bytes::from(vec![first_byte]))?;
+        file.sync(crate::io::Durability::Durable)
     }
 }
 
@@ -184,6 +238,7 @@ impl CloudWriteCapability for CorruptingMultipartBackend {
         callback: CloudCallback,
     ) {
         use crate::storage::cloud::CloudError;
+        self.mutate_local_output_if_requested();
 
         self.output_read_opens_before_upload.store(
             self.output_read_opens.load(Ordering::Acquire),
@@ -221,7 +276,7 @@ impl CloudWriteCapability for CorruptingMultipartBackend {
                     return;
                 }
             };
-            if part_ordinal == 0 {
+            if part_ordinal == 0 && self.corrupt_uploaded_part.load(Ordering::Acquire) {
                 part[0] ^= 1;
                 self.corrupted_parts.fetch_add(1, Ordering::AcqRel);
             }
@@ -370,6 +425,7 @@ fn event_loop_with_corrupting_storage(
         output_paths: parking_lot::Mutex::new(HashSet::new()),
         read_opens: Arc::clone(&backend.output_read_opens),
     });
+    *backend.output_fs.lock() = Some(Arc::clone(&counting_fs));
     state.fs = counting_fs.clone();
     crate::metadata::ensure_or_create_format_marker(&state.fs, path)?;
     crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
@@ -504,5 +560,53 @@ fn should_keep_compaction_manifest_unchanged_when_streaming_upload_corrupts_a_pa
         event_loop.state.diagnostics.counters().compaction_failures,
         failures_before + 1
     );
+    Ok(())
+}
+
+#[test]
+fn should_reject_completed_sst_mutated_before_streaming_upload() -> MidgeResult<()> {
+    // Arrange: mutate the finalized local output after its identity was
+    // computed but before the provider starts reading it.
+    let directory = tempfile::tempdir()?;
+    let output_read_opens = Arc::new(AtomicUsize::new(0));
+    let backend = Arc::new(CorruptingMultipartBackend::new(Arc::clone(
+        &output_read_opens,
+    )));
+    backend.mutate_local_output_before_upload();
+    let (mut event_loop, counting_fs) =
+        event_loop_with_corrupting_storage(directory.path(), &backend)?;
+    let hybrid = event_loop
+        .actors
+        .cloud_coordinator
+        .hybrid_storage
+        .clone()
+        .expect("injected hybrid storage");
+    let (initial_names, plan) = add_large_inputs_and_plan(&mut event_loop, hybrid.as_ref())?;
+    counting_fs.reset();
+
+    // Act: the provider streams the modified local bytes and returns their
+    // matching receipt, which must disagree with the finalized writer identity.
+    let failures_before = event_loop.state.diagnostics.counters().compaction_failures;
+    event_loop.launch_compaction(plan)?;
+    wait_for_compaction_failure(&mut event_loop, failures_before);
+
+    // Assert: the mutated output never becomes authoritative.
+    assert_eq!(
+        backend
+            .output_read_opens_before_upload
+            .load(Ordering::Acquire),
+        1
+    );
+    assert_eq!(backend.local_output_mutations.load(Ordering::Acquire), 1);
+    assert_eq!(backend.corrupted_parts.load(Ordering::Acquire), 0);
+    let uploaded = backend.uploaded.lock();
+    assert_eq!(uploaded.len(), 1);
+    assert!(uploaded[0].1 > 2 * crate::storage::FILE_UPLOAD_PART_BYTES);
+    drop(uploaded);
+    assert_eq!(manifest_names(&event_loop.state.manifest), initial_names);
+    let persisted = crate::metadata::ManifestPersistence::load(&event_loop.state.db_path)
+        .map_err(MidgeError::Internal)?;
+    assert_eq!(manifest_names(&persisted), initial_names);
+    assert!(event_loop.state.intent_log.is_empty());
     Ok(())
 }

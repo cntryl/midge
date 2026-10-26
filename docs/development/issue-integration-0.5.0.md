@@ -928,6 +928,13 @@ transfer and provider receipts.
 Active regressions cover buffered/streaming empty, range-only and multiblock
 files, compare finalized metadata and CRC with independent reads, require no
 output reads during finalization, and reject failed directory synchronization.
+The streaming publication regression now also mutates the completed local SST
+after finalization and before upload, lets the provider return a receipt for
+those changed bytes, and proves the output does not enter either the live or
+persisted manifest. Together with the existing uploaded-part corruption case,
+the production publication module passes 2/2. This covers the AC3 local-file
+mutation case; it does not change #949 issue status or its remaining evidence
+boundary.
 The new soft-roll regression executes production partitioned compaction with a
 one-byte target and independently checks the size and CRC of every finalized
 output against its completed file.
