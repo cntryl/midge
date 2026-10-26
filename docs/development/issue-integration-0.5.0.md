@@ -1891,3 +1891,13 @@ publication cut tests passed 3/3, covering bounded witness storage and
 admission of a later capture and selected-body read after the final source
 drop. These are local behavioral results; they do not establish hosted
 provider latency or the independent-flush performance target.
+
+### Current #946 execution checkpoint (2026-10-26)
+
+The event-loop validation tests passed 21/21 with failpoints enabled, including
+resident and spilled point/insert/assertion/range retries across flush and
+pending-group apply, TTL/error ordering, deadline and epoch checks, and
+consumed-workspace memory ownership. The public `transactions` integration
+target passed 153/153. This covers the recorded behavior paths; the three-pair
+#935 latency comparison and remaining full-system crash schedules are still
+separate qualification gates.
