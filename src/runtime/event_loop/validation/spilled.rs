@@ -13,7 +13,7 @@ use crossbeam::channel::Receiver;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-pub(super) struct SpilledValidationJob {
+pub(in crate::runtime::event_loop) struct SpilledValidationJob {
     pub(super) request: SpilledTransactionRequest,
     snapshots: HashMap<u32, Arc<ReadSnapshot>>,
     recent_ranges: Vec<RecentDeleteRange>,
@@ -130,8 +130,7 @@ impl EventLoop {
             .reserve(bytes, "detached spill validation metadata")?;
         let job = self.capture_spilled_validation_job(request, families, reservation)?;
         if self.pipeline.validation.worker.is_none() {
-            self.pipeline.validation.worker =
-                Some(ValidationWorker::new(self.pipeline.worker_msg_tx.clone())?);
+            self.pipeline.validation.worker = Some(ValidationWorker::new()?);
         }
         self.pipeline
             .validation
