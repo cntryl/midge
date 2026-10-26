@@ -352,12 +352,20 @@ fn should_summarize_compaction_output_through_injected_mock_fs() -> MidgeResult<
 }
 
 #[test]
-fn should_not_read_finalized_output_before_local_publication_staging() -> MidgeResult<()> {
+fn should_open_finalized_compaction_output_only_for_cloud_upload() -> MidgeResult<()> {
     // Arrange
     let counting_fs = Arc::new(ReadCountingFs {
         inner: crate::io::MockFs::new(),
         read_opens: std::sync::atomic::AtomicUsize::new(0),
     });
+    let mock_cloud = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let cloud: Arc<dyn crate::storage::StorageBackend> = Arc::new(
+        crate::storage::cloud::CloudStorage::new(mock_cloud.clone(), "compaction-test".into()),
+    );
+    let hybrid = crate::storage::HybridStorage::with_policy(
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
     let factory = crate::sst::FsSstFactoryIo::new(counting_fs.clone(), 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"source", Some(b"value"), 7, EntryType::Put, None)?;
@@ -379,7 +387,7 @@ fn should_not_read_finalized_output_before_local_publication_staging() -> MidgeR
             .read_opens
             .store(0, std::sync::atomic::Ordering::SeqCst);
         record_staged_output_partition(
-            None,
+            Some(&hybrid),
             &output_fs,
             &prepared,
             0,
@@ -396,8 +404,8 @@ fn should_not_read_finalized_output_before_local_publication_staging() -> MidgeR
             counting_fs
                 .read_opens
                 .load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "finalized output must not be reopened to derive publication metadata"
+            1,
+            "the finalized output must be opened once for cloud upload, without a prior metadata reread"
         );
         Ok(())
     };
@@ -414,6 +422,7 @@ fn should_not_read_finalized_output_before_local_publication_staging() -> MidgeR
 
     // Assert
     assert_eq!(outputs.len(), 1);
+    assert_eq!(mock_cloud.get_uploads().len(), 1);
     let published = prepared.lock();
     let metadata = &published.values().next().expect("staged output").metadata;
     assert_eq!(metadata.smallest_key.as_deref(), Some(b"source".as_slice()));
