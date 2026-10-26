@@ -1255,13 +1255,18 @@ upload and validates its whole-object CRC because that protocol has no checked
 intermediate-chunk receipt. Same-deadline aborts retain uncertainty as residue,
 never authoritative metadata. Conditional final commitment preserves IfAbsent.
 
-Active native HTTP regressions cover64MiB publication, corruption and changed
-finalized source across S3, Azure, GCS JSON/XML. Full failpoint test targets and
-restricted provider library configurations compile. Tests, missing/wrong receipt
-fallback, unknown final results, abort/retry campaigns and Sqrzl remain pending
-qualification. No actual provider request/peak-memory performance result is
-claimed from compile checks. Provider protocol details and limits are recorded
-in cloud-file-publication-915.md.
+At the current head, the native multipart contract suite passes 4/4 across S3,
+Azure, GCS JSON and GCS XML. It streams 64 MiB through HybridStorage, verifies
+exact bytes and bounded part/read/resource admission, rejects corrupted parts
+before commit, and rejects a changed finalized source. Provider receipt
+contracts pass 5/5; HybridStorage publication reconciliation passes 5/5 for
+lost completion, missing or wrong receipts, transient retry and identity-pinned
+readback. The production compaction corruption regression passes 1/1 and
+leaves the manifest unchanged. These are mock HTTP/provider contract results;
+live-provider qualification, timeout/unknown native completion and abort/retry
+campaigns, Sqrzl S3/GCS qualification, and performance results remain pending.
+Provider protocol details and limits are recorded in
+cloud-file-publication-915.md.
 
 The #912 expiration-driven maintenance follow-up is also deferred by the
 clock-correction decision above. Ordinary compaction retains its existing
