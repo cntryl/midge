@@ -1584,9 +1584,10 @@ or authority loss fences subsequent mutation globally and retains ownership
 until every admitted worker settles; restart replays the durable group whole.
 Active regressions hold the first unit while a later unit applies, verify old
 and new snapshots plus exact memory accounting, and lose authority before a
-cross-family BestEffort attempt and restart. The shared compile reaches only
-concurrent #909 test renames; behavioral, loom/differential/crash and A/B
-qualification remain pending. A related #941 regression preserves NotAttempted
+cross-family BestEffort attempt and restart. At the current head, memtable apply
+tests pass 2/2 and the public engine differential target passes 5/5, including
+the default randomized multi-key history. Exact-head Loom/crash reruns and the
+throughput A/B remain pending. A related #941 regression preserves NotAttempted
 for an append whose physical rollback proves unchanged NoSpace.
 
 #943/#913 now have an optional bounded inventory-page capability. Native
