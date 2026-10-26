@@ -532,9 +532,11 @@ before its design decision; it has no speculative production sharding change.
 The #929 matrix now has three acceptable runs for each of its six Tier 2
 baseline rows at source `64389f99`. Point-read amplification has three clean
 runs at source `72dcb0bc`, recorded as diagnostic context because the benchmark
-still declares diagnostic trust; strict commit
-latency at 1/16/64 writers, hybrid lag, YCSB A–F, recovery and compaction CPU
-remain unmeasured. #937 provider runs, remaining relative A/B targets,
+still declares diagnostic trust. Strict local commit latency has three
+acceptable runs per row at source `330c67a`, including 1/16/64 writers and 4 KiB
+rotation; one noisy 64-writer run is retained and excluded. Hybrid lag, YCSB
+A–F, recovery and compaction CPU remain unmeasured. #937 provider runs,
+remaining relative A/B targets,
 runtime/crash campaigns, assurance compute budgets and qualification of the
 eventual release SHA remain due. The executed Sqrzl results above qualify their recorded runtime
 source; they do not replace continuous-lag benchmark or release evidence.
