@@ -108,6 +108,47 @@ fn layout_fingerprint(engine: &Engine) -> Vec<(u32, u32, String, u64)> {
     files
 }
 
+fn describe_layout(engine: &Engine) -> String {
+    let mut files: Vec<_> = engine
+        .metrics()
+        .get_storage_layout()
+        .expect("read benchmark storage layout")
+        .levels
+        .into_iter()
+        .flat_map(|level| {
+            level.files.into_iter().map(move |file| {
+                (
+                    level.level,
+                    file.cf_id,
+                    file.name,
+                    file.size_bytes,
+                    file.smallest_key,
+                    file.largest_key,
+                )
+            })
+        })
+        .collect();
+    files.sort_unstable_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.4.cmp(&right.4))
+            .then_with(|| left.5.cmp(&right.5))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    files
+        .into_iter()
+        .map(|(level, cf_id, name, bytes, smallest, largest)| {
+            format!(
+                "L{level}:CF{cf_id}:{name}:{bytes}:{}:{}",
+                smallest.as_deref().map(hex::encode).unwrap_or_default(),
+                largest.as_deref().map(hex::encode).unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
+}
+
 fn compact_to_stable_layout(engine: &Engine) {
     for _ in 0..MAX_SETUP_COMPACTION_PASSES {
         let before = layout_fingerprint(engine);
@@ -159,7 +200,7 @@ fn overlapping_l2(engine: &Engine, cf_id: u32, lower: &[u8], upper: &[u8]) -> L2
         })
 }
 
-fn prepare_fixture(engine: &Engine, cf: &ColumnFamilyHandle) -> (Vec<u32>, L2Overlap) {
+fn prepare_fixture(engine: &Engine, cf: &ColumnFamilyHandle) -> (Vec<u32>, L2Overlap, String) {
     let ids = shuffled_ids();
 
     // Populate and compact the base outside the measured window.
@@ -181,7 +222,8 @@ fn prepare_fixture(engine: &Engine, cf: &ColumnFamilyHandle) -> (Vec<u32>, L2Ove
             && l2_overlap.largest_file_bytes < MIN_GRANDPARENT_OVERLAP_BYTES,
         "workload invalid: update span must overlap more than 320 MiB across at least two individually smaller L2 files; observed {l2_overlap:?}"
     );
-    (ids, l2_overlap)
+    let layout = describe_layout(engine);
+    (ids, l2_overlap, layout)
 }
 
 fn measure_updates(
@@ -235,6 +277,7 @@ fn record_measurement(
     compaction_output_bytes: u64,
     compactions_run: u64,
     final_sst_count: usize,
+    initial_layout: &str,
 ) {
     let logical_input_bytes = u64::try_from(UPDATE_KEYS)
         .expect("update count fits in u64")
@@ -274,6 +317,7 @@ fn record_measurement(
     );
     ctx.parameter("compaction_metric", "published compaction output SST bytes");
     ctx.parameter("flush_bytes_in_compaction_metric", "false");
+    ctx.parameter("pre_measurement_layout", initial_layout);
     ctx.record_external_outcome(
         "sustained_write_throughput_under_compaction",
         elapsed,
@@ -320,7 +364,7 @@ fn run(ctx: &mut StressContext) {
     let cf = engine
         .create_column_family("grandparent-cuts")
         .expect("create benchmark column family");
-    let (ids, l2_overlap) = prepare_fixture(&engine, &cf);
+    let (ids, l2_overlap, initial_layout) = prepare_fixture(&engine, &cf);
     let (elapsed, compaction_output_bytes, compactions_run, final_sst_count) =
         measure_updates(&engine, &cf, &ids[..UPDATE_KEYS]);
     record_measurement(
@@ -330,6 +374,7 @@ fn run(ctx: &mut StressContext) {
         compaction_output_bytes,
         compactions_run,
         final_sst_count,
+        &initial_layout,
     );
     engine
         .shutdown(std::time::Duration::from_secs(60))
