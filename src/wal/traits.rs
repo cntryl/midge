@@ -159,6 +159,14 @@ pub trait GroupedWalWriter: Send + Sync {
 }
 
 pub trait WalWriter: Send + Sync {
+    /// Whether asynchronous strict completion can wake the runtime directly.
+    fn supports_completion_wake(&self) -> bool {
+        false
+    }
+
+    /// Install a coalescing wake channel for loop-owned WAL completion.
+    fn set_completion_wake(&self, _wake: crossbeam::channel::Sender<()>) {}
+
     fn supports_sequenced_submission(&self) -> bool {
         false
     }

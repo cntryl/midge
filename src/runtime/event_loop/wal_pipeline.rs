@@ -69,21 +69,42 @@ pub(super) struct WalCommitPipeline {
     memory: ResourceBudget,
     queued_memory: ResourceBudget,
     admitting: Vec<ResourceReservation>,
+    completion_wake_tx: crossbeam::channel::Sender<()>,
+    completion_wake_rx: crossbeam::channel::Receiver<()>,
 }
 
 impl Default for WalCommitPipeline {
     fn default() -> Self {
+        let (completion_wake_tx, completion_wake_rx) = crossbeam::channel::bounded(1);
         Self {
             pending: None,
             deferred: VecDeque::new(),
             memory: ResourceBudget::new(MAX_INFLIGHT_GROUP_BYTES),
             queued_memory: ResourceBudget::new(MAX_INFLIGHT_GROUP_BYTES),
             admitting: Vec::new(),
+            completion_wake_tx,
+            completion_wake_rx,
         }
     }
 }
 
 impl WalCommitPipeline {
+    pub(super) fn completion_wake_sender(&self) -> crossbeam::channel::Sender<()> {
+        self.completion_wake_tx.clone()
+    }
+
+    pub(super) fn completion_wake_receiver(&self) -> crossbeam::channel::Receiver<()> {
+        self.completion_wake_rx.clone()
+    }
+
+    pub(super) fn pending_deadline_timeout(&self) -> Option<Duration> {
+        self.pending
+            .as_ref()
+            .filter(|pending| !pending.failed)
+            .and_then(|pending| pending.io.as_ref())
+            .and_then(PendingStrictIo::deadline_timeout)
+    }
+
     pub(super) fn has_pending_group(&self) -> bool {
         self.pending.is_some()
     }

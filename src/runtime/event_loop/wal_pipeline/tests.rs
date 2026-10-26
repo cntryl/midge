@@ -360,6 +360,45 @@ fn should_drain_in_flight_group_before_rotate_given_pending_group() -> MidgeResu
 }
 
 #[test]
+fn should_wake_event_loop_when_async_wal_completion_arrives() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let response = event_loop
+        .routing
+        .router
+        .register(97_803, "wake on WAL completion");
+    event_loop.process_one(
+        write(97_803, &[b"completion-wake"], true),
+        &crossbeam::channel::never(),
+    );
+    wait_for_hold(&mut event_loop, &held);
+    assert!(event_loop.wal_group_in_flight());
+    assert!(event_loop
+        .idle_progress_timeout()
+        .is_some_and(|timeout| timeout > Duration::from_millis(1)));
+
+    // Act: with no runtime message available, the event loop must select the
+    // writer's coalesced completion signal instead of polling every millisecond.
+    held.release.send(()).expect("release held sync");
+    let never = crossbeam::channel::never();
+    let started = Instant::now();
+    event_loop.wait_for_runtime_event(&never, &never);
+
+    // Assert
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "WAL completion did not wake the event loop"
+    );
+    let applied = applied_cut(&mut event_loop, &response);
+    assert!(applied > 0);
+    assert_eq!(event_loop.state.applied_sequence, applied);
+    Ok(())
+}
+
+#[test]
 fn should_reject_direct_rotation_when_strict_group_owns_writer_root() -> MidgeResult<()> {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();

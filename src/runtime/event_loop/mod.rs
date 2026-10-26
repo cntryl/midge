@@ -375,6 +375,12 @@ impl EventLoop {
             diagnostics: EventLoopDiagnostics::new(trace_enabled),
         };
 
+        let completion_wake = event_loop.pipeline.wal_commits.completion_wake_sender();
+        event_loop
+            .actors
+            .wal_actor
+            .set_completion_wake(completion_wake);
+
         event_loop.finish_initialization(
             config.hybrid_storage,
             config.compaction_memory_limit,
