@@ -130,7 +130,8 @@ impl EventLoop {
             .reserve(bytes, "detached spill validation metadata")?;
         let job = self.capture_spilled_validation_job(request, families, reservation)?;
         if self.pipeline.validation.worker.is_none() {
-            self.pipeline.validation.worker = Some(ValidationWorker::new()?);
+            self.pipeline.validation.worker =
+                Some(ValidationWorker::new(self.pipeline.worker_msg_tx.clone())?);
         }
         self.pipeline
             .validation
