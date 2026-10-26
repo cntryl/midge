@@ -453,6 +453,15 @@ fn should_coalesce_independent_strict_transactions_with_one_durable_append() -> 
     // Assert
     assert_eq!(handled, 3);
     assert_eq!(fixture.event_loop.actors.wal_actor.append_calls(), 1);
+    assert!(
+        fixture
+            .event_loop
+            .state
+            .diagnostics
+            .counters()
+            .event_loop_write_service_ns_total
+            > 0
+    );
     assert_eq!(fixture.event_loop.actors.wal_actor.sync_calls(), 1);
     assert_eq!(fixture.event_loop.state.wal.pending_writes, 0);
     assert_eq!(

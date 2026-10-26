@@ -51,6 +51,9 @@ struct StrictCommitSample {
 struct RotationRunSample {
     ledger: LedgerSyncSample,
     elapsed: Duration,
+    event_loop_write_service_ns_total: u64,
+    wal_encode_ns_total: u64,
+    wal_write_syscall_ns_total: u64,
     commit_p50_us: u64,
     commit_p95_us: u64,
     commit_p99_us: u64,
@@ -255,6 +258,15 @@ fn execute_rotation_run() -> RotationRunSample {
     RotationRunSample {
         ledger: LedgerSyncSample::between(&start_metrics, &end_metrics),
         elapsed,
+        event_loop_write_service_ns_total: end_metrics
+            .event_loop_write_service_ns_total
+            .saturating_sub(start_metrics.event_loop_write_service_ns_total),
+        wal_encode_ns_total: end_metrics
+            .wal_encode_ns_total
+            .saturating_sub(start_metrics.wal_encode_ns_total),
+        wal_write_syscall_ns_total: end_metrics
+            .wal_write_syscall_ns_total
+            .saturating_sub(start_metrics.wal_write_syscall_ns_total),
         commit_p50_us: all.value_at_quantile(0.50),
         commit_p95_us: all.value_at_quantile(0.95),
         commit_p99_us: all.value_at_quantile(0.99),
@@ -508,6 +520,22 @@ fn record_rotation_observations(
         .iter()
         .map(|sample| sample.flush_publish_ns_total)
         .sum::<u64>();
+    let event_loop_write_service_ns_total = samples
+        .iter()
+        .map(|sample| sample.event_loop_write_service_ns_total)
+        .sum::<u64>();
+    let wal_encode_ns_total = samples
+        .iter()
+        .map(|sample| sample.wal_encode_ns_total)
+        .sum::<u64>();
+    let wal_write_syscall_ns_total = samples
+        .iter()
+        .map(|sample| sample.wal_write_syscall_ns_total)
+        .sum::<u64>();
+    let measured_commits = u64::try_from(samples.len())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(ROTATION_TRANSACTIONS_PER_RUN).unwrap_or(u64::MAX));
+    let per_commit_ns = |total: u64| u64_to_f64(total) / u64_to_f64(measured_commits.max(1));
 
     for latency_us in [
         median_u64(samples.iter().map(|sample| sample.commit_p50_us)),
@@ -573,6 +601,31 @@ fn record_rotation_observations(
         ObservationUnit::Nanoseconds,
         ObservationDirection::Informational,
     );
+    for (name, value) in [
+        (
+            "event_loop_write_service_ns_per_4k_commit",
+            per_commit_ns(event_loop_write_service_ns_total),
+        ),
+        (
+            "wal_encode_ns_per_4k_commit",
+            per_commit_ns(wal_encode_ns_total),
+        ),
+        (
+            "wal_append_service_ns_per_4k_commit",
+            per_commit_ns(wal_write_syscall_ns_total),
+        ),
+        (
+            "wal_encode_and_append_service_ns_per_4k_commit",
+            per_commit_ns(wal_encode_ns_total.saturating_add(wal_write_syscall_ns_total)),
+        ),
+    ] {
+        ctx.record_observation(
+            name,
+            value,
+            ObservationUnit::Nanoseconds,
+            ObservationDirection::Informational,
+        );
+    }
 }
 
 #[stress(tier = 2)]

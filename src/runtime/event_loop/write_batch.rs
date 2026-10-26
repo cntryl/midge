@@ -280,6 +280,22 @@ impl EventLoop {
         initial: ApplyTransactionRequest,
         max: usize,
     ) -> usize {
+        let started = Instant::now();
+        let handled = self.apply_transaction_with_coalescing_inner(msg_rx, initial, max);
+        self.state.diagnostics.record(|metrics| {
+            metrics.record_event_loop_write_service(
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            );
+        });
+        handled
+    }
+
+    fn apply_transaction_with_coalescing_inner(
+        &mut self,
+        msg_rx: &Receiver<RuntimeMsg>,
+        initial: ApplyTransactionRequest,
+        max: usize,
+    ) -> usize {
         if max == 0 {
             return 0;
         }

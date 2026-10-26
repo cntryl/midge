@@ -1349,8 +1349,18 @@ writer I/O failure after held encoding with reservation release (1/1), and
 shutdown drain while encoding is held (1/1). The sequenced-submissions module
 passes 5/5 and WAL pipeline module 15/15. Caller abandonment covers the path
 where a wait ends before the worker effect; no separate cancellation token is
-part of this submission API. AC1 loop CPU/writer service timings and A/B targets
-remain open. Large/spilled/non-filesystem paths retain their drained synchronous
+part of this submission API. AC1 now has a per-engine event-loop write-handler
+wall-service counter and exposes the existing writer encode and append-service
+counters to the runtime snapshot. The Tier 2 4 KiB rotation row reports all
+three per committed 4 KiB unit; the append timer includes file-handle checks
+and segment digest updates, while the event-loop timer includes coalescing,
+admission and handler deferral work. A focused Strict coalescing regression
+passes and verifies the event-loop counter advances. `cargo check --locked
+--bench tier2_subsystem_durability_commit_latency`, `cargo fmt --check`, and
+`git diff --check` pass. The numeric A/B remains open: the preregistered base
+172c941 predates several required integration changes, and a minimal overlay
+has not yet been built cleanly at both that source and the #941 candidate.
+Do not attribute an integrated-range measurement to #941 alone. Large/spilled/non-filesystem paths retain their drained synchronous
 compatibility barriers. Next-group append remains ordered behind the active
 group; no multi-group pipeline is claimed.
 

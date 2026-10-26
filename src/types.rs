@@ -361,6 +361,12 @@ pub struct RuntimeMetricsSnapshot {
     pub wal_flush_count: u64,
     pub wal_fsync_count: u64,
     pub wal_append_ns_total: u64,
+    /// WAL nested encoding and frame construction time across this engine.
+    pub wal_encode_ns_total: u64,
+    /// Writer append service time, including file-handle checks and segment digest updates.
+    pub wal_write_syscall_ns_total: u64,
+    /// Event-loop wall service time spent in write coalescing/admission handlers.
+    pub event_loop_write_service_ns_total: u64,
     pub wal_fsync_ns_total: u64,
     /// Maximum latency of one physical WAL fsync.
     pub wal_fsync_ns_max: u64,
