@@ -6581,8 +6581,29 @@ fn append_cloud_async_put(el: &mut EventLoop) -> crate::common::MidgeResult<u64>
 }
 
 #[cfg(feature = "failpoints")]
-fn expect_failed_seal_response(fail_rx: &crossbeam::channel::Receiver<RuntimeResponse>) {
-    match fail_rx.recv().expect("failed strict response") {
+fn expect_failed_seal_response(
+    el: &mut EventLoop,
+    msg_rx: &crossbeam::channel::Receiver<RuntimeMsg>,
+    fail_rx: &crossbeam::channel::Receiver<RuntimeResponse>,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let response = loop {
+        el.progress_pass(msg_rx);
+        match fail_rx.try_recv() {
+            Ok(response) => break response,
+            Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                panic!("failed strict response channel disconnected")
+            }
+            Err(crossbeam::channel::TryRecvError::Empty) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "failed strict response timed out"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    };
+    match response {
         RuntimeResponse::Error { error, .. } => match error {
             crate::common::MidgeError::Internal(message) => {
                 assert!(
@@ -6599,6 +6620,7 @@ fn expect_failed_seal_response(fail_rx: &crossbeam::channel::Receiver<RuntimeRes
 #[cfg(feature = "failpoints")]
 fn complete_retry_and_ack(
     el: &mut EventLoop,
+    msg_rx: &crossbeam::channel::Receiver<RuntimeMsg>,
     last_sequence: u64,
     retry_request_id: u64,
     retry_rx: &crossbeam::channel::Receiver<RuntimeResponse>,
@@ -6608,6 +6630,13 @@ fn complete_retry_and_ack(
         .durability
         .inflight_segment_for_sequence(last_sequence)
         .expect("inflight segment for strict retry");
+    assert!(
+        el.pipeline
+            .durability
+            .cloud_durability_request_ids_at_or_after(seg_id)
+            .contains(&retry_request_id),
+        "strict retry caller must remain attached to its inflight segment until CloudAck"
+    );
     copy_local_segment_to_remote_wal_for_test(el, seg_id);
     cloud_persistence(
         el.actors
@@ -6633,7 +6662,28 @@ fn complete_retry_and_ack(
         max_sequence: last_sequence,
     });
 
-    match retry_rx.recv().expect("strict retry response") {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let response = loop {
+        el.progress_pass(msg_rx);
+        match retry_rx.try_recv() {
+            Ok(response) => break response,
+            Err(crossbeam::channel::TryRecvError::Disconnected) => {
+                panic!("strict retry response channel disconnected")
+            }
+            Err(crossbeam::channel::TryRecvError::Empty) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "strict retry response timed out: cloud_durable={}, pending_waiters={}, request_registered={}, cloud_backlog_empty={}",
+                    el.state.wal.frontiers.cloud_durable(),
+                    el.pipeline.durability.has_pending_waiters(),
+                    el.routing.router.registered_at(retry_request_id).is_some(),
+                    el.actors.cloud_coordinator.cloud_wal.backlog().is_empty(),
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    };
+    match response {
         RuntimeResponse::Ok { request_id } => assert_eq!(request_id, retry_request_id),
         other => panic!("unexpected strict retry response: {other:?}"),
     }
@@ -6674,7 +6724,7 @@ fn should_retry_seal_wal_for_cloud_after_failpoint_before_rotate() -> crate::com
     // Act
     // Assert
     assert_eq!(outcome, super::super::HandleOutcome::Continue);
-    expect_failed_seal_response(&fail_rx);
+    expect_failed_seal_response(&mut el, &msg_rx, &fail_rx);
     assert!(
         el.state.wal.pending_writes > 0,
         "failed strict seal must preserve buffered WAL accounting for retry"
@@ -6700,13 +6750,29 @@ fn should_retry_seal_wal_for_cloud_after_failpoint_before_rotate() -> crate::com
         &msg_rx,
     );
     assert_eq!(outcome, super::super::HandleOutcome::Continue);
-    assert!(
-            el.pipeline.durability
-                .inflight_segment_for_sequence(last_sequence)
-                .is_some(),
-            "successful retry should install an inflight segment instead of falling through to a missing-cover error"
+    assert_eq!(el.deferred_wal_request_ids(), [retry_request_id]);
+    let dispatch_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(outcome) = el.process_pending_message(&msg_rx) {
+            assert_eq!(outcome, super::super::HandleOutcome::Continue);
+            break;
+        }
+        assert!(
+            Instant::now() < dispatch_deadline,
+            "deferred strict seal retry did not become dispatchable"
         );
-    complete_retry_and_ack(&mut el, last_sequence, retry_request_id, &retry_rx);
+        el.progress_cloud_seal();
+        el.progress_wal_pipeline();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(el.deferred_wal_request_ids(), Vec::<u64>::new());
+    progress_cloud_seal_with_waiters_until_inflight(
+        &mut el,
+        last_sequence,
+        &[retry_request_id],
+        &[],
+    )?;
+    complete_retry_and_ack(&mut el, &msg_rx, last_sequence, retry_request_id, &retry_rx);
     assert_eq!(
         el.state.wal.pending_writes, 0,
         "successful strict retry should clear buffered WAL accounting"
