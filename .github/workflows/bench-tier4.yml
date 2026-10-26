@@ -356,6 +356,13 @@ jobs:
           printf 'base=%s\ncandidate=%s\nbenchmark=%s\n' \
             "$BASE_SOURCE_REF" "$CANDIDATE_SOURCE_REF" "$BENCHMARK_SOURCE_REF"
 
+      - name: Prebuild both benchmark sources before measurement
+        run: |
+          set -euo pipefail
+          for source in "$RUNNER_TEMP/midge-ab/base" "$RUNNER_TEMP/midge-ab/candidate"; do
+            (cd "$source" && cargo bench --locked --no-run --bench "$BENCH_NAME")
+          done
+
       - name: Run alternating A/B samples on this runner
         run: |
           set -euo pipefail
