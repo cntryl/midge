@@ -25,13 +25,19 @@ review; it does not claim implementation or acceptance criteria are complete.
 While cloud durable reads are enabled, compaction writes a version-retaining
 chain per key rather than collapsing the key to its newest version:
 
-1. Let `F` be the cloud-durable sequence captured for the compaction plan.
-2. Retain every point version with sequence greater than `F`. A later cloud
+1. Let `F` be the cloud-durable sequence captured for the compaction plan and
+   `H` be the oldest active or in-flight snapshot sequence floor, if one
+   exists. Set the retention cut `C = min(F, H)` when `H` exists, otherwise
+   `C = F`. The acquisition guard's temporary zero floor therefore makes
+   `C = 0` until the new durable reader has captured and pinned its view.
+2. Retain every point version with sequence greater than `C`. A later cloud
    frontier may advance through any of these versions before another
    compaction runs; discarding an intermediate version would make that later
    frontier unreadable.
-3. Retain the newest point version at or below `F`, if one exists. This is the
-   point value (or point tombstone) visible at the captured durable cut.
+3. Retain the newest point version at or below `C`, if one exists. This is the
+   point value (or point tombstone) visible at the captured cut. The
+   compaction selector must emit this version chain; applying `C` only to
+   tombstone eligibility is insufficient.
 4. Versions below that floor may be dropped after normal tombstone and
    bottommost proofs permit it. Existing readers continue to use and pin their
    originally captured source generation.
@@ -58,9 +64,12 @@ This design adds retained history to ordinary compaction outputs. It does not
 create a new object or SST generation for each frontier. Jev weakly preferred
 a separately materialized source view (confidence 0.48); the existing fixed
 `ReadSnapshot` plus sequence filtering provides that view, while this retained
-chain supplies its missing historical versions. That source-based assessment
-is the reason for preferring the smaller representation, and remains subject
-to an implementation prototype and adversarial review.
+chain supplies its missing historical versions. In a separate narrow review,
+Jev selected the zero-floor acquisition order with confidence 1.0. Source
+inspection confirms the ordering, but implementation must still make the
+point-version selector consume `C`; the existing snapshot horizon alone does
+not do so. Both choices remain subject to an implementation prototype and
+adversarial review.
 
 ## Enablement and safe reads
 
@@ -76,12 +85,17 @@ to an implementation prototype and adversarial review.
   obsolete versions have actually been removed; a setting change alone does
   not mean retained bytes are zero. Re-enabling after disablement requires a
   new proof or a new store.
-- Add a read-only `begin_tx_at_cloud_durable(cf)` operation. Acquire the
-  snapshot/GC acquisition guard before capture. In one event-loop operation,
-  capture the cloud-durable sequence and the `ReadSnapshot` source view. Pin
-  the captured SST generation before releasing acquisition exclusion. Return
-  only after the pin is registered. The transaction's start sequence is the
-  captured frontier, not a later frontier read from a separate atomic.
+- Add a read-only `begin_tx_at_cloud_durable(cf)` operation. The frontier is
+  not known before capture, so call `begin_acquisition(0)` first. The zero
+  floor is conservative: while the short capture window is open, compaction
+  must preserve every version that could be needed by the durable cut. Then,
+  in one event-loop operation, capture the cloud-durable sequence and the
+  `ReadSnapshot` source view. Register the captured SST generation pin before
+  releasing acquisition exclusion. Return only after the pin is registered.
+  The transaction's start sequence is the captured frontier, not a later
+  frontier read from a separate atomic. Never read the frontier first and pass
+  it to `begin_acquisition`; compaction could discard the cut's floor between
+  that read and guard registration.
 - Apply the existing cloud lease read fence when acquiring and using the
   transaction. Authority loss returns the existing fenced error; it cannot
   silently fall back to local latest reads or return an incomplete durable
@@ -121,3 +135,10 @@ compaction and publication code:
    cannot be lost during manifest rewrite or recovery.
 5. Retained-byte metrics follow published generations, pins, and physical
    reclamation rather than counting planned compaction output as already freed.
+
+The read-acquisition order above follows the current pin-registry contract:
+`begin_acquisition` inserts its in-flight floor before taking capture-to-GC
+exclusion, and the compaction horizon reads the registry's oldest active or
+in-flight sequence. This closes only the capture-to-pin window. It does not
+prove completeness for a store enabled after history was already discarded;
+that remains the persisted readiness/late-enable check in R2 and AC3.
