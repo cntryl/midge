@@ -1201,15 +1201,7 @@ mod cloud_snapshot_orphan_sweep {
             .expect("shutdown reopened engine");
     }
 
-    #[test]
-    fn should_keep_shared_sst_pinned_across_snapshot_generations_until_final_release() {
-        // Arrange: predecessor epoch publishes an SST that the successor may sweep.
-        let directory = tempfile::tempdir().expect("database directory");
-        let root = directory.path();
-        let options = OpenOptions::cloud_simulated(root, "bucket", "snapshot-sweep")
-            .background_compaction(false)
-            .build()
-            .expect("options");
+    fn seed_predecessor_sst(options: &OpenOptions, root: &Path) -> String {
         let mut predecessor = Engine::open(options.clone()).expect("open predecessor");
         let cf = predecessor
             .get_column_family("default")
@@ -1230,9 +1222,20 @@ mod cloud_snapshot_orphan_sweep {
             .shutdown(Duration::from_secs(30))
             .expect("shutdown predecessor");
         drop(predecessor);
+        old_sst
+    }
 
-        // Act: successor compacts while a public transaction holds the old view.
-        let mut successor = Engine::open(options.clone()).expect("open successor");
+    fn publish_compacted_successor(
+        options: &OpenOptions,
+        old_sst: &str,
+        root: &Path,
+    ) -> (
+        Engine,
+        cntryl_midge::Transaction,
+        cntryl_midge::Transaction,
+        (u64, u64, u64),
+    ) {
+        let successor = Engine::open(options.clone()).expect("open successor");
         let cf = successor.get_column_family("default").expect("default CF");
         let snapshot = successor
             .begin_tx(cf.id(), TransactionMode::ReadOnly)
@@ -1285,24 +1288,42 @@ mod cloud_snapshot_orphan_sweep {
                 .all(|file| file.name != old_sst),
             "compaction must retire the predecessor SST"
         );
-        assert!(root.join("cloud_store/sst").join(&old_sst).exists());
-
-        // Assert: a real idle sweep preserves the pinned source and public read.
+        assert!(root.join("cloud_store/sst").join(old_sst).exists());
         let before_sweep = successor
             .metrics()
             .get_runtime_metrics()
             .expect("read initial sweep metrics");
-        let current_lists = wait_for_sweep(&successor, before_sweep.cloud_orphan_list_attempts);
+        (
+            successor,
+            snapshot,
+            later_snapshot,
+            (
+                before_sweep.cloud_orphan_list_attempts,
+                before_sweep.cloud_orphan_delete_attempts,
+                before_sweep.cloud_orphan_retained,
+            ),
+        )
+    }
+
+    fn assert_pinned_snapshots_survive_sweep(
+        successor: &Engine,
+        root: &Path,
+        old_sst: &str,
+        before_sweep: (u64, u64, u64),
+        current_lists: u64,
+        snapshot: &cntryl_midge::Transaction,
+        later_snapshot: &cntryl_midge::Transaction,
+    ) {
         let while_pinned = successor
             .metrics()
             .get_runtime_metrics()
             .expect("read pinned sweep metrics");
-        assert!(while_pinned.cloud_orphan_retained > before_sweep.cloud_orphan_retained);
+        assert!(while_pinned.cloud_orphan_retained > before_sweep.2);
         assert_eq!(
-            while_pinned.cloud_orphan_delete_attempts, before_sweep.cloud_orphan_delete_attempts,
+            while_pinned.cloud_orphan_delete_attempts, before_sweep.1,
             "a sweep must not attempt to delete the pinned predecessor SST"
         );
-        assert!(root.join("cloud_store/sst").join(&old_sst).exists());
+        assert!(root.join("cloud_store/sst").join(old_sst).exists());
         assert_eq!(
             snapshot.get(b"snapshot-key").expect("read pinned value"),
             Some(bytes::Bytes::from_static(b"before"))
@@ -1313,18 +1334,28 @@ mod cloud_snapshot_orphan_sweep {
                 .expect("read later pinned value"),
             Some(bytes::Bytes::from_static(b"after"))
         );
+        assert!(
+            current_lists > before_sweep.0,
+            "the idle sweeper must run at least once"
+        );
+    }
 
-        // Drop the original generation. The later generation was captured
-        // before compaction from a manifest that still named old_sst, so its
-        // shared filename remains protected until this second pin is released.
+    fn release_snapshot_generations_and_reclaim(
+        successor: &Engine,
+        root: &Path,
+        old_sst: &str,
+        current_lists: u64,
+        snapshot: cntryl_midge::Transaction,
+        later_snapshot: cntryl_midge::Transaction,
+    ) {
         drop(snapshot);
         let after_first_release = successor
             .metrics()
             .get_runtime_metrics()
             .expect("read partial-release metrics");
-        wait_for_retained_sweep(&successor, after_first_release.cloud_orphan_retained);
+        wait_for_retained_sweep(successor, after_first_release.cloud_orphan_retained);
         assert!(
-            root.join("cloud_store/sst").join(&old_sst).exists(),
+            root.join("cloud_store/sst").join(old_sst).exists(),
             "shared SST must remain while the later source generation is pinned"
         );
 
@@ -1334,10 +1365,48 @@ mod cloud_snapshot_orphan_sweep {
             .get_runtime_metrics()
             .expect("read post-release sweep metrics");
         wait_for_sweep(
-            &successor,
+            successor,
             metrics.cloud_orphan_list_attempts.max(current_lists),
         );
-        wait_for_remote_reclaim(&successor, root, &old_sst);
+        wait_for_remote_reclaim(successor, root, old_sst);
+    }
+
+    #[test]
+    fn should_keep_shared_sst_pinned_across_snapshot_generations_until_final_release() {
+        // Arrange: predecessor epoch publishes an SST that the successor may sweep.
+        let directory = tempfile::tempdir().expect("database directory");
+        let root = directory.path();
+        let options = OpenOptions::cloud_simulated(root, "bucket", "snapshot-sweep")
+            .background_compaction(false)
+            .build()
+            .expect("options");
+        let old_sst = seed_predecessor_sst(&options, root);
+
+        // Act: successor compacts while both snapshot generations are pinned.
+        let (mut successor, snapshot, later_snapshot, (prior_lists, prior_deletes, prior_retained)) =
+            publish_compacted_successor(&options, &old_sst, root);
+        let current_lists = wait_for_sweep(&successor, prior_lists);
+
+        // Assert: the idle sweep retains both the SST and each public read.
+        assert_pinned_snapshots_survive_sweep(
+            &successor,
+            root,
+            &old_sst,
+            (prior_lists, prior_deletes, prior_retained),
+            current_lists,
+            &snapshot,
+            &later_snapshot,
+        );
+
+        // Release generations in order; reclaim only after the last pin drops.
+        release_snapshot_generations_and_reclaim(
+            &successor,
+            root,
+            &old_sst,
+            current_lists,
+            snapshot,
+            later_snapshot,
+        );
         successor
             .shutdown(Duration::from_secs(30))
             .expect("shutdown successor");
