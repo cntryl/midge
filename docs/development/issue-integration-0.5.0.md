@@ -1944,3 +1944,13 @@ also compares production memtable state after apply with overlay point/range
 sequence and existence answers across two families; it passes, with the
 shrunk absence-fallback case retained in
 `proptest-regressions/runtime/actors/wal/staged_writes.txt`.
+
+### Current #978 execution checkpoint (2026-10-26)
+
+The WAL pipeline regression module passes 15/15 with failpoints enabled,
+including the cross-family partial-spill visibility fence, resident/spill
+prefix ordering, and oversized resident compatibility barrier. The WAL actor
+module passes 72/72, including child-process partial-apply/restart recovery and
+the rejected-write fence beside a partially applied spilled transaction. These
+are local behavioral results; broader crash schedules and hosted performance
+qualification remain separate gates.
