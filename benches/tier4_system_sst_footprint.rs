@@ -125,7 +125,7 @@ fn record_metrics(ctx: &mut StressContext, fixture: &PreparedFixture) {
 }
 
 fn run(ctx: &mut StressContext) {
-    let mut fixture = prepare_fixture();
+    let mut fixture = ctx.measure("fixture_build_and_flush", prepare_fixture);
     record_metrics(ctx, &fixture);
     fixture
         .engine
