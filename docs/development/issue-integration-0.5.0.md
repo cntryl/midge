@@ -1160,9 +1160,12 @@ The initialization protocol distinguishes a new pending namespace from an
 initialized authority: crashes after lease CAS or pointer claim can resume
 safely, while an initialized missing pointer and the prior embedded layout
 fail closed. Active takeover/initialization regressions cover these boundaries.
-Failpoint test targets compile. Versioned shared-codec delta objects, cached
-common-path request counts, retention on their exact dependency closure and the
-crash campaign remain pending.
+Versioned shared-codec delta objects and bounded checkpoint recovery are
+implemented. The failpoint-enabled metadata-snapshot module passes 15/15,
+including takeover ordering, checkpoint-limit replay, ignored uncommitted high
+ordinals and retirement-read admission. The cached common-path request-count
+and 100-edit heartbeat-overlap regressions each pass 1/1. Retention over the
+exact dependency closure and the broader crash/provider campaign remain pending.
 
 ### #923: read-path contention candidate implemented
 
@@ -1298,10 +1301,11 @@ checks ordinal/parent/epoch lineage and reconstructs exact control files. LIST's
 largest uploaded ordinal has no commitment authority. Snapshot resets bound the
 closure (provisional16objects/64MiB,16KiBedit policy).
 
-Active checkpoint/recovery and orphan-high-ordinal regressions are included.
-Library compilation passes; behavioral execution is pending. Cached common-path
-request reduction, #913/#943 retention and crash/provider qualification remain
-required; this commit does not claim the two-request target.
+Active checkpoint/recovery and orphan-high-ordinal regressions pass as part of
+the 15-test metadata-snapshot module. The 100-edit heartbeat overlap and cached
+common-path two-request regression also pass. #913/#943 retention and broader
+crash/provider qualification remain required; local mock results do not qualify
+live-provider behavior.
 
 ### #909: job reservations and immediate follow-up candidate
 
