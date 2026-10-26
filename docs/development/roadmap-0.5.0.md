@@ -40,8 +40,9 @@ The read-path work has since merged; the status below is recorded at
 - **Correctness and assurance use behavioral gates.** Correctness fixes need
   a failing invariant test and a no-regression check on the relevant rows;
   they do not wait for an absolute baseline. Assurance targets specify
-  detection power and compute budget. #929 still owes the committed evidence
-  matrix; it supplies absolute context, not the performance PR pass/fail gate.
+  detection power and compute budget. #929 still owes a concise baseline
+  summary; raw reports and uptime remain attached to GitHub Actions runs.
+  Absolute results supply context, not the performance PR pass/fail gate.
 - **One purpose per issue, one milestone delivery PR.** Issues that bundled
   several changes were split; each has one failure scenario and one proof.
   The 0.5.0 issue work is tracked as issue-scoped commits on one integration
@@ -104,7 +105,7 @@ decisions of Phases 2 and 3; Phase 5 may start any time after Phase 0.
 - #930 Per-operation latency histograms and tracing spans.
 - #936 Hybrid durability contract and a cloud-durable wait API.
 - #937 Tier 2 hybrid lag rows merged in #960; Tier 5 Sqrzl row remains open.
-- #929 Rows and procedure merged in #961; evidence matrix remains open.
+- #929 Rows and procedure merged in #961; baseline summary remains open.
 
 ### Phase 1: read path
 
