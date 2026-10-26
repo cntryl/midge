@@ -40,6 +40,7 @@ check; assurance work specifies detection power and compute budget.
 | hybrid durability lag | `tier2_subsystem_hybrid_durability_lag` | commit latency against cloud-durable lag |
 | YCSB A–F | `tier4_ycsb_workload_a` … `_f` | long-running mixed workloads |
 | recovery | `tier4_system_recovery_throughput` | reopen after flush and compaction |
+| compaction CPU | `tier2_subsystem_compaction` | process CPU nanoseconds per logical input MiB for production `compact_all` over eight independently flushed SSTs |
 
 Keys are 16 bytes and values 100 bytes in the baseline matrix, one operation
 per transaction, to match the `db_bench` workloads the rows are named after.
