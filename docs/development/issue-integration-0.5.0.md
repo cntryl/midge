@@ -972,9 +972,10 @@ staged range deletion and insert-only, and require coalescing while retaining
 failure outcomes. A held-fsync regression also proves an earlier pending Strict
 group invalidates a stale range proof after apply, without partial deletion.
 Detached SST validation has an event-loop open counter and a Tier 2
-SST-backed conflict row. The validation tests passed 27/27; remaining work is
-the exact-source A/B run and remaining AC4 interleavings. The #905 hot-key
-benchmark row is present but unmeasured.
+SST-backed conflict row. At the current head, validation tests pass 21/21, the
+staged-overlay property regression passes 64 generated cases, and write-batch
+tests pass 50/50. Remaining work is the exact-source A/B run and remaining AC4
+interleavings. The #905 hot-key benchmark row is present but unmeasured.
 
 Off-loop snapshot validation rechecks intervening writes against the original
 cut; the shared staged-write overlay also covers earlier in-flight groups.
