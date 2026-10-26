@@ -325,6 +325,7 @@ fn should_fence_runtime_when_storage_acknowledgement_times_out() -> MidgeResult<
     });
     assert!(event_loop.state.persistence_anomaly_detected());
     assert!(!lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+    assert!(!event_loop.actors.wal_actor.is_fenced());
     assert!(matches!(
         event_loop.check_lease_health(),
         Err(MidgeError::Fenced(_))
@@ -1276,7 +1277,8 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
     assert_eq!(fixture.event_loop.actors.wal_actor.append_calls(), 1);
     assert_eq!(fixture.event_loop.actors.wal_actor.sync_calls(), 0);
     assert!(fixture.event_loop.state.persistence_anomaly_detected());
-    assert!(!lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+    assert!(lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+    assert!(fixture.event_loop.actors.wal_actor.is_fenced());
     assert_eq!(
         fixture
             .event_loop
@@ -2448,7 +2450,8 @@ fn should_fence_runtime_when_the_wal_actor_reports_a_fenced_writer() -> MidgeRes
     expect_error(&response, 3, |error| {
         matches!(error, MidgeError::NoSpace(_))
     });
-    assert!(!lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+    assert!(lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+    assert!(event_loop.actors.wal_actor.is_fenced());
     Ok(())
 }
 

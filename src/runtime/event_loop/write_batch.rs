@@ -856,8 +856,13 @@ impl EventLoop {
         ) || self.actors.wal_actor.is_fenced();
         if must_fence {
             self.state.mark_persistence_anomaly();
-            if let Some(healthy) = &self.authority.fencing.lease_healthy {
-                healthy.store(false, std::sync::atomic::Ordering::Release);
+            // WAL persistence ambiguity is tracked by the WAL actor fence.
+            // Keep lease health independent so already-applied data can still
+            // be flushed and recovered; true lease failures remain lease-owned.
+            if !self.actors.wal_actor.is_fenced() {
+                if let Some(healthy) = &self.authority.fencing.lease_healthy {
+                    healthy.store(false, std::sync::atomic::Ordering::Release);
+                }
             }
             tracing::error!(
                 request_id,

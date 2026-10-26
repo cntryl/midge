@@ -981,6 +981,11 @@ impl WalActor {
         state: &mut RuntimeState,
         durability_policy: DurabilityPolicy,
     ) -> MidgeResult<()> {
+        // A fenced filesystem WAL cannot safely accept even BestEffort writes:
+        // without a writer they would otherwise be applied only in memory.
+        if self.is_fenced() {
+            return self.ensure_filesystem_wal_available(state);
+        }
         if matches!(durability_policy, DurabilityPolicy::BestEffort) {
             return Ok(());
         }
