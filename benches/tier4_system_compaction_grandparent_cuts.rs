@@ -30,6 +30,7 @@ const WRITE_BATCH: usize = 2_000;
 const MIN_GRANDPARENT_OVERLAP_BYTES: u64 = 320 * 1024 * 1024;
 const WRITE_STALL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 const MAX_SETUP_COMPACTION_PASSES: usize = 8;
+const SETUP_COMPACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn data_path() -> PathBuf {
     let root = PathBuf::from("target/tmp");
@@ -151,19 +152,40 @@ fn describe_layout(engine: &Engine) -> String {
 }
 
 fn compact_to_stable_layout(engine: &Engine) {
-    for _ in 0..MAX_SETUP_COMPACTION_PASSES {
+    let deadline = Instant::now() + SETUP_COMPACTION_TIMEOUT;
+    let mut compaction_passes = 0;
+    loop {
         let before = layout_fingerprint(engine);
         engine.compact_all().expect("compact benchmark data");
         let after = layout_fingerprint(engine);
-        if before == after {
+        let runtime = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("read benchmark runtime metrics");
+        let layout_is_idle = runtime.active_compactions == 0
+            && runtime.compacting_ssts == 0
+            && runtime.flush_inflight == 0
+            && runtime.flush_queue_depth == 0;
+        if before == after && layout_is_idle {
             assert!(
                 after.iter().all(|(level, _, _, _)| *level != 0),
                 "stable benchmark layout must not retain L0 files"
             );
             return;
         }
+        if before != after {
+            compaction_passes += 1;
+            assert!(
+                compaction_passes <= MAX_SETUP_COMPACTION_PASSES,
+                "benchmark storage layout did not stabilize after compaction passes"
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "benchmark compaction did not become idle before the setup timeout"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    panic!("benchmark storage layout did not stabilize after compaction passes");
 }
 
 #[derive(Debug, Default)]
@@ -318,11 +340,19 @@ fn record_measurement(
     );
     ctx.parameter("compaction_metric", "published compaction output SST bytes");
     ctx.parameter("flush_bytes_in_compaction_metric", "false");
-    let layout_fingerprint =
-        xxh3_64_with_seed(initial_layout.as_bytes(), SEED) & ((1_u64 << 53) - 1);
+    let layout_fingerprint = xxh3_64_with_seed(initial_layout.as_bytes(), SEED);
     ctx.record_observation(
-        "pre_measurement_layout_fingerprint",
-        layout_fingerprint as f64,
+        "pre_measurement_layout_fingerprint_high",
+        f64::from(u32::try_from(layout_fingerprint >> u32::BITS).expect("upper half fits in u32")),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "pre_measurement_layout_fingerprint_low",
+        f64::from(
+            u32::try_from(layout_fingerprint & u64::from(u32::MAX))
+                .expect("lower half fits in u32"),
+        ),
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );

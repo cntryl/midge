@@ -396,6 +396,59 @@ fn should_reuse_free_compute_slot_immediately_when_publication_leaves_level_debt
 }
 
 #[test]
+fn should_keep_compact_all_waiting_for_an_existing_background_compaction() -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange: hold a real compaction worker after it becomes active, then
+    // issue CompactAll while the actor cannot schedule another plan.
+    let mut fixture = ConcurrentFixture::new(16 * 1024 * 1024, false)?;
+    let source = fixture.file(1, 1, b"a", b"value", 1)?;
+    fixture.persist()?;
+    let held = HeldComputes::new();
+    fixture
+        .event_loop
+        .launch_compaction(fixture.plan(&source, 1, 2))?;
+    held.enter();
+    fixture.event_loop.routing.runtime_response_timeout = Duration::from_secs(10);
+    let request_id = 91_713;
+    let response = fixture.event_loop.routing.router.register_at_for_test(
+        request_id,
+        "CompactAll",
+        Instant::now(),
+    );
+
+    // Act: CompactAll must retain its waiter while the existing compute is held.
+    CompactionCoordinator::compact_all(&mut fixture.event_loop, request_id);
+
+    // Assert: it cannot acknowledge quiescence before the active compute settles.
+    assert!(response.try_recv().is_err());
+    assert!(fixture
+        .event_loop
+        .state
+        .pending_compaction_waits
+        .contains_key(&request_id));
+    assert_eq!(
+        fixture
+            .event_loop
+            .state
+            .active_compactions
+            .load(Ordering::Acquire),
+        1
+    );
+
+    held.release.send(()).unwrap();
+    fixture.drain();
+    let result = response.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(result, RuntimeResponse::Ok { request_id: id } if id == request_id));
+    assert!(fixture.event_loop.state.pending_compaction_waits.is_empty());
+
+    fail::remove("midge::compaction::before_compute");
+    drop(held);
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
 fn should_reject_conflicting_reserved_span_while_an_independent_job_publishes() -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
