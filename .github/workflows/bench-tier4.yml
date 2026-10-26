@@ -263,7 +263,7 @@ jobs:
           set -euo pipefail
           [[ "$BENCH_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]
           cp ".benchmark-overlay/benches/${BENCH_NAME}.rs" "benches/${BENCH_NAME}.rs"
-          if ! rg -Fq "name = \"${BENCH_NAME}\"" Cargo.toml; then
+          if ! grep -Fq "name = \"${BENCH_NAME}\"" Cargo.toml; then
             printf '\n[[bench]]\nname = "%s"\npath = "benches/%s.rs"\nharness = false\n' \
               "$BENCH_NAME" "$BENCH_NAME" >> Cargo.toml
           fi
