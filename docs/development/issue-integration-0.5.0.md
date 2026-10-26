@@ -1186,9 +1186,10 @@ capture/registration exclusion boundary.
 
 Active regressions cover nonfinal release with the wait mutex held, final
 release racing wait setup, coherent authority reads with renewal locked, and
-10,000 snapshots across generations sharing a filename. Failpoint test targets
-compile. Existing read-fencing and #341/#342 tests are retained unchanged;
-execution and the named 32-client A/B target/evidence remain pending acceptance.
+10,000 snapshots across generations sharing a filename. Current behavior tests
+pass: lifecycle 2/2, snapshot pins 14/14, lease validity 2/2, and read-authority
+fencing 4/4. Existing read-fencing and #341/#342 tests are retained unchanged;
+the named 32-client A/B target/evidence remains pending acceptance.
 
 The #940/#978 receipt prerequisite now records the pre-I/O end offset, actual
 appended sequence, pending counts, epoch and segment. Ticketed completion binds
@@ -1204,9 +1205,10 @@ The #923 fast path also covers `LeaseValidity::remaining`, which the actual
 before/after read-authority wrapper calls. A valid published deadline returns
 without the renewal mutex. Expiry takes the writer lock to recheck the current
 deadline before fencing, so a timely concurrent renewal is preserved. The
-held-renewal regression now exercises both the tuple snapshot and remaining
-validity. The current combined check is blocked by concurrent multipart
-provider interface edits; this follow-up has not executed its tests.
+two held-renewal regressions pass: one captures both the tuple snapshot and
+remaining validity while renewal is locked, and one preserves a timely renewal
+when an expiry check resumes from a stale snapshot. The named 32-client A/B
+remains pending.
 
 ### #940: ordered visibility decision reconciled
 
