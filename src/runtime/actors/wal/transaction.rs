@@ -718,7 +718,10 @@ impl WalActor {
         }
 
         if self.writer().is_some() {
+            #[cfg(feature = "failpoints")]
             Self::prepared_append_failpoints(prepared_transactions)?;
+            #[cfg(not(feature = "failpoints"))]
+            Self::prepared_append_failpoints(prepared_transactions);
         }
 
         let admitted = self.admit_wal_records(&records)?;
@@ -765,6 +768,7 @@ impl WalActor {
         Ok(())
     }
 
+    #[cfg(feature = "failpoints")]
     pub(super) fn prepared_append_failpoints(
         prepared_transactions: &[PreparedTransactionAppend],
     ) -> MidgeResult<()> {
@@ -784,6 +788,10 @@ impl WalActor {
         );
         crate::failpoints::fail_point!("midge::wal::txn_after_ops_append_before_commit");
         Ok(())
+    }
+
+    #[cfg(not(feature = "failpoints"))]
+    pub(super) fn prepared_append_failpoints(_prepared_transactions: &[PreparedTransactionAppend]) {
     }
 
     #[cfg(all(test, feature = "failpoints"))]

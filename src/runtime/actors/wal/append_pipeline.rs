@@ -21,7 +21,10 @@ impl WalActor {
         root: Option<crate::lease::WriterEffectGroup>,
         authority_prevalidated: bool,
     ) -> MidgeResult<PendingStrictAppend> {
+        #[cfg(feature = "failpoints")]
         Self::prepared_append_failpoints(prepared)?;
+        #[cfg(not(feature = "failpoints"))]
+        Self::prepared_append_failpoints(prepared);
         let units = prepared
             .iter()
             .filter_map(|unit| unit.wal_batch.unit.clone())

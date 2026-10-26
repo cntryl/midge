@@ -129,7 +129,7 @@ impl CompactionActor {
     pub(crate) fn total_memory_limit(&self) -> usize {
         self.global_memory_limit
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "failpoints"))]
     pub(in crate::runtime) fn shared_memory_usage(&self) -> (usize, usize) {
         (self.memory.used(), self.memory.peak())
     }
