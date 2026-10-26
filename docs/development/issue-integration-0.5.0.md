@@ -41,6 +41,26 @@ currently cover these slices:
 | `a32cb816` | #927 proves a conditional immutable PUT that commits before its success response is lost is not blindly replayed | Jev selected this production HTTP regression (1.0); the exact test applies one object, drops the first response, and passed with an ambiguous error, preserved If-None-Match/body, and exactly one request (1/1); file-level rustfmt check and `git diff --check` passed | 10,000-SST cold-start A/B and Sqrzl provider qualification |
 | `fec81371` | #927 adds `tier4_recovery_cloud_inventory_10k` and measures the production startup inventory path on 10,000 mock SST objects | Three alternating pairs at serial base `b1f36ecc` and bounded-concurrency candidate `aca68bed` show 31.38x median throughput (31.34–31.42x); all six row qualities are acceptable with 0.39–2.15% RSD. The fixed-work row is `trust_class=diagnostic` and each filtered command exits nonzero because the diagnostic-only invocation has no intended gate rows; no green Tier 4 suite claim is made. Jev judged AC1 met with this boundary (0.76). Inventory recovery module passed 4/4, immutable transient/reconciliation test passed 1/1, strict all-target/all-feature Clippy and `cargo fmt --check` passed. Raw artifacts and harness classification: `docs/development/evidence/issue-927-inventory-ab-2026-10-26/` | Sqrzl/provider qualification for late/unknown mutation outcomes and the provider recovery matrix remain open; #927 stays open |
 
+### Current #908 validation checkpoint (2026-10-26)
+
+At `59afeae9`, the focused public backpressure suite passed 4/4, including
+soft-band delay with restart visibility, hard L0 rejection, pending-byte
+rejection before sequence allocation, and unchanged defaults. The caller
+deadline regression passed 1/1 and confirms no request is queued after the
+slowdown deadline; the runtime soft-band behavior test passed 1/1. The shared
+worker limiter released promptly under hard pressure (1/1), and concurrent
+flush/compaction SST writers used one shared schedule with exact output
+identity preserved (1/1). Commands were:
+
+- `cargo test --locked --test write_backpressure -- --nocapture`
+- `cargo test --locked --lib common::write_rate::tests -- --nocapture`
+- `cargo test --locked --lib sst::fs::factory_io::tests::write_rate -- --nocapture`
+- `cargo test --locked --lib runtime::handle::write_admission_tests -- --nocapture`
+- `cargo test --locked --lib runtime::tests::should_slow_commit_inside_l0_soft_band_without_hard_stall -- --nocapture`
+
+These runs establish focused behavior only. #908's sustainable-load three-pair
+latency A/B remains unmeasured and belongs on the hosted benchmark runner.
+
 Jev judgments informed the design reviews; implementation source and behavior
 tests remain the correctness evidence. Parallel Jev-reviewed slices found
 #947's proposed framing optimizations and #911's checkpoint failure handling
