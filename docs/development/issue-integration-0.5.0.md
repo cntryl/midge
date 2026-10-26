@@ -1541,9 +1541,11 @@ metrics without attempting DELETE; after releasing the final pin, a subsequent
 sweep reclaims the remote SST. Removing the sweep deletion gate makes this
 test fail (two DELETE attempts while pinned); restoring the gate passes in
 61.47 seconds. This supplies AC3's public read/sweep/reclaim evidence for
-CloudSimulated only. AC6's sweep-enabled crash campaign remains open, as do
-native-provider qualification and the general SST orphan and catalog-anchor
-WAL rediscovery evidence.
+CloudSimulated only. The AC6 sweep-enabled process-abort regression now passes
+1/1: the orphan survives the crash, a cold successor preserves selected data,
+and the scheduled sweep reclaims the orphan within the measured LIST/probe/
+delete bounds. Native-provider qualification and the general SST orphan and
+catalog-anchor WAL rediscovery evidence remain open.
 
 #908 adds opt-in caller-side admission slowdown below existing L0/memory
 ceilings, an estimated pending-compaction byte band/hard limit and a shared
