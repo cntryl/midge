@@ -32,6 +32,8 @@ No failed move uses rewrite-output cleanup on the reused source names.
 Active regressions cover zero compaction readers/writers, point and scan
 visibility through restart, hot B/cold A L0 overlap, unknown/range bounds,
 late target conflicts, changed source order, atomic idempotent replay and
-failures immediately before/after the durable move edit. Compilation is complete;
-behavior execution and the #935 ingest A/B write-amplification measurement remain
-pending. No throughput or write-amplification delta is claimed yet.
+failures immediately before/after the durable move edit. Compilation and focused
+behavior execution are complete. The fixed-work ingest write-amplification
+benchmark remains available for progress visibility, but its delta is
+informational and is not a #926 closure gate. No throughput or
+write-amplification improvement claim is made.

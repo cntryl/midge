@@ -8,6 +8,29 @@ on:
         type: choice
         options: [smoke, standard, extended]
         default: standard
+      run_mode:
+        description: Run the full Tier 4 matrix or one named benchmark workload
+        type: choice
+        options: [full, targeted]
+        default: full
+      bench:
+        description: Cargo benchmark target for targeted mode
+        type: string
+        default: ""
+      workload:
+        description: cntryl-stress workload name for targeted mode
+        type: string
+        default: ""
+      samples:
+        description: Measured samples per workload
+        type: choice
+        options: [5, 10]
+        default: "5"
+      warmup_samples:
+        description: Warmup samples per workload
+        type: choice
+        options: [1, 2]
+        default: "1"
 
 permissions:
   contents: read
@@ -20,6 +43,7 @@ jobs:
   bench:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
+    if: inputs.run_mode == 'full'
 
     strategy:
       fail-fast: false
@@ -31,6 +55,8 @@ jobs:
             workload: tier4_streaming_cloud
           - bench: tier4_system_compaction_backpressure
             workload: tier4_compaction_write_backpressure_local
+          - bench: tier4_system_compaction_backpressure
+            workload: tier4_compaction_time_ordered_ingest_write_amplification
           - bench: tier4_system_compression_policy
             workload: latency_policy_repeated
           - bench: tier4_system_compression_policy
@@ -188,13 +214,41 @@ jobs:
         run: rustup update stable
 
       - name: Run benchmarks
-        run: cargo bench --locked --bench '${{ matrix.bench }}' -- --workload '${{ matrix.bench }}::${{ matrix.workload }}'
+        run: cargo bench --locked --bench '${{ matrix.bench }}' -- --workload '${{ matrix.bench }}::${{ matrix.workload }}' --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress --require-quiet-env
 
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: bench-tier4-${{ matrix.workload }}-${{ github.sha }}
+          path: |
+            target/stress/**
+            target/midge-stress/**
+          if-no-files-found: ignore
+
+  targeted:
+    if: inputs.run_mode == 'targeted'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      BENCH_NAME: ${{ inputs.bench }}
+      WORKLOAD_NAME: ${{ inputs.workload }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
+      - name: Run targeted benchmark
+        run: cargo bench --locked --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress --require-quiet-env
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier4-${{ inputs.workload }}-${{ github.sha }}
           path: |
             target/stress/**
             target/midge-stress/**

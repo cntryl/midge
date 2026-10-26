@@ -6,7 +6,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::{Engine, MidgeError, WriteOptions};
+use cntryl_midge::{Engine, MidgeError, TransactionMode, WriteOptions};
 use cntryl_stress::{
     stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
     StressContext,
@@ -39,6 +39,7 @@ fn make_value(fill: u8) -> [u8; VALUE_SIZE] {
 const WRITERS: usize = 1;
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(8);
+const TIME_ORDERED_INGEST_WRITES: u64 = 16_384;
 const COMPACTION_CONCURRENCY_ENV: &str = "MIDGE_COMPACTION_CONCURRENCY";
 
 fn compaction_concurrency() -> usize {
@@ -344,6 +345,179 @@ fn record_backpressure_observations(
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );
+}
+
+fn write_time_ordered_ingest(engine: &Engine, cf_id: u32) {
+    for batch_start in (0..TIME_ORDERED_INGEST_WRITES).step_by(WRITE_BATCH_SIZE) {
+        let batch_end = batch_start
+            .saturating_add(u64::try_from(WRITE_BATCH_SIZE).expect("batch size fits u64"))
+            .min(TIME_ORDERED_INGEST_WRITES);
+        loop {
+            let mut transaction = engine
+                .begin_tx(cf_id, TransactionMode::ReadWrite)
+                .expect("begin time-ordered ingest transaction");
+            for sequence in batch_start..batch_end {
+                transaction
+                    .put(
+                        ycsb::make_key(sequence).to_vec(),
+                        make_value(u8::try_from(sequence % 251).expect("value byte fits u8"))
+                            .to_vec(),
+                        None,
+                    )
+                    .expect("stage time-ordered ingest value");
+            }
+            match transaction.commit(WriteOptions::buffered()) {
+                Ok(()) => break,
+                Err(MidgeError::WriteStall(_)) => {
+                    engine
+                        .wait_for_write_stall_clear(cf_id, Duration::from_secs(30))
+                        .expect("wait for time-ordered ingest stall");
+                }
+                Err(error) => panic!("commit time-ordered ingest batch: {error}"),
+            }
+        }
+    }
+}
+
+fn logical_move_from_layouts(
+    files_before: &[cntryl_midge::StorageFileLayout],
+    files_after: &[cntryl_midge::StorageFileLayout],
+    output_bytes: u64,
+    compactions_run: u64,
+) -> bool {
+    assert!(!files_before.is_empty(), "fixture must produce L0 SSTs");
+    assert!(files_before.iter().all(|file| file.level == 0));
+    assert!(!files_after.is_empty(), "compaction must preserve SSTs");
+    assert!(files_after.iter().all(|file| file.level != 0));
+    let mut before_names: Vec<_> = files_before.iter().map(|file| file.name.as_str()).collect();
+    let mut after_names: Vec<_> = files_after.iter().map(|file| file.name.as_str()).collect();
+    before_names.sort_unstable();
+    after_names.sort_unstable();
+    let logical_move = before_names == after_names;
+    assert_eq!(logical_move, output_bytes == 0);
+    assert!(logical_move || compactions_run > 0);
+    logical_move
+}
+
+fn record_time_ordered_ingest_result(
+    ctx: &mut StressContext,
+    elapsed: Duration,
+    logical_move: bool,
+    compactions_run: u64,
+    output_bytes: u64,
+) {
+    let logical_ingest_bytes = TIME_ORDERED_INGEST_WRITES
+        .saturating_mul(u64::try_from(ycsb::KEY_SIZE + VALUE_SIZE).expect("write bytes fit u64"));
+    ctx.parameter("storage_profile", "local_filesystem");
+    ctx.parameter("measurement_window_shape", "fixed_workload");
+    ctx.parameter("logical_writes", TIME_ORDERED_INGEST_WRITES);
+    ctx.parameter("writers", 1);
+    ctx.parameter("write_batch_size", WRITE_BATCH_SIZE);
+    ctx.parameter("value_size_bytes", VALUE_SIZE);
+    ctx.parameter("memtable_size_bytes", 64 * 1024 * 1024);
+    ctx.parameter(
+        "compaction_output_metric",
+        "published compaction output SST bytes",
+    );
+    ctx.parameter("flush_bytes_in_compaction_output_metric", false);
+    ctx.record_observation(
+        "logical_move_completed",
+        if logical_move { 1.0 } else { 0.0 },
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "compactions_run",
+        counter_as_f64(compactions_run),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_external_outcome(
+        "tier4_time_ordered_ingest_write_amplification",
+        elapsed,
+        LogicalUnit::new("write"),
+        OperationOutcome::success(TIME_ORDERED_INGEST_WRITES),
+    );
+    ctx.record_observation(
+        "compaction_output_bytes",
+        counter_as_f64(output_bytes),
+        ObservationUnit::Bytes,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "compaction_output_bytes_per_logical_ingest_byte",
+        counter_as_f64(output_bytes) / counter_as_f64(logical_ingest_bytes.max(1)),
+        ObservationUnit::Ratio,
+        ObservationDirection::LowerIsBetter,
+    );
+}
+
+fn tier4_time_ordered_ingest_write_amplification(ctx: &mut StressContext) {
+    stress_config::init_benchmark_telemetry().expect("initialize benchmark telemetry");
+    let mut opts = stress_config::opts_for_mode("local");
+    opts.enable_compaction = false;
+    opts.memtable_size = 64 * 1024 * 1024;
+    let mut engine = Engine::open(opts.to_open_options()).expect("open time-ordered ingest engine");
+    let cf = engine
+        .create_column_family("time-ordered-ingest")
+        .expect("create time-ordered ingest column family");
+    let before = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("read compaction metrics before ingest");
+    let started = Instant::now();
+    write_time_ordered_ingest(&engine, cf.id());
+    engine.flush_cf(&cf).expect("flush time-ordered ingest");
+    let files_before = engine
+        .metrics()
+        .get_storage_layout()
+        .expect("read layout before compaction");
+    let files_before: Vec<_> = files_before
+        .levels
+        .into_iter()
+        .flat_map(|level| level.files)
+        .filter(|file| file.cf_id == cf.id())
+        .collect();
+    engine
+        .compact_all()
+        .expect("compact time-ordered ingest files");
+    let elapsed = started.elapsed();
+    let after = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("read compaction metrics after ingest");
+    let files_after = engine
+        .metrics()
+        .get_storage_layout()
+        .expect("read layout after compaction");
+    let files_after: Vec<_> = files_after
+        .levels
+        .into_iter()
+        .flat_map(|level| level.files)
+        .filter(|file| file.cf_id == cf.id())
+        .collect();
+    let output_bytes = after
+        .compaction_bytes_rewritten
+        .saturating_sub(before.compaction_bytes_rewritten);
+    let compactions_run = after.compactions_run.saturating_sub(before.compactions_run);
+    let logical_move =
+        logical_move_from_layouts(&files_before, &files_after, output_bytes, compactions_run);
+    record_time_ordered_ingest_result(ctx, elapsed, logical_move, compactions_run, output_bytes);
+    engine
+        .shutdown(Duration::from_secs(30))
+        .expect("shutdown time-ordered ingest engine");
+}
+
+#[stress(
+    tier = 4,
+    metadata(
+        component = "logical_sst_moves",
+        scenario = "fixed_ingest",
+        measurement_shape = "fixed_workload"
+    )
+)]
+fn tier4_compaction_time_ordered_ingest_write_amplification(ctx: &mut StressContext) {
+    tier4_time_ordered_ingest_write_amplification(ctx);
 }
 
 #[stress(tier = 4)]

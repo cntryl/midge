@@ -8,6 +8,29 @@ on:
         type: choice
         options: [smoke, standard, extended]
         default: standard
+      run_mode:
+        description: Run the full Tier 2 matrix or one named benchmark workload
+        type: choice
+        options: [full, targeted]
+        default: full
+      bench:
+        description: Cargo benchmark target for targeted mode
+        type: string
+        default: ""
+      workload:
+        description: cntryl-stress workload name for targeted mode
+        type: string
+        default: ""
+      samples:
+        description: Measured samples per workload
+        type: choice
+        options: [5, 10]
+        default: "5"
+      warmup_samples:
+        description: Warmup samples per workload
+        type: choice
+        options: [1, 2]
+        default: "1"
 
 permissions:
   contents: read
@@ -20,6 +43,7 @@ jobs:
   bench:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
+    if: inputs.run_mode == 'full'
 
     strategy:
       fail-fast: false
@@ -49,13 +73,42 @@ jobs:
         run: rustup update stable
 
       - name: Run benchmarks
-        run: cargo bench --locked --bench '${{ matrix.bench }}'
+        run: cargo bench --locked --bench '${{ matrix.bench }}' -- --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress --require-quiet-env
 
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: bench-tier2-${{ matrix.bench }}-${{ github.sha }}
+          path: |
+            target/stress/**
+            target/midge-stress/**
+          if-no-files-found: ignore
+
+  targeted:
+    if: inputs.run_mode == 'targeted'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      STRESS_PROFILE: ${{ inputs.profile == 'smoke' && 'smoke' || inputs.profile == 'extended' && 'lab' || 'default' }}
+      BENCH_NAME: ${{ inputs.bench }}
+      WORKLOAD_NAME: ${{ inputs.workload }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
+      - name: Run targeted benchmark
+        run: cargo bench --locked --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress --require-quiet-env
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier2-${{ inputs.workload }}-${{ github.sha }}
           path: |
             target/stress/**
             target/midge-stress/**
