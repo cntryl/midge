@@ -111,7 +111,7 @@ struct ValidationWorker {
 }
 
 impl ValidationWorker {
-    fn new() -> MidgeResult<Self> {
+    fn new(wake: Option<Sender<RuntimeMsg>>) -> MidgeResult<Self> {
         let (requests, incoming) =
             crossbeam::channel::bounded::<ValidationTask>(MAX_VALIDATION_JOBS);
         let (completed, completions) = crossbeam::channel::unbounded();
@@ -126,6 +126,9 @@ impl ValidationWorker {
                     for job in incoming {
                         if completed.send(job.read(&cancellation)).is_err() {
                             break;
+                        }
+                        if let Some(wake) = &wake {
+                            let _ = wake.send(RuntimeMsg::ValidationReady);
                         }
                         // One streaming workspace may survive in a completed
                         // first-error key. Wait until the loop consumes it
@@ -302,7 +305,8 @@ impl EventLoop {
             .reserve(metadata_bytes, "detached transaction validation")?;
         let job = self.capture_validation_job(request, reservation)?;
         if self.pipeline.validation.worker.is_none() {
-            self.pipeline.validation.worker = Some(ValidationWorker::new()?);
+            self.pipeline.validation.worker =
+                Some(ValidationWorker::new(self.pipeline.worker_msg_tx.clone())?);
         }
         let worker = self
             .pipeline

@@ -42,6 +42,7 @@ impl RuntimeDispatcher {
                 event_loop.progress_wal_pipeline();
                 HandleOutcome::Continue
             }
+            RuntimeMsg::ValidationReady => Self::validation_ready(event_loop, msg_rx),
             RuntimeMsg::CheckWriteStall { request_id, cf_id } => {
                 event_loop.handle_check_write_stall(request_id, cf_id);
                 HandleOutcome::Continue
@@ -122,6 +123,14 @@ impl RuntimeDispatcher {
             RuntimeMsg::Test(msg) => Self::handle_test_message(event_loop, msg, msg_rx),
             _ => unreachable!("message handled before dispatch routing"),
         }
+    }
+
+    fn validation_ready(
+        event_loop: &mut EventLoop,
+        msg_rx: &Receiver<RuntimeMsg>,
+    ) -> HandleOutcome {
+        event_loop.drain_validation_results(msg_rx);
+        HandleOutcome::Continue
     }
 
     fn handle_early_control(event_loop: &mut EventLoop, msg: &RuntimeMsg) -> Option<HandleOutcome> {

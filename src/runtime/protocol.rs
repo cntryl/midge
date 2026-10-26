@@ -492,6 +492,8 @@ pub enum RuntimeMsg {
     RetryGc,
     /// Wake loop-owned settlement after an admitted memtable effect finishes.
     MemtableApplyProgress,
+    /// Wake the event loop after detached transaction validation is ready.
+    ValidationReady,
 
     /// Test-only actor entry point; see [`TestRuntimeMsg`].
     ///
@@ -759,6 +761,7 @@ impl RuntimeMsg {
             | RuntimeMsg::CancelWaitForWriteStallClear { .. }
             | RuntimeMsg::Shutdown
             | RuntimeMsg::MemtableApplyProgress
+            | RuntimeMsg::ValidationReady
             | RuntimeMsg::RetryGc => None,
 
             RuntimeMsg::Test(msg) => msg.request_id(),
@@ -768,6 +771,7 @@ impl RuntimeMsg {
     pub fn kind_name(&self) -> &'static str {
         match self {
             RuntimeMsg::MemtableApplyProgress => "MemtableApplyProgress",
+            RuntimeMsg::ValidationReady => "ValidationReady",
             RuntimeMsg::FlushMemtable { .. } => "FlushMemtable",
             RuntimeMsg::CompactionComplete { .. } => "CompactionComplete",
             RuntimeMsg::ApplyTransaction { .. } => "ApplyTransaction",
