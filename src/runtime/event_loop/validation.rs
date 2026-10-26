@@ -338,12 +338,22 @@ impl EventLoop {
         let applied_sequence = self.state.applied_sequence;
         let registry = Arc::clone(&self.state.snapshot_pins);
         let acquisition = registry.begin_acquisition(applied_sequence);
-        let mut families = Self::transaction_cf_ids(&request.ops)
-            .into_iter()
-            .collect::<HashSet<_>>();
+        // Collect operation and assertion families once, then deduplicate in
+        // place. The previous path built a deduplicated Vec, collected it
+        // into another HashSet, and extended that set before building the
+        // snapshot map.
+        let mut families =
+            Vec::with_capacity(request.ops.len().saturating_add(request.assertions.len()));
+        families.extend(request.ops.iter().map(|op| match op {
+            TransactionOp::Put { cf_id, .. }
+            | TransactionOp::Delete { cf_id, .. }
+            | TransactionOp::DeleteRange { cf_id, .. } => *cf_id,
+        }));
         families.extend(request.assertions.iter().map(|assertion| assertion.cf_id));
-        let mut snapshots = HashMap::new();
-        let mut pins = Vec::new();
+        families.sort_unstable();
+        families.dedup();
+        let mut snapshots = HashMap::with_capacity(families.len());
+        let mut pins = Vec::with_capacity(families.len());
         for cf_id in families {
             let snapshot = self.create_read_snapshot(cf_id).ok_or_else(|| {
                 MidgeError::InvalidArgument(format!("column family {cf_id} does not exist"))
