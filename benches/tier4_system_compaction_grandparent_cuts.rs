@@ -17,6 +17,7 @@ use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use std::path::PathBuf;
 use std::time::Instant;
+use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 const BENCHMARK: &str = "tier4_system_compaction_grandparent_cuts";
 const SEED: u64 = 0x9480_2026_1006;
@@ -317,7 +318,15 @@ fn record_measurement(
     );
     ctx.parameter("compaction_metric", "published compaction output SST bytes");
     ctx.parameter("flush_bytes_in_compaction_metric", "false");
-    ctx.parameter("pre_measurement_layout", initial_layout);
+    let layout_fingerprint =
+        xxh3_64_with_seed(initial_layout.as_bytes(), SEED) & ((1_u64 << 53) - 1);
+    ctx.record_observation(
+        "pre_measurement_layout_fingerprint",
+        layout_fingerprint as f64,
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    eprintln!("midge948_pre_measurement_layout={initial_layout}");
     ctx.record_external_outcome(
         "sustained_write_throughput_under_compaction",
         elapsed,
