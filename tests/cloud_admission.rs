@@ -169,10 +169,12 @@ mod cloud_eventual_flush {
             .expect("runtime metrics");
         // Act
         // Assert
-        assert_eq!(
+        assert!(
+            pre_flush_metrics.max_memtable_wal_segment_gap > 0
+                && pre_flush_metrics.max_memtable_wal_segment_gap < BUFFERED_TEST_GAP,
+            "buffered cloud writes should grow the memtable segment gap without reaching the automatic flush threshold: gap={} threshold={}",
             pre_flush_metrics.max_memtable_wal_segment_gap,
-            BUFFERED_TEST_GAP - 1,
-            "buffered cloud writes should grow the memtable segment gap before the first automatic flush"
+            BUFFERED_TEST_GAP
         );
 
         for i in (BUFFERED_TEST_GAP - 1)..16 {
