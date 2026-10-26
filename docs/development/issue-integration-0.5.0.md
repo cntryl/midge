@@ -1126,8 +1126,10 @@ timeout after catalog CAS and wrong-epoch completion while the matching
 operation remains active. Metadata mirror and CloudAsync seal use owned worker
 paths. A new injected object-store test blocks the actual provider write, then
 observes local transaction acknowledgement and read visibility before releasing
-it; the six-test metadata-mirror module passes. The provider-latency A/B,
-publication crash campaigns and broader reorder/duplicate matrix remain open.
+it; the six-test metadata-mirror module passes. At the current head, the
+publication-worker module passes 2/2, catalog tests pass 9/9, and the four-ACK
+reordering/retry regression passes 1/1. The provider-latency A/B, publication
+crash campaigns and broader reorder/duplicate matrix remain open.
 No publication batching interval is selected before #916's
 measurements justify one. Mirror authority/repair semantics remain unchanged.
 
