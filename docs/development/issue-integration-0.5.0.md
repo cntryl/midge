@@ -1239,10 +1239,9 @@ Active local/simulated-cloud regressions retain reads, cached scans and an
 uncommitted writer across Engine drop, then require successor recovery plus
 Fenced old operations. Another holds an admitted Strict WAL unit at its sync
 boundary: the client becomes fenced but successor acquisition remains excluded
-until the unit drains, after which the acknowledged value recovers. Existing
-graceful/retry and outliving-transaction tests remain active. Combined failpoint
-test targets compile; execution and broader blocked-provider campaigns remain
-pending.
+until the unit drains, after which the acknowledged value recovers. The focused
+failpoint-enabled drop-reaper module passes 2/2. Broader blocked-provider and
+remaining AC4 policy-matrix review remain pending.
 
 The following #940 slice adds nonblocking lower-writer sync submission. Typed
 prefix/completion identities bind barrier, epoch, segment, sequence range and
