@@ -162,6 +162,11 @@ jobs:
             (cd "$source" && cargo bench --locked --no-run --bench "$BENCH_NAME")
           done
 
+      - name: Let prebuild load clear before measurements
+        run: |
+          sleep 65
+          uptime
+
       - name: Run alternating A/B samples on this runner
         run: |
           set -euo pipefail
