@@ -356,6 +356,65 @@ fn should_keep_fragment_ordinals_contiguous_when_a_soft_roll_precedes_an_empty_c
 }
 
 #[test]
+fn should_keep_exact_finalized_identity_for_each_soft_roll_output() -> MidgeResult<()> {
+    // Arrange
+    let fs = Arc::new(crate::io::MockFs::new());
+    let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
+    let mut plan = CompactionPlan::new(0, 1, 2).with_output_seq(949);
+    plan.target_sst_size = 1;
+    plan.add_test_source("source.sst");
+    let mut writer = factory.create()?;
+    for (key, value, sequence) in [
+        (b"a".as_slice(), b"first".as_slice(), 1),
+        (b"b".as_slice(), b"second".as_slice(), 2),
+        (b"c".as_slice(), b"third".as_slice(), 3),
+    ] {
+        writer.add_with_meta(key, Some(value), sequence, EntryType::Put, None)?;
+    }
+    writer.finish_to_path(Path::new("source.sst"))?;
+    let finalized_outputs = std::cell::RefCell::new(Vec::new());
+    let sink = |name: &str,
+                path: &Path,
+                _budget: &crate::common::resource_budget::ResourceBudget,
+                finalized: Option<&crate::sst::traits::FinalizedSst>| {
+        let finalized = finalized.ok_or_else(|| {
+            MidgeError::Internal("filesystem compaction omitted finalized identity".into())
+        })?;
+        let independent_identity =
+            crate::sst::fs::file_identity_with_fs(&factory.output_fs(), path)?;
+        finalized_outputs.borrow_mut().push((
+            name.to_owned(),
+            finalized.clone(),
+            independent_identity,
+        ));
+        Ok(())
+    };
+
+    // Act
+    let outputs = execute_compaction_with_output_sink(
+        &plan,
+        &factory,
+        Path::new(""),
+        None,
+        Some(&sink),
+        None,
+    )?;
+
+    // Assert
+    let finalized_outputs = finalized_outputs.into_inner();
+    assert!(outputs.len() >= 2, "the small target must cause soft rolls");
+    assert_eq!(outputs.len(), finalized_outputs.len());
+    for (output, (name, finalized, (size_bytes, checksum))) in outputs.iter().zip(finalized_outputs)
+    {
+        assert_eq!(output, &name);
+        assert_eq!(finalized.size_bytes, size_bytes);
+        assert_eq!(finalized.content_crc32c, checksum);
+        assert_eq!(finalized.point_count, 1);
+    }
+    Ok(())
+}
+
+#[test]
 fn should_retain_source_when_the_fragment_boundary_exceeds_its_memory_budget() -> MidgeResult<()> {
     // Arrange
     let (fs, factory, mut plan) = fragment_fixture();

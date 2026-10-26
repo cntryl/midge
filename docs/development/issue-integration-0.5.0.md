@@ -49,8 +49,12 @@ already present; their remaining throughput measurements stay open. The
 suite passed 4/4. The #926 implementation was already
 present, so its eight focused ordering, proof, replay and recovery tests were
 executed and passed without a code change. #949's implementation was likewise
-already present; its focused writer/merge coverage is recorded in its issue,
-while the compaction CPU-per-MB comparison remains open. Re-evaluation against
+already present. Its finalized-writer identity, no-reread and streaming
+publication regressions pass, and the three-pair CPU-per-MiB comparison now
+qualifies AC2 at an 11.71% median reduction. The source, workload, raw artifacts
+and limits are recorded in
+[`evidence/issue-949-ab-2026-10-25/README.md`](evidence/issue-949-ab-2026-10-25/README.md).
+Re-evaluation against
 `4e0499f2` confirmed cloud seal needs a `WalSealTicket`-aware worker handoff
 and loop-owned rotation. The async seal path now retains a ticket across
 prefix sync, footer append and footer sync, then performs rotation and ledger
@@ -862,15 +866,16 @@ change, with each pair within the 15% guardrail; it remains explicitly
 diagnostic-trust evidence. Exact artifacts and limits are in
 `docs/development/evidence/issue-978-strict-group-commit-ab-2026-10-26/`.
 
-### #949: merge-heap slice implemented; writer identity pending
+### #949: finalized writer identity and merge heap implemented
 
 The merge heap owns each retained event and compares its existing key rather
 than allocating a second key. Advancing a nonempty input replaces the top via
 PeekMut and repairs the heap once. Sequence, event-kind and input tie ordering
 are preserved. Reservation accounting drops the eliminated duplicate key.
 The failpoint test targets compile. Existing compaction order/coverage tests
-remain active. The #949 A/B comparison below measures the merged heap and
-finalized writer identity changes together.
+remain active. The #949 A/B comparison measures the merged heap and finalized
+writer identity changes together, so it does not isolate their individual CPU
+effects.
 
 The following #949 slice now returns finalized logical bounds, point/range
 counts, length and CRC32C from the filesystem SST writer. Streaming CRC is
@@ -885,11 +890,15 @@ transfer and provider receipts.
 Active regressions cover buffered/streaming empty, range-only and multiblock
 files, compare finalized metadata and CRC with independent reads, require no
 output reads during finalization, and reject failed directory synchronization.
-The production cloud handoff regression passes and verifies one finalized
-output read before streaming upload; a corrupted uploaded part cannot gain
-manifest authority. `cargo check --locked --tests --features failpoints`, the
-focused compaction regressions, strict all-target/all-feature Clippy, and
-`cargo fmt --check` pass for the current integration tree. The Tier 2 CPU
+The new soft-roll regression executes production partitioned compaction with a
+one-byte target and independently checks the size and CRC of every finalized
+output against its completed file.
+The production cloud handoff and native-provider adapter regressions verify the
+finalized source is streamed once and a corrupted uploaded part cannot gain
+manifest authority. The three-pair Tier 2 comparison reports CPU reductions of
+14.06%, 11.40%, and 11.71% (median 11.71%); all six runs have acceptable
+quality and RSD below 10%. This qualifies AC2 for the preregistered workload,
+without separating the two changes' individual CPU effects. The complete
 comparison is recorded in
 [`evidence/issue-949-ab-2026-10-25/README.md`](evidence/issue-949-ab-2026-10-25/README.md).
 
