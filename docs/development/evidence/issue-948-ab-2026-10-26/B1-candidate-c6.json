@@ -1,0 +1,1194 @@
+{
+  "schema_version": "cntryl-stress.v2",
+  "tool_version": "0.5.1",
+  "suite": "tier4-system-compaction-grandparent-cuts",
+  "run_profile": "release",
+  "environment": {
+    "cpu_model": "unknown",
+    "core_count": 10,
+    "os": "macos aarch64",
+    "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "allocator": "cntryl-stress allocator not installed",
+    "build_profile": "release",
+    "git_commit": "c6b00073fd20bdd726a17ce8437fcb8bd6812365",
+    "tool_version": "0.5.1",
+    "command_line": [
+      "/tmp/midge948-base-target/release/deps/tier4_system_compaction_grandparent_cuts-e8ead5d6f06b3ae3",
+      "--profile",
+      "release",
+      "--samples",
+      "5",
+      "--warmup-samples",
+      "1",
+      "--no-progress",
+      "--require-quiet-env",
+      "--timeout-secs",
+      "900",
+      "--output-dir",
+      "/tmp/midge948-ab-2026-10-26/B1",
+      "--bench"
+    ],
+    "profile_config": {
+      "profile": "release",
+      "measured_samples": 5,
+      "warmup_samples": 1,
+      "cooldown_samples": 0,
+      "min_quality": "acceptable",
+      "fail_on_quality": true,
+      "fail_on_regression": true,
+      "regression_threshold": 0.05,
+      "sample_duration": 1000000000,
+      "operations_per_sample": 1,
+      "micro_sample_duration": 100000000,
+      "report_depth": "gated",
+      "console_names": "compact",
+      "progress": false,
+      "require_quiet_env": true
+    },
+    "timer_resolution_ns": 41,
+    "observations": [
+      {
+        "key": "power_source",
+        "value": "ac",
+        "adverse": false
+      }
+    ]
+  },
+  "benchmark_specs": [
+    {
+      "id": "tier4-system-compaction-grandparent-cuts/tier4_system_compaction_grandparent_cuts::tier4_compaction_grandparent_cuts/sustained_write_throughput_under_compaction",
+      "name": "sustained_write_throughput_under_compaction",
+      "tier": 4,
+      "mode": {
+        "type": "fixed_duration",
+        "sample_duration": 1000000000
+      },
+      "intent": "external",
+      "budgets": {},
+      "parameters": {
+        "base_keys": "2700000",
+        "compaction_metric": "published compaction output SST bytes",
+        "flush_bytes_in_compaction_metric": "false",
+        "key_bytes": "16",
+        "level2_grandparent_limit_bytes": "335544320",
+        "logical_unit": "logical_input_byte",
+        "measurement_mode": "duration",
+        "production_defaults": "true",
+        "seed": "163278016090118",
+        "storage": "local",
+        "updated_keys": "550000",
+        "value_bytes": "128",
+        "write_batch_keys": "2000"
+      },
+      "metadata": {
+        "cntryl_stress_observation_topology": "pre_measurement_l2_overlap_bytes:Bytes:Informational|pre_measurement_l2_overlap_files:Count:Informational|largest_pre_measurement_l2_overlap_file_bytes:Bytes:Informational|compaction_output_bytes:Bytes:Informational|compaction_output_bytes_per_logical_input_byte:Ratio:Informational|measured_compactions_run:Count:Informational|final_sst_count:Count:Informational",
+        "component": "engine_compaction",
+        "measurement_shape": "fixed_workload",
+        "scenario": "grandparent_output_cuts"
+      }
+    }
+  ],
+  "samples": [
+    {
+      "benchmark_id": "tier4-system-compaction-grandparent-cuts/tier4_system_compaction_grandparent_cuts::tier4_compaction_grandparent_cuts/sustained_write_throughput_under_compaction",
+      "intent": "external",
+      "sample_number": 0,
+      "phase": "warmup",
+      "elapsed_ns": 5875095167,
+      "wall_clock_ns": 28220770834,
+      "operations_attempted": 79200000,
+      "operations_completed": 79200000,
+      "throughput": 13480632.69593672,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "pre_measurement_l2_overlap_bytes",
+          "value": 384221780.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "pre_measurement_l2_overlap_files",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "largest_pre_measurement_l2_overlap_file_bytes",
+          "value": 133994180.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes",
+          "value": 494770046.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes_per_logical_input_byte",
+          "value": 6.247096540404041,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "measured_compactions_run",
+          "value": 4.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "final_sst_count",
+          "value": 5.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "base_keys": "2700000",
+        "compaction_metric": "published compaction output SST bytes",
+        "flush_bytes_in_compaction_metric": "false",
+        "key_bytes": "16",
+        "level2_grandparent_limit_bytes": "335544320",
+        "logical_unit": "logical_input_byte",
+        "production_defaults": "true",
+        "seed": "163278016090118",
+        "storage": "local",
+        "updated_keys": "550000",
+        "value_bytes": "128",
+        "write_batch_keys": "2000"
+      },
+      "counters": {
+        "attempted": 79200000,
+        "completed": 79200000,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "unknown",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "c6b00073fd20bdd726a17ce8437fcb8bd6812365",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/tmp/midge948-base-target/release/deps/tier4_system_compaction_grandparent_cuts-e8ead5d6f06b3ae3",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--no-progress",
+          "--require-quiet-env",
+          "--timeout-secs",
+          "900",
+          "--output-dir",
+          "/tmp/midge948-ab-2026-10-26/B1",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier4-system-compaction-grandparent-cuts/tier4_system_compaction_grandparent_cuts::tier4_compaction_grandparent_cuts/sustained_write_throughput_under_compaction",
+      "intent": "external",
+      "sample_number": 1,
+      "phase": "measured",
+      "elapsed_ns": 6043459875,
+      "wall_clock_ns": 28437820333,
+      "operations_attempted": 79200000,
+      "operations_completed": 79200000,
+      "throughput": 13105075.84035213,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "pre_measurement_l2_overlap_bytes",
+          "value": 384221780.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "pre_measurement_l2_overlap_files",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "largest_pre_measurement_l2_overlap_file_bytes",
+          "value": 133994180.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes",
+          "value": 494770046.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes_per_logical_input_byte",
+          "value": 6.247096540404041,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "measured_compactions_run",
+          "value": 4.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "final_sst_count",
+          "value": 5.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "base_keys": "2700000",
+        "compaction_metric": "published compaction output SST bytes",
+        "flush_bytes_in_compaction_metric": "false",
+        "key_bytes": "16",
+        "level2_grandparent_limit_bytes": "335544320",
+        "logical_unit": "logical_input_byte",
+        "production_defaults": "true",
+        "seed": "163278016090118",
+        "storage": "local",
+        "updated_keys": "550000",
+        "value_bytes": "128",
+        "write_batch_keys": "2000"
+      },
+      "counters": {
+        "attempted": 79200000,
+        "completed": 79200000,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "unknown",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "c6b00073fd20bdd726a17ce8437fcb8bd6812365",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/tmp/midge948-base-target/release/deps/tier4_system_compaction_grandparent_cuts-e8ead5d6f06b3ae3",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--no-progress",
+          "--require-quiet-env",
+          "--timeout-secs",
+          "900",
+          "--output-dir",
+          "/tmp/midge948-ab-2026-10-26/B1",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier4-system-compaction-grandparent-cuts/tier4_system_compaction_grandparent_cuts::tier4_compaction_grandparent_cuts/sustained_write_throughput_under_compaction",
+      "intent": "external",
+      "sample_number": 2,
+      "phase": "measured",
+      "elapsed_ns": 6082028375,
+      "wall_clock_ns": 28346726834,
+      "operations_attempted": 79200000,
+      "operations_completed": 79200000,
+      "throughput": 13021971.473456008,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "pre_measurement_l2_overlap_bytes",
+          "value": 384221780.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "pre_measurement_l2_overlap_files",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "largest_pre_measurement_l2_overlap_file_bytes",
+          "value": 133994180.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes",
+          "value": 494770046.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes_per_logical_input_byte",
+          "value": 6.247096540404041,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "measured_compactions_run",
+          "value": 4.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "final_sst_count",
+          "value": 5.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "base_keys": "2700000",
+        "compaction_metric": "published compaction output SST bytes",
+        "flush_bytes_in_compaction_metric": "false",
+        "key_bytes": "16",
+        "level2_grandparent_limit_bytes": "335544320",
+        "logical_unit": "logical_input_byte",
+        "production_defaults": "true",
+        "seed": "163278016090118",
+        "storage": "local",
+        "updated_keys": "550000",
+        "value_bytes": "128",
+        "write_batch_keys": "2000"
+      },
+      "counters": {
+        "attempted": 79200000,
+        "completed": 79200000,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "unknown",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "c6b00073fd20bdd726a17ce8437fcb8bd6812365",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/tmp/midge948-base-target/release/deps/tier4_system_compaction_grandparent_cuts-e8ead5d6f06b3ae3",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--no-progress",
+          "--require-quiet-env",
+          "--timeout-secs",
+          "900",
+          "--output-dir",
+          "/tmp/midge948-ab-2026-10-26/B1",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier4-system-compaction-grandparent-cuts/tier4_system_compaction_grandparent_cuts::tier4_compaction_grandparent_cuts/sustained_write_throughput_under_compaction",
+      "intent": "external",
+      "sample_number": 3,
+      "phase": "measured",
+      "elapsed_ns": 5944400708,
+      "wall_clock_ns": 28198033958,
+      "operations_attempted": 79200000,
+      "operations_completed": 79200000,
+      "throughput": 13323462.513792569,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "pre_measurement_l2_overlap_bytes",
+          "value": 384221780.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "pre_measurement_l2_overlap_files",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "largest_pre_measurement_l2_overlap_file_bytes",
+          "value": 133994180.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes",
+          "value": 494770046.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes_per_logical_input_byte",
+          "value": 6.247096540404041,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "measured_compactions_run",
+          "value": 4.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "final_sst_count",
+          "value": 5.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "base_keys": "2700000",
+        "compaction_metric": "published compaction output SST bytes",
+        "flush_bytes_in_compaction_metric": "false",
+        "key_bytes": "16",
+        "level2_grandparent_limit_bytes": "335544320",
+        "logical_unit": "logical_input_byte",
+        "production_defaults": "true",
+        "seed": "163278016090118",
+        "storage": "local",
+        "updated_keys": "550000",
+        "value_bytes": "128",
+        "write_batch_keys": "2000"
+      },
+      "counters": {
+        "attempted": 79200000,
+        "completed": 79200000,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "unknown",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "c6b00073fd20bdd726a17ce8437fcb8bd6812365",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/tmp/midge948-base-target/release/deps/tier4_system_compaction_grandparent_cuts-e8ead5d6f06b3ae3",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--no-progress",
+          "--require-quiet-env",
+          "--timeout-secs",
+          "900",
+          "--output-dir",
+          "/tmp/midge948-ab-2026-10-26/B1",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier4-system-compaction-grandparent-cuts/tier4_system_compaction_grandparent_cuts::tier4_compaction_grandparent_cuts/sustained_write_throughput_under_compaction",
+      "intent": "external",
+      "sample_number": 4,
+      "phase": "measured",
+      "elapsed_ns": 5950440584,
+      "wall_clock_ns": 28035075792,
+      "operations_attempted": 79200000,
+      "operations_completed": 79200000,
+      "throughput": 13309938.798978856,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "pre_measurement_l2_overlap_bytes",
+          "value": 384221780.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "pre_measurement_l2_overlap_files",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "largest_pre_measurement_l2_overlap_file_bytes",
+          "value": 133994180.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes",
+          "value": 494770046.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes_per_logical_input_byte",
+          "value": 6.247096540404041,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "measured_compactions_run",
+          "value": 4.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "final_sst_count",
+          "value": 5.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "base_keys": "2700000",
+        "compaction_metric": "published compaction output SST bytes",
+        "flush_bytes_in_compaction_metric": "false",
+        "key_bytes": "16",
+        "level2_grandparent_limit_bytes": "335544320",
+        "logical_unit": "logical_input_byte",
+        "production_defaults": "true",
+        "seed": "163278016090118",
+        "storage": "local",
+        "updated_keys": "550000",
+        "value_bytes": "128",
+        "write_batch_keys": "2000"
+      },
+      "counters": {
+        "attempted": 79200000,
+        "completed": 79200000,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "unknown",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "c6b00073fd20bdd726a17ce8437fcb8bd6812365",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/tmp/midge948-base-target/release/deps/tier4_system_compaction_grandparent_cuts-e8ead5d6f06b3ae3",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--no-progress",
+          "--require-quiet-env",
+          "--timeout-secs",
+          "900",
+          "--output-dir",
+          "/tmp/midge948-ab-2026-10-26/B1",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    },
+    {
+      "benchmark_id": "tier4-system-compaction-grandparent-cuts/tier4_system_compaction_grandparent_cuts::tier4_compaction_grandparent_cuts/sustained_write_throughput_under_compaction",
+      "intent": "external",
+      "sample_number": 5,
+      "phase": "measured",
+      "elapsed_ns": 6326456625,
+      "wall_clock_ns": 28965316167,
+      "operations_attempted": 79200000,
+      "operations_completed": 79200000,
+      "throughput": 12518856.082412483,
+      "latency_ns": [],
+      "observations": [
+        {
+          "name": "pre_measurement_l2_overlap_bytes",
+          "value": 384221780.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "pre_measurement_l2_overlap_files",
+          "value": 3.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "largest_pre_measurement_l2_overlap_file_bytes",
+          "value": 133994180.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes",
+          "value": 494770046.0,
+          "unit": "bytes",
+          "direction": "informational"
+        },
+        {
+          "name": "compaction_output_bytes_per_logical_input_byte",
+          "value": 6.247096540404041,
+          "unit": "ratio",
+          "direction": "informational"
+        },
+        {
+          "name": "measured_compactions_run",
+          "value": 4.0,
+          "unit": "count",
+          "direction": "informational"
+        },
+        {
+          "name": "final_sst_count",
+          "value": 5.0,
+          "unit": "count",
+          "direction": "informational"
+        }
+      ],
+      "parameters": {
+        "base_keys": "2700000",
+        "compaction_metric": "published compaction output SST bytes",
+        "flush_bytes_in_compaction_metric": "false",
+        "key_bytes": "16",
+        "level2_grandparent_limit_bytes": "335544320",
+        "logical_unit": "logical_input_byte",
+        "production_defaults": "true",
+        "seed": "163278016090118",
+        "storage": "local",
+        "updated_keys": "550000",
+        "value_bytes": "128",
+        "write_batch_keys": "2000"
+      },
+      "counters": {
+        "attempted": 79200000,
+        "completed": 79200000,
+        "failures": 0,
+        "timeouts": 0,
+        "duplicates": 0,
+        "dropped": 0,
+        "validation_errors": 0
+      },
+      "environment": {
+        "cpu_model": "unknown",
+        "core_count": 10,
+        "os": "macos aarch64",
+        "rustc_version": "rustc 1.99.0 (b940084d7 2026-09-28)",
+        "allocator": "cntryl-stress allocator not installed",
+        "build_profile": "release",
+        "git_commit": "c6b00073fd20bdd726a17ce8437fcb8bd6812365",
+        "tool_version": "0.5.1",
+        "command_line": [
+          "/tmp/midge948-base-target/release/deps/tier4_system_compaction_grandparent_cuts-e8ead5d6f06b3ae3",
+          "--profile",
+          "release",
+          "--samples",
+          "5",
+          "--warmup-samples",
+          "1",
+          "--no-progress",
+          "--require-quiet-env",
+          "--timeout-secs",
+          "900",
+          "--output-dir",
+          "/tmp/midge948-ab-2026-10-26/B1",
+          "--bench"
+        ],
+        "profile_config": {
+          "profile": "release",
+          "measured_samples": 5,
+          "warmup_samples": 1,
+          "cooldown_samples": 0,
+          "min_quality": "acceptable",
+          "fail_on_quality": true,
+          "fail_on_regression": true,
+          "regression_threshold": 0.05,
+          "sample_duration": 1000000000,
+          "operations_per_sample": 1,
+          "micro_sample_duration": 100000000,
+          "report_depth": "gated",
+          "console_names": "compact",
+          "progress": false,
+          "require_quiet_env": true
+        },
+        "timer_resolution_ns": 41,
+        "observations": [
+          {
+            "key": "power_source",
+            "value": "ac",
+            "adverse": false
+          }
+        ]
+      }
+    }
+  ],
+  "summaries": [
+    {
+      "benchmark_id": "tier4-system-compaction-grandparent-cuts/tier4_system_compaction_grandparent_cuts::tier4_compaction_grandparent_cuts/sustained_write_throughput_under_compaction",
+      "name": "sustained_write_throughput_under_compaction",
+      "tier": 4,
+      "intent": "external",
+      "primary_metric": "throughput",
+      "measured_samples": 5,
+      "warmup_samples": 1,
+      "cooldown_samples": 0,
+      "stats": {
+        "mean": 13055860.94179841,
+        "median": 13105075.84035213,
+        "min": 12518856.082412483,
+        "max": 13323462.513792569,
+        "std_dev": 327150.9514549188,
+        "relative_std_dev": 0.025057784615914774,
+        "confidence_interval_95": {
+          "lower": 12769100.489386491,
+          "upper": 13342621.394210327
+        },
+        "p50": 13105075.84035213,
+        "p95": 13320757.770829827,
+        "p99": 13322921.56520002
+      },
+      "wall_clock": {
+        "mean": 28396594616.8,
+        "median": 28346726834.0,
+        "min": 28035075792.0,
+        "max": 28965316167.0,
+        "std_dev": 352757974.0442961,
+        "relative_std_dev": 0.012422544984869324,
+        "confidence_interval_95": {
+          "lower": 28087388619.449284,
+          "upper": 28705800614.150715
+        },
+        "p50": 28346726834.0,
+        "p95": 28859817000.2,
+        "p99": 28944216333.64
+      },
+      "total_wall_clock_ns": 170203743918,
+      "ns_per_op": {
+        "mean": 76.63329840151515,
+        "median": 76.3063115530303,
+        "min": 75.0555644949495,
+        "max": 79.8795028409091,
+        "std_dev": 1.9630349704181673,
+        "relative_std_dev": 0.025615953004305962,
+        "confidence_interval_95": {
+          "lower": 74.91262238417794,
+          "upper": 78.35397441885236
+        },
+        "p50": 76.3063115530303,
+        "p95": 79.26225978535354,
+        "p99": 79.75605422979798
+      },
+      "observations": [
+        {
+          "name": "pre_measurement_l2_overlap_bytes",
+          "unit": "bytes",
+          "direction": "informational",
+          "stats": {
+            "mean": 384221780.0,
+            "median": 384221780.0,
+            "min": 384221780.0,
+            "max": 384221780.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 384221780.0,
+              "upper": 384221780.0
+            },
+            "p50": 384221780.0,
+            "p95": 384221780.0,
+            "p99": 384221780.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 384221780.0,
+            "p99": 384221780.0,
+            "max": 384221780.0
+          }
+        },
+        {
+          "name": "pre_measurement_l2_overlap_files",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 3.0,
+            "median": 3.0,
+            "min": 3.0,
+            "max": 3.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 3.0,
+              "upper": 3.0
+            },
+            "p50": 3.0,
+            "p95": 3.0,
+            "p99": 3.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 3.0,
+            "p99": 3.0,
+            "max": 3.0
+          }
+        },
+        {
+          "name": "largest_pre_measurement_l2_overlap_file_bytes",
+          "unit": "bytes",
+          "direction": "informational",
+          "stats": {
+            "mean": 133994180.0,
+            "median": 133994180.0,
+            "min": 133994180.0,
+            "max": 133994180.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 133994180.0,
+              "upper": 133994180.0
+            },
+            "p50": 133994180.0,
+            "p95": 133994180.0,
+            "p99": 133994180.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 133994180.0,
+            "p99": 133994180.0,
+            "max": 133994180.0
+          }
+        },
+        {
+          "name": "compaction_output_bytes",
+          "unit": "bytes",
+          "direction": "informational",
+          "stats": {
+            "mean": 494770046.0,
+            "median": 494770046.0,
+            "min": 494770046.0,
+            "max": 494770046.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 494770046.0,
+              "upper": 494770046.0
+            },
+            "p50": 494770046.0,
+            "p95": 494770046.0,
+            "p99": 494770046.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 494770046.0,
+            "p99": 494770046.0,
+            "max": 494770046.0
+          }
+        },
+        {
+          "name": "compaction_output_bytes_per_logical_input_byte",
+          "unit": "ratio",
+          "direction": "informational",
+          "stats": {
+            "mean": 6.247096540404041,
+            "median": 6.247096540404041,
+            "min": 6.247096540404041,
+            "max": 6.247096540404041,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 6.247096540404041,
+              "upper": 6.247096540404041
+            },
+            "p50": 6.247096540404041,
+            "p95": 6.247096540404041,
+            "p99": 6.247096540404041
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 6.247096540404041,
+            "p99": 6.247096540404041,
+            "max": 6.247096540404041
+          }
+        },
+        {
+          "name": "measured_compactions_run",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 4.0,
+            "median": 4.0,
+            "min": 4.0,
+            "max": 4.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 4.0,
+              "upper": 4.0
+            },
+            "p50": 4.0,
+            "p95": 4.0,
+            "p99": 4.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 4.0,
+            "p99": 4.0,
+            "max": 4.0
+          }
+        },
+        {
+          "name": "final_sst_count",
+          "unit": "count",
+          "direction": "informational",
+          "stats": {
+            "mean": 5.0,
+            "median": 5.0,
+            "min": 5.0,
+            "max": 5.0,
+            "std_dev": 0.0,
+            "relative_std_dev": 0.0,
+            "confidence_interval_95": {
+              "lower": 5.0,
+              "upper": 5.0
+            },
+            "p50": 5.0,
+            "p95": 5.0,
+            "p99": 5.0
+          },
+          "distribution": {
+            "count": 5,
+            "p90": 5.0,
+            "p99": 5.0,
+            "max": 5.0
+          }
+        }
+      ],
+      "quality": "acceptable",
+      "trust_class": "gate",
+      "budgets": {},
+      "correctness": {
+        "passed": true,
+        "counters": {
+          "attempted": 396000000,
+          "completed": 396000000,
+          "failures": 0,
+          "timeouts": 0,
+          "duplicates": 0,
+          "dropped": 0,
+          "validation_errors": 0
+        },
+        "errors": []
+      },
+      "parameters": {
+        "base_keys": "2700000",
+        "compaction_metric": "published compaction output SST bytes",
+        "flush_bytes_in_compaction_metric": "false",
+        "key_bytes": "16",
+        "level2_grandparent_limit_bytes": "335544320",
+        "logical_unit": "logical_input_byte",
+        "measurement_mode": "duration",
+        "production_defaults": "true",
+        "seed": "163278016090118",
+        "storage": "local",
+        "updated_keys": "550000",
+        "value_bytes": "128",
+        "write_batch_keys": "2000"
+      },
+      "metadata": {
+        "cntryl_stress_observation_topology": "pre_measurement_l2_overlap_bytes:Bytes:Informational|pre_measurement_l2_overlap_files:Count:Informational|largest_pre_measurement_l2_overlap_file_bytes:Bytes:Informational|compaction_output_bytes:Bytes:Informational|compaction_output_bytes_per_logical_input_byte:Ratio:Informational|measured_compactions_run:Count:Informational|final_sst_count:Count:Informational",
+        "component": "engine_compaction",
+        "measurement_shape": "fixed_workload",
+        "scenario": "grandparent_output_cuts"
+      },
+      "source": {
+        "file": "benches/tier4_system_compaction_grandparent_cuts.rs",
+        "line": 277
+      },
+      "peak_rss_bytes": 143556608
+    }
+  ],
+  "comparisons": [],
+  "diagnostics_summary": [],
+  "started_at": "01793012293010474000-0000006595-00000000000000000000",
+  "total_elapsed_ns": 170204111458,
+  "metadata": {
+    "allow_codes_src": "default",
+    "baseline_dir_src": "default",
+    "baseline_runs_src": "default",
+    "baseline_src": "default",
+    "cntryl_stress_summary_semantics": "interpolated_percentiles_p95_ci_v1",
+    "confirm_regressions_src": "default",
+    "console_names_src": "default",
+    "cooldown_samples_src": "default",
+    "deny_codes_src": "default",
+    "deny_diagnostics_src": "default",
+    "fail_on_quality_src": "default",
+    "fail_on_regression_src": "default",
+    "filter_src": "default",
+    "git_sha_src": "auto_detect",
+    "include_ignored_src": "default",
+    "json_stdout_src": "default",
+    "micro_sample_duration_src": "default",
+    "min_quality_src": "default",
+    "no_progress_timeout_secs_src": "default",
+    "operations_per_sample_src": "default",
+    "output_dir_src": "cli --output-dir",
+    "profile_src": "cli --profile",
+    "progress_src": "cli --no-progress",
+    "require_quiet_env_src": "cli --require-quiet-env",
+    "sample_duration_src": "default",
+    "samples_src": "cli --samples",
+    "save_baseline_src": "default",
+    "threshold_src": "default",
+    "tier_src": "default",
+    "timeout_secs_src": "cli --timeout-secs",
+    "warmup_samples_src": "cli --warmup-samples"
+  }
+}

@@ -188,7 +188,7 @@ fn measure_updates(
     engine: &Engine,
     cf: &ColumnFamilyHandle,
     update_ids: &[u32],
-) -> (std::time::Duration, u64) {
+) -> (std::time::Duration, u64, u64, usize) {
     let metrics_before = engine
         .metrics()
         .get_runtime_metrics()
@@ -207,7 +207,15 @@ fn measure_updates(
     let compaction_output_bytes = metrics_after
         .compaction_bytes_rewritten
         .saturating_sub(metrics_before.compaction_bytes_rewritten);
-    (elapsed, compaction_output_bytes)
+    let compactions_run = metrics_after
+        .compactions_run
+        .saturating_sub(metrics_before.compactions_run);
+    (
+        elapsed,
+        compaction_output_bytes,
+        compactions_run,
+        metrics_after.sst_count,
+    )
 }
 
 fn u64_as_f64(value: u64) -> f64 {
@@ -225,6 +233,8 @@ fn record_measurement(
     l2_overlap: &L2Overlap,
     elapsed: std::time::Duration,
     compaction_output_bytes: u64,
+    compactions_run: u64,
+    final_sst_count: usize,
 ) {
     let logical_input_bytes = u64::try_from(UPDATE_KEYS)
         .expect("update count fits in u64")
@@ -282,6 +292,18 @@ fn record_measurement(
         ObservationUnit::Ratio,
         ObservationDirection::Informational,
     );
+    ctx.record_observation(
+        "measured_compactions_run",
+        u64_as_f64(compactions_run),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "final_sst_count",
+        usize_as_f64(final_sst_count),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
 }
 
 fn run(ctx: &mut StressContext) {
@@ -299,8 +321,16 @@ fn run(ctx: &mut StressContext) {
         .create_column_family("grandparent-cuts")
         .expect("create benchmark column family");
     let (ids, l2_overlap) = prepare_fixture(&engine, &cf);
-    let (elapsed, compaction_output_bytes) = measure_updates(&engine, &cf, &ids[..UPDATE_KEYS]);
-    record_measurement(ctx, &l2_overlap, elapsed, compaction_output_bytes);
+    let (elapsed, compaction_output_bytes, compactions_run, final_sst_count) =
+        measure_updates(&engine, &cf, &ids[..UPDATE_KEYS]);
+    record_measurement(
+        ctx,
+        &l2_overlap,
+        elapsed,
+        compaction_output_bytes,
+        compactions_run,
+        final_sst_count,
+    );
     engine
         .shutdown(std::time::Duration::from_secs(60))
         .expect("shutdown compaction benchmark engine");
