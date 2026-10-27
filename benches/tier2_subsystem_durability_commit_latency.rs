@@ -492,6 +492,10 @@ fn run_strict_commit_case(
         ObservationUnit::Ratio,
         ObservationDirection::HigherIsBetter,
     );
+    record_strict_phase_observations(ctx, &sample);
+}
+
+fn record_strict_phase_observations(ctx: &mut StressContext, sample: &StrictCommitSample) {
     let per_commit_ns = |total: u64| u64_to_f64(total) / u64_to_f64(sample.completed.max(1));
     for (name, total) in [
         ("wal_append_completion_ns_per_commit", sample.wal_append_ns),
