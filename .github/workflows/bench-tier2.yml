@@ -9,9 +9,9 @@ on:
         options: [smoke, standard, extended]
         default: standard
       run_mode:
-        description: Run the full Tier 2 matrix, one workload, or same-runner A/B campaign
+        description: Run the full Tier 2 matrix or one named benchmark workload
         type: choice
-        options: [full, targeted, ab]
+        options: [full, targeted]
         default: full
       bench:
         description: Cargo benchmark target for targeted mode
@@ -29,14 +29,6 @@ on:
         description: Optional ref supplying the same benchmark source when it is absent from source_ref
         type: string
         default: ""
-      base_ref:
-        description: Exact base source SHA for same-runner A/B mode
-        type: string
-        default: ""
-      candidate_ref:
-        description: Exact candidate source SHA for same-runner A/B mode
-        type: string
-        default: ""
       samples:
         description: Measured samples per workload
         type: choice
@@ -52,7 +44,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: bench-tier2-${{ github.ref }}-${{ inputs.run_mode != 'full' && github.run_id || 'matrix' }}
+  group: bench-tier2-${{ github.ref }}-${{ inputs.run_mode == 'targeted' && github.run_id || 'matrix' }}
   cancel-in-progress: false
 
 jobs:
@@ -109,103 +101,6 @@ jobs:
             target/midge-stress/**
           if-no-files-found: ignore
 
-  ab:
-    if: inputs.run_mode == 'ab'
-    runs-on: [self-hosted, Linux]
-    timeout-minutes: 90
-    env:
-      CARGO_INCREMENTAL: "0"
-      STRESS_PROFILE: ${{ inputs.profile == 'smoke' && 'smoke' || inputs.profile == 'extended' && 'lab' || 'default' }}
-      BENCH_NAME: ${{ inputs.bench }}
-      WORKLOAD_NAME: ${{ inputs.workload }}
-      BASE_SOURCE_REF: ${{ inputs.base_ref }}
-      CANDIDATE_SOURCE_REF: ${{ inputs.candidate_ref }}
-      BENCHMARK_SOURCE_REF: ${{ inputs.benchmark_ref }}
-      SAMPLE_COUNT: ${{ inputs.samples }}
-      WARMUP_COUNT: ${{ inputs.warmup_samples }}
-    steps:
-      - name: Checkout workflow repository
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Prepare exact source checkouts and shared benchmark
-        run: |
-          set -euo pipefail
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/midge-ab-target" >> "$GITHUB_ENV"
-          [[ "$BENCH_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]
-          [[ "$WORKLOAD_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]
-          [[ "$BASE_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
-          [[ "$CANDIDATE_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
-          [[ "$BENCHMARK_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
-          git fetch origin "$BENCHMARK_SOURCE_REF"
-          git fetch origin "$BASE_SOURCE_REF" "$CANDIDATE_SOURCE_REF"
-          mkdir -p "$RUNNER_TEMP/midge-ab"
-          git show "${BENCHMARK_SOURCE_REF}:benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/midge-ab/${BENCH_NAME}.rs"
-          git worktree add --detach "$RUNNER_TEMP/midge-ab/base" "$BASE_SOURCE_REF"
-          git worktree add --detach "$RUNNER_TEMP/midge-ab/candidate" "$CANDIDATE_SOURCE_REF"
-          for source in "$RUNNER_TEMP/midge-ab/base" "$RUNNER_TEMP/midge-ab/candidate"; do
-            cp "$RUNNER_TEMP/midge-ab/${BENCH_NAME}.rs" "$source/benches/${BENCH_NAME}.rs"
-            if ! grep -Fq "name = \"${BENCH_NAME}\"" "$source/Cargo.toml"; then
-              printf '\n[[bench]]\nname = "%s"\npath = "benches/%s.rs"\nharness = false\n' \
-                "$BENCH_NAME" "$BENCH_NAME" >> "$source/Cargo.toml"
-            fi
-          done
-          printf 'base=%s\ncandidate=%s\nbenchmark=%s\n' \
-            "$BASE_SOURCE_REF" "$CANDIDATE_SOURCE_REF" "$BENCHMARK_SOURCE_REF"
-
-      - name: Prebuild both benchmark sources before measurement
-        run: |
-          set -euo pipefail
-          for source in "$RUNNER_TEMP/midge-ab/base" "$RUNNER_TEMP/midge-ab/candidate"; do
-            (cd "$source" && cargo bench --locked --no-run --bench "$BENCH_NAME")
-          done
-
-      - name: Let prebuild load clear before measurements
-        run: |
-          sleep 65
-          uptime
-
-      - name: Run alternating A/B samples on this runner
-        run: |
-          set -euo pipefail
-          base="$RUNNER_TEMP/midge-ab/base"
-          candidate="$RUNNER_TEMP/midge-ab/candidate"
-          failed=0
-          run_one() {
-            local label="$1" source="$2" output result
-            output="$GITHUB_WORKSPACE/target/stress/ab/$label"
-            mkdir -p "$output"
-            printf '\n=== %s source %s ===\n' "$label" "$(git -C "$source" rev-parse HEAD)"
-            uname -a
-            rustc --version --verbose
-            uptime
-            set +e
-            (cd "$source" && cargo bench --locked --bench "$BENCH_NAME" -- \
-              --workload "${BENCH_NAME}::${WORKLOAD_NAME}" \
-              --samples "$SAMPLE_COUNT" --warmup-samples "$WARMUP_COUNT" \
-              --no-progress --require-quiet-env --output-dir "$output")
-            result=$?
-            set -e
-            uptime
-            return "$result"
-          }
-          run_one A1 "$base" || failed=1
-          run_one B1 "$candidate" || failed=1
-          run_one A2 "$base" || failed=1
-          run_one B2 "$candidate" || failed=1
-          run_one A3 "$base" || failed=1
-          run_one B3 "$candidate" || failed=1
-          exit "$failed"
-
-      - name: Upload alternating A/B reports
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: bench-tier2-ab-${{ inputs.workload }}-${{ github.run_id }}
-          path: target/stress/ab/**
-          if-no-files-found: ignore
 
   targeted:
     if: inputs.run_mode == 'targeted'
