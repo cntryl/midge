@@ -13,11 +13,6 @@ on:
         type: choice
         options: [full, targeted, ab]
         default: full
-      runner_pool:
-        description: Runner pool for benchmark jobs
-        type: choice
-        options: [hosted-arm, self-hosted-x64]
-        default: hosted-arm
       bench:
         description: Cargo benchmark target for targeted mode
         type: string
@@ -62,7 +57,7 @@ concurrency:
 
 jobs:
   bench:
-    runs-on: ${{ inputs.runner_pool == 'self-hosted-x64' && fromJSON('["self-hosted","Linux","X64","ubuntu-24.04"]') || 'ubuntu-24.04-arm' }}
+    runs-on: [self-hosted, Linux, ubuntu-24.04]
     timeout-minutes: 30
     if: inputs.run_mode == 'full'
 
@@ -116,7 +111,7 @@ jobs:
 
   ab:
     if: inputs.run_mode == 'ab'
-    runs-on: ${{ inputs.runner_pool == 'self-hosted-x64' && fromJSON('["self-hosted","Linux","X64","ubuntu-24.04"]') || 'ubuntu-24.04-arm' }}
+    runs-on: [self-hosted, Linux, ubuntu-24.04]
     timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
@@ -214,7 +209,7 @@ jobs:
 
   targeted:
     if: inputs.run_mode == 'targeted'
-    runs-on: ${{ inputs.runner_pool == 'self-hosted-x64' && fromJSON('["self-hosted","Linux","X64","ubuntu-24.04"]') || 'ubuntu-24.04-arm' }}
+    runs-on: [self-hosted, Linux, ubuntu-24.04]
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
