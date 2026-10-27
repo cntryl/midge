@@ -12055,6 +12055,26 @@ mod hybrid_storage {
             engine
                 .flush_cf(&cf)
                 .expect("flush and release published local SST");
+            // WAL retirement is asynchronous, and its bytes remain charged
+            // until the local segment is removed. Allow that independent work
+            // to complete before testing the next SST publication.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let storage = engine
+                    .metrics()
+                    .get_runtime_metrics()
+                    .expect("runtime metrics")
+                    .local_storage
+                    .expect("cloud local storage metrics");
+                if storage.free_bytes >= budget_bytes / 2 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "local budget did not recover after publication: {storage:?}"
+                );
+                thread::sleep(Duration::from_millis(25));
+            }
         }
 
         // Assert
