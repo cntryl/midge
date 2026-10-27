@@ -63,7 +63,7 @@ fn should_publish_accepted_immutable_without_manual_waiter_while_cloud_compactio
     let prune_not_started = el.actors.cloud_coordinator.cloud_wal_prune_worker.is_none();
     let no_manual_waiter = el.publication.flush_barrier_waiters.is_empty();
     let admission_released = admission.try_recv();
-    let resumed_write = acknowledge_put(&mut el, cf_id, 91_403);
+    let resumed_write = acknowledge_put_with_progress(&mut el, cf_id, 91_403);
     let resumed_publication = if let Ok(resumed_sequence) = resumed_write.as_ref() {
         el.freeze_active_memtable(cf_id)?;
         el.schedule_next_flush_worker();

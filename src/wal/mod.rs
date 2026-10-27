@@ -37,6 +37,7 @@ pub(crate) mod append_completion;
 pub(crate) mod cloud_catalog;
 pub(crate) mod cloud_segment;
 mod config;
+pub(crate) mod footer_completion;
 // `encoding`, `frame` and `policy` stay `pub` inside this private module so the
 // crate's own tests and benches can reach them through `crate::__internal`;
 // `wal` itself is private, so nothing downstream can name them.

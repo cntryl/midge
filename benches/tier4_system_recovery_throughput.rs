@@ -25,6 +25,8 @@ const VALUE_SIZE: usize = 64;
 const TARGET_BATCH: usize = 1_000;
 const RECOVERY_FIXTURE_MEMTABLE_SIZE_BYTES: usize = 2 * 1024 * 1024;
 const REOPENS_PER_SAMPLE: u64 = 10;
+const COLD_START_INVENTORY_ENTRIES: usize = 10_000;
+const COLD_START_MOCK_HEAD_DELAY: Duration = Duration::from_millis(1);
 
 fn setup_engine(opts: MidgeOptions) -> Engine {
     stress_config::bench_stress::open_engine_no_compaction(opts)
@@ -130,6 +132,43 @@ fn run_reopen_after_compaction_case(
     );
 }
 
+fn run_cloud_inventory_case(ctx: &mut StressContext) {
+    use cntryl_stress::{LogicalUnit, OperationOutcome};
+
+    stress_config::mark_capped_probe(ctx, "fixed_10000_sst_inventory");
+    let expected_entries = u64::try_from(COLD_START_INVENTORY_ENTRIES).expect("10,000 fits in u64");
+    ctx.parameter("inventory_entries", COLD_START_INVENTORY_ENTRIES);
+    ctx.parameter("provider_mock", "filesystem_object_store");
+    ctx.parameter("fixture_setup_measured", false);
+    ctx.parameter("mock_head_delay_ms", COLD_START_MOCK_HEAD_DELAY.as_millis());
+    let directory = tempfile::tempdir().expect("create cloud inventory benchmark root");
+    let fixture = cntryl_midge::__internal::recovery::prepare_inventory_progress_fixture(
+        directory.path(),
+        COLD_START_INVENTORY_ENTRIES,
+        COLD_START_MOCK_HEAD_DELAY,
+    )
+    .expect("prepare 10,000-SST inventory outside measured recovery");
+    let started_at = std::time::Instant::now();
+    let result = fixture
+        .run()
+        .expect("validate 10,000-SST cloud inventory through production recovery");
+    let elapsed = started_at.elapsed();
+    assert_eq!(result.expected_inventory_entries, expected_entries);
+    assert_eq!(result.completed_inventory_heads, expected_entries);
+    assert_eq!(
+        result.completed_inventory_size_validations,
+        expected_entries
+    );
+    assert_eq!(result.retained_inventory_entries, expected_entries);
+    assert_eq!(result.mismatches, 0);
+    ctx.record_external_outcome(
+        "tier4_recovery_cloud_inventory_10k",
+        elapsed,
+        LogicalUnit::new("manifest_sst"),
+        OperationOutcome::success(expected_entries),
+    );
+}
+
 #[stress(tier = 4, role = "diagnostic")]
 fn tier4_recovery_reopen_after_flush_local(ctx: &mut StressContext) {
     let opts = recovery_opts_for_mode("local");
@@ -152,6 +191,11 @@ fn tier4_recovery_reopen_after_compaction_local(ctx: &mut StressContext) {
 fn tier4_recovery_reopen_after_compaction_cloud(ctx: &mut StressContext) {
     let opts = recovery_opts_for_mode("cloud");
     run_reopen_after_compaction_case(ctx, "tier4_recovery_reopen_after_compaction_cloud", &opts);
+}
+
+#[stress(tier = 4, role = "diagnostic")]
+fn tier4_recovery_cloud_inventory_10k(ctx: &mut StressContext) {
+    run_cloud_inventory_case(ctx);
 }
 
 stress_main!();

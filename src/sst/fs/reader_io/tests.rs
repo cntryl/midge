@@ -489,6 +489,25 @@ fn should_reject_legacy_v2_sst_without_falling_back_to_unchecksummed_blocks() ->
 }
 
 #[test]
+fn should_reject_format_nine_sst_v4_directly_with_compatibility_error() -> MidgeResult<()> {
+    // Arrange: this fixture has a current metadata marker and a real V4 SST,
+    // so opening the SST directly exercises the reader's version boundary.
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/compatibility/v9_populated_v4_sst_db/sst");
+    let file_name = "000000_00_00000000000000000001.sst";
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(&fixture_dir).map_err(FsError::into_midge)?);
+
+    // Act
+    let result = SstFileIo::open(file_name, fs);
+
+    // Assert: V4 is rejected at the SST reader boundary, before metadata
+    // version checks or a best-effort legacy block decode can mask the cause.
+    assert!(matches!(result, Err(MidgeError::CompatibilityError(_))));
+    Ok(())
+}
+
+#[test]
 fn should_get_state_at_read_only_candidate_block_when_key_present() -> MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;

@@ -86,6 +86,7 @@ struct CompactionOutputWork<'a> {
     prepared: &'a PreparedCompactionOutputs,
     manual_deadline: Option<OperationDeadline>,
     budget: Option<&'a crate::common::resource_budget::ResourceBudget>,
+    grandparent_overlap_rolls: &'a Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -430,6 +431,7 @@ pub struct CompactionJobActor {
     /// Metadata and exact provider identities proved before each remote
     /// partition's local staging file was released.
     prepared_outputs: PreparedCompactionOutputs,
+    grandparent_overlap_rolls: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CompactionJobActor {
@@ -504,7 +506,15 @@ impl CompactionJobActor {
             worker_pool: None,
             worker_error: Arc::new(std::sync::Mutex::new(None)),
             prepared_outputs: Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            grandparent_overlap_rolls: Arc::new(std::sync::atomic::AtomicU64::default()),
         }
+    }
+
+    pub(crate) fn set_grandparent_overlap_roll_counter(
+        &mut self,
+        counter: Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        self.grandparent_overlap_rolls = counter;
     }
 
     #[cfg(test)]
@@ -1286,6 +1296,7 @@ impl CompactionJobActor {
                 prepared: &self.prepared_outputs,
                 manual_deadline: self.active_manual_deadline,
                 budget: self.memory_budget.as_ref(),
+                grandparent_overlap_rolls: &self.grandparent_overlap_rolls,
             },
         )
         .inspect_err(|_| cleanup_failed_prepared_outputs(&self.prepared_outputs, sba))?;
@@ -1355,6 +1366,7 @@ impl CompactionJobActor {
                             plan.compaction_memory_limit,
                         )
                     }),
+                grandparent_overlap_rolls: Some(Arc::clone(work.grandparent_overlap_rolls)),
             },
             factory,
             output_dir,
@@ -1389,6 +1401,7 @@ impl CompactionJobActor {
         self.worker_cancel.store(false, Ordering::Release);
         let worker_cancel = Arc::clone(&self.worker_cancel);
         let worker_error = Arc::clone(&self.worker_error);
+        let grandparent_overlap_rolls = Arc::clone(&self.grandparent_overlap_rolls);
         let prepared_outputs = Arc::clone(&self.prepared_outputs);
         let memory_budget = self.memory_budget.clone();
         let trivial_move = self.active_trivial_move();
@@ -1426,7 +1439,12 @@ impl CompactionJobActor {
                     output_dir,
                     Some(&abort_check),
                     hybrid_storage.as_ref(),
-                    CompactionOutputWork { prepared: &prepared_outputs, manual_deadline, budget: memory_budget.as_ref() },
+                    CompactionOutputWork {
+                        prepared: &prepared_outputs,
+                        manual_deadline,
+                        budget: memory_budget.as_ref(),
+                        grandparent_overlap_rolls: &grandparent_overlap_rolls,
+                    },
                 ) };
 
                 let (output_ssts, error) = match result {

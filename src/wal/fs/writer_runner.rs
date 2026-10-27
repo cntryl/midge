@@ -99,6 +99,12 @@ enum WriteAcknowledgement {
         prefix: crate::wal::append_completion::WalAppendPrefix,
         sender: std::sync::mpsc::SyncSender<crate::wal::append_completion::AppendResult>,
     },
+    Footer {
+        prefix: crate::wal::footer_completion::WalFooterPrefix,
+        sender: std::sync::mpsc::SyncSender<
+            crate::common::MidgeResult<crate::wal::footer_completion::WalFooterCompletion>,
+        >,
+    },
 }
 
 impl QueuedWrite {
@@ -157,6 +163,29 @@ impl QueuedWrite {
         }
     }
 
+    pub(crate) fn footer(
+        data: Vec<u8>,
+        prefix: crate::wal::footer_completion::WalFooterPrefix,
+        sender: std::sync::mpsc::SyncSender<
+            crate::common::MidgeResult<crate::wal::footer_completion::WalFooterCompletion>,
+        >,
+        effect: PendingWriterEffect,
+        id: u64,
+        reservation: crate::common::resource_budget::ResourceReservation,
+    ) -> Self {
+        Self {
+            encoded_len: data.len(),
+            data,
+            ack: WriteAcknowledgement::Footer { prefix, sender },
+            raw: None,
+            last_record_offset: 0,
+            service_elapsed: Duration::ZERO,
+            _reservation: Some(reservation),
+            effect: Some(effect),
+            id,
+        }
+    }
+
     fn fail(&self, error: WalAppendError) {
         match &self.ack {
             WriteAcknowledgement::Legacy(sender) => {
@@ -164,6 +193,9 @@ impl QueuedWrite {
             }
             WriteAcknowledgement::Sequenced { sender, .. } => {
                 let _ = sender.send(Err(error));
+            }
+            WriteAcknowledgement::Footer { sender, .. } => {
+                let _ = sender.send(Err(error.error));
             }
         }
     }
@@ -734,6 +766,26 @@ impl WriterRunner {
                         end_offset: next_pos,
                         elapsed: entry.service_elapsed,
                     }));
+                }
+                WriteAcknowledgement::Footer { prefix, sender } => {
+                    let result = if *prefix
+                        == (crate::wal::footer_completion::WalFooterPrefix {
+                            operation_id: prefix.operation_id,
+                            writer_epoch: prefix.writer_epoch,
+                            segment_id: prefix.segment_id,
+                            start_offset: entry_pos,
+                            end_offset: next_pos,
+                        }) {
+                        Ok(crate::wal::footer_completion::WalFooterCompletion {
+                            prefix: *prefix,
+                            elapsed: entry.service_elapsed,
+                        })
+                    } else {
+                        Err(crate::common::MidgeError::Internal(
+                            "WAL footer write did not match its admitted prefix".into(),
+                        ))
+                    };
+                    let _ = sender.send(result);
                 }
             }
         }

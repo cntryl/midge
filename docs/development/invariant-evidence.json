@@ -59,8 +59,6 @@
         "run_id": 37274074026,
         "sha": "c8f0de80de7925c4e3fe92b665639e4615e53281"
       },
-      "readback_path": "docs/development/evidence/checkpoint-715-readback.json",
-      "readback_sha256": "443395a3c19159b8113b5da98762c5b65d4b8cc6a78fe73286470c0ae0563c92",
       "complete": true,
       "planned_attempts": 9,
       "valid_attempts": 9,
@@ -265,7 +263,8 @@
           "executed_work_or_clock_verified_from_json": false
         }
       ],
-      "scope": "Retained source-bound controlled local Fs payload/publication-time measurements. Earlier invalid campaigns remain invalid. Pre-state costs are excluded/unknown; no physical/device bytes, changed cadence, native confidence upgrade or full-hour qualification."
+      "scope": "Retained source-bound controlled local Fs payload/publication-time measurements. Earlier invalid campaigns remain invalid. Pre-state costs are excluded/unknown; no physical/device bytes, changed cadence, native confidence upgrade or full-hour qualification.",
+      "readback_url": "https://github.com/cntryl/midge/issues/711"
     },
     "final_fourteen_hours": "Separate acceptance at the final merged catalog source; source-bound run identities and original artifact readbacks are recorded on GitHub issue #711, independently of this reference inventory."
   },
@@ -17976,11 +17975,11 @@
           "marker": "### Recorded checkpoint campaign"
         },
         {
-          "path": "docs/development/evidence/checkpoint-715-readback.json",
           "line": 24,
           "symbol": "\"conditional_policy_measurement_predicate_met\": true,",
-          "kind": "text",
-          "marker": "\"conditional_policy_measurement_predicate_met\": true,"
+          "kind": "external",
+          "marker": "\"conditional_policy_measurement_predicate_met\": true,",
+          "url": "https://github.com/cntryl/midge/issues/711"
         },
         {
           "path": "benches/bench_support/checkpoint_boundary.rs",

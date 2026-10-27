@@ -13,7 +13,7 @@ use crossbeam::channel::Receiver;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-pub(super) struct SpilledValidationJob {
+pub(in crate::runtime::event_loop) struct SpilledValidationJob {
     pub(super) request: SpilledTransactionRequest,
     snapshots: HashMap<u32, Arc<ReadSnapshot>>,
     recent_ranges: Vec<RecentDeleteRange>,

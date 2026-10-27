@@ -325,6 +325,7 @@ fn should_fence_runtime_when_storage_acknowledgement_times_out() -> MidgeResult<
     });
     assert!(event_loop.state.persistence_anomaly_detected());
     assert!(!lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+    assert!(!event_loop.actors.wal_actor.is_fenced());
     assert!(matches!(
         event_loop.check_lease_health(),
         Err(MidgeError::Fenced(_))
@@ -452,6 +453,15 @@ fn should_coalesce_independent_strict_transactions_with_one_durable_append() -> 
     // Assert
     assert_eq!(handled, 3);
     assert_eq!(fixture.event_loop.actors.wal_actor.append_calls(), 1);
+    assert!(
+        fixture
+            .event_loop
+            .state
+            .diagnostics
+            .counters()
+            .event_loop_write_service_ns_total
+            > 0
+    );
     assert_eq!(fixture.event_loop.actors.wal_actor.sync_calls(), 1);
     assert_eq!(fixture.event_loop.state.wal.pending_writes, 0);
     assert_eq!(
@@ -624,6 +634,89 @@ fn should_return_inline_responses_when_same_key_lww_transactions_share_a_group()
     assert_no_additional_response(&fallback_rx);
     assert_memtable_value(&fixture.event_loop, 0, b"same-key-inline", Some(b"second"));
 
+    Ok(())
+}
+
+const SHARED_STRICT_OVERLAP_CRASH_CHILD: &str = "MIDGE_SHARED_STRICT_OVERLAP_CRASH_CHILD";
+
+#[test]
+fn should_recover_later_overlapping_strict_write_after_shared_group_crash() -> MidgeResult<()> {
+    // Arrange: the child exits immediately after one shared durable group is
+    // acknowledged, without dropping or shutting down the event loop.
+    if let Some(path) = std::env::var_os(SHARED_STRICT_OVERLAP_CRASH_CHILD) {
+        let state = RuntimeState::new(path.into(), false);
+        let router = Arc::new(ResponseRouter::new());
+        let mut event_loop = EventLoop::new(
+            state,
+            false,
+            Arc::clone(&router),
+            RuntimeConfig {
+                wal_durability_policy: DurabilityPolicy::Strict,
+                ..RuntimeConfig::default()
+            },
+            crate::runtime::event_loop::FlushWorkerMode::Inline,
+        )?;
+        let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+        let first_rx = router.register(38, "TestRequest");
+        let second_rx = router.register(39, "TestRequest");
+        msg_tx
+            .send(txn_msg(
+                39,
+                vec![put_op(0, b"strict-overlap-crash", b"later")],
+                Some(DurabilityPolicy::Strict),
+            ))
+            .expect("queue later same-key strict transaction");
+
+        // Act: both overlapping writes are appended and synced as one group.
+        let handled = event_loop.apply_transaction_with_coalescing(
+            &msg_rx,
+            txn_request(
+                38,
+                vec![put_op(0, b"strict-overlap-crash", b"earlier")],
+                Some(DurabilityPolicy::Strict),
+            ),
+            1024,
+        );
+
+        // Assert before the abrupt exit so the parent knows one group owns
+        // both writes and both acknowledgements followed its physical sync.
+        assert_eq!(handled, 2);
+        assert_eq!(event_loop.actors.wal_actor.append_calls(), 1);
+        assert_eq!(event_loop.actors.wal_actor.sync_calls(), 1);
+        assert_eq!(expect_transaction_applied(&first_rx, 38).1, 1);
+        assert_eq!(expect_transaction_applied(&second_rx, 39).1, 1);
+        std::process::exit(76);
+    }
+
+    let directory = tempfile::tempdir().map_err(MidgeError::Io)?;
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            "--exact",
+            "runtime::event_loop::write_batch::tests::should_recover_later_overlapping_strict_write_after_shared_group_crash",
+            "--nocapture",
+        ])
+        .env(SHARED_STRICT_OVERLAP_CRASH_CHILD, directory.path())
+        .output()
+        .expect("run shared strict group crash child");
+    assert_eq!(
+        output.status.code(),
+        Some(76),
+        "child stdout: {}\nchild stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Act: recover the synced WAL after the child bypassed all destructors.
+    let mut reopened = crate::Engine::open(crate::OpenOptions::local(directory.path()).build()?)?;
+
+    // Assert: ordered replay keeps the later same-key write.
+    let tx = reopened.begin_tx(0, crate::TransactionMode::ReadOnly)?;
+    assert_eq!(
+        tx.get(b"strict-overlap-crash")?,
+        Some(Bytes::from_static(b"later"))
+    );
+    drop(tx);
+    reopened.shutdown(Duration::from_secs(30))?;
     Ok(())
 }
 
@@ -1276,7 +1369,8 @@ fn should_fail_all_event_loop_strict_transactions_when_shared_sync_fails() -> Mi
     assert_eq!(fixture.event_loop.actors.wal_actor.append_calls(), 1);
     assert_eq!(fixture.event_loop.actors.wal_actor.sync_calls(), 0);
     assert!(fixture.event_loop.state.persistence_anomaly_detected());
-    assert!(!lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+    assert!(lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+    assert!(fixture.event_loop.actors.wal_actor.is_fenced());
     assert_eq!(
         fixture
             .event_loop
@@ -2448,7 +2542,8 @@ fn should_fence_runtime_when_the_wal_actor_reports_a_fenced_writer() -> MidgeRes
     expect_error(&response, 3, |error| {
         matches!(error, MidgeError::NoSpace(_))
     });
-    assert!(!lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+    assert!(lease_healthy.load(std::sync::atomic::Ordering::Acquire));
+    assert!(event_loop.actors.wal_actor.is_fenced());
     Ok(())
 }
 

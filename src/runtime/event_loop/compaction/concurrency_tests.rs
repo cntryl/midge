@@ -306,14 +306,19 @@ fn should_preserve_l0_level_order_when_an_overlapping_job_is_owned() -> MidgeRes
         .iter()
         .find(|file| !selected.contains(&file.name))
         .map_or_else(|| plan.source_files[0].clone(), |file| file.name.clone());
+    let competing_plan = fixture.plan(&competing, 0, 1);
+    assert!(
+        plan.input_files
+            .iter()
+            .all(|input| !competing_plan.input_files.contains(input)),
+        "the competing L0 request must use a distinct input identity"
+    );
     let held = HeldComputes::new();
     // Act
     fixture.event_loop.launch_compaction(plan)?;
     held.enter();
     assert!(matches!(
-        fixture
-            .event_loop
-            .launch_compaction(fixture.plan(&competing, 0, 1)),
+        fixture.event_loop.launch_compaction(competing_plan),
         Err(MidgeError::Busy(_))
     ));
     fixture
@@ -350,12 +355,34 @@ fn should_reuse_free_compute_slot_immediately_when_publication_leaves_level_debt
         .event_loop
         .launch_compaction(fixture.plan(&second, 3, 4))?;
     let workers = [held.enter(), held.enter()];
+    let initial_file_levels: std::collections::HashMap<_, _> = fixture
+        .event_loop
+        .state
+        .manifest
+        .files
+        .iter()
+        .map(|file| (file.name.clone(), file.level))
+        .collect();
     // Act: one owner completes while the other remains physically held.
     held.release.send(()).unwrap();
     let replacement = fixture.next_compute(&held);
     // Assert: a reused fixed worker starts existing debt within five seconds;
     // the periodic idle timer is thirty seconds and no write or flush occurs.
     assert!(workers.contains(&replacement));
+    let state = &fixture.event_loop.state;
+    let next_job_uses_published_output = state.compaction.compacting_ssts.iter().any(|active| {
+        state.manifest.files.iter().any(|file| {
+            file.name == *active
+                && matches!(file.level, 2 | 4)
+                && initial_file_levels
+                    .get(active)
+                    .is_none_or(|initial_level| *initial_level != file.level)
+        })
+    });
+    assert!(
+        next_job_uses_published_output,
+        "the next job must consume the just-published over-target output"
+    );
     assert_eq!(fixture.event_loop.actors.compaction_actor.active_count(), 2);
     fixture.event_loop.state.set_compaction_enabled(false);
     held.release.send(()).unwrap();
@@ -364,6 +391,59 @@ fn should_reuse_free_compute_slot_immediately_when_publication_leaves_level_debt
     fail::remove("midge::compaction::before_compute");
     drop(held);
     fixture.restart(&[(b"a", b"first"), (b"z", b"second")])?;
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_keep_compact_all_waiting_for_an_existing_background_compaction() -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange: hold a real compaction worker after it becomes active, then
+    // issue CompactAll while the actor cannot schedule another plan.
+    let mut fixture = ConcurrentFixture::new(16 * 1024 * 1024, false)?;
+    let source = fixture.file(1, 1, b"a", b"value", 1)?;
+    fixture.persist()?;
+    let held = HeldComputes::new();
+    fixture
+        .event_loop
+        .launch_compaction(fixture.plan(&source, 1, 2))?;
+    held.enter();
+    fixture.event_loop.routing.runtime_response_timeout = Duration::from_secs(10);
+    let request_id = 91_713;
+    let response = fixture.event_loop.routing.router.register_at_for_test(
+        request_id,
+        "CompactAll",
+        Instant::now(),
+    );
+
+    // Act: CompactAll must retain its waiter while the existing compute is held.
+    CompactionCoordinator::compact_all(&mut fixture.event_loop, request_id);
+
+    // Assert: it cannot acknowledge quiescence before the active compute settles.
+    assert!(response.try_recv().is_err());
+    assert!(fixture
+        .event_loop
+        .state
+        .pending_compaction_waits
+        .contains_key(&request_id));
+    assert_eq!(
+        fixture
+            .event_loop
+            .state
+            .active_compactions
+            .load(Ordering::Acquire),
+        1
+    );
+
+    held.release.send(()).unwrap();
+    fixture.drain();
+    let result = response.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(result, RuntimeResponse::Ok { request_id: id } if id == request_id));
+    assert!(fixture.event_loop.state.pending_compaction_waits.is_empty());
+
+    fail::remove("midge::compaction::before_compute");
+    drop(held);
     scenario.teardown();
     Ok(())
 }

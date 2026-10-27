@@ -3,7 +3,7 @@
 //! Measures the two numbers the hybrid-cloud claim depends on, side by side:
 //! commit latency at the caller and how far cloud durability trails it. One
 //! client commits fixed work against the in-memory object-store simulator
-//! while a sampler reads the durability frontiers every few milliseconds, and
+//! while a sampler reads durability frontiers every few milliseconds, and
 //! a probe commit waits for cloud durability every `PROBE_EVERY` commits to
 //! turn the sequence lag into a time lag. Provider requests and uploaded bytes
 //! come from the simulator, so every row also reports requests per commit and
@@ -92,8 +92,25 @@ struct LagSample {
     committed_bytes: u64,
     sampler_ticks: u64,
     sampler_max_gap_ms: u64,
+    max_pending_uploads: usize,
     provider_requests: u64,
     native_transport: Option<Traffic>,
+}
+
+struct ClientSample {
+    commit_latencies_us: Vec<u64>,
+    probe_wait_us: Vec<u64>,
+    probe_timeouts: u64,
+    write_stalls: u64,
+    last_sequence: u64,
+}
+
+struct SamplerSample {
+    durable_lag_sequences: Vec<u64>,
+    visible_lag_sequences: Vec<u64>,
+    ticks: u64,
+    max_gap_ms: u64,
+    max_pending_uploads: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -174,7 +191,7 @@ pub(crate) fn sqrzl_options(cache: &std::path::Path, namespace: &str) -> OpenOpt
 fn spawn_sampler(
     engine: &Arc<Engine>,
     stop: &Arc<AtomicBool>,
-) -> std::thread::JoinHandle<(Vec<u64>, Vec<u64>, u64, u64)> {
+) -> std::thread::JoinHandle<SamplerSample> {
     let engine = Arc::clone(engine);
     let stop = Arc::clone(stop);
     std::thread::spawn(move || {
@@ -183,6 +200,7 @@ fn spawn_sampler(
         let mut ticks = 0_u64;
         let mut previous = Instant::now();
         let mut max_gap = Duration::ZERO;
+        let mut max_pending_uploads = 0;
         while !stop.load(Ordering::Acquire) {
             if let Ok(metrics) = engine.metrics().get_runtime_metrics() {
                 if stop.load(Ordering::Acquire) {
@@ -201,17 +219,19 @@ fn spawn_sampler(
                         .current_sequence
                         .saturating_sub(metrics.wal_cloud_durable_seq),
                 );
+                max_pending_uploads = max_pending_uploads.max(metrics.pending_cloud_uploads);
                 ticks += 1;
             }
             std::thread::sleep(SAMPLE_INTERVAL);
         }
         max_gap = max_gap.max(previous.elapsed());
-        (
-            durable,
-            visible,
+        SamplerSample {
+            durable_lag_sequences: durable,
+            visible_lag_sequences: visible,
             ticks,
-            u64::try_from(max_gap.as_millis()).unwrap_or(u64::MAX),
-        )
+            max_gap_ms: u64::try_from(max_gap.as_millis()).unwrap_or(u64::MAX),
+            max_pending_uploads,
+        }
     })
 }
 
@@ -249,6 +269,64 @@ fn commit_value(
     }
 }
 
+fn execute_writers(
+    engine: &Arc<Engine>,
+    cf_id: ColumnFamilyId,
+    mode: CommitMode,
+    writers: usize,
+) -> Vec<ClientSample> {
+    assert!(writers > 0, "hybrid lag rows need at least one writer");
+    assert_eq!(
+        TRANSACTIONS % writers,
+        0,
+        "the fixed transaction count must divide evenly across writers"
+    );
+    let transactions_per_writer = TRANSACTIONS / writers;
+    std::thread::scope(|scope| {
+        let handles = (0..writers)
+            .map(|writer| {
+                let engine = Arc::clone(engine);
+                scope.spawn(move || {
+                    let mut sample = ClientSample {
+                        commit_latencies_us: Vec::with_capacity(transactions_per_writer),
+                        probe_wait_us: Vec::new(),
+                        probe_timeouts: 0,
+                        write_stalls: 0,
+                        last_sequence: 0,
+                    };
+                    for offset in 0..transactions_per_writer {
+                        let ordinal = writer * transactions_per_writer + offset;
+                        let started = Instant::now();
+                        let (sequence, stalls) = commit_value(&engine, cf_id, ordinal, mode);
+                        sample.last_sequence = sample.last_sequence.max(sequence);
+                        sample.write_stalls += stalls;
+                        sample
+                            .commit_latencies_us
+                            .push(duration_micros(started.elapsed()));
+                        if mode == CommitMode::CloudAsync
+                            && ordinal % PROBE_EVERY == PROBE_EVERY - 1
+                        {
+                            let wait_started = Instant::now();
+                            match engine.wait_cloud_durable(sample.last_sequence, PROBE_TIMEOUT) {
+                                Ok(true) => sample
+                                    .probe_wait_us
+                                    .push(duration_micros(wait_started.elapsed())),
+                                Ok(false) => sample.probe_timeouts += 1,
+                                Err(error) => panic!("hybrid lag probe wait failed: {error}"),
+                            }
+                        }
+                    }
+                    sample
+                })
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("hybrid lag writer thread"))
+            .collect()
+    })
+}
+
 fn wal_bytes(store: &SimulatedObjectStore) -> u64 {
     store.stored_bytes_under(&format!("{OBJECT_PREFIX}wal/"))
 }
@@ -261,11 +339,11 @@ fn put_count(store: &SimulatedObjectStore) -> u64 {
         .unwrap_or(0)
 }
 
-fn execute_case(mode: CommitMode) -> LagSample {
+fn execute_case(mode: CommitMode, writers: usize) -> LagSample {
     let cache = tempfile::tempdir().expect("local cache directory");
     let store = SimulatedObjectStore::new(Schedule::Eager);
     let engine = Arc::new(open_engine(mode, &store, &cache));
-    execute_open_engine(mode, engine, false, || Traffic {
+    execute_open_engine(mode, engine, false, writers, || Traffic {
         requests: store.request_counts().values().copied().sum(),
         puts: put_count(&store),
         bytes: wal_bytes(&store),
@@ -277,6 +355,7 @@ fn execute_open_engine(
     mode: CommitMode,
     engine: Arc<Engine>,
     native: bool,
+    writers: usize,
     counters: impl Fn() -> Traffic,
 ) -> LagSample {
     let cf_id = engine
@@ -288,33 +367,33 @@ fn execute_open_engine(
     let sampler = mode.is_cloud().then(|| spawn_sampler(&engine, &stop));
 
     let started_at = Instant::now();
+    let client_samples = execute_writers(&engine, cf_id, mode, writers);
+    let elapsed = started_at.elapsed();
     let mut commit_latencies_us = Vec::with_capacity(TRANSACTIONS);
     let mut probe_wait_us = Vec::new();
     let mut probe_timeouts = 0_u64;
     let mut write_stalls = 0_u64;
     let mut last_sequence = 0_u64;
-    for ordinal in 0..TRANSACTIONS {
-        let commit_started = Instant::now();
-        let (sequence, stalls) = commit_value(&engine, cf_id, ordinal, mode);
-        last_sequence = sequence;
-        write_stalls += stalls;
-        commit_latencies_us.push(duration_micros(commit_started.elapsed()));
-        if mode == CommitMode::CloudAsync && ordinal % PROBE_EVERY == PROBE_EVERY - 1 {
-            let wait_started = Instant::now();
-            match engine.wait_cloud_durable(last_sequence, PROBE_TIMEOUT) {
-                Ok(true) => probe_wait_us.push(duration_micros(wait_started.elapsed())),
-                Ok(false) => probe_timeouts += 1,
-                Err(error) => panic!("hybrid lag probe wait failed: {error}"),
-            }
-        }
+    for sample in client_samples {
+        commit_latencies_us.extend(sample.commit_latencies_us);
+        probe_wait_us.extend(sample.probe_wait_us);
+        probe_timeouts += sample.probe_timeouts;
+        write_stalls += sample.write_stalls;
+        last_sequence = last_sequence.max(sample.last_sequence);
     }
-    let elapsed = started_at.elapsed();
     // A final drain must not manufacture sampler health for the measured
     // commit window.
     stop.store(true, Ordering::Release);
-    let (durable_lag_sequences, visible_lag_sequences, sampler_ticks, sampler_max_gap_ms) = sampler
-        .map(|handle| handle.join().expect("join lag sampler"))
-        .unwrap_or_default();
+    let sampler = sampler.map_or(
+        SamplerSample {
+            durable_lag_sequences: Vec::new(),
+            visible_lag_sequences: Vec::new(),
+            ticks: 0,
+            max_gap_ms: 0,
+            max_pending_uploads: 0,
+        },
+        |handle| handle.join().expect("join lag sampler"),
+    );
     if mode.is_cloud() {
         // Drain so the request and byte totals cover every commit's upload.
         assert!(
@@ -335,10 +414,10 @@ fn execute_open_engine(
 
     LagSample {
         elapsed,
-        completed: u64::try_from(TRANSACTIONS).expect("transaction count fits in u64"),
+        completed: u64::try_from(commit_latencies_us.len()).expect("transaction count fits in u64"),
         commit_latencies_us,
-        durable_lag_sequences,
-        visible_lag_sequences,
+        durable_lag_sequences: sampler.durable_lag_sequences,
+        visible_lag_sequences: sampler.visible_lag_sequences,
         probe_wait_us,
         probe_timeouts,
         write_stalls,
@@ -346,8 +425,9 @@ fn execute_open_engine(
         upload_bytes: traffic.bytes,
         committed_bytes: u64::try_from(TRANSACTIONS * (KEY_SIZE + VALUE_SIZE))
             .expect("committed bytes fit in u64"),
-        sampler_ticks,
-        sampler_max_gap_ms,
+        sampler_ticks: sampler.ticks,
+        sampler_max_gap_ms: sampler.max_gap_ms,
+        max_pending_uploads: sampler.max_pending_uploads,
         provider_requests: traffic.requests,
         native_transport: native.then_some(traffic),
     }
@@ -496,19 +576,39 @@ fn record_lag_observations(ctx: &mut StressContext, sample: &LagSample, period_m
     for (name, value, unit, direction) in observations {
         ctx.record_observation(name, value, unit, direction);
     }
+    record_queue_observations(ctx, sample);
+}
+
+fn record_queue_observations(ctx: &mut StressContext, sample: &LagSample) {
+    ctx.record_observation(
+        "pending_cloud_uploads_sampled_max",
+        u64_to_f64(u64::try_from(sample.max_pending_uploads).unwrap_or(u64::MAX)),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
 }
 
 pub(crate) fn run_case(ctx: &mut StressContext, scenario: &'static str, mode: CommitMode) {
+    run_case_with_writers(ctx, scenario, mode, 1);
+}
+
+pub(crate) fn run_case_with_writers(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    mode: CommitMode,
+    writers: usize,
+) {
     run_measured_case(
         ctx,
         scenario,
         mode,
+        writers,
         if mode.is_cloud() {
             "simulated_cloud"
         } else {
             "local"
         },
-        || execute_case(mode),
+        || execute_case(mode, writers),
     );
 }
 
@@ -519,16 +619,30 @@ pub(crate) fn run_provider_case(
     mode: CommitMode,
     options: OpenOptions,
 ) {
+    run_provider_case_with_writers(ctx, scenario, mode, options, 1);
+}
+
+#[cfg(feature = "stress-soak")]
+pub(crate) fn run_provider_case_with_writers(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    mode: CommitMode,
+    options: OpenOptions,
+    writers: usize,
+) {
     let counters = provider_observation::install();
     let window = counters.begin();
     run_measured_case(
         ctx,
         scenario,
         mode,
+        writers,
         if mode.is_cloud() { "sqrzl_s3" } else { "local" },
         || {
             let engine = Arc::new(Engine::open(options).expect("open provider lag engine"));
-            execute_open_engine(mode, engine, mode.is_cloud(), || counters.snapshot())
+            execute_open_engine(mode, engine, mode.is_cloud(), writers, || {
+                counters.snapshot()
+            })
         },
     );
     drop(window);
@@ -538,6 +652,7 @@ fn run_measured_case(
     ctx: &mut StressContext,
     scenario: &'static str,
     mode: CommitMode,
+    writers: usize,
     storage: &'static str,
     execute: impl FnOnce() -> LagSample,
 ) {
@@ -555,10 +670,20 @@ fn run_measured_case(
         },
     );
     ctx.parameter("commit_mode", mode.label());
-    ctx.parameter("writers", 1);
+    ctx.parameter("writers", writers);
+    ctx.parameter("transactions_per_writer", TRANSACTIONS / writers);
     ctx.parameter("value_size_bytes", VALUE_SIZE);
     ctx.parameter("sample_interval_ms", SAMPLE_INTERVAL.as_millis());
     ctx.parameter("probe_every_commits", PROBE_EVERY);
+    let upload_policy = cntryl_midge::CloudWritePolicy::default();
+    ctx.parameter(
+        "cloud_wal_upload_concurrency",
+        upload_policy.wal_upload_concurrency,
+    );
+    ctx.parameter(
+        "cloud_wal_upload_memory_cap_bytes",
+        upload_policy.wal_upload_memory_bytes,
+    );
     let sample = execute();
     let period_ms = if mode.is_cloud() {
         sampler_period_ms(&sample)

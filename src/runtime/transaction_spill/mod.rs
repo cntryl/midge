@@ -629,6 +629,7 @@ impl TransactionOpSource {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn latest_before(
         &self,
         ordinal: u64,

@@ -60,6 +60,75 @@ fn should_reject_incorrect_azure_shared_key_for_conditional_write_against_sqrzl(
 }
 
 #[test]
+fn should_validate_streamed_multipart_receipt_from_sqrzl_azure() {
+    // Arrange
+    let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-receipt-azure");
+    // Act
+    assert_sqrzl_streamed_receipt("sqrzl-azure-receipt", &provider);
+    // Assert: the helper verifies exact receipt identity and size.
+}
+
+fn assert_sqrzl_streamed_receipt(label: &str, provider: &CloudProviderConfig) {
+    use crate::io::{File, FsPath, OpenOptions as FsOpenOptions, RealFs};
+    use crate::storage::{
+        StorageBackend, StorageFileUpload, StoragePrecondition, StorageRequest,
+        FILE_UPLOAD_PART_BYTES,
+    };
+    use std::sync::Arc;
+
+    // Arrange: prepare an authenticated namespace and a payload spanning two parts.
+    require_sqrzl(label);
+    ensure_sqrzl_namespace(provider).unwrap_or_else(|error| {
+        panic!("{label}: failed to prepare Sqrzl namespace: {error}");
+    });
+    let backend = build_cloud_storage(provider, "").expect("build Sqrzl storage backend");
+    let prefix = format!("qualification/{label}/{}/", uuid::Uuid::new_v4());
+    let size = FILE_UPLOAD_PART_BYTES + 1;
+    let bytes: Vec<u8> = (0..size)
+        .map(|index| {
+            u8::try_from(index.wrapping_mul(131).wrapping_add(17) & 0xff)
+                .expect("masked byte fits in u8")
+        })
+        .collect();
+    let directory = tempfile::tempdir().expect("create streamed receipt source");
+    std::fs::write(directory.path().join("source"), &bytes).expect("write streamed receipt source");
+    let fs = RealFs::new(directory.path()).expect("open streamed receipt source directory");
+    let file =
+        crate::io::open_persistent_handle(&fs, &FsPath::new("source"), FsOpenOptions::READ_ONLY)
+            .expect("open streamed receipt source");
+    let file: Arc<dyn File> = Arc::from(file);
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(60));
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Act: stream the file through the provider receipt API.
+    backend.submit_file_write_receipt_request(
+        StorageRequest::new(
+            format!("{prefix}object.sst"),
+            deadline,
+            Duration::from_secs(60),
+        )
+        .with_precondition(StoragePrecondition::IfAbsent),
+        StorageFileUpload {
+            file,
+            size: size as u64,
+            content_crc32c: crc32c::crc32c(&bytes),
+            part_size: FILE_UPLOAD_PART_BYTES,
+        },
+        tx,
+    );
+    let receipt = rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("wait for Sqrzl streamed upload receipt")
+        .unwrap_or_else(|error| panic!("{label}: streamed upload failed: {error}"))
+        .unwrap_or_else(|| panic!("{label}: provider omitted its checksum receipt"));
+    // Assert: the receipt covers the exact multipart payload and byte length.
+    assert_eq!(receipt.metadata.size, size as u64, "{label}: receipt size");
+    assert!(
+        receipt.matches(&bytes),
+        "{label}: provider receipt must match the exact uploaded bytes and identity"
+    );
+}
+
+#[test]
 fn should_run_gcs_xml_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-gcs");
     run_provider_contract("gcs", &provider);

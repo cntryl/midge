@@ -40,10 +40,13 @@ The read-path work has since merged; the status below is recorded at
 - **Correctness and assurance use behavioral gates.** Correctness fixes need
   a failing invariant test and a no-regression check on the relevant rows;
   they do not wait for an absolute baseline. Assurance targets specify
-  detection power and compute budget. #929 still owes the committed evidence
-  matrix; it supplies absolute context, not the performance PR pass/fail gate.
-- **One purpose per issue, one PR per issue.** Issues that bundled several
-  changes were split; each has one failure scenario and one proof.
+  detection power and compute budget. #929 still owes a concise baseline
+  summary; raw reports and uptime remain attached to GitHub Actions runs.
+  Absolute results supply context, not the performance PR pass/fail gate.
+- **One purpose per issue, one milestone delivery PR.** Issues that bundled
+  several changes were split; each has one failure scenario and one proof.
+  The 0.5.0 issue work is tracked as issue-scoped commits on one integration
+  branch and will be submitted in one PR after the milestone issues are ready.
 - **Formats are unstable on `develop` between releases.** Each
   format-changing PR lands independently, bumps its own rejection test, and
   updates [format-compatibility.md](format-compatibility.md). No coordination
@@ -66,8 +69,14 @@ The read-path work has since merged; the status below is recorded at
 ## Baseline
 
 The Phase 0 baseline runs on an Apple Silicon macOS machine with APFS. Its
-evidence records the hardware and load around every run. The evidence matrix
-is still outstanding at the revision above. Alternating A/B measurements
+evidence records the hardware and load around every run. The checkpoint at
+`f64d6e60` lists every absolute row and marks them unmeasured; the qualified
+evidence matrix is still outstanding. The six Tier 2 baseline rows now have
+three acceptable runs each at `64389f99`; their medians and variability are
+recorded, and the other planned rows remain due. See
+[the current matrix status](https://github.com/cntryl/midge/issues/929)
+and [the earlier matrix discussion](https://github.com/cntryl/midge/issues/929).
+Alternating A/B measurements
 govern performance PRs even when a quiet absolute baseline is unavailable;
 noise remains grounds for an inconclusive result. The first matrix is
 Midge-only. RocksDB `db_bench` context is deferred and cannot support a parity
@@ -96,7 +105,7 @@ decisions of Phases 2 and 3; Phase 5 may start any time after Phase 0.
 - #930 Per-operation latency histograms and tracing spans.
 - #936 Hybrid durability contract and a cloud-durable wait API.
 - #937 Tier 2 hybrid lag rows merged in #960; Tier 5 Sqrzl row remains open.
-- #929 Rows and procedure merged in #961; evidence matrix remains open.
+- #929 Rows and procedure merged in #961; baseline summary remains open.
 
 ### Phase 1: read path
 

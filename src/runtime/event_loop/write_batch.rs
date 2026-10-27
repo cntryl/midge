@@ -280,6 +280,22 @@ impl EventLoop {
         initial: ApplyTransactionRequest,
         max: usize,
     ) -> usize {
+        let started = Instant::now();
+        let handled = self.apply_transaction_with_coalescing_inner(msg_rx, initial, max);
+        self.state.diagnostics.record(|metrics| {
+            metrics.record_event_loop_write_service(
+                u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            );
+        });
+        handled
+    }
+
+    fn apply_transaction_with_coalescing_inner(
+        &mut self,
+        msg_rx: &Receiver<RuntimeMsg>,
+        initial: ApplyTransactionRequest,
+        max: usize,
+    ) -> usize {
         if max == 0 {
             return 0;
         }
@@ -856,8 +872,13 @@ impl EventLoop {
         ) || self.actors.wal_actor.is_fenced();
         if must_fence {
             self.state.mark_persistence_anomaly();
-            if let Some(healthy) = &self.authority.fencing.lease_healthy {
-                healthy.store(false, std::sync::atomic::Ordering::Release);
+            // WAL persistence ambiguity is tracked by the WAL actor fence.
+            // Keep lease health independent so already-applied data can still
+            // be flushed and recovered; true lease failures remain lease-owned.
+            if !self.actors.wal_actor.is_fenced() {
+                if let Some(healthy) = &self.authority.fencing.lease_healthy {
+                    healthy.store(false, std::sync::atomic::Ordering::Release);
+                }
             }
             tracing::error!(
                 request_id,
@@ -932,6 +953,21 @@ impl CoalescedTransactionBatch {
             fallback_request: None,
             deferred_error: None,
         }
+    }
+
+    pub(super) fn spilled_pipeline_placeholder(
+        request_id: u64,
+        touched_cfs: Vec<crate::types::ColumnFamilyId>,
+    ) -> Self {
+        let mut batch = Self::new(TransactionCoalescingKey {
+            durability_policy: crate::wal::DurabilityPolicy::Strict,
+            has_start_sequence: false,
+            conflict_policy: ConflictPolicy::LastWriteWins,
+        });
+        batch.request_ids.push(request_id);
+        batch.touched_cfs.insert(request_id, touched_cfs);
+        batch.handled = 1;
+        batch
     }
 
     fn push_prepared(

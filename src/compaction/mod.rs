@@ -48,6 +48,31 @@ pub fn execute_compaction(
     execute_compaction_with_output_sink(plan, sst_factory, output_dir, abort_check, None, None)
 }
 
+#[cfg(test)]
+pub(crate) fn execute_compaction_with_overlap_roll_counter(
+    plan: &CompactionPlan,
+    sst_factory: &dyn crate::sst::SstFactory,
+    output_dir: &Path,
+    counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> MidgeResult<Vec<String>> {
+    execute_compaction_at_target(
+        plan,
+        CompactionResources {
+            target_sst_size: plan.target_sst_size,
+            source_fan_in: LeveledCompactionConfig::default().max_compaction_input_files,
+            budget: crate::common::resource_budget::ResourceBudget::new(
+                plan.compaction_memory_limit,
+            ),
+            grandparent_overlap_rolls: Some(counter),
+        },
+        sst_factory,
+        output_dir,
+        None,
+        None,
+        None,
+    )
+}
+
 pub(crate) type CompactionOutputSink<'a> = dyn Fn(
         &str,
         &Path,
@@ -73,6 +98,7 @@ pub(crate) fn execute_compaction_with_output_sink(
             budget: crate::common::resource_budget::ResourceBudget::new(
                 plan.compaction_memory_limit,
             ),
+            grandparent_overlap_rolls: None,
         },
         sst_factory,
         output_dir,
@@ -86,6 +112,7 @@ pub(crate) struct CompactionResources {
     pub(crate) target_sst_size: usize,
     pub(crate) source_fan_in: usize,
     pub(crate) budget: crate::common::resource_budget::ResourceBudget,
+    pub(crate) grandparent_overlap_rolls: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 pub(crate) fn execute_compaction_at_target(
@@ -171,7 +198,7 @@ pub(crate) fn execute_compaction_at_target(
         output_dir,
         inputs,
         &budget,
-        executor::PartitionOutputConfig {
+        &executor::PartitionOutputConfig {
             cf_id: plan.cf_id,
             target_level: plan.target_level,
             generation: plan.output_seq,
@@ -186,6 +213,7 @@ pub(crate) fn execute_compaction_at_target(
             },
             output_size_limit,
             grandparent_overlap: &plan.grandparent_overlap,
+            grandparent_overlap_rolls: resources.grandparent_overlap_rolls,
         },
         abort_check,
         output_sink,
@@ -435,6 +463,7 @@ mod tests {
                 budget: crate::common::resource_budget::ResourceBudget::new(
                     plan.compaction_memory_limit,
                 ),
+                grandparent_overlap_rolls: None,
             },
             &factory,
             dir.path(),
@@ -504,6 +533,7 @@ mod tests {
                 budget: crate::common::resource_budget::ResourceBudget::new(
                     plan.compaction_memory_limit,
                 ),
+                grandparent_overlap_rolls: None,
             },
             &factory,
             &local_dir,
@@ -2627,7 +2657,7 @@ mod tests {
             temp_dir.path(),
             inputs,
             &budget,
-            executor::PartitionOutputConfig {
+            &executor::PartitionOutputConfig {
                 cf_id: 0,
                 target_level: 1,
                 generation: 54,
@@ -2639,6 +2669,7 @@ mod tests {
                 },
                 output_size_limit: None,
                 grandparent_overlap: &executor::GrandparentOverlap::default(),
+                grandparent_overlap_rolls: None,
             },
             None,
             None,

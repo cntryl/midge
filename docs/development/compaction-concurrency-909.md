@@ -25,13 +25,15 @@ phase, epoch, family, sequence and flush ID, after the worker's terminal flag.
 Duplicate or early results cannot release that owner or its staging admission.
 The eligible-family selector skips owned and retry-delayed families.
 
-Active regression source uses actual filesystem workers and event-loop
-publication for simultaneous disjoint jobs, conflicting spans, one-L0 ownership,
-hot/newer L0 ordering, immediate rescheduling, shared memory failure isolation,
-per-family concurrent flush and restart. The phase regression holds real build
-and publication work while submitting early, stale and duplicate completions.
-These tests have been compiled; execution, throughput/fairness measurements and
-larger-default qualification remain pending in the batch validation phase.
+Active regressions use actual filesystem workers and event-loop publication for
+simultaneous disjoint jobs, conflicting spans, one-L0 ownership, hot/newer L0
+ordering, immediate rescheduling, shared memory failure isolation, per-family
+concurrent flush and restart. Current failpoint-enabled results: compaction
+concurrency 14/14, worker pool 4/4, reservation registry 4/4, flush physical
+phase and retry ordering 1/1 each, concurrent flush recovery 1/1, and concurrent
+compaction crash recovery 1/1. The crash campaign exposed and fixed a stale
+subprocess test selector before the passing run. Throughput/fairness measurements
+and qualification of a larger default remain pending.
 
 Cloud metadata publication independence is tracked separately by #910. Logical
 level moves with no SST rewrite are tracked by #926.

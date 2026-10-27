@@ -27,8 +27,9 @@ use crate::wal::traits::{GroupedWalWriter, WalAppendError, WalWriter};
 use crate::wal::types::{WalPos, WalRecord};
 use crate::wal::writer_authority::PendingWriterEffect;
 use parking_lot::{Condvar, Mutex};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
@@ -321,6 +322,92 @@ impl FsWalWriterIo {
         Ok(Footer::sealing(&self.header, &self.tail.lock(), &digest))
     }
 
+    fn submit_footer_operation(
+        &self,
+        operation_id: u64,
+        facts: &SealedFacts,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<crate::wal::footer_completion::WalPendingFooter> {
+        let started = Instant::now();
+        if let Some(error) = self.writer_failure() {
+            return Err(error);
+        }
+        let footer = self.sealing(timeout)?;
+        if footer.sealed_facts() != *facts {
+            return Err(MidgeError::Internal(format!(
+                "WAL segment {} changed after its seal facts were taken",
+                self.header.id
+            )));
+        }
+        let data = footer.encode_frame()?;
+        let start_offset = self.current_pos();
+        let end_offset = start_offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| MidgeError::ResourceLimit("WAL footer offset overflow".into()))?;
+        let expected = crate::wal::footer_completion::WalFooterPrefix {
+            operation_id,
+            writer_epoch: self.header.epoch,
+            segment_id: self.header.id,
+            start_offset,
+            end_offset,
+        };
+        if data.is_empty() {
+            return Err(MidgeError::Internal("encoded WAL footer is empty".into()));
+        }
+        crate::failpoints::fail_point!("midge::wal::timeout_before_enqueue", |_| Err(
+            MidgeError::Timeout("injected timeout before WAL footer enqueue".into())
+        ));
+        let (effect, root) =
+            PendingWriterEffect::admit(self.write_authority.read().clone(), group, timeout)?;
+        let reservation = self
+            .raw_submission_memory
+            .reserve(data.len(), "asynchronous WAL footer")?;
+        let (sender, response) = std::sync::mpsc::sync_channel(1);
+        {
+            let mut queue = self.queue.lock();
+            let mut state = self.sync_state.lock();
+            if let Some(error) = state.failure() {
+                return Err(error);
+            }
+            if self.sealed.load(Ordering::Acquire) {
+                return Err(MidgeError::Internal(format!(
+                    "WAL segment {} is already sealed",
+                    self.header.id
+                )));
+            }
+            if queue.len() >= super::writer_runner::MAX_QUEUE_DEPTH
+                || state.submitted_writes != state.completed_writes
+                || started.elapsed() >= timeout
+            {
+                return Err(MidgeError::WriteStall(
+                    "WAL footer admission is not at a drained segment boundary".into(),
+                ));
+            }
+            let id = state.submitted_writes.checked_add(1).ok_or_else(|| {
+                MidgeError::ResourceLimit("WAL writer request identity exhausted".into())
+            })?;
+            self.sealed.store(true, Ordering::Release);
+            state.submitted_writes = id;
+            queue.push(super::writer_runner::QueuedWrite::footer(
+                data,
+                expected,
+                sender,
+                effect,
+                id,
+                reservation,
+            ));
+        }
+        self.queue_cond.notify_one();
+        let failure_state = Arc::clone(&self.sync_state);
+        Ok(crate::wal::footer_completion::WalPendingFooter::new(
+            response,
+            expected,
+            Arc::new(move || failure_state.lock().failure()),
+            root,
+        ))
+    }
+
     fn take_buffer(&self) -> Vec<u8> {
         let mut pool = self.buf_pool.lock();
         pool.pop().unwrap_or_else(|| Vec::with_capacity(1024))
@@ -503,6 +590,16 @@ impl WalWriter for FsWalWriterIo {
         group: Option<&crate::lease::WriterEffectGroup>,
     ) -> Option<MidgeResult<crate::wal::traits::WalPendingSync>> {
         Some(self.enqueue_sync_prefix(prefix, timeout, group))
+    }
+
+    fn submit_footer(
+        &self,
+        operation_id: u64,
+        facts: &SealedFacts,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<MidgeResult<crate::wal::footer_completion::WalPendingFooter>> {
+        Some(self.submit_footer_operation(operation_id, facts, timeout, group))
     }
 
     fn set_write_authority(&self, authority: Option<crate::wal::traits::WriteAuthority>) {
@@ -1427,6 +1524,49 @@ mod tests {
 
         // Assert
         assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn should_match_sealed_identity_to_independent_written_segment_bytes() -> MidgeResult<()> {
+        // Arrange: use a raw 4 KiB value so the production writer exercises
+        // the borrowed WAL value path before final framing.
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+        let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs))?;
+        let value: Vec<_> = (0_usize..4096)
+            .map(|index| {
+                let value = index.wrapping_mul(73).wrapping_add(index / 3);
+                u8::try_from(value % 251).expect("fixture byte fits in u8")
+            })
+            .collect();
+        assert_eq!(crate::codec::compress_wal_value(&value).1, None);
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"raw-value"),
+            Some(Bytes::from(value)),
+            7,
+        );
+
+        // Act: append and obtain the real writer's seal facts, then compute
+        // the segment digest independently from the persisted prefix bytes.
+        writer
+            .append_record_accounted(&record)
+            .map_err(|failure| failure.error)?;
+        writer.sync_with_timeout(Duration::from_secs(5))?;
+        let facts = writer.seal_facts(Duration::from_secs(5))?;
+        let bytes = crate::io::read_all(fs.as_ref(), &FsPath::new("wal.log"))
+            .map_err(crate::io::FsError::into_midge)?;
+        let data_len =
+            usize::try_from(facts.data_len).expect("segment prefix length fits in address space");
+        let expected_digest = SegmentDigest::of(&bytes[..data_len]);
+
+        // Assert: segment identity and length bind the exact independently
+        // read header and frame bytes written through the production path.
+        assert_eq!(data_len, bytes.len());
+        assert_eq!(facts.link.id, writer.header.id);
+        assert_eq!(facts.link.last_seq, record.seq);
+        assert_eq!(facts.link.digest, expected_digest.value());
+        assert_eq!(expected_digest.data_len(), facts.data_len);
         Ok(())
     }
 

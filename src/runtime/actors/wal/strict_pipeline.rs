@@ -93,6 +93,41 @@ impl WalActor {
         Ok(PendingStrictIo::Sync(pending))
     }
 
+    pub(crate) fn begin_spilled_strict_group_submission(
+        &mut self,
+        state: &mut RuntimeState,
+        source: &crate::runtime::transaction_spill::TransactionOpSource,
+        params: &super::SpilledTransactionAppendParams,
+        proof: Option<&super::SpilledValidationProof>,
+        ticket: &WalSyncTicket,
+        memory: &crate::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<(PendingStrictSync, super::PreparedSpilledAppend)> {
+        let root = self.begin_strict_writer_group(state)?;
+        let authority_prevalidated = root.is_some() || self.validate_writer_admission(state)?;
+        let prepared = self.append_spilled_strict_for_pipeline(
+            state,
+            source,
+            params,
+            proof,
+            root.as_ref(),
+            memory,
+        )?;
+        self.sync_authority_prevalidated = authority_prevalidated;
+        let submitted = self.submit_strict_sync(state, ticket, root.as_ref());
+        self.sync_authority_prevalidated = false;
+        let mut pending = submitted.map_err(|error| {
+            if !self.is_fenced() {
+                self.fence_transition(
+                    state,
+                    format!("strict spilled sync submission failed after append: {error}"),
+                );
+            }
+            Self::appended_unit_error(error)
+        })?;
+        pending.root = root;
+        Ok((pending, prepared))
+    }
+
     pub(super) fn submit_strict_sync(
         &mut self,
         state: &mut RuntimeState,

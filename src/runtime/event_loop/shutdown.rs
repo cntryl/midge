@@ -29,6 +29,9 @@ impl EventLoop {
         // tail is the only copy of buffered commits from the last batch
         // window. Make it durable, and complete the waiters it covers, before
         // held work is rejected below. CloudAsync seals its segment later.
+        trace_shutdown_phase("strict-wal-pipeline-drain", None, || {
+            self.drain_shutdown_wal_pipeline();
+        });
         if let Err(error) =
             trace_shutdown_phase("sync-current-wal", None, || self.sync_current_wal())
         {
@@ -79,6 +82,10 @@ impl EventLoop {
 
         // Establish authoritative remote WAL durability before replacing that
         // recovery authority with an SST/manifest checkpoint.
+        // Shutdown has stopped admitting requests and no longer services the
+        // event loop for ordinary reads or controls. Keep this final seal as a
+        // bounded synchronous drain under `cloud_shutdown_deadline`; active
+        // CloudAsync seals use the pending writer-runner path instead.
         if cloud_async && self.state.wal.pending_writes > 0 {
             match trace_shutdown_phase(
                 "final-cloud-wal-seal",
@@ -153,6 +160,19 @@ impl EventLoop {
         }
 
         HandleOutcome::Break
+    }
+
+    fn drain_shutdown_wal_pipeline(&mut self) {
+        while self.pipeline.wal_commits.has_pending_group()
+            || self.pipeline.memtable_apply.is_pending()
+        {
+            self.progress_wal_pipeline();
+            if self.pipeline.wal_commits.has_pending_group()
+                || self.pipeline.memtable_apply.is_pending()
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
     }
 
     fn drain_local_shutdown_flush_pipeline(&mut self) {

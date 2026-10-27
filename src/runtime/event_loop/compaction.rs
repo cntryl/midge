@@ -415,6 +415,9 @@ mod name_budget_tests;
 #[cfg(test)]
 mod fragmentation_tests;
 
+#[cfg(test)]
+mod streaming_publication_tests;
+
 pub(super) struct CompactionCoordinator;
 
 pub(super) struct CompactionCompleteRequest {
@@ -558,11 +561,23 @@ impl CompactionCoordinator {
         }
 
         if scheduled == 0 {
-            event_loop
+            let active_compactions = event_loop
                 .state
-                .pending_compaction_waits
-                .remove(&request_id);
-            event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
+                .active_compactions
+                .load(std::sync::atomic::Ordering::Acquire);
+            let pending_metadata_compactions = !event_loop
+                .actors
+                .cloud_coordinator
+                .metadata_mirror
+                .pending_compactions
+                .is_empty();
+            if active_compactions == 0 && !pending_metadata_compactions {
+                event_loop
+                    .state
+                    .pending_compaction_waits
+                    .remove(&request_id);
+                event_loop.respond(request_id, RuntimeResponse::Ok { request_id });
+            }
             return HandleOutcome::Continue;
         }
 

@@ -50,6 +50,103 @@ fn should_preserve_fenced_kind_when_wal_sync_detects_stale_writer() -> crate::co
     Ok(())
 }
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_settle_parked_strict_group_before_shutdown_wal_barrier() -> crate::common::MidgeResult<()>
+{
+    use crate::runtime::{ConflictPolicy, RuntimeResponse, TransactionOp};
+    use bytes::Bytes;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let db_path = event_loop.state.db_path.clone();
+    let (entered, reached) = crossbeam::channel::bounded(1);
+    let (release, released) = crossbeam::channel::bounded(1);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let callback_calls = Arc::clone(&calls);
+    fail::cfg_callback("midge::wal::before_physical_sync", move || {
+        if callback_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            entered.send(()).expect("signal held WAL sync");
+            released
+                .recv_timeout(Duration::from_secs(10))
+                .expect("release held WAL sync");
+        }
+    })
+    .expect("configure held WAL sync");
+
+    let commit = event_loop.routing.router.register(94_050, "strict commit");
+    let shutdown = event_loop.routing.router.register(94_051, "shutdown");
+    event_loop.process_one(
+        RuntimeMsg::ApplyTransaction {
+            request_id: 94_050,
+            ops: vec![TransactionOp::Put {
+                cf_id: 0,
+                key: Bytes::from_static(b"shutdown-prefix"),
+                value: Bytes::from_static(b"durable-before-shutdown"),
+                ttl_seconds: None,
+                insert_only: false,
+            }],
+            assertions: Vec::new(),
+            durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+            start_sequence: None,
+            conflict_policy: ConflictPolicy::LastWriteWins,
+            response_tx: None,
+        },
+        &crossbeam::channel::never(),
+    );
+    assert!(
+        event_loop.wal_group_in_flight(),
+        "Strict transaction was not accepted into the WAL pipeline: sequence={}, response={:?}",
+        event_loop.state.sequence,
+        commit.try_recv()
+    );
+    let gate_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        event_loop.progress_wal_pipeline();
+        if reached.try_recv().is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < gate_deadline,
+            "strict group did not reach physical sync"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    // Act: shutdown must drain this owned barrier before requesting its final sync.
+    let release_worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(25));
+        release.send(()).expect("release held sync");
+    });
+    event_loop.handle_shutdown(Some(94_051));
+    release_worker.join().expect("join WAL sync releaser");
+
+    // Assert: the accepted Strict write settles before shutdown acknowledges.
+    assert!(matches!(
+        commit.try_recv(),
+        Ok(RuntimeResponse::TransactionApplied {
+            request_id: 94_050,
+            ..
+        })
+    ));
+    assert!(matches!(
+        shutdown.try_recv(),
+        Ok(RuntimeResponse::Ok { request_id: 94_051 })
+    ));
+    drop(event_loop);
+    let recovered = RuntimeState::try_new(db_path, false, crate::config::RecoveryPolicy::Strict)?;
+    let family = recovered.get_cf(0).expect("recovered default family");
+    assert_eq!(
+        family.memtable.get(b"shutdown-prefix")?,
+        Some(b"durable-before-shutdown".to_vec())
+    );
+    Ok(())
+}
+
 #[test]
 fn should_preserve_resource_limit_when_compaction_launch_is_refused(
 ) -> crate::common::MidgeResult<()> {
@@ -238,6 +335,16 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_reserved
     storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
     next_sst: Option<u64>,
 ) -> crate::common::MidgeResult<EventLoop> {
+    create_test_cloud_event_loop_with_store_factory(storage_policy, next_sst, |cloud| cloud)
+}
+
+pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_store_factory(
+    storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
+    next_sst: Option<u64>,
+    store_factory: impl FnOnce(
+        Arc<crate::storage::filesystem::FileSystem>,
+    ) -> Arc<dyn crate::storage::inventory::ObjectStore>,
+) -> crate::common::MidgeResult<EventLoop> {
     let db_path = unique_test_db_path("midge_event_loop_cloud");
     std::fs::create_dir_all(&db_path).expect("create temp cloud event loop dir");
     if let Some(next) = next_sst {
@@ -257,8 +364,9 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_reserved
         crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
             .expect("create cloud backend"),
     );
+    let shared_metadata_store = store_factory(Arc::clone(&cloud));
     let shared_metadata = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
-        cloud.clone(),
+        shared_metadata_store,
         Duration::from_secs(5),
     ));
     let inventory: Arc<dyn crate::storage::inventory::ObjectInventory> = cloud.clone();
@@ -898,7 +1006,7 @@ fn test_manifest_l0_file_meta(name: &str, largest_seq: u64) -> crate::metadata::
     }
 }
 
-fn write_runtime_l0_sst_for_test(
+pub(super) fn write_runtime_l0_sst_for_test(
     event_loop: &EventLoop,
     name: &str,
     largest_seq: u64,
@@ -3446,7 +3554,7 @@ fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
 fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::common::MidgeResult<()>
 {
     // Arrange
-    let mut event_loop = create_test_event_loop()?;
+    let mut event_loop = create_test_local_event_loop()?;
     for index in 1..100 {
         event_loop.state.create_cf(format!("family-{index}"))?;
     }
@@ -3458,6 +3566,7 @@ fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::co
         .keys()
         .map(|&id| (id, cache.load_family(id).expect("published family").1))
         .collect::<std::collections::HashMap<_, _>>();
+    event_loop.state.diagnostics.reset_read_snapshot_builds();
     let (_sender, receiver) = crossbeam::channel::unbounded();
 
     // Act
@@ -3482,6 +3591,11 @@ fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::co
     );
 
     // Assert: source-stable families allocate no replacement ReadSnapshot.
+    assert_eq!(
+        event_loop.state.diagnostics.read_snapshot_builds(),
+        0,
+        "an in-place memtable update reuses all 100 family ReadSnapshots"
+    );
     for (&id, previous) in &before {
         let (sequence, current) = cache.load_family(id).expect("published family");
         assert!(Arc::ptr_eq(previous, &current), "source changed for {id}");

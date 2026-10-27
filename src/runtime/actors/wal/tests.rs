@@ -2117,7 +2117,10 @@ fn assert_best_effort_write_after_fencing(
             conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
         },
     );
-    assert!(best_effort.is_ok(), "explicit BestEffort remains available");
+    assert!(
+        matches!(best_effort, Err(MidgeError::RecoveryFailed(_))),
+        "a fenced filesystem WAL must reject BestEffort writes"
+    );
     assert_eq!(
         state
             .get_cf(0)
@@ -2125,7 +2128,7 @@ fn assert_best_effort_write_after_fencing(
             .memtable
             .iter_all()
             .len(),
-        entries_before + 1
+        entries_before
     );
 }
 
@@ -2643,9 +2646,16 @@ fn should_exit_after_writing_to_partly_applied_family_in_child() {
     );
     let sync_same = put_one(&engine, &family, b"sync", crate::WriteOptions::sync());
     let flushed = engine.flush_cf(&family);
+    let fresh = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadOnly)
+        .expect("read the global cut after rejected writes");
 
     // Assert: every later write must wait for restart. A cross-family write
     // would otherwise expose the first partial key through the global cut.
+    assert_eq!(fresh.start_sequence(), retained.start_sequence());
+    for key in [b"first".as_slice(), b"second"] {
+        assert_eq!(fresh.get(key).expect("fresh snapshot read"), None);
+    }
     assert!(
         matches!(best_effort_other, Err(MidgeError::Fenced(_))),
         "{best_effort_other:?}"
@@ -2822,12 +2832,28 @@ fn should_exit_after_flushing_past_failed_strict_sync_in_child() {
         "{commit:?}"
     );
 
+    let mut later = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadWrite)
+        .expect("later best-effort transaction");
+    later
+        .put(
+            b"after-failed-sync".to_vec(),
+            b"must-not-be-memory-only".to_vec(),
+            None,
+        )
+        .expect("stage later best-effort write");
+    let later_write = later.commit(crate::WriteOptions::best_effort());
+
     // Act
     let flushed = engine.flush_cf(&family);
     let _ = engine.shutdown(std::time::Duration::from_secs(30));
 
     // Assert
-    std::fs::write(path.join("failed-sync-flushed"), format!("{flushed:?}")).expect("flush marker");
+    std::fs::write(
+        path.join("failed-sync-flushed"),
+        format!("{flushed:?}|{later_write:?}"),
+    )
+    .expect("flush marker");
     std::process::exit(76);
 }
 
@@ -2864,7 +2890,10 @@ fn should_publish_best_effort_write_when_flushed_after_failed_strict_sync() {
     // Assert: none of the failed unit reached the memtable, so a flush past
     // its commit drops it whole on replay; the best-effort write the flush
     // published survives.
-    assert_eq!(flushed, "Ok(())");
+    assert!(
+        flushed.starts_with("Ok(())|Err(RecoveryFailed(\"local WAL is poisoned:"),
+        "{flushed}"
+    );
     {
         let tx = reopened
             .begin_tx(0, crate::TransactionMode::ReadOnly)

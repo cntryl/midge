@@ -205,6 +205,7 @@ struct PipelineCoordination {
     validation: validation::ValidationCoordinator,
     durability: DurabilityCoordinator,
     wal_transition: crate::runtime::wal_transition::WalTransitionProtocol,
+    pending_cloud_seal: Option<cloud_integration::sealing::PendingCloudSeal>,
     flush_worker_result_rx: crossbeam::channel::Receiver<FlushWorkerResult>,
     deferred_flush_results: std::collections::VecDeque<FlushWorkerResult>,
     pending_flush_mirrors: std::collections::VecDeque<flush_pipeline::PendingFlushMirror>,
@@ -276,9 +277,7 @@ impl EventLoop {
         config: super::RuntimeConfig,
         flush_worker_mode: FlushWorkerMode,
     ) -> crate::common::MidgeResult<Self> {
-        // Before anything reads the ledger or admits work (#843): the
-        // recovered tail is sealed durably, and sequences an earlier process
-        // reserved are never handed out again.
+        // Seal the recovered tail before admission so reserved sequences are never reused (#843).
         let sealed_tail = state.begin_wal_epoch(config.writer_epoch)?;
         let (inline_flush_worker, worker_msg_tx) = (
             flush_worker_mode.is_inline(),
@@ -311,15 +310,8 @@ impl EventLoop {
             state.write_pressure.admission.limiter().as_ref(),
             config.flush_concurrency,
         )?;
-        let mut wal_actor = WalActor::open(
-            &state,
-            config.wal_durability_policy,
-            config.wal_batch_config,
-            config.writer_epoch,
-            config.storage_io_timeout,
-        )?;
-
-        Self::configure_wal_actor(&state, &mut wal_actor, &config, read_resources.as_ref());
+        let wal_actor =
+            Self::open_and_configure_wal_actor(&state, &config, read_resources.as_ref())?;
 
         // CloudAsync waiters are keyed by segment id. Local waiters start at
         // generation zero; the durability coordinator is the sole owner of
@@ -334,11 +326,16 @@ impl EventLoop {
         );
         background_compaction_schedule.defer();
 
+        let grandparent_overlap_rolls = state.diagnostics.grandparent_overlap_roll_counter();
         let mut event_loop = Self {
             state,
             actors: EventLoopActors {
                 flush_actor,
-                compaction_actor: Self::create_compaction_actor(sst_factory, &config)?,
+                compaction_actor: Self::create_compaction_actor(
+                    sst_factory,
+                    &config,
+                    grandparent_overlap_rolls,
+                )?,
                 compaction_publish_actor,
                 wal_actor,
                 gc_actor,
@@ -361,6 +358,7 @@ impl EventLoop {
                 validation: validation::ValidationCoordinator::default(),
                 durability,
                 wal_transition: crate::runtime::wal_transition::WalTransitionProtocol::new(),
+                pending_cloud_seal: None,
                 flush_worker_result_rx,
                 deferred_flush_results: std::collections::VecDeque::new(),
                 pending_flush_mirrors: std::collections::VecDeque::new(),
@@ -445,12 +443,14 @@ impl EventLoop {
     fn create_compaction_actor(
         sst_factory: Arc<dyn crate::sst::SstFactory>,
         config: &super::RuntimeConfig,
+        grandparent_overlap_rolls: Arc<std::sync::atomic::AtomicU64>,
     ) -> crate::common::MidgeResult<CompactionActor> {
         let compaction_config = crate::compaction::LeveledCompactionConfig {
             l0_file_count_threshold: config.l0_compaction_trigger.max(1),
             ..Default::default()
         };
         let mut actor = CompactionActor::new_with_config(sst_factory, compaction_config);
+        actor.set_grandparent_overlap_roll_counter(grandparent_overlap_rolls);
         actor.set_execution_limits(config.target_sst_size, config.compaction_memory_limit);
         actor.configure_concurrency(config.compaction_concurrency)?;
         actor.configure_work_target(config.hybrid_storage.as_ref().map(|storage| {
@@ -474,6 +474,22 @@ impl EventLoop {
         if let Some(store) = config.leader_store.clone() {
             wal_actor.set_leader_store(store, config.leader_holder_id.clone().unwrap_or_default());
         }
+    }
+
+    fn open_and_configure_wal_actor(
+        state: &RuntimeState,
+        config: &super::RuntimeConfig,
+        read_resources: Option<&Arc<ReadResources>>,
+    ) -> crate::common::MidgeResult<WalActor> {
+        let mut wal_actor = WalActor::open(
+            state,
+            config.wal_durability_policy,
+            config.wal_batch_config,
+            config.writer_epoch,
+            config.storage_io_timeout,
+        )?;
+        Self::configure_wal_actor(state, &mut wal_actor, config, read_resources);
+        Ok(wal_actor)
     }
 
     fn apply_runtime_state_config(

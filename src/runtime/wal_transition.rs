@@ -79,6 +79,8 @@ pub(crate) struct WalSealTicket {
     segment_id: u64,
     next_segment_id: u64,
     max_sequence: u64,
+    prefix_operation_id: u64,
+    footer_operation_id: u64,
 }
 
 impl WalSealTicket {
@@ -97,6 +99,14 @@ impl WalSealTicket {
         self.max_sequence
     }
 
+    pub(crate) fn prefix_operation_id(&self) -> u64 {
+        self.prefix_operation_id
+    }
+
+    pub(crate) fn footer_operation_id(&self) -> u64 {
+        self.footer_operation_id
+    }
+
     #[must_use]
     pub(crate) fn matches(&self, receipt: WalRotationReceipt) -> bool {
         self.segment_id == receipt.sealed_segment()
@@ -110,6 +120,8 @@ impl WalSealTicket {
             segment_id,
             next_segment_id,
             max_sequence,
+            prefix_operation_id: segment_id.saturating_mul(2),
+            footer_operation_id: segment_id.saturating_mul(2).saturating_add(1),
         }
     }
 }
@@ -163,6 +175,7 @@ enum WalLifecyclePhase {
 pub(crate) struct WalTransitionProtocol {
     phase: WalLifecyclePhase,
     segments: BTreeMap<u64, SegmentObligation>,
+    next_operation_id: u64,
 }
 
 impl WalTransitionProtocol {
@@ -170,6 +183,7 @@ impl WalTransitionProtocol {
         Self {
             phase: WalLifecyclePhase::Ready,
             segments: BTreeMap::new(),
+            next_operation_id: 1,
         }
     }
 
@@ -228,6 +242,13 @@ impl WalTransitionProtocol {
                 "WAL segment {segment_id} already has a transition obligation"
             )));
         }
+        let prefix_operation_id = self.next_operation_id;
+        let footer_operation_id = prefix_operation_id
+            .checked_add(1)
+            .ok_or_else(|| MidgeError::ResourceLimit("WAL seal operation ids exhausted".into()))?;
+        let next_operation_id = footer_operation_id
+            .checked_add(1)
+            .ok_or_else(|| MidgeError::ResourceLimit("WAL seal operation ids exhausted".into()))?;
         self.segments.insert(
             segment_id,
             SegmentObligation {
@@ -240,10 +261,13 @@ impl WalTransitionProtocol {
             next_segment_id,
             max_sequence,
         };
+        self.next_operation_id = next_operation_id;
         Ok(WalSealTicket {
             segment_id,
             next_segment_id,
             max_sequence,
+            prefix_operation_id,
+            footer_operation_id,
         })
     }
 
@@ -500,7 +524,6 @@ impl WalTransitionProtocol {
         self.segments.contains_key(&segment_id)
     }
 
-    #[cfg(test)]
     pub(crate) fn is_fenced(&self) -> bool {
         matches!(self.phase, WalLifecyclePhase::Fenced { .. })
     }

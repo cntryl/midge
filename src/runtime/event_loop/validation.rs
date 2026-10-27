@@ -27,7 +27,7 @@ use spilled::SpilledValidationJob;
 #[cfg(all(test, feature = "failpoints"))]
 mod tests;
 
-struct ValidationJob {
+pub(super) struct ValidationJob {
     request: ApplyTransactionRequest,
     snapshots: HashMap<u32, Arc<ReadSnapshot>>,
     applied_sequence: u64,
@@ -42,7 +42,7 @@ enum ValidationTask {
     Spilled(SpilledValidationJob),
 }
 
-enum ValidationCompletion {
+pub(super) enum ValidationCompletion {
     Resident {
         job: ValidationJob,
         proof: MidgeResult<CommitValidationProof>,
@@ -59,6 +59,10 @@ impl ValidationCompletion {
             Self::Resident { job, .. } => job.request.request_id,
             Self::Spilled { job, .. } => job.request.request_id,
         }
+    }
+
+    fn requires_worker_acknowledgement(&self) -> bool {
+        matches!(self, Self::Spilled { .. })
     }
 }
 
@@ -124,13 +128,16 @@ impl ValidationWorker {
             .spawn(move || {
                 gate.run(|| {
                     for job in incoming {
-                        if completed.send(job.read(&cancellation)).is_err() {
+                        let completion = job.read(&cancellation);
+                        let requires_acknowledgement = completion.requires_worker_acknowledgement();
+                        if completed.send(completion).is_err() {
                             break;
                         }
-                        // One streaming workspace may survive in a completed
-                        // first-error key. Wait until the loop consumes it
-                        // before reading another job's payloads.
-                        if continued.recv().is_err() {
+                        // Spilled completions retain streaming state and stay
+                        // serialized. Resident proofs retain only bounded
+                        // metadata charged to their job reservations, so let
+                        // the worker start the next read immediately.
+                        if requires_acknowledgement && continued.recv().is_err() {
                             break;
                         }
                     }
@@ -331,12 +338,22 @@ impl EventLoop {
         let applied_sequence = self.state.applied_sequence;
         let registry = Arc::clone(&self.state.snapshot_pins);
         let acquisition = registry.begin_acquisition(applied_sequence);
-        let mut families = Self::transaction_cf_ids(&request.ops)
-            .into_iter()
-            .collect::<HashSet<_>>();
+        // Collect operation and assertion families once, then deduplicate in
+        // place. The previous path built a deduplicated Vec, collected it
+        // into another HashSet, and extended that set before building the
+        // snapshot map.
+        let mut families =
+            Vec::with_capacity(request.ops.len().saturating_add(request.assertions.len()));
+        families.extend(request.ops.iter().map(|op| match op {
+            TransactionOp::Put { cf_id, .. }
+            | TransactionOp::Delete { cf_id, .. }
+            | TransactionOp::DeleteRange { cf_id, .. } => *cf_id,
+        }));
         families.extend(request.assertions.iter().map(|assertion| assertion.cf_id));
-        let mut snapshots = HashMap::new();
-        let mut pins = Vec::new();
+        families.sort_unstable();
+        families.dedup();
+        let mut snapshots = HashMap::with_capacity(families.len());
+        let mut pins = Vec::with_capacity(families.len());
         for cf_id in families {
             let snapshot = self.create_read_snapshot(cf_id).ok_or_else(|| {
                 MidgeError::InvalidArgument(format!("column family {cf_id} does not exist"))
@@ -361,12 +378,7 @@ impl EventLoop {
     }
 
     pub(super) fn drain_validation_results(&mut self, msg_rx: &Receiver<RuntimeMsg>) {
-        if self
-            .publication
-            .publication_gate
-            .blocks_validation_completion()
-            || self.publication.verification_barrier.is_active()
-        {
+        if self.validation_completion_blocked() {
             return;
         }
         loop {
@@ -379,25 +391,62 @@ impl EventLoop {
             let Some(completion) = completion else {
                 break;
             };
-            self.pipeline.validation.pending = self.pipeline.validation.pending.saturating_sub(1);
-            if !self
-                .pipeline
-                .validation
-                .callers
-                .remove(&completion.request_id())
-            {
-                drop(completion);
+            self.handle_validation_completion(completion, msg_rx);
+        }
+    }
+
+    pub(super) fn validation_completion_receiver(&self) -> Option<Receiver<ValidationCompletion>> {
+        if self.validation_completion_blocked() {
+            return None;
+        }
+        self.pipeline
+            .validation
+            .worker
+            .as_ref()
+            .filter(|worker| {
+                !worker
+                    .handle
+                    .as_ref()
+                    .is_some_and(std::thread::JoinHandle::is_finished)
+            })
+            .map(|worker| worker.completions.clone())
+    }
+
+    fn validation_completion_blocked(&self) -> bool {
+        self.publication
+            .publication_gate
+            .blocks_validation_completion()
+            || self.publication.verification_barrier.is_active()
+    }
+
+    pub(super) fn handle_validation_completion(
+        &mut self,
+        completion: ValidationCompletion,
+        msg_rx: &Receiver<RuntimeMsg>,
+    ) {
+        let requires_worker_acknowledgement = completion.requires_worker_acknowledgement();
+        self.pipeline.validation.pending = self.pipeline.validation.pending.saturating_sub(1);
+        if !self
+            .pipeline
+            .validation
+            .callers
+            .remove(&completion.request_id())
+        {
+            drop(completion);
+            if requires_worker_acknowledgement {
                 self.release_validation_worker();
-                continue;
             }
-            match completion {
-                ValidationCompletion::Resident { job, proof } => {
-                    self.complete_validation(job, proof, msg_rx);
-                }
-                ValidationCompletion::Spilled { job, proof } => {
-                    self.complete_spilled_validation(job, proof, msg_rx);
-                }
+            return;
+        }
+        match completion {
+            ValidationCompletion::Resident { job, proof } => {
+                self.complete_validation(job, proof, msg_rx);
             }
+            ValidationCompletion::Spilled { job, proof } => {
+                self.complete_spilled_validation(job, proof, msg_rx);
+            }
+        }
+        if requires_worker_acknowledgement {
             self.release_validation_worker();
         }
     }

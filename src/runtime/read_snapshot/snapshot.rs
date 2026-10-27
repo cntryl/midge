@@ -78,6 +78,8 @@ impl ReadSnapshot {
             || Arc::new(crate::diagnostics::RuntimeDiagnostics::default()),
             |resources| resources.diagnostics(),
         );
+        #[cfg(any(test, feature = "internal-testing"))]
+        diagnostics.record_read_snapshot_build();
         Self {
             read_time_millis,
             sources: Arc::new(super::ReadSnapshotSources {
@@ -370,5 +372,16 @@ impl ReadSnapshot {
                 }
             })
             .collect())
+    }
+}
+
+impl Clone for ReadSnapshot {
+    fn clone(&self) -> Self {
+        #[cfg(any(test, feature = "internal-testing"))]
+        self.diagnostics.record_read_snapshot_build();
+        Self {
+            sources: Arc::clone(&self.sources),
+            read_time_millis: self.read_time_millis,
+        }
     }
 }

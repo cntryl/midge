@@ -301,6 +301,33 @@ mod read_amplification_benchmark {
         assert!(path_after.bloom_checks > path_before.bloom_checks);
         assert!(path_after.bloom_rejects > path_before.bloom_rejects);
     }
+
+    #[test]
+    fn should_measure_bloom_work_for_point_misses_separately() {
+        // Arrange
+        let fixture = ReadAmpFixture::new();
+        let workload = ReadWorkload::misses_only(64);
+        assert_eq!(workload.expected_point_hits(), 0);
+        assert_eq!(workload.expected_point_misses(), 64);
+        let path_before = fixture
+            .engine
+            .read_path_diagnostics_snapshot_for_benchmarks();
+
+        // Act
+        let result = run_workload(&fixture, &workload);
+        let path_after = fixture
+            .engine
+            .read_path_diagnostics_snapshot_for_benchmarks();
+
+        // Assert
+        assert_eq!(result.point_reads, 64);
+        assert_eq!(result.point_hits, 0);
+        assert_eq!(result.point_misses, 64);
+        assert_eq!(result.scans, 0);
+        assert!(path_after.bloom_checks > path_before.bloom_checks);
+        assert!(path_after.bloom_rejects > path_before.bloom_rejects);
+        assert!(path_after.candidate_sst_files_checked > path_before.candidate_sst_files_checked);
+    }
 }
 
 mod read_amp_api {

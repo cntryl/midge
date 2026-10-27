@@ -145,6 +145,10 @@ telemetry = [
 telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
 stress-soak = ["cloud-all"]
 checkpoint-bench = ["internal-testing"]
+# Enables the candidate-only #908 admission configuration in the Tier 4
+# compaction backpressure benchmark. Keep this disabled for the preregistered
+# base revision, whose public API predates WriteBackpressureConfig.
+candidate-write-backpressure-bench = []
 
 # Cloud storage backend support enabled by default for current deployment profiles.
 cloud-common = [
@@ -329,6 +333,11 @@ name = "tier2_subsystem_baseline_matrix"
 path = "benches/tier2_subsystem_baseline_matrix.rs"
 harness = false
 
+[[bench]]
+name = "tier2_subsystem_compaction"
+path = "benches/tier2_subsystem_compaction.rs"
+harness = false
+
 # Tier 3
 [[bench]]
 name = "tier3_system_engine"
@@ -385,6 +394,22 @@ harness = false
 [[bench]]
 name = "tier4_system_compaction_backpressure"
 path = "benches/tier4_system_compaction_backpressure.rs"
+harness = false
+
+[[bench]]
+name = "tier4_system_compaction_grandparent_cuts"
+path = "benches/tier4_system_compaction_grandparent_cuts.rs"
+harness = false
+
+[[bench]]
+name = "tier4_system_sst_v5"
+path = "benches/tier4_system_sst_v5.rs"
+harness = false
+required-features = ["internal-testing"]
+
+[[bench]]
+name = "tier4_system_sst_footprint"
+path = "benches/tier4_system_sst_footprint.rs"
 harness = false
 
 [[bench]]

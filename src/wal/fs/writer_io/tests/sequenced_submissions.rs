@@ -230,3 +230,151 @@ fn should_keep_raw_memory_until_terminal_when_append_waiter_is_abandoned() -> Mi
     assert_eq!(&bytes[HEADER_LEN..], expected.as_slice());
     Ok(())
 }
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_release_sequenced_memory_after_writer_failure_during_append() -> MidgeResult<()> {
+    struct Release {
+        encode: crossbeam::channel::Sender<()>,
+        write: std::sync::mpsc::Sender<()>,
+    }
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = self.encode.send(());
+            let _ = self.write.send(());
+            fail::remove("midge::wal::before_writer_encode");
+        }
+    }
+
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let (encode_entered, encode_reached) = crossbeam::channel::bounded(1);
+    let (encode_release, encode_released) = crossbeam::channel::unbounded();
+    let (write_entered, write_reached) = std::sync::mpsc::channel();
+    let (write_release, write_released) = std::sync::mpsc::channel();
+    let _release = Release {
+        encode: encode_release.clone(),
+        write: write_release.clone(),
+    };
+    fail::cfg_callback("midge::wal::before_writer_encode", move || {
+        let _ = encode_entered.send(());
+        let _ = encode_released.recv_timeout(Duration::from_secs(30));
+    })
+    .expect("hold sequenced writer encode");
+
+    let inner = crate::io::MockFs::new();
+    create_test_segment(&inner, "wal.log")?;
+    let fs = Arc::new(GatedNoSpaceFs {
+        inner,
+        entered: std::sync::Mutex::new(write_entered),
+        release: Arc::new(std::sync::Mutex::new(write_released)),
+    });
+    let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs) as Arc<dyn Fs>)?;
+    let unit = unit(4096);
+
+    // Act: encode is held, then the physical append is held and fails.
+    let pending = writer
+        .submit_sequenced_batch(
+            prefix(&writer, &unit),
+            vec![unit],
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("sequenced writer capability")
+        .map_err(|failure| failure.error)?;
+    encode_reached
+        .recv_timeout(Duration::from_secs(5))
+        .expect("writer reached encode");
+    assert!(writer.raw_submission_memory.used() > 0);
+    encode_release.send(()).expect("release encoding");
+    write_reached
+        .recv_timeout(Duration::from_secs(5))
+        .expect("writer reached failing append");
+    assert!(pending.try_complete().is_none());
+    assert!(writer.raw_submission_memory.used() > 0);
+    write_release.send(()).expect("release failing append");
+
+    // Assert: terminal failure reaches the waiter and releases raw ownership.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let completion = loop {
+        if let Some(completion) = pending.try_complete() {
+            break completion;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "append failure did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(completion.is_err());
+    assert_eq!(writer.raw_submission_memory.used(), 0);
+    assert_eq!(writer.current_pos(), HEADER_LEN as u64);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_drain_sequenced_append_before_shutdown_given_held_writer_encoding() -> MidgeResult<()> {
+    struct Release(crossbeam::channel::Sender<()>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+            fail::remove("midge::wal::before_writer_encode");
+        }
+    }
+
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+    create_test_segment(fs.as_ref(), "wal.log")?;
+    let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs))?;
+    let (entered, reached) = crossbeam::channel::bounded(1);
+    let (release, released) = crossbeam::channel::unbounded();
+    let _release = Release(release.clone());
+    fail::cfg_callback("midge::wal::before_writer_encode", move || {
+        let _ = entered.send(());
+        let _ = released.recv_timeout(Duration::from_secs(30));
+    })
+    .expect("hold sequenced writer encode");
+    let unit = unit(4096);
+    let expected = reference_frame(&unit)?;
+    let memory = writer.raw_submission_memory.clone();
+    let pending = writer
+        .submit_sequenced_batch(
+            prefix(&writer, &unit),
+            vec![unit],
+            Duration::from_secs(5),
+            None,
+        )
+        .expect("sequenced writer capability")
+        .map_err(|failure| failure.error)?;
+    reached
+        .recv_timeout(Duration::from_secs(5))
+        .expect("writer reached encode");
+
+    // Act: shutdown joins the worker and therefore waits for its owned encode.
+    let (stopped, stopped_rx) = std::sync::mpsc::channel();
+    let shutdown = std::thread::spawn(move || {
+        drop(writer);
+        let _ = stopped.send(());
+    });
+
+    // Assert: the admitted append remains owned until encode is released.
+    assert!(matches!(
+        stopped_rx.recv_timeout(Duration::from_millis(25)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert!(pending.try_complete().is_none());
+    assert!(memory.used() > 0);
+    release.send(()).expect("release writer encode");
+    stopped_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("writer shutdown did not drain sequenced append");
+    shutdown.join().expect("join writer shutdown");
+    completed(&pending).expect("sequenced append should complete before shutdown");
+    assert_eq!(memory.used(), 0);
+    let bytes =
+        crate::io::read_all(fs.as_ref(), &FsPath::new("wal.log")).map_err(FsError::into_midge)?;
+    assert_eq!(&bytes[HEADER_LEN..], expected.as_slice());
+    Ok(())
+}

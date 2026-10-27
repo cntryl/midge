@@ -572,8 +572,11 @@ impl Compactor {
                 source_level,
                 target_level,
             )?;
+            // The output roller owns enabled level+2 overlap limits. A large
+            // level+1 target span is not evidence that those output cuts fail;
+            // retain source fragmentation only when the overlap policy is off.
             if self.exceeds_work_target(&source_files, &levels[level + 1], &target_files)
-                && self.target_span_needs_fragmentation(&levels[level + 1], &target_files)
+                && self.config.max_grandparent_overlap_bytes == 0
             {
                 if let Some(split_key) = Self::fragmentation_split_key(
                     source_files[0],
@@ -630,29 +633,6 @@ impl Compactor {
             )
             .try_fold(0_u64, |total, file| total.checked_add(file.size_bytes));
         input_bytes.is_none_or(|bytes| bytes > u64::try_from(limit).unwrap_or(u64::MAX))
-    }
-
-    /// A conforming overlap span already has the output policy's preferred
-    /// shape. Stream that complete merge even when its work exceeds the soft
-    /// scheduling target, instead of rewriting the same source once first.
-    /// Older/widened spans and an explicitly disabled overlap policy retain
-    /// fragmentation when complete bounds prove a useful interior boundary.
-    fn target_span_needs_fragmentation(
-        &self,
-        target_files: &[&FileMeta],
-        selected_targets: &[String],
-    ) -> bool {
-        let overlap_limit = self.config.max_grandparent_overlap_bytes;
-        if overlap_limit == 0 {
-            return true;
-        }
-        let selected: std::collections::HashSet<_> =
-            selected_targets.iter().map(String::as_str).collect();
-        target_files
-            .iter()
-            .filter(|file| selected.contains(file.name.as_str()))
-            .try_fold(0_u64, |bytes, file| bytes.checked_add(file.size_bytes))
-            .is_none_or(|bytes| bytes > overlap_limit)
     }
 
     fn fragmentation_split_key(

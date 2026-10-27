@@ -166,6 +166,7 @@ pub struct Metrics {
     // Event loop
     pub event_loop_wakes: Arc<AtomicU64>,
     pub event_loop_batch_total: Arc<AtomicU64>,
+    pub event_loop_write_service_ns_total: Arc<AtomicU64>,
 
     enabled: bool,
 }
@@ -270,6 +271,7 @@ impl Metrics {
             pending_txn_duration_ms_max: Arc::new(AtomicU64::new(0)),
             event_loop_wakes: Arc::new(AtomicU64::new(0)),
             event_loop_batch_total: Arc::new(AtomicU64::new(0)),
+            event_loop_write_service_ns_total: Arc::new(AtomicU64::new(0)),
             enabled: config.enabled && config.features.enable_metrics,
         }
     }
@@ -286,6 +288,14 @@ impl Metrics {
         if self.enabled {
             self.event_loop_batch_total
                 .saturating_add(batch, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub fn record_event_loop_write_service(&self, ns: u64) {
+        if self.enabled {
+            self.event_loop_write_service_ns_total
+                .saturating_add(ns, Ordering::Relaxed);
         }
     }
 
@@ -848,6 +858,11 @@ impl Metrics {
             wal_flush_count: self.wal_flush_count.load(Ordering::Relaxed),
             wal_fsync_count: self.wal_fsync_count.load(Ordering::Relaxed),
             wal_append_ns_total: self.wal_append_ns_total.load(Ordering::Relaxed),
+            wal_encode_ns_total: self.wal_encode_ns_total.load(Ordering::Relaxed),
+            wal_write_syscall_ns_total: self.wal_write_syscall_ns_total.load(Ordering::Relaxed),
+            event_loop_write_service_ns_total: self
+                .event_loop_write_service_ns_total
+                .load(Ordering::Relaxed),
             wal_fsync_ns_total: self.wal_fsync_ns_total.load(Ordering::Relaxed),
             wal_fsync_ns_max: self.wal_fsync_ns_max.load(Ordering::Relaxed),
             cloud_async_wal_segments_sealed: self
@@ -944,6 +959,9 @@ pub struct MetricsSnapshot {
     pub wal_flush_count: u64,
     pub wal_fsync_count: u64,
     pub wal_append_ns_total: u64,
+    pub wal_encode_ns_total: u64,
+    pub wal_write_syscall_ns_total: u64,
+    pub event_loop_write_service_ns_total: u64,
     pub wal_fsync_ns_total: u64,
     pub wal_fsync_ns_max: u64,
     pub cloud_async_wal_segments_sealed: u64,

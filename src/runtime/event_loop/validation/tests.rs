@@ -268,6 +268,100 @@ fn should_retry_detached_validation_when_intervening_conflicting_write_is_flushe
 }
 
 #[test]
+fn should_select_detached_validation_completion_without_event_loop_sst_reads() -> MidgeResult<()> {
+    // Arrange
+    let (_directory, mut event_loop, sst_opens) = create_counted_event_loop()?;
+    apply_and_flush(&mut event_loop, request(94_600, b"seed", false));
+    sst_opens.event_loop_opens.store(0, Ordering::SeqCst);
+    let mut checked = request(94_601, b"new-key", true);
+    checked.start_sequence = Some(event_loop.state.applied_sequence);
+    checked.durability_policy = Some(crate::wal::DurabilityPolicy::BestEffort);
+    let router = Arc::clone(&event_loop.routing.router);
+    let client_router = Arc::clone(&router);
+    let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
+    let (worker_msg_tx, worker_msg_rx) = crossbeam::channel::unbounded();
+    event_loop.pipeline.worker_msg_tx = Some(worker_msg_tx);
+    let client_thread = std::thread::spawn(move || {
+        let response = client_router.register(94_601, "detached validation completion select");
+        msg_tx
+            .send(RuntimeMsg::ApplyTransaction {
+                request_id: checked.request_id,
+                ops: checked.ops,
+                assertions: checked.assertions,
+                durability_policy: checked.durability_policy,
+                start_sequence: checked.start_sequence,
+                conflict_policy: checked.conflict_policy,
+                response_tx: None,
+            })
+            .expect("submit checked transaction to event loop");
+        let result = response.recv_timeout(Duration::from_secs(10));
+        msg_tx
+            .send(RuntimeMsg::Shutdown)
+            .expect("request event loop shutdown after validation completion");
+        result
+    });
+
+    // Act
+    event_loop.run(&msg_rx, &worker_msg_rx);
+    let result = client_thread
+        .join()
+        .expect("validation client exits after receiving the response");
+
+    // Assert
+    assert!(matches!(
+        result,
+        Ok(RuntimeResponse::TransactionApplied { .. })
+    ));
+    assert_eq!(router.pending_len(), 0);
+    assert_eq!(sst_opens.event_loop_opens.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[test]
+fn should_keep_resident_validation_worker_running_between_completed_jobs() -> MidgeResult<()> {
+    // Arrange
+    let (_directory, mut event_loop, _) = create_counted_event_loop()?;
+    apply_and_flush(&mut event_loop, request(94_619, b"seed", false));
+    let first_reservation = event_loop
+        .pipeline
+        .validation
+        .memory
+        .reserve(1024, "resident validation worker test")?;
+    let first = event_loop
+        .capture_validation_job(request(94_620, b"first-key", true), first_reservation)?;
+    let second_reservation = event_loop
+        .pipeline
+        .validation
+        .memory
+        .reserve(1024, "resident validation worker test")?;
+    let second = event_loop
+        .capture_validation_job(request(94_621, b"second-key", true), second_reservation)?;
+    let worker = ValidationWorker::new()?;
+    let requests = worker.requests.as_ref().expect("validation worker open");
+    requests
+        .send(ValidationTask::Resident(first))
+        .expect("send first resident validation");
+    requests
+        .send(ValidationTask::Resident(second))
+        .expect("send second resident validation");
+
+    // Act: leave the first completion unread while the worker processes the second job.
+    let first = worker
+        .completions
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first resident validation completion");
+    let second = worker
+        .completions
+        .recv_timeout(Duration::from_secs(5))
+        .expect("resident worker continues without a completion acknowledgement");
+
+    // Assert
+    assert_eq!(first.request_id(), 94_620);
+    assert_eq!(second.request_id(), 94_621);
+    Ok(())
+}
+
+#[test]
 fn should_retry_detached_insert_only_validation_when_intervening_write_is_flushed(
 ) -> MidgeResult<()> {
     // Arrange
@@ -397,18 +491,66 @@ fn assert_intervening_flushed_write_is_seen(
 #[test]
 fn should_retry_detached_validation_after_earlier_pending_group_becomes_visible() -> MidgeResult<()>
 {
+    // Arrange
+    let checked = request(94_601, b"conflict", true);
+
+    // Act
+    // Assert: the shared helper checks that the earlier pending write wins.
+    assert_pending_group_validation_rejects(checked, |error| {
+        matches!(error, MidgeError::WriteConflict(_))
+    })
+}
+
+#[test]
+fn should_retry_detached_insert_only_check_after_earlier_pending_group_becomes_visible(
+) -> MidgeResult<()> {
+    // Arrange
+    let mut checked = request(94_601, b"conflict", false);
+    if let TransactionOp::Put { insert_only, .. } = &mut checked.ops[0] {
+        *insert_only = true;
+    }
+
+    // Act
+    // Assert: the shared helper checks insert-only behavior after visibility.
+    assert_pending_group_validation_rejects(
+        checked,
+        |error| matches!(error, MidgeError::InvalidArgument(message) if message == "key already exists"),
+    )
+}
+
+#[test]
+fn should_retry_detached_assertion_after_earlier_pending_group_becomes_visible() -> MidgeResult<()>
+{
+    // Arrange
+    let mut checked = request(94_601, b"unrelated", false);
+    checked.assertions.push(crate::runtime::KeyAssertion {
+        cf_id: 0,
+        key: Bytes::from_static(b"conflict"),
+    });
+
+    // Act
+    // Assert: the shared helper checks the detached assertion after visibility.
+    assert_pending_group_validation_rejects(checked, |error| {
+        matches!(error, MidgeError::WriteConflict(_))
+    })
+}
+
+fn assert_pending_group_validation_rejects(
+    mut checked: ApplyTransactionRequest,
+    expected_error: fn(&MidgeError) -> bool,
+) -> MidgeResult<()> {
     // Arrange: a caller's detached read starts at the fully applied seed cut.
     let _guard = crate::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
-    apply_and_flush(&mut event_loop, request(94_600, b"seed", false));
+    let checked_id = checked.request_id;
+    apply_and_flush(&mut event_loop, request(checked_id - 1, b"seed", false));
     event_loop.pipeline.inline_flush_worker = false;
     let validation = HeldCallback::first("midge::validation::before_snapshot_reads");
     let sync = HeldCallback::first("midge::wal::before_physical_sync");
     let checked_response = event_loop
         .routing
         .router
-        .register(94_601, "pending conflict check");
-    let mut checked = request(94_601, b"conflict", true);
+        .register(checked_id, "pending checked transaction");
     checked.start_sequence = Some(3);
     WalCoordinator::apply_transaction(&mut event_loop, &crossbeam::channel::never(), checked, None);
     validation
@@ -418,14 +560,14 @@ fn should_retry_detached_validation_after_earlier_pending_group_becomes_visible(
     let writer_response = event_loop
         .routing
         .router
-        .register(94_602, "earlier strict group");
+        .register(checked_id + 1, "earlier strict group");
 
     // Act: the blind writer allocates the earlier WAL unit and waits in sync.
     // The completed old proof must queue without acknowledging the caller.
     WalCoordinator::apply_transaction(
         &mut event_loop,
         &crossbeam::channel::never(),
-        request(94_602, b"conflict", false),
+        request(checked_id + 1, b"conflict", false),
         None,
     );
     wait_for_stage(&mut event_loop, &sync.reached);
@@ -445,8 +587,89 @@ fn should_retry_detached_validation_after_earlier_pending_group_becomes_visible(
     let writer = settle_validation_request(&mut event_loop, &writer_response);
     let checked = settle_validation_request(&mut event_loop, &checked_response);
 
-    // Assert: the actual earlier group is whole before the retry can reject
-    // the caller. Its rejected operation allocates no newer sequence.
+    // Assert: the earlier group is whole before retry; rejection allocates no
+    // later sequence and preserves the typed outcome for this check.
+    assert!(matches!(
+        writer,
+        RuntimeResponse::TransactionApplied {
+            last_sequence: 6,
+            ..
+        }
+    ));
+    assert!(
+        matches!(&checked, RuntimeResponse::Error { error, .. } if expected_error(error)),
+        "unexpected checked transaction response: {checked:?}"
+    );
+    assert!(validation.calls.load(Ordering::SeqCst) >= 2);
+    assert_eq!(event_loop.state.applied_sequence, 6);
+    assert_eq!(event_loop.state.sequence, 6);
+    assert_eq!(old.get(b"conflict", 3)?, None);
+    assert_eq!(old.get(b"conflict", 6)?, Some(b"value".to_vec()));
+    Ok(())
+}
+
+#[test]
+fn should_retry_detached_range_validation_after_earlier_pending_group_becomes_visible(
+) -> MidgeResult<()> {
+    // Arrange: the range proof starts at the applied seed cut and sees no later key.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    apply_and_flush(&mut event_loop, request(94_610, b"seed", false));
+    event_loop.pipeline.inline_flush_worker = false;
+    let validation = HeldCallback::first("midge::validation::before_snapshot_reads");
+    let sync = HeldCallback::first("midge::wal::before_physical_sync");
+    let checked_response = event_loop
+        .routing
+        .router
+        .register(94_611, "pending range check");
+    let mut checked = request(94_611, b"unused", true);
+    checked.start_sequence = Some(3);
+    checked.ops = vec![TransactionOp::DeleteRange {
+        cf_id: 0,
+        start_key: Bytes::from_static(b"a"),
+        end_key: Bytes::from_static(b"z"),
+    }];
+    WalCoordinator::apply_transaction(&mut event_loop, &crossbeam::channel::never(), checked, None);
+    validation
+        .reached
+        .recv_timeout(Duration::from_secs(10))
+        .expect("held range validation");
+    let writer_response = event_loop
+        .routing
+        .router
+        .register(94_612, "earlier in-range write");
+
+    // Act: allocate the earlier conflicting write, hold its sync, then finish
+    // the stale empty-range proof against the still-applied seed cut.
+    WalCoordinator::apply_transaction(
+        &mut event_loop,
+        &crossbeam::channel::never(),
+        request(94_612, b"inside", false),
+        None,
+    );
+    wait_for_stage(&mut event_loop, &sync.reached);
+    validation
+        .release
+        .send(())
+        .expect("release old range proof");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !event_loop.pipeline.validation.has_ready_result() {
+        assert!(Instant::now() < deadline, "range proof did not finish");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    event_loop.drain_validation_results(&crossbeam::channel::never());
+    assert!(checked_response.try_recv().is_err());
+    assert!(writer_response.try_recv().is_err());
+    assert_eq!(event_loop.state.applied_sequence, 3);
+    let old = event_loop.create_read_snapshot(0).expect("old family view");
+    assert_eq!(old.get(b"inside", 3)?, None);
+
+    sync.release.send(()).expect("release earlier strict group");
+    let writer = settle_validation_request(&mut event_loop, &writer_response);
+    let checked = settle_validation_request(&mut event_loop, &checked_response);
+
+    // Assert: refreshed range validation rejects the whole delete without
+    // allocating any sequence after the earlier write.
     assert!(matches!(
         writer,
         RuntimeResponse::TransactionApplied {
@@ -464,8 +687,12 @@ fn should_retry_detached_validation_after_earlier_pending_group_becomes_visible(
     assert!(validation.calls.load(Ordering::SeqCst) >= 2);
     assert_eq!(event_loop.state.applied_sequence, 6);
     assert_eq!(event_loop.state.sequence, 6);
-    assert_eq!(old.get(b"conflict", 3)?, None);
-    assert_eq!(old.get(b"conflict", 6)?, Some(b"value".to_vec()));
+    assert_eq!(old.get(b"inside", 3)?, None);
+    let current = event_loop
+        .create_read_snapshot(0)
+        .expect("current family view");
+    assert_eq!(current.get(b"inside", 6)?, Some(b"value".to_vec()));
+    assert_eq!(current.get(b"seed", 6)?, Some(b"value".to_vec()));
     Ok(())
 }
 

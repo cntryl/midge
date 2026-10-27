@@ -2,17 +2,20 @@ use super::super::read_committed_metadata_bodies_within;
 use super::*;
 use crate::io::{Fs, FsPath};
 use crate::lease::fs_leader_store::FsLeaderStore;
-use crate::lease::LeaderStore;
-use crate::metadata::{files, Manifest, ManifestPersistence};
+use crate::lease::{
+    CloudLeaseConfig, CloudStorageLease, LeaderStore, LeaseGuard, LeaseHeartbeat, PrimaryLease,
+};
+use crate::metadata::store::ManifestStore;
+use crate::metadata::{files, Manifest, ManifestEdit, ManifestPersistence};
 use crate::runtime::{
     IntentLogEntry, IntentPersistence, MetadataPublicationLock, PublicationPhase,
 };
 use crate::storage::cloud::{
-    CloudBackend, CloudCallback, CloudReadCapability, CloudStorage, CloudWriteCapability,
-    MockCloudBackend,
+    CloudBackend, CloudCallback, CloudEvent, CloudReadCapability, CloudStorage,
+    CloudWriteCapability, MockCloudBackend,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::time::Duration;
 
 #[path = "tests/adapter_admission.rs"]
@@ -141,16 +144,240 @@ impl Drop for HeldReadbackBackend {
     }
 }
 
+struct HeartbeatMetadataBackend {
+    inner: Arc<MockCloudBackend>,
+    pointer_puts: AtomicUsize,
+    pointer_precondition_failures: AtomicUsize,
+    active_pointer_puts: AtomicUsize,
+    renewal_puts: AtomicUsize,
+    renewals_during_pointer_put: AtomicUsize,
+    hold_next_pointer: AtomicBool,
+    overlap_gate: Mutex<()>,
+    overlap_changed: Condvar,
+}
+
+impl CloudReadCapability for HeartbeatMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
+
+impl CloudWriteCapability for HeartbeatMetadataBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: CloudCallback,
+    ) {
+        let is_pointer = key.ends_with("metadata/committed-pointer.v1");
+        let is_renewal = key.ends_with(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+            && headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("if-match"));
+        if is_renewal {
+            self.renewal_puts.fetch_add(1, Ordering::AcqRel);
+            if self.active_pointer_puts.load(Ordering::Acquire) > 0 {
+                self.renewals_during_pointer_put
+                    .fetch_add(1, Ordering::AcqRel);
+                let _gate = self.overlap_gate.lock().unwrap();
+                self.overlap_changed.notify_all();
+            }
+        }
+
+        if !is_pointer {
+            self.inner.submit_put(key, bytes, headers, callback);
+            return;
+        }
+
+        self.pointer_puts.fetch_add(1, Ordering::AcqRel);
+        let overlap_before = self.renewals_during_pointer_put.load(Ordering::Acquire);
+        self.active_pointer_puts.fetch_add(1, Ordering::AcqRel);
+        if self.hold_next_pointer.swap(false, Ordering::AcqRel) {
+            // Wait for the real heartbeat worker to enter the same provider
+            // backend while the pointer CAS is outstanding. A timeout keeps
+            // this deterministic test bounded if heartbeat wiring regresses.
+            let gate = self.overlap_gate.lock().unwrap();
+            let _ = self
+                .overlap_changed
+                .wait_timeout_while(gate, Duration::from_secs(2), |()| {
+                    self.renewals_during_pointer_put.load(Ordering::Acquire) == overlap_before
+                })
+                .unwrap();
+        }
+        let (tx, rx) = mpsc::channel();
+        self.inner.submit_put(key, bytes, headers, tx);
+        let event = rx.recv().expect("mock pointer put completes");
+        if matches!(
+            &event,
+            CloudEvent::Put {
+                result: crate::storage::cloud::CloudOutcome::Err(error),
+                ..
+            } if error.is_precondition_failed()
+        ) {
+            self.pointer_precondition_failures
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        self.active_pointer_puts.fetch_sub(1, Ordering::AcqRel);
+        let _ = callback.send(event);
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for HeartbeatMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for HeartbeatMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for HeartbeatMetadataBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl CloudBackend for HeartbeatMetadataBackend {}
+
+struct FastHeartbeatLease {
+    inner: Arc<CloudStorageLease>,
+}
+
+impl PrimaryLease for FastHeartbeatLease {
+    fn try_acquire(self: Arc<Self>) -> Result<LeaseGuard, LeaseError> {
+        Arc::clone(&self.inner).try_acquire()
+    }
+
+    fn renew(&self) -> Result<(), LeaseError> {
+        self.inner.renew()
+    }
+
+    fn release(&self) -> Result<(), LeaseError> {
+        self.inner.release()
+    }
+
+    fn ttl(&self) -> Duration {
+        Duration::from_millis(30)
+    }
+
+    fn holder_id(&self) -> String {
+        self.inner.holder_id()
+    }
+
+    fn epoch(&self) -> u64 {
+        self.inner.epoch()
+    }
+
+    fn get_leader_store(&self) -> Option<Arc<dyn LeaderStore>> {
+        self.inner.get_leader_store()
+    }
+}
+
+#[test]
+fn should_commit_100_provider_metadata_edits_without_heartbeat_pointer_cas_conflicts() {
+    // Arrange: the production provider-backed lease and metadata pointer share
+    // one backend. The heartbeat wrapper only shortens the scheduler interval;
+    // each renewal still executes the real cloud lease protocol.
+    let backend = Arc::new(HeartbeatMetadataBackend {
+        inner: Arc::new(MockCloudBackend::new()),
+        pointer_puts: AtomicUsize::new(0),
+        pointer_precondition_failures: AtomicUsize::new(0),
+        active_pointer_puts: AtomicUsize::new(0),
+        renewal_puts: AtomicUsize::new(0),
+        renewals_during_pointer_put: AtomicUsize::new(0),
+        hold_next_pointer: AtomicBool::new(false),
+        overlap_gate: Mutex::new(()),
+        overlap_changed: Condvar::new(),
+    });
+    let cloud = Arc::new(CloudStorage::new(
+        backend.clone(),
+        "metadata-heartbeat-qualification".into(),
+    ));
+    let lease = Arc::new(
+        CloudStorageLease::new_provider_backed_with_clock_skew_tolerance_and_ttl(
+            CloudLeaseConfig {
+                bucket: "test-bucket".into(),
+                prefix: "metadata-heartbeat-qualification".into(),
+            },
+            Arc::clone(&cloud),
+            Duration::from_secs(30),
+            Duration::from_secs(90),
+            crate::lease::LeaseClock::default(),
+        ),
+    );
+    let _guard = Arc::clone(&lease)
+        .try_acquire()
+        .expect("acquire provider-backed metadata authority");
+    let store = lease
+        .get_leader_store()
+        .expect("provider-backed lease exposes its leader store");
+    let fixture = Fixture::with_store(cloud, store);
+    let epoch = lease.epoch();
+    let holder_id = lease.holder_id();
+    let manifest_store = ManifestStore::new(Arc::clone(&fixture.fs));
+    let pointer_puts_before = backend.pointer_puts.load(Ordering::Acquire);
+    let lease_renewals_before = backend.renewal_puts.load(Ordering::Acquire);
+    backend.hold_next_pointer.store(true, Ordering::Release);
+    let mut heartbeat = LeaseHeartbeat::new(Arc::new(FastHeartbeatLease {
+        inner: Arc::clone(&lease),
+    }));
+    heartbeat.start();
+
+    // Act: every distinct manifest journal edit requires a new committed
+    // pointer. Pointer puts remain briefly in flight so the actual heartbeat
+    // worker overlaps them deterministically on the shared mock provider.
+    for id in 1..=100_u32 {
+        manifest_store
+            .append(&ManifestEdit::CreateColumnFamily {
+                id,
+                name: format!("heartbeat-family-{id}"),
+                created_at: u64::from(id),
+            })
+            .expect("append distinct manifest edit");
+        let cut = fixture.cut_for_epoch(epoch);
+        fixture
+            .mirror_as(&cut, &holder_id, epoch, Duration::from_secs(5))
+            .unwrap();
+        drop(cut);
+    }
+
+    // Assert: all 100 commits publish exactly once while real lease renewals
+    // overlap pointer writes; renewals cannot invalidate the separate pointer.
+    heartbeat.stop();
+    assert!(heartbeat.is_healthy());
+    assert_eq!(
+        backend
+            .pointer_puts
+            .load(Ordering::Acquire)
+            .saturating_sub(pointer_puts_before),
+        100
+    );
+    assert_eq!(
+        backend
+            .pointer_precondition_failures
+            .load(Ordering::Acquire),
+        0
+    );
+    assert!(
+        backend
+            .renewal_puts
+            .load(Ordering::Acquire)
+            .saturating_sub(lease_renewals_before)
+            > 0,
+        "the heartbeat must perform provider-backed lease renewals"
+    );
+    assert!(
+        backend.renewals_during_pointer_put.load(Ordering::Acquire) > 0,
+        "at least one lease renewal must overlap a metadata pointer CAS"
+    );
+}
+
 struct Fixture {
     _directory: tempfile::TempDir,
     fs: Arc<dyn Fs>,
     cloud: Arc<CloudStorage>,
-    store: Arc<FsLeaderStore>,
+    store: Arc<dyn LeaderStore>,
     lock: MetadataPublicationLock,
 }
 
 struct LostCasStore {
-    inner: Arc<FsLeaderStore>,
+    inner: Arc<dyn LeaderStore>,
     memory: crate::common::resource_budget::ResourceBudget,
     occupied: parking_lot::Mutex<Option<crate::common::resource_budget::ResourceReservation>>,
     mutations: std::sync::atomic::AtomicUsize,
@@ -258,7 +485,7 @@ impl Fixture {
         let fs = crate::io::real::test_root(directory.path());
         crate::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
         ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
-        let store = Arc::new(FsLeaderStore::new(
+        let store: Arc<dyn LeaderStore> = Arc::new(FsLeaderStore::new(
             Arc::clone(&fs),
             crate::lease::LeaseClock::default(),
         ));
@@ -271,11 +498,30 @@ impl Fixture {
             lock: MetadataPublicationLock::default(),
         }
     }
+
+    fn with_store(cloud: Arc<CloudStorage>, store: Arc<dyn LeaderStore>) -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let fs = crate::io::real::test_root(directory.path());
+        crate::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+        ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
+        Self {
+            _directory: directory,
+            fs,
+            cloud,
+            store,
+            lock: MetadataPublicationLock::default(),
+        }
+    }
+
     fn cut(&self) -> Arc<CapturedMetadataCut> {
+        self.cut_for_epoch(1)
+    }
+
+    fn cut_for_epoch(&self, epoch: u64) -> Arc<CapturedMetadataCut> {
         self.lock
             .capture_control_cut(
                 &self.fs,
-                1,
+                epoch,
                 &OperationDeadline::from_budget(Duration::from_secs(5)),
             )
             .unwrap()
@@ -284,6 +530,16 @@ impl Fixture {
         self.mirror_for(cut, Duration::from_secs(5))
     }
     fn mirror_for(&self, cut: &CapturedMetadataCut, timeout: Duration) -> MidgeResult<()> {
+        self.mirror_as(cut, "writer", 1, timeout)
+    }
+
+    fn mirror_as(
+        &self,
+        cut: &CapturedMetadataCut,
+        holder_id: &str,
+        writer_epoch: u64,
+        timeout: Duration,
+    ) -> MidgeResult<()> {
         let deadline = OperationDeadline::from_budget(timeout);
         mirror_captured_control_metadata_within(
             CloudMetadataMirrorContext {
@@ -294,8 +550,8 @@ impl Fixture {
                 deadline: &deadline,
                 authority: super::super::CloudMetadataMirrorAuthority {
                     store: self.store.as_ref(),
-                    holder_id: "writer",
-                    writer_epoch: 1,
+                    holder_id,
+                    writer_epoch,
                 },
             },
             cut,

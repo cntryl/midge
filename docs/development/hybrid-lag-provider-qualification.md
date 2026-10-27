@@ -1,7 +1,9 @@
 # Hybrid lag provider diagnostic candidate
 
-Issue #937's Sqrzl rows share the Tier 2 lag workload: 2048 single-client
-transactions, 24-byte keys and 128-byte values, with `cloud_async`,
+Issue #937's Sqrzl rows share the Tier 2 lag workload: 2048 fixed transactions
+with 24-byte keys and 128-byte values. One-client rows preserve the existing
+baseline; a four-client `cloud_strict` row loads the configured upload pool.
+Rows cover `cloud_async`,
 `cloud_strict` and the equivalent local `sync` floor. Cloud options use the
 production defaults with compaction enabled. Native provider execution remains
 a qualification step; this document records the implemented measurement shape,
@@ -13,7 +15,7 @@ cargo bench --locked --bench tier2_subsystem_hybrid_durability_lag -- --no-progr
 cargo bench --locked --features stress-soak --bench tier5_hybrid_durability_lag -- --no-progress
 ```
 
-The Tier 5 target is opt-in and its three rows have diagnostic trust. It uses
+The Tier 5 target is opt-in and its four rows have diagnostic trust. It uses
 the existing Sqrzl namespace setup, `MIDGE_STRESS_SQRZL_ENDPOINT` (default
 `http://127.0.0.1:9000`) and configured `SQRZL_SECRET_ACCESS_KEY`. Unavailable
 Sqrzl or namespace setup fails the row; no provider result is substituted.
@@ -51,3 +53,9 @@ Qualification still owes exact-SHA mock and Sqrzl artifacts, machine/service
 identity, commands, sampler health, all pair deltas and median. Preserve failed
 and inconclusive attempts under the existing evidence procedure. No matched
 SlateDB run or external parity comparison is available.
+
+On 2026-10-26, a one-sample local smoke of the new four-client simulator row
+was inconclusive: its maximum sampler gap was 53 ms against the existing 40 ms
+limit. The guard remains unchanged. This host run is retained as a failed
+attempt, not as row evidence; repeat on a runner that meets the existing sample
+health checks before beginning the three alternating A/B pairs.

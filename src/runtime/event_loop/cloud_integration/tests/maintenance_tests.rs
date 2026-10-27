@@ -64,6 +64,9 @@ fn cloud_debt_with_wal_records(
         })
         .collect();
     seed_cloud_prune_candidate_with_records(&mut el, 81, last, records);
+    el.actors
+        .wal_actor
+        .reopen_empty_writer_from_state_for_test(&el.state)?;
     el.state.wal.frontiers.set_cloud_durable_for_test(last);
     if last > 81 {
         add_valid_versions_manifest_sst_for_test(&mut el, "wal-debt-versions.sst", 82..=last);

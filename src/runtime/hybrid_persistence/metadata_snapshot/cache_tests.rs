@@ -4,12 +4,19 @@ use crate::storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudOutcome, CloudRequestOptions, MockCloudBackend,
 };
 use crate::storage::cloud::{CloudReadCapability, CloudWriteCapability};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+type RequestHeaders = Vec<(String, String)>;
+type PutRequest = (String, RequestHeaders);
+type PutRequestHistory = std::sync::Mutex<Vec<PutRequest>>;
 
 struct ReceiptBackend {
     inner: MockCloudBackend,
     reads: AtomicUsize,
     writes: AtomicUsize,
+    generations: std::sync::Mutex<HashMap<String, u64>>,
+    put_requests: PutRequestHistory,
 }
 
 impl CloudReadCapability for ReceiptBackend {
@@ -21,7 +28,23 @@ impl CloudReadCapability for ReceiptBackend {
         self.reads.fetch_add(1, Ordering::Relaxed);
         self.inner.submit_get_with_metadata(key, callback);
     }
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get_range);
+    fn submit_get_range_with_identity(
+        &self,
+        key: &str,
+        start: u64,
+        end: u64,
+        expected: crate::storage::StorageObjectMetadata,
+        timeout: std::time::Duration,
+        callback: CloudCallback,
+    ) {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .submit_get_range_with_identity(key, start, end, expected, timeout, callback);
+    }
+    fn submit_get_range(&self, key: &str, start: u64, end: Option<u64>, callback: CloudCallback) {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.inner.submit_get_range(key, start, end, callback);
+    }
 }
 
 impl CloudWriteCapability for ReceiptBackend {
@@ -33,7 +56,33 @@ impl CloudWriteCapability for ReceiptBackend {
         callback: CloudCallback,
     ) {
         self.writes.fetch_add(1, Ordering::Relaxed);
-        self.inner.submit_put(key, bytes, headers, callback);
+        self.put_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((key.to_string(), headers.clone()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.inner.submit_put(key, bytes, headers, tx);
+        let event = rx.recv().expect("mock PUT completion");
+        match event {
+            CloudEvent::Put {
+                result: CloudOutcome::Ok(()),
+                ..
+            } => {
+                let mut generations = self
+                    .generations
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let generation = generations.entry(key.to_string()).or_default();
+                *generation = generation.saturating_add(1);
+                let _ = callback.send(CloudEvent::Put {
+                    key: key.into(),
+                    result: CloudOutcome::Ok(()),
+                });
+            }
+            event => {
+                let _ = callback.send(event);
+            }
+        }
     }
     fn write_with_receipt(
         &self,
@@ -42,32 +91,30 @@ impl CloudWriteCapability for ReceiptBackend {
         options: CloudRequestOptions,
         callback: CloudCallback,
     ) {
-        self.writes.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = std::sync::mpsc::channel();
-        self.inner
-            .submit_put(key, bytes.clone(), options.headers_with_deadline(), tx);
+        self.submit_put(key, bytes.clone(), options.headers_with_deadline(), tx);
         match rx.recv().expect("mock PUT completion") {
             CloudEvent::Put {
                 result: CloudOutcome::Ok(()),
                 ..
             } => {
-                // The mock's in-memory state lookup supplies the receipt for
-                // this logical PUT; it is not another transport request.
-                let (tx, rx) = std::sync::mpsc::channel();
-                self.inner.submit_get_with_metadata(key, tx);
-                let CloudEvent::GetWithMetadata {
-                    result: CloudOutcome::Ok((actual, metadata)),
-                    ..
-                } = rx.recv().expect("mock receipt state")
-                else {
-                    panic!("mock receipt object")
-                };
-                assert_eq!(actual, bytes);
+                let generations = self
+                    .generations
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let generation = generations
+                    .get(key)
+                    .copied()
+                    .expect("successful mock PUT has a generation");
                 let _ = callback.send(CloudEvent::PutReceipt {
                     key: key.into(),
                     result: CloudOutcome::Ok(Some(crate::storage::StorageWriteReceipt {
-                        metadata,
-                        content_crc32c: crc32c::crc32c(&actual),
+                        metadata: crate::storage::StorageObjectMetadata {
+                            size: bytes.len() as u64,
+                            etag: format!("mock-gen-{generation}"),
+                            generation: None,
+                        },
+                        content_crc32c: crc32c::crc32c(&bytes),
                     })),
                 });
             }
@@ -97,6 +144,42 @@ impl crate::storage::cloud::CloudHeadCapability for ReceiptBackend {
 }
 impl CloudBackend for ReceiptBackend {}
 
+fn assert_metadata_publication_request_history(backend: &ReceiptBackend) {
+    assert_eq!(backend.writes.load(Ordering::Relaxed), 2);
+    assert_eq!(backend.reads.load(Ordering::Relaxed), 0);
+    let put_requests = backend
+        .put_requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(put_requests.len(), 2);
+    let edit_put = put_requests
+        .iter()
+        .find(|(key, _)| key.starts_with("metadata-cache/manifest/"))
+        .expect("one immutable manifest edit PUT");
+    assert!(edit_put
+        .1
+        .iter()
+        .any(|(name, value)| { name.eq_ignore_ascii_case("if-none-match") && value == "*" }));
+    let pointer_cas = put_requests
+        .iter()
+        .find(|(key, _)| key == "metadata-cache/metadata/committed-pointer.v1")
+        .expect("one committed-pointer CAS");
+    assert!(pointer_cas.1.iter().any(|(name, _)| {
+        name.eq_ignore_ascii_case("if-match")
+            || name.eq_ignore_ascii_case("x-goog-if-generation-match")
+    }));
+    assert!(
+        backend.inner.get_downloads().is_empty(),
+        "mock transport observed unexpected GETs: {:?}",
+        backend.inner.get_downloads()
+    );
+    assert!(
+        backend.inner.get_range_downloads().is_empty(),
+        "mock transport observed unexpected range GETs: {:?}",
+        backend.inner.get_range_downloads()
+    );
+}
+
 #[test]
 fn should_bound_changed_metadata_publication_to_two_requests_when_receipts_are_cached() {
     // Arrange
@@ -105,6 +188,8 @@ fn should_bound_changed_metadata_publication_to_two_requests_when_receipts_are_c
         inner: MockCloudBackend::new(),
         reads: AtomicUsize::new(0),
         writes: AtomicUsize::new(0),
+        generations: std::sync::Mutex::new(HashMap::new()),
+        put_requests: std::sync::Mutex::new(Vec::new()),
     });
     let cloud = Arc::new(CloudStorage::new(backend.clone(), "metadata-cache".into()));
     let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
@@ -147,16 +232,20 @@ fn should_bound_changed_metadata_publication_to_two_requests_when_receipts_are_c
         }],
     )
     .unwrap();
+    backend.inner.clear_history();
     backend.reads.store(0, Ordering::Relaxed);
     backend.writes.store(0, Ordering::Relaxed);
+    backend
+        .put_requests
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
 
     // Act
     mirror().unwrap();
 
-    // Assert: count calls at the provider boundary after first-publication
-    // admission, then independently read the actual selected immutable chain.
-    assert_eq!(backend.writes.load(Ordering::Relaxed), 2);
-    assert_eq!(backend.reads.load(Ordering::Relaxed), 0);
+    // Assert: count provider calls, then independently read the selected chain.
+    assert_metadata_publication_request_history(&backend);
     let CloudMetadataHead::Committed(generation) = store
         .read_committed_metadata(std::time::Duration::from_secs(5))
         .unwrap()
