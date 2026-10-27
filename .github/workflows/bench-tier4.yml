@@ -57,7 +57,7 @@ concurrency:
 
 jobs:
   bench:
-    runs-on: [self-hosted, Linux, ubuntu-24.04]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     if: inputs.run_mode == 'full'
 
@@ -246,7 +246,7 @@ jobs:
 
   targeted:
     if: inputs.run_mode == 'targeted'
-    runs-on: [self-hosted, Linux, ubuntu-24.04]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
@@ -300,7 +300,7 @@ jobs:
 
   ab:
     if: inputs.run_mode == 'ab'
-    runs-on: [self-hosted, Linux, ubuntu-24.04]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 180
     env:
       CARGO_INCREMENTAL: "0"

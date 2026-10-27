@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   bench:
-    runs-on: [self-hosted, Linux, ubuntu-24.04]
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
 
     strategy:
