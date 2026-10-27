@@ -261,6 +261,22 @@ pub struct RecoveryMetricsSnapshot {
     pub intent_log_entries_replayed: u64,
 }
 
+/// Exact phase accounting for successful pipelined local Strict WAL syncs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct WalSyncPhaseMetricsSnapshot {
+    /// Number of barriers measured from submission until physical fsync
+    /// service begins, excluding the physical fsync duration.
+    pub writer_queue_count: u64,
+    pub writer_queue_ns_total: u64,
+    /// Number and total duration from physical completion until runtime
+    /// receipt handling begins.
+    pub receipt_delivery_count: u64,
+    pub receipt_delivery_ns_total: u64,
+    /// Number and total duration spent persisting strict sync ledger proofs.
+    pub ledger_proof_count: u64,
+    pub ledger_proof_ns_total: u64,
+}
+
 /// Per-operation latency distributions of one engine, as bucketed
 /// percentiles. Every histogram is always on; each costs one relaxed atomic
 /// increment per record.
@@ -370,6 +386,8 @@ pub struct RuntimeMetricsSnapshot {
     pub wal_fsync_ns_total: u64,
     /// Maximum latency of one physical WAL fsync.
     pub wal_fsync_ns_max: u64,
+    /// Exact phase accounting for successful pipelined local Strict WAL syncs.
+    pub wal_sync_phases: WalSyncPhaseMetricsSnapshot,
     /// Per-operation latency distributions for this engine.
     pub latency: RuntimeLatencySummaries,
     /// Durability waiters completed through keyed fan-out events.

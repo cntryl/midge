@@ -684,6 +684,7 @@ impl WriterRunner {
                 .map(|elapsed| crate::wal::traits::WalSyncCompletion {
                     prefix: completion.prefix,
                     elapsed: *elapsed,
+                    completed_at: Instant::now(),
                 })
                 .map_err(crate::common::MidgeError::replay);
             let _ = completion.sender.send(receipt);
