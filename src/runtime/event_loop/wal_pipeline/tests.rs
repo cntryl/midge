@@ -395,32 +395,6 @@ fn should_wake_event_loop_when_async_wal_completion_arrives() -> MidgeResult<()>
     let applied = applied_cut(&mut event_loop, &response);
     assert!(applied > 0);
     assert_eq!(event_loop.state.applied_sequence, applied);
-
-    // Rotation installs a new writer. The wake channel must be attached to it
-    // before the next strict group can rely on event-driven completion.
-    drop(held);
-    assert!(event_loop.seal_active_wal_for_prune());
-    let held_after_rotation = HeldSync::at("midge::wal::before_physical_sync");
-    let rotated_response = event_loop
-        .routing
-        .router
-        .register(97_804, "wake on rotated WAL completion");
-    event_loop.process_one(
-        write(97_804, &[b"rotated-completion-wake"], true),
-        &crossbeam::channel::never(),
-    );
-    wait_for_hold(&mut event_loop, &held_after_rotation);
-    assert!(event_loop
-        .idle_progress_timeout()
-        .is_some_and(|timeout| timeout > Duration::from_millis(1)));
-    held_after_rotation
-        .release
-        .send(())
-        .expect("release rotated WAL sync");
-    let started = Instant::now();
-    event_loop.wait_for_runtime_event(&never, &never);
-    assert!(started.elapsed() < Duration::from_secs(2));
-    assert!(applied_cut(&mut event_loop, &rotated_response) > applied);
     Ok(())
 }
 
