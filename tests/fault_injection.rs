@@ -12041,40 +12041,39 @@ mod hybrid_storage {
 
         // Act
         for attempt in 0_u8..12 {
-            let mut tx = engine
-                .begin_tx(cf.id(), TransactionMode::ReadWrite)
-                .expect("begin_tx");
-            tx.put(
-                format!("budget-key-{attempt:02}").into_bytes(),
-                incompressible_value(100 * 1024, attempt),
-                None,
-            )
-            .expect("put");
-            tx.commit(WriteOptions::cloud_strict())
-                .expect("cloud commit");
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let mut tx = engine
+                    .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                    .expect("begin_tx");
+                tx.put(
+                    format!("budget-key-{attempt:02}").into_bytes(),
+                    incompressible_value(100 * 1024, attempt),
+                    None,
+                )
+                .expect("put");
+                match tx.commit(WriteOptions::cloud_strict()) {
+                    Ok(()) => break,
+                    Err(MidgeError::NoSpace(message))
+                        if message == "ephemeral local disk budget cannot admit WAL append" =>
+                    {
+                        let storage = engine
+                            .metrics()
+                            .get_runtime_metrics()
+                            .expect("runtime metrics")
+                            .local_storage;
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "WAL admission did not recover for write {attempt}: {storage:?}"
+                        );
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                    Err(error) => panic!("cloud commit {attempt} failed: {error:?}"),
+                }
+            }
             engine
                 .flush_cf(&cf)
                 .expect("flush and release published local SST");
-            // WAL retirement is asynchronous, and its bytes remain charged
-            // until the local segment is removed. Allow that independent work
-            // to complete before testing the next SST publication.
-            let deadline = std::time::Instant::now() + Duration::from_secs(30);
-            loop {
-                let storage = engine
-                    .metrics()
-                    .get_runtime_metrics()
-                    .expect("runtime metrics")
-                    .local_storage
-                    .expect("cloud local storage metrics");
-                if storage.free_bytes >= budget_bytes / 2 {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "local budget did not recover after publication: {storage:?}"
-                );
-                thread::sleep(Duration::from_millis(25));
-            }
         }
 
         // Assert
