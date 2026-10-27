@@ -46,7 +46,10 @@ struct StrictCommitSample {
     wal_appends: u64,
     physical_fsyncs: u64,
     wal_append_ns: u64,
-    wal_fsync_ns: u64,
+    physical_wal_fsync_ns: u64,
+    wal_sync_transition_p50_ns: u64,
+    wal_sync_transition_p95_ns: u64,
+    wal_sync_transition_p99_ns: u64,
     wal_encode_ns: u64,
     wal_write_syscall_ns: u64,
     event_loop_write_service_ns: u64,
@@ -406,9 +409,12 @@ fn execute_strict_commit_case(
         wal_append_ns: end_metrics
             .wal_append_ns_total
             .saturating_sub(start_metrics.wal_append_ns_total),
-        wal_fsync_ns: end_metrics
+        physical_wal_fsync_ns: end_metrics
             .wal_fsync_ns_total
             .saturating_sub(start_metrics.wal_fsync_ns_total),
+        wal_sync_transition_p50_ns: end_metrics.latency.wal_fsync.p50_ns,
+        wal_sync_transition_p95_ns: end_metrics.latency.wal_fsync.p95_ns,
+        wal_sync_transition_p99_ns: end_metrics.latency.wal_fsync.p99_ns,
         wal_encode_ns: end_metrics
             .wal_encode_ns_total
             .saturating_sub(start_metrics.wal_encode_ns_total),
@@ -489,7 +495,10 @@ fn run_strict_commit_case(
     let per_commit_ns = |total: u64| u64_to_f64(total) / u64_to_f64(sample.completed.max(1));
     for (name, total) in [
         ("wal_append_completion_ns_per_commit", sample.wal_append_ns),
-        ("wal_sync_completion_ns_per_commit", sample.wal_fsync_ns),
+        (
+            "physical_wal_fsync_ns_per_commit",
+            sample.physical_wal_fsync_ns,
+        ),
         ("wal_encode_ns_per_commit", sample.wal_encode_ns),
         (
             "wal_write_syscall_ns_per_commit",
@@ -503,6 +512,27 @@ fn run_strict_commit_case(
         ctx.record_observation(
             name,
             per_commit_ns(total),
+            ObservationUnit::Nanoseconds,
+            ObservationDirection::Informational,
+        );
+    }
+    for (name, value) in [
+        (
+            "wal_sync_transition_p50_ns",
+            sample.wal_sync_transition_p50_ns,
+        ),
+        (
+            "wal_sync_transition_p95_ns",
+            sample.wal_sync_transition_p95_ns,
+        ),
+        (
+            "wal_sync_transition_p99_ns",
+            sample.wal_sync_transition_p99_ns,
+        ),
+    ] {
+        ctx.record_observation(
+            name,
+            u64_to_f64(value),
             ObservationUnit::Nanoseconds,
             ObservationDirection::Informational,
         );

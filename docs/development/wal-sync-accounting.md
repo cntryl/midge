@@ -25,14 +25,16 @@ sync receipts invalidate a cost measurement. The old `physical_fsyncs` and
 `commits_per_fsync` observations retain their writer-only scope, declared in
 row parameters. No measurement or saving has been recorded by adding counters.
 
-The 1/16/64-writer Strict workload also reports existing phase timers per
-commit. `wal_append_completion_ns_per_commit` and
-`wal_sync_completion_ns_per_commit` span submission through receipt handling,
-so they include writer queue/service time and runtime handoff. The sync timer
-also includes persistence of the ledger proof after the WAL receipt; separate
-ledger file/directory counters show those calls. Encode and write syscall
-timers isolate writer-side work; `event_loop_write_service_ns_per_commit` is
-the time spent handling a coalesced write batch on the event loop. These
+The 1/16/64-writer Strict workload also reports existing phase timers. The
+per-commit append completion, `wal_append_completion_ns_per_commit`, is the
+append submission-to-receipt wall span divided by commits. Sync transition
+p50/p95/p99 observations come from the runtime's `wal_fsync` latency histogram;
+they span each logical sync wait through receipt handling, including writer
+queue/service time and persistence of the ledger proof. Separate ledger
+file/directory counters show those calls. `physical_wal_fsync_ns_per_commit`
+is the writer runner's physical fsync time divided by commits. Encode and
+write syscall timers isolate writer-side work; `event_loop_write_service_ns_per_commit`
+is the time spent handling a coalesced write batch on the event loop. These
 overlap and must not be summed as disjoint components. Compare them alongside
 commit latency, load and commits per fsync; the counters diagnose where time is
 spent but do not by themselves establish causality.
