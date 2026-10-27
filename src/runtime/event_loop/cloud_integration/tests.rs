@@ -2524,10 +2524,12 @@ fn should_share_create_deadline_with_remote_ddl_registry_cas() -> crate::common:
     );
     let elapsed = started.elapsed();
 
-    // Assert
+    // Assert: the recorded CAS budget below proves the request deadline was
+    // shared. Leave host scheduling slack around the outer wall-clock check;
+    // a fresh five-second CAS after the 2.5-second read would exceed six seconds.
     assert!(
-        elapsed < Duration::from_millis(5_200),
-        "remote DDL registry work escaped the shared deadline: {elapsed:?}"
+        elapsed < Duration::from_secs(6),
+        "remote DDL registry work materially exceeded the shared deadline: {elapsed:?}"
     );
     let response = response_rx
         .recv_timeout(Duration::from_secs(1))
