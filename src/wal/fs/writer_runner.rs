@@ -654,12 +654,16 @@ impl WriterRunner {
             .into_iter()
             .map(|request| (request.effect, request.completion))
             .unzip();
+        let mut physical_completed_at = None;
         let result = pending_effects
             .into_iter()
             .map(PendingWriterEffect::activate)
             .collect::<Result<Vec<_>, _>>()
             .and_then(|effects| {
                 let result = self.perform_physical_sync(file_opt, &effects);
+                if result.is_ok() {
+                    physical_completed_at = Some(Instant::now());
+                }
                 // A terminal receipt must not leave an active child behind
                 // for the loop-owned lexical root to wait on.
                 drop(effects);
@@ -684,7 +688,8 @@ impl WriterRunner {
                 .map(|elapsed| crate::wal::traits::WalSyncCompletion {
                     prefix: completion.prefix,
                     elapsed: *elapsed,
-                    completed_at: Instant::now(),
+                    completed_at: physical_completed_at
+                        .expect("successful physical sync records its completion instant"),
                 })
                 .map_err(crate::common::MidgeError::replay);
             let _ = completion.sender.send(receipt);
