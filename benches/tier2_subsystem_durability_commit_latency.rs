@@ -45,6 +45,11 @@ struct StrictCommitSample {
     completed: u64,
     wal_appends: u64,
     physical_fsyncs: u64,
+    wal_append_ns: u64,
+    wal_fsync_ns: u64,
+    wal_encode_ns: u64,
+    wal_write_syscall_ns: u64,
+    event_loop_write_service_ns: u64,
     commit_latencies_us: Vec<u64>,
 }
 
@@ -398,6 +403,21 @@ fn execute_strict_commit_case(
         completed: u64::try_from(transactions_per_sample).expect("transaction count fits in u64"),
         wal_appends,
         physical_fsyncs,
+        wal_append_ns: end_metrics
+            .wal_append_ns_total
+            .saturating_sub(start_metrics.wal_append_ns_total),
+        wal_fsync_ns: end_metrics
+            .wal_fsync_ns_total
+            .saturating_sub(start_metrics.wal_fsync_ns_total),
+        wal_encode_ns: end_metrics
+            .wal_encode_ns_total
+            .saturating_sub(start_metrics.wal_encode_ns_total),
+        wal_write_syscall_ns: end_metrics
+            .wal_write_syscall_ns_total
+            .saturating_sub(start_metrics.wal_write_syscall_ns_total),
+        event_loop_write_service_ns: end_metrics
+            .event_loop_write_service_ns_total
+            .saturating_sub(start_metrics.event_loop_write_service_ns_total),
         commit_latencies_us,
     }
 }
@@ -422,6 +442,10 @@ fn run_strict_commit_case(
     ctx.parameter("value_size_bytes", VALUE_SIZE);
     ctx.parameter("key_distribution", key_distribution.label());
     ctx.parameter("operation_surface", "single_put_single_commit");
+    ctx.parameter(
+        "phase_timing_scope",
+        "runtime_wall_time_counters_and_writer_service_counters",
+    );
     let sample = execute_strict_commit_case(writers, key_distribution);
     sample.ledger.record(ctx);
     record_success(
@@ -462,6 +486,27 @@ fn run_strict_commit_case(
         ObservationUnit::Ratio,
         ObservationDirection::HigherIsBetter,
     );
+    let per_commit_ns = |total: u64| u64_to_f64(total) / u64_to_f64(sample.completed.max(1));
+    for (name, total) in [
+        ("wal_append_completion_ns_per_commit", sample.wal_append_ns),
+        ("wal_sync_completion_ns_per_commit", sample.wal_fsync_ns),
+        ("wal_encode_ns_per_commit", sample.wal_encode_ns),
+        (
+            "wal_write_syscall_ns_per_commit",
+            sample.wal_write_syscall_ns,
+        ),
+        (
+            "event_loop_write_service_ns_per_commit",
+            sample.event_loop_write_service_ns,
+        ),
+    ] {
+        ctx.record_observation(
+            name,
+            per_commit_ns(total),
+            ObservationUnit::Nanoseconds,
+            ObservationDirection::Informational,
+        );
+    }
 }
 
 fn set_rotation_parameters(ctx: &mut StressContext) {
