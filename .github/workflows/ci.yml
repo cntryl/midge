@@ -18,8 +18,8 @@ concurrency:
 
 jobs:
   ci:
-    name: Core (ubuntu-latest)
-    runs-on: ubuntu-latest
+    name: Core (self-hosted Linux)
+    runs-on: [self-hosted, Linux]
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: 0
