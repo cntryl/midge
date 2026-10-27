@@ -81,6 +81,15 @@ pub struct Metrics {
     pub wal_append_ns_total: Arc<AtomicU64>,
     pub wal_fsync_ns_total: Arc<AtomicU64>,
     pub wal_fsync_ns_max: Arc<AtomicU64>,
+    /// Pipelined local Strict sync time from submission through pre-fsync dispatch.
+    pub wal_sync_writer_queue_count: Arc<AtomicU64>,
+    pub wal_sync_writer_queue_ns_total: Arc<AtomicU64>,
+    /// Pipelined local Strict sync time from writer completion to receipt handling.
+    pub wal_sync_receipt_delivery_count: Arc<AtomicU64>,
+    pub wal_sync_receipt_delivery_ns_total: Arc<AtomicU64>,
+    /// Pipelined local Strict sync time spent persisting the ledger proof.
+    pub wal_sync_ledger_proof_count: Arc<AtomicU64>,
+    pub wal_sync_ledger_proof_ns_total: Arc<AtomicU64>,
 
     // Recovery operations
     pub wal_recovery_records_replayed: Arc<AtomicU64>,
@@ -208,6 +217,12 @@ impl Metrics {
             wal_append_ns_total: Arc::new(AtomicU64::new(0)),
             wal_fsync_ns_total: Arc::new(AtomicU64::new(0)),
             wal_fsync_ns_max: Arc::new(AtomicU64::new(0)),
+            wal_sync_writer_queue_count: Arc::new(AtomicU64::new(0)),
+            wal_sync_writer_queue_ns_total: Arc::new(AtomicU64::new(0)),
+            wal_sync_receipt_delivery_count: Arc::new(AtomicU64::new(0)),
+            wal_sync_receipt_delivery_ns_total: Arc::new(AtomicU64::new(0)),
+            wal_sync_ledger_proof_count: Arc::new(AtomicU64::new(0)),
+            wal_sync_ledger_proof_ns_total: Arc::new(AtomicU64::new(0)),
 
             wal_recovery_records_replayed: Arc::new(AtomicU64::new(0)),
             wal_recovery_bytes_replayed: Arc::new(AtomicU64::new(0)),
@@ -435,6 +450,42 @@ impl Metrics {
         if self.enabled {
             self.wal_fsync_latency.record(elapsed);
         }
+    }
+
+    /// Record one strict sync phase duration as an exact count and nanosecond total.
+    #[inline]
+    fn record_wal_sync_phase(&self, count: &AtomicU64, total_ns: &AtomicU64, elapsed: Duration) {
+        if self.enabled {
+            count.saturating_add(1, Ordering::Relaxed);
+            total_ns.saturating_add(
+                u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+        }
+    }
+
+    pub fn record_wal_sync_writer_queue_latency(&self, elapsed: Duration) {
+        self.record_wal_sync_phase(
+            &self.wal_sync_writer_queue_count,
+            &self.wal_sync_writer_queue_ns_total,
+            elapsed,
+        );
+    }
+
+    pub fn record_wal_sync_receipt_delivery_latency(&self, elapsed: Duration) {
+        self.record_wal_sync_phase(
+            &self.wal_sync_receipt_delivery_count,
+            &self.wal_sync_receipt_delivery_ns_total,
+            elapsed,
+        );
+    }
+
+    pub fn record_wal_sync_ledger_proof_latency(&self, elapsed: Duration) {
+        self.record_wal_sync_phase(
+            &self.wal_sync_ledger_proof_count,
+            &self.wal_sync_ledger_proof_ns_total,
+            elapsed,
+        );
     }
 
     /// Record one cloud WAL segment upload attempt that completed.
@@ -798,6 +849,19 @@ impl Metrics {
         }
     }
 
+    fn wal_sync_phase_snapshot(&self) -> crate::types::WalSyncPhaseMetricsSnapshot {
+        crate::types::WalSyncPhaseMetricsSnapshot {
+            writer_queue_count: self.wal_sync_writer_queue_count.load(Ordering::Relaxed),
+            writer_queue_ns_total: self.wal_sync_writer_queue_ns_total.load(Ordering::Relaxed),
+            receipt_delivery_count: self.wal_sync_receipt_delivery_count.load(Ordering::Relaxed),
+            receipt_delivery_ns_total: self
+                .wal_sync_receipt_delivery_ns_total
+                .load(Ordering::Relaxed),
+            ledger_proof_count: self.wal_sync_ledger_proof_count.load(Ordering::Relaxed),
+            ledger_proof_ns_total: self.wal_sync_ledger_proof_ns_total.load(Ordering::Relaxed),
+        }
+    }
+
     /// Get all metrics as a snapshot
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -865,6 +929,7 @@ impl Metrics {
                 .load(Ordering::Relaxed),
             wal_fsync_ns_total: self.wal_fsync_ns_total.load(Ordering::Relaxed),
             wal_fsync_ns_max: self.wal_fsync_ns_max.load(Ordering::Relaxed),
+            wal_sync_phases: self.wal_sync_phase_snapshot(),
             cloud_async_wal_segments_sealed: self
                 .cloud_async_wal_segments_sealed
                 .load(Ordering::Relaxed),
@@ -964,6 +1029,7 @@ pub struct MetricsSnapshot {
     pub event_loop_write_service_ns_total: u64,
     pub wal_fsync_ns_total: u64,
     pub wal_fsync_ns_max: u64,
+    pub wal_sync_phases: crate::types::WalSyncPhaseMetricsSnapshot,
     pub cloud_async_wal_segments_sealed: u64,
     pub cloud_async_wal_bytes_sealed: u64,
     pub cloud_async_wal_seal_latency_us: u64,

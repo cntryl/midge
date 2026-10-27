@@ -183,6 +183,19 @@ impl WalActor {
         ticket: &WalSyncTicket,
         completion: MidgeResult<WalSyncCompletion>,
     ) -> MidgeResult<super::WalSyncReceipt> {
+        let receipt_observed_at = std::time::Instant::now();
+        if let Ok(completion) = &completion {
+            let before_physical_sync = completion
+                .completed_at
+                .saturating_duration_since(pending.started)
+                .saturating_sub(completion.elapsed);
+            let receipt_delivery =
+                receipt_observed_at.saturating_duration_since(completion.completed_at);
+            self.counters.record(|metrics| {
+                metrics.record_wal_sync_writer_queue_latency(before_physical_sync);
+                metrics.record_wal_sync_receipt_delivery_latency(receipt_delivery);
+            });
+        }
         let completed = completion.and_then(|receipt| {
             if receipt.prefix != pending.expected
                 || pending.receipt.generation != Some(ticket.generation())
@@ -194,7 +207,16 @@ impl WalActor {
             self.ensure_lease_validity()?;
             Self::after_fsync_boundary()?;
             WalTransitionBoundary::AfterFsync.check()?;
-            self.persist_sync_boundary(state, pending.root.as_ref(), pending.receipt.end_offset)?;
+            let proof_started = std::time::Instant::now();
+            let proof = self.persist_sync_boundary(
+                state,
+                pending.root.as_ref(),
+                pending.receipt.end_offset,
+            );
+            self.counters.record(|metrics| {
+                metrics.record_wal_sync_ledger_proof_latency(proof_started.elapsed());
+            });
+            proof?;
             Ok(receipt)
         });
         if let Err(error) = completed {

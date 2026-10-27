@@ -863,6 +863,7 @@ impl RuntimeState {
             event_loop_write_service_ns_total: telemetry.event_loop_write_service_ns_total,
             wal_fsync_ns_total: telemetry.wal_fsync_ns_total,
             wal_fsync_ns_max: telemetry.wal_fsync_ns_max,
+            wal_sync_phases: telemetry.wal_sync_phases,
             latency: telemetry.latency,
             sst_bloom_rejects_total: read_path.bloom_rejects,
             sst_bloom_checks_total: read_path.bloom_checks,

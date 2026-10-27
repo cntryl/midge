@@ -50,10 +50,51 @@ struct StrictCommitSample {
     wal_sync_transition_p50_ns: u64,
     wal_sync_transition_p95_ns: u64,
     wal_sync_transition_p99_ns: u64,
+    wal_sync_phases: WalSyncPhaseSample,
     wal_encode_ns: u64,
     wal_write_syscall_ns: u64,
     event_loop_write_service_ns: u64,
     commit_latencies_us: Vec<u64>,
+}
+
+struct WalSyncPhaseSample {
+    writer_queue_count: u64,
+    writer_queue_ns_total: u64,
+    receipt_delivery_count: u64,
+    receipt_delivery_ns_total: u64,
+    ledger_proof_count: u64,
+    ledger_proof_ns_total: u64,
+}
+
+impl WalSyncPhaseSample {
+    fn between(start: &RuntimeMetricsSnapshot, end: &RuntimeMetricsSnapshot) -> Self {
+        Self {
+            writer_queue_count: end
+                .wal_sync_phases
+                .writer_queue_count
+                .saturating_sub(start.wal_sync_phases.writer_queue_count),
+            writer_queue_ns_total: end
+                .wal_sync_phases
+                .writer_queue_ns_total
+                .saturating_sub(start.wal_sync_phases.writer_queue_ns_total),
+            receipt_delivery_count: end
+                .wal_sync_phases
+                .receipt_delivery_count
+                .saturating_sub(start.wal_sync_phases.receipt_delivery_count),
+            receipt_delivery_ns_total: end
+                .wal_sync_phases
+                .receipt_delivery_ns_total
+                .saturating_sub(start.wal_sync_phases.receipt_delivery_ns_total),
+            ledger_proof_count: end
+                .wal_sync_phases
+                .ledger_proof_count
+                .saturating_sub(start.wal_sync_phases.ledger_proof_count),
+            ledger_proof_ns_total: end
+                .wal_sync_phases
+                .ledger_proof_ns_total
+                .saturating_sub(start.wal_sync_phases.ledger_proof_ns_total),
+        }
+    }
 }
 
 struct RotationRunSample {
@@ -415,6 +456,7 @@ fn execute_strict_commit_case(
         wal_sync_transition_p50_ns: end_metrics.latency.wal_fsync.p50_ns,
         wal_sync_transition_p95_ns: end_metrics.latency.wal_fsync.p95_ns,
         wal_sync_transition_p99_ns: end_metrics.latency.wal_fsync.p99_ns,
+        wal_sync_phases: WalSyncPhaseSample::between(&start_metrics, &end_metrics),
         wal_encode_ns: end_metrics
             .wal_encode_ns_total
             .saturating_sub(start_metrics.wal_encode_ns_total),
@@ -516,6 +558,30 @@ fn record_strict_phase_observations(ctx: &mut StressContext, sample: &StrictComm
         ctx.record_observation(
             name,
             per_commit_ns(total),
+            ObservationUnit::Nanoseconds,
+            ObservationDirection::Informational,
+        );
+    }
+    for (name, count, total_ns) in [
+        (
+            "wal_sync_writer_queue_ns_per_sync",
+            sample.wal_sync_phases.writer_queue_count,
+            sample.wal_sync_phases.writer_queue_ns_total,
+        ),
+        (
+            "wal_sync_receipt_delivery_ns_per_sync",
+            sample.wal_sync_phases.receipt_delivery_count,
+            sample.wal_sync_phases.receipt_delivery_ns_total,
+        ),
+        (
+            "wal_sync_ledger_proof_ns_per_sync",
+            sample.wal_sync_phases.ledger_proof_count,
+            sample.wal_sync_phases.ledger_proof_ns_total,
+        ),
+    ] {
+        ctx.record_observation(
+            name,
+            u64_to_f64(total_ns) / u64_to_f64(count.max(1)),
             ObservationUnit::Nanoseconds,
             ObservationDirection::Informational,
         );

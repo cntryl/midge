@@ -39,6 +39,21 @@ overlap and must not be summed as disjoint components. Compare them alongside
 commit latency, load and commits per fsync; the counters diagnose where time is
 spent but do not by themselves establish causality.
 
+Three pipelined local Strict sync phase observations further divide that
+transition. They are recorded only for successful physical completions on this
+path. The
+`wal_sync_writer_queue_ns_per_sync` average spans strict sync submission to the
+writer's completion timestamp, minus physical fsync service time; it includes
+writer queueing and dispatch before the filesystem call. The
+`wal_sync_receipt_delivery_ns_per_sync` average spans writer completion to the
+event loop beginning receipt handling. The
+`wal_sync_ledger_proof_ns_per_sync` average measures the ledger proof persistence
+call, including its file and directory durability calls when applicable. Each
+observation uses an exact nanosecond total divided by its recorded phase count,
+so it is not quantized to the 250 us bins used by the overall transition
+percentiles. They are diagnostic averages and do not partition every
+instruction or replace the failure accounting above.
+
 Active regressions exercise actual ledger publication, append, compaction,
 file/directory failure boundaries and a public Strict commit/reopen path.
 Behavioral execution remains pending in the implementation-first batch.

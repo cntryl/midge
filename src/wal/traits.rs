@@ -60,6 +60,9 @@ pub struct WalSyncPrefix {
 pub struct WalSyncCompletion {
     pub prefix: WalSyncPrefix,
     pub elapsed: Duration,
+    /// Time the writer finished the physical barrier, before handing its
+    /// receipt to the runtime thread.
+    pub completed_at: std::time::Instant,
 }
 
 /// A loop-owned pending sync. Dropping a caller's wait does not revoke its

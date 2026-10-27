@@ -757,6 +757,10 @@ fn should_keep_wal_runtime_state_unchanged_until_owner_drains_completion() -> Mi
     assert!(event_loop.state.wal.frontiers.local_durable() > durable_before);
     assert!(event_loop.state.applied_sequence > applied_before);
     assert!(event_loop.state.total_memtable_bytes > 0);
+    let phase_metrics = diagnostics.counters();
+    assert!(phase_metrics.wal_sync_phases.writer_queue_count > 0);
+    assert!(phase_metrics.wal_sync_phases.receipt_delivery_count > 0);
+    assert!(phase_metrics.wal_sync_phases.ledger_proof_count > 0);
     Ok(())
 }
 
