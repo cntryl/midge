@@ -182,12 +182,6 @@ impl PendingStrictAppend {
     pub(crate) fn deadline_expired(&self) -> bool {
         self.deadline.is_expired()
     }
-
-    pub(crate) fn deadline_timeout(&self) -> Option<Duration> {
-        self.deadline
-            .is_bounded()
-            .then(|| self.deadline.remaining())
-    }
 }
 
 impl PendingStrictSync {
@@ -197,12 +191,6 @@ impl PendingStrictSync {
 
     pub(crate) fn deadline_expired(&self) -> bool {
         self.deadline.is_expired()
-    }
-
-    pub(crate) fn deadline_timeout(&self) -> Option<Duration> {
-        self.deadline
-            .is_bounded()
-            .then(|| self.deadline.remaining())
     }
 }
 
@@ -228,13 +216,6 @@ impl PendingStrictIo {
         match self {
             Self::Append(append) => append.deadline_expired(),
             Self::Sync(sync) => sync.deadline_expired(),
-        }
-    }
-
-    pub(crate) fn deadline_timeout(&self) -> Option<Duration> {
-        match self {
-            Self::Append(append) => append.deadline_timeout(),
-            Self::Sync(sync) => sync.deadline_timeout(),
         }
     }
 }
@@ -352,7 +333,6 @@ pub struct WalActor {
     /// Logical fencing cannot detach or synchronously join an admitted worker
     /// while the runtime still needs to service completion/control messages.
     fenced_writer: Option<Box<dyn WalWriter>>,
-    completion_wake: Option<crossbeam::channel::Sender<()>>,
     /// Operational counters of the owning engine; shared with every writer.
     counters: crate::telemetry::CounterSink,
     storage_budget: Option<Arc<crate::storage::HybridStorage>>,
@@ -479,9 +459,6 @@ impl WalActor {
     #[cfg(test)]
     pub(crate) fn replace_writer_for_test(&mut self, writer: Box<dyn WalWriter>) {
         writer.set_write_authority(self.write_authority());
-        if let Some(wake) = &self.completion_wake {
-            writer.set_completion_wake(wake.clone());
-        }
         match &mut self.io {
             WalIoState::Open {
                 writer: current, ..
@@ -505,9 +482,6 @@ impl WalActor {
         writer: Box<dyn WalWriter>,
     ) {
         writer.set_write_authority(self.write_authority());
-        if let Some(wake) = &self.completion_wake {
-            writer.set_completion_wake(wake.clone());
-        }
         self.io = WalIoState::Open { fs, writer };
     }
 
@@ -521,20 +495,6 @@ impl WalActor {
             WalIoState::Memory
             | WalIoState::Transitioning { writer: None, .. }
             | WalIoState::Fenced { .. } => None,
-        }
-    }
-
-    pub(crate) fn supports_completion_wake(&self) -> bool {
-        self.completion_wake.is_some()
-            && self
-                .writer()
-                .is_some_and(WalWriter::supports_completion_wake)
-    }
-
-    pub(crate) fn set_completion_wake(&mut self, wake: crossbeam::channel::Sender<()>) {
-        self.completion_wake = Some(wake.clone());
-        if let Some(writer) = self.writer() {
-            writer.set_completion_wake(wake);
         }
     }
 
@@ -685,9 +645,6 @@ impl WalActor {
 
     fn install_transition_writer(&mut self, writer: Box<dyn WalWriter>) -> MidgeResult<()> {
         writer.set_write_authority(self.write_authority());
-        if let Some(wake) = &self.completion_wake {
-            writer.set_completion_wake(wake.clone());
-        }
         match &mut self.io {
             WalIoState::Transitioning {
                 writer: current, ..
@@ -851,7 +808,6 @@ impl WalActor {
 
         let actor = Self {
             fenced_writer: None,
-            completion_wake: None,
             io,
             counters,
             storage_budget: None,

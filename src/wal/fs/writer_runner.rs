@@ -244,7 +244,6 @@ pub struct WriterConfig {
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) counters: crate::telemetry::CounterSink,
     pub(crate) digest: Arc<Mutex<SegmentDigest>>,
-    pub(crate) completion_wake: Arc<parking_lot::RwLock<Option<crossbeam::channel::Sender<()>>>>,
 }
 
 pub struct WriterRunner {
@@ -254,12 +253,6 @@ pub struct WriterRunner {
 impl WriterRunner {
     pub fn new(config: WriterConfig) -> Self {
         Self { config }
-    }
-
-    fn notify_completion(&self) {
-        if let Some(wake) = self.config.completion_wake.read().as_ref() {
-            let _ = wake.try_send(());
-        }
     }
 
     fn open_file_handle(&self) -> FsResult<Box<dyn crate::io::File + '_>> {
@@ -624,7 +617,6 @@ impl WriterRunner {
         // observes this acknowledgement. Publish its completed-write proof
         // first, without requiring the caller to win a second worker race.
         Self::ack_batch_success(batch, start_pos);
-        self.notify_completion();
     }
 
     fn complete_pending_flushes(&self) {
@@ -695,7 +687,6 @@ impl WriterRunner {
                 })
                 .map_err(crate::common::MidgeError::replay);
             let _ = completion.sender.send(receipt);
-            self.notify_completion();
         }
         result.map(|_| ()).map_err(|_| ())
     }
@@ -821,6 +812,7 @@ impl WriterRunner {
                 m.record_wal_buffer_pool_overflow(dropped as u64);
             });
         }
+
         self.config.queue_cond.notify_all();
     }
 
@@ -837,7 +829,6 @@ impl WriterRunner {
                 unchanged: failure.unchanged,
             });
         }
-        self.notify_completion();
         self.config.sync_cond.notify_all();
         self.config.queue_cond.notify_all();
     }
@@ -863,7 +854,6 @@ impl Drop for WriterRunner {
         for entry in pending {
             entry.fail(WalAppendError::unchanged(error.replay()));
         }
-        self.notify_completion();
         self.config.sync_cond.notify_all();
         self.config.queue_cond.notify_all();
     }
@@ -1147,7 +1137,6 @@ mod tests {
             shutdown: Arc::new(AtomicBool::new(false)),
             counters: crate::telemetry::CounterSink::default(),
             digest: Arc::new(Mutex::new(SegmentDigest::of(&[]))),
-            completion_wake: Arc::new(parking_lot::RwLock::new(None)),
         })
     }
 

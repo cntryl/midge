@@ -48,7 +48,6 @@ pub struct FsWalWriterIo {
     /// Reserved for segment rotation.
     fs: Arc<dyn Fs>,
     write_authority: Arc<parking_lot::RwLock<Option<crate::wal::traits::WriteAuthority>>>,
-    completion_wake: Arc<parking_lot::RwLock<Option<crossbeam::channel::Sender<()>>>>,
     /// Operational counters of the owning engine.
     counters: crate::telemetry::CounterSink,
 
@@ -187,7 +186,6 @@ impl FsWalWriterIo {
         let writer = Self {
             fs,
             write_authority: Arc::new(parking_lot::RwLock::new(authority)),
-            completion_wake: Arc::new(parking_lot::RwLock::new(None)),
             counters,
             current_pos: Arc::new(std::sync::atomic::AtomicU64::new(current_pos)),
             queue: Arc::new(Mutex::new(Vec::new())),
@@ -223,7 +221,6 @@ impl FsWalWriterIo {
             shutdown: writer.shutdown.clone(),
             counters: writer.counters.clone(),
             digest: Arc::clone(&writer.digest),
-            completion_wake: Arc::clone(&writer.completion_wake),
         };
         let runner = WriterRunner::new(config);
         let failpoint_gate = crate::failpoints::worker_gate();
@@ -568,14 +565,6 @@ impl FsWalWriterIo {
 }
 
 impl WalWriter for FsWalWriterIo {
-    fn supports_completion_wake(&self) -> bool {
-        true
-    }
-
-    fn set_completion_wake(&self, wake: crossbeam::channel::Sender<()>) {
-        *self.completion_wake.write() = Some(wake);
-    }
-
     fn supports_sequenced_submission(&self) -> bool {
         true
     }
@@ -1031,7 +1020,6 @@ mod tests {
     fn writer_without_background_worker() -> FsWalWriterIo {
         FsWalWriterIo {
             write_authority: Arc::new(parking_lot::RwLock::new(None)),
-            completion_wake: Arc::new(parking_lot::RwLock::new(None)),
             fs: Arc::new(crate::io::MockFs::new()),
             counters: crate::telemetry::CounterSink::default(),
             queue: Arc::new(Mutex::new(Vec::new())),

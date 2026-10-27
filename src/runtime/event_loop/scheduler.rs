@@ -5,7 +5,7 @@ use crate::runtime::RuntimeMsg;
 use crossbeam::channel::{Receiver, TryRecvError};
 use std::time::Duration;
 
-pub(super) enum EventLoopWait {
+enum EventLoopWait {
     Message(RuntimeMsg),
     Continue,
     Closed,
@@ -137,9 +137,6 @@ impl EventLoop {
 
     pub(super) fn idle_progress_timeout(&self) -> Option<Duration> {
         if self.wal_group_in_flight() {
-            if self.actors.wal_actor.supports_completion_wake() {
-                return self.pipeline.wal_commits.pending_deadline_timeout();
-            }
             return Some(Duration::from_millis(1));
         }
         // Lease loss can occur without a storage completion or pressure
@@ -460,7 +457,7 @@ impl EventLoop {
         Some(HandleOutcome::Continue)
     }
 
-    pub(super) fn wait_for_runtime_event(
+    fn wait_for_runtime_event(
         &mut self,
         msg_rx: &Receiver<RuntimeMsg>,
         worker_msg_rx: &Receiver<RuntimeMsg>,
@@ -472,7 +469,6 @@ impl EventLoop {
         let storage_rx = (!self.wal_group_in_flight())
             .then(|| self.actors.cloud_coordinator.hybrid_storage_events.clone())
             .flatten();
-        let wal_completion_rx = self.pipeline.wal_commits.completion_wake_receiver();
         if let Some(storage_rx) = storage_rx {
             if let Some(timeout) = timeout {
                 crossbeam::channel::select! {
@@ -492,7 +488,6 @@ impl EventLoop {
                         self.handle_selected_storage_event(event);
                         EventLoopWait::Continue
                     }
-                    recv(wal_completion_rx) -> _ => EventLoopWait::Continue,
                     default(timeout) => {
                         self.progress_pass(msg_rx);
                         EventLoopWait::Continue
@@ -516,7 +511,6 @@ impl EventLoop {
                         self.handle_selected_storage_event(event);
                         EventLoopWait::Continue
                     }
-                    recv(wal_completion_rx) -> _ => EventLoopWait::Continue,
                 }
             }
         } else if let Some(timeout) = timeout {
@@ -533,7 +527,6 @@ impl EventLoop {
                 recv(msg_rx) -> msg => {
                     msg.map_or(EventLoopWait::Closed, EventLoopWait::Message)
                 }
-                recv(wal_completion_rx) -> _ => EventLoopWait::Continue,
                 default(timeout) => {
                     self.progress_pass(msg_rx);
                     EventLoopWait::Continue
@@ -553,7 +546,6 @@ impl EventLoop {
                 recv(msg_rx) -> msg => {
                     msg.map_or(EventLoopWait::Closed, EventLoopWait::Message)
                 }
-                recv(wal_completion_rx) -> _ => EventLoopWait::Continue,
             }
         }
     }
