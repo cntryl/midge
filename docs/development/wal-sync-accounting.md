@@ -28,9 +28,11 @@ row parameters. No measurement or saving has been recorded by adding counters.
 The 1/16/64-writer Strict workload also reports existing phase timers per
 commit. `wal_append_completion_ns_per_commit` and
 `wal_sync_completion_ns_per_commit` span submission through receipt handling,
-so they include writer queue/service time and runtime handoff. Encode and write
-syscall timers isolate writer-side work; `event_loop_write_service_ns_per_commit`
-is the time spent handling a coalesced write batch on the event loop. These
+so they include writer queue/service time and runtime handoff. The sync timer
+also includes persistence of the ledger proof after the WAL receipt; separate
+ledger file/directory counters show those calls. Encode and write syscall
+timers isolate writer-side work; `event_loop_write_service_ns_per_commit` is
+the time spent handling a coalesced write batch on the event loop. These
 overlap and must not be summed as disjoint components. Compare them alongside
 commit latency, load and commits per fsync; the counters diagnose where time is
 spent but do not by themselves establish causality.
