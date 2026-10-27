@@ -444,7 +444,10 @@ mod failure_injection {
             "failed positional WAL append must roll back its physical partial tail"
         );
         assert_eq!(health_after_failure, EngineHealth::Degraded);
-        assert!(matches!(followup_result, Err(MidgeError::Fenced(_))));
+        assert!(
+            matches!(followup_result, Err(MidgeError::RecoveryFailed(_))),
+            "followup result after partial WAL failure: {followup_result:?}"
+        );
         assert_acknowledged_exhaustion_fixture(&engine, &cf);
         assert_absent(&engine, &cf, b"failed-new");
         assert_absent(&engine, &cf, b"followup");
