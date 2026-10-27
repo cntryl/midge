@@ -87,6 +87,21 @@ impl<'a> DataBlockLayout<'a> {
         Ok(entry.key_delta)
     }
 
+    /// Validate a restart continuation bit against the last key decoded from
+    /// the preceding interval, then return this restart's independent key.
+    pub(crate) fn validate_restart_link(
+        &self,
+        index: usize,
+        previous_key: &[u8],
+    ) -> MidgeResult<&'a [u8]> {
+        let key = self.restart_key(index)?;
+        let (_, continued) = self.restart(index)?;
+        if continued != (previous_key == key) {
+            return Err(corrupt("restart continuation does not match adjacent keys"));
+        }
+        Ok(key)
+    }
+
     /// Seek to the first possible interval of the user-key group. Equal keys
     /// may span arbitrarily many restarts: `lower_bound` finds the first equal
     /// restart, and its continuation bit decides whether the prior interval

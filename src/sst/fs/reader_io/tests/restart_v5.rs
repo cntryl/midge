@@ -103,6 +103,51 @@ fn should_preserve_snapshot_visibility_across_restart_intervals_in_both_directio
 }
 
 #[test]
+fn should_reject_point_lookup_when_repeated_key_restart_loses_its_continuation_bit(
+) -> MidgeResult<()> {
+    // Arrange: one user key spans eight independent restart intervals.
+    let directory = tempfile::tempdir()?;
+    let fs = crate::io::real::test_root(directory.path());
+    let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 64 * 1024);
+    let mut writer = factory.create()?;
+    for sequence in (1..=128_u64).rev() {
+        writer.add_sorted_with_meta(
+            b"same-key",
+            Some(b"version"),
+            sequence,
+            EntryType::Put,
+            None,
+        )?;
+    }
+    crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("versions.sst"))?;
+    let reader = SstFileIo::open("versions.sst", fs)?;
+    let handle = reader.index_entries()?[0].1;
+    let block = reader.read_block(&handle)?;
+    let layout = DataBlockLayout::read(&block)?;
+    assert!(layout.restart_count > 1);
+    let trailer_word = layout.data_end + 4;
+    let restart = u32::from_le_bytes(block[trailer_word..trailer_word + 4].try_into().unwrap());
+    assert_ne!(restart & crate::sst::data_block::CONTINUED_KEY, 0);
+    let (baseline, _) = reader.key_state_from_encoded_block_with_stats(&block, b"same-key", 1)?;
+    assert!(matches!(baseline, KeyState::Value(_, 1, None, _)));
+    let mut malformed = block.to_vec();
+    malformed[trailer_word..trailer_word + 4]
+        .copy_from_slice(&(restart & !crate::sst::data_block::CONTINUED_KEY).to_le_bytes());
+
+    // Act: an old snapshot seeks through the production point decoder.
+    let result =
+        reader.key_state_from_encoded_block_with_stats(&Bytes::from(malformed), b"same-key", 1);
+
+    // Assert: invalid restart metadata must fail closed instead of hiding the
+    // version that begins after the corrupted boundary.
+    assert!(
+        matches!(result, Err(MidgeError::Corruption(_))),
+        "a false continuation bit must not turn a visible old value into an absent key: {result:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn should_reject_invalid_restart_directories_before_entry_decoding() -> MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
