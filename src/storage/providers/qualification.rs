@@ -11,6 +11,7 @@ use crate::config::{CloudProviderConfig, OciCredentialSource};
 use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::time::Duration;
 
+mod mutation_faults;
 mod receipt_faults;
 
 #[test]

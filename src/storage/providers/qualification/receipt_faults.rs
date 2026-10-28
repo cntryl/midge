@@ -53,7 +53,7 @@ fn is_completion(request: &Request) -> bool {
         })
 }
 
-fn forward(request: Request, runtime: &tokio::runtime::Runtime) -> Response {
+pub(super) fn forward(request: Request, runtime: &tokio::runtime::Runtime) -> Response {
     runtime.block_on(async {
         let head = request.method == "HEAD";
         let client = reqwest::Client::builder()
