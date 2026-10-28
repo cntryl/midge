@@ -15,7 +15,7 @@ measured comparison against the restart path; adding a cache allocation
 without evidence would not satisfy #918 R3.
 
 The named #935 qualification rows are `sst-v5-point-unique-64k` (650-entry
-representative block: target <=24 entry decodes),
+representative block: target <=23 entry decodes),
 `sst-v5-point-repeated-versions` (report group length separately),
 `sst-v5-reverse-limit-1` (no full-block key arena), and
 `sst-v5-small-kv-footprint` (engine-produced SST bytes per logical byte).
