@@ -76,6 +76,10 @@ pub struct RuntimeHandle {
     /// Per-runtime read-path diagnostics shared with the event loop and
     /// read resources.
     pub(crate) diagnostics: Arc<crate::diagnostics::RuntimeDiagnostics>,
+    /// Latest nonblocking durability snapshot published by the event loop.
+    pub(crate) durability_frontiers: Arc<crate::runtime::frontiers::ObservedDurabilityFrontiers>,
+    /// Latest nonblocking pending-upload gauge published by the event loop.
+    pub(crate) pending_cloud_uploads: Arc<crate::runtime::frontiers::ObservedPendingCloudUploads>,
     /// Shared local disk admission for transaction spill runs.
     pub(crate) storage_budget: Option<Arc<crate::storage::HybridStorage>>,
     pub(crate) sst_read_fs: Option<Arc<dyn crate::io::Fs>>,

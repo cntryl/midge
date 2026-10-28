@@ -365,13 +365,13 @@ pub use config::{
     WriteBackpressureConfig,
 };
 pub use types::{
-    HybridStorageBudgetSnapshot, LocalStorageUsage, StorageAdmissionBlock, StorageAdmissionKind,
-    StorageAdmissionReason,
+    DurabilityFrontiersSnapshot, ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot,
+    RuntimeLatencySummaries, RuntimeMetricsSnapshot, SnapshotPinSnapshot, StorageFileLayout,
+    StorageLayoutLevel, StorageLayoutSnapshot, StorageVerificationReport,
 };
 pub use types::{
-    ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeLatencySummaries,
-    RuntimeMetricsSnapshot, SnapshotPinSnapshot, StorageFileLayout, StorageLayoutLevel,
-    StorageLayoutSnapshot, StorageVerificationReport,
+    HybridStorageBudgetSnapshot, LocalStorageUsage, StorageAdmissionBlock, StorageAdmissionKind,
+    StorageAdmissionReason,
 };
 
 // Configuration

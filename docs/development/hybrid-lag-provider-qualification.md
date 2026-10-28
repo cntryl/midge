@@ -21,11 +21,15 @@ the existing Sqrzl namespace setup, `MIDGE_STRESS_SQRZL_ENDPOINT` (default
 Sqrzl or namespace setup fails the row; no provider result is substituted.
 The Tier 2 simulator rows retain gate trust.
 
-The sampler polls runtime frontiers every 10 ms during the commit window and
-records local-durable and visible sequence lag. It stops before the final drain;
-drain-time zero lag cannot establish sample health. A valid cloud row requires
-nonzero ticks, at least one quarter of nominal ticks and no inter-sample gap
-above 40 ms. It reports achieved mean period, maximum gap and tick count.
+The sampler reads the event-loop-published durability-frontier snapshot and a
+separate pending-upload gauge every 10 ms during the commit window. These direct
+reads do not queue a full runtime metrics request; frontier values may briefly
+lag while the event loop processes a message. It records local-durable and
+visible sequence lag and the sampled maximum pending-upload count. The sampler
+stops before the final drain; drain-time zero lag cannot establish sample
+health. A valid cloud row requires nonzero ticks, at least one quarter of
+nominal ticks and no inter-sample gap above 40 ms. It reports achieved mean
+period, maximum gap and tick count.
 Probe waits every 64 asynchronous commits provide a separate time-lag signal.
 Probe timeouts, incomplete sampling or failed shutdown make the row inconclusive.
 Commit p50/p99 and sampled lag p50/p99/max remain separate observations.

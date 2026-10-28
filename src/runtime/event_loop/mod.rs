@@ -239,6 +239,10 @@ struct EventLoopDiagnostics {
 /// Owns all actors and is responsible for routing inbound messages.
 pub struct EventLoop {
     state: RuntimeState,
+    observed_frontiers: Arc<crate::runtime::frontiers::ObservedDurabilityFrontiers>,
+    observed_pending_cloud_uploads: Arc<crate::runtime::frontiers::ObservedPendingCloudUploads>,
+    published_frontiers: crate::types::DurabilityFrontiersSnapshot,
+    published_pending_cloud_uploads: usize,
     actors: EventLoopActors,
     routing: RequestRouting,
     publication: PublicationCoordination,
@@ -270,12 +274,45 @@ impl EventLoop {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new(
+        state: RuntimeState,
+        trace_enabled: bool,
+        router: Arc<ResponseRouter>,
+        config: super::RuntimeConfig,
+        flush_worker_mode: FlushWorkerMode,
+    ) -> crate::common::MidgeResult<Self> {
+        let observed_frontiers =
+            Arc::new(crate::runtime::frontiers::ObservedDurabilityFrontiers::new(
+                crate::types::DurabilityFrontiersSnapshot {
+                    current_sequence: state.sequence,
+                    wal_local_durable_seq: state.wal.frontiers.local_durable(),
+                    wal_cloud_durable_seq: state.wal.frontiers.cloud_durable(),
+                },
+            ));
+        let observed_pending_cloud_uploads =
+            Arc::new(crate::runtime::frontiers::ObservedPendingCloudUploads::new(
+                state.cloud.pending_uploads.len(),
+            ));
+        Self::new_with_observed_frontiers(
+            state,
+            trace_enabled,
+            router,
+            config,
+            flush_worker_mode,
+            observed_frontiers,
+            observed_pending_cloud_uploads,
+        )
+    }
+
+    pub(crate) fn new_with_observed_frontiers(
         mut state: RuntimeState,
         trace_enabled: bool,
         router: Arc<ResponseRouter>,
         config: super::RuntimeConfig,
         flush_worker_mode: FlushWorkerMode,
+        observed_frontiers: Arc<crate::runtime::frontiers::ObservedDurabilityFrontiers>,
+        observed_pending_cloud_uploads: Arc<crate::runtime::frontiers::ObservedPendingCloudUploads>,
     ) -> crate::common::MidgeResult<Self> {
         // Seal the recovered tail before admission so reserved sequences are never reused (#843).
         let sealed_tail = state.begin_wal_epoch(config.writer_epoch)?;
@@ -329,6 +366,10 @@ impl EventLoop {
         let grandparent_overlap_rolls = state.diagnostics.grandparent_overlap_roll_counter();
         let mut event_loop = Self {
             state,
+            observed_frontiers,
+            observed_pending_cloud_uploads,
+            published_frontiers: crate::types::DurabilityFrontiersSnapshot::default(),
+            published_pending_cloud_uploads: 0,
             actors: EventLoopActors {
                 flush_actor,
                 compaction_actor: Self::create_compaction_actor(
@@ -381,8 +422,28 @@ impl EventLoop {
             &recovered_cloud_wal,
             config.startup_scope.as_ref(),
         )?;
+        event_loop.publish_progress_snapshots(true);
 
         Ok(event_loop)
+    }
+
+    fn publish_progress_snapshots(&mut self, force_publish: bool) {
+        let frontiers = crate::types::DurabilityFrontiersSnapshot {
+            current_sequence: self.state.sequence,
+            wal_local_durable_seq: self.state.wal.frontiers.local_durable(),
+            wal_cloud_durable_seq: self.state.wal.frontiers.cloud_durable(),
+        };
+        if force_publish || frontiers != self.published_frontiers {
+            self.observed_frontiers.publish(frontiers);
+            self.published_frontiers = frontiers;
+        }
+
+        let pending_cloud_uploads = self.state.cloud.pending_uploads.len();
+        if force_publish || pending_cloud_uploads != self.published_pending_cloud_uploads {
+            self.observed_pending_cloud_uploads
+                .publish(pending_cloud_uploads);
+            self.published_pending_cloud_uploads = pending_cloud_uploads;
+        }
     }
 
     fn finish_initialization(
