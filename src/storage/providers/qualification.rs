@@ -68,6 +68,67 @@ fn should_validate_streamed_multipart_receipt_from_sqrzl_azure() {
     // Assert: the helper verifies exact receipt identity and size.
 }
 
+#[test]
+fn should_publish_s3_file_when_sqrzl_checksum_receipts_are_disabled() {
+    use crate::common::resource_budget::ResourceBudget;
+    use crate::io::{FsPath, RealFs};
+    use crate::storage::hybrid::backend::{HybridStorage, ImmutableFileSource};
+    use crate::storage::StorageBackend;
+    use std::sync::Arc;
+
+    // Arrange: Sqrzl S3 does not support the checksum multipart receipt path.
+    let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-s3-readback");
+    let CloudProviderConfig::S3Compatible(config) = &provider else {
+        unreachable!("Sqrzl S3 must use the S3-compatible provider");
+    };
+    assert!(!config.checksum_receipts());
+    require_sqrzl("s3-readback-fallback");
+    ensure_sqrzl_namespace(&provider).expect("prepare Sqrzl S3 bucket");
+    let cloud = build_cloud_storage(&provider, "").expect("build Sqrzl S3 backend");
+    assert!(!cloud.supports_file_upload());
+    let cloud_store: Arc<dyn StorageBackend> = cloud.clone();
+    let (event_tx, _event_rx) = crossbeam::channel::unbounded();
+    let storage = HybridStorage::new_with_class_stores_and_event_sender(
+        Arc::clone(&cloud_store),
+        Arc::clone(&cloud_store),
+        cloud_store,
+        event_tx,
+        Duration::from_secs(60),
+    );
+    let key = format!(
+        "qualification/s3-readback/{}/object.sst",
+        uuid::Uuid::new_v4()
+    );
+    let bytes: Vec<u8> = (0_usize..(256 * 1024))
+        .map(|index| u8::try_from(index.wrapping_mul(131).wrapping_add(17) & 0xff).unwrap())
+        .collect();
+    let directory = tempfile::tempdir().expect("create SST source");
+    std::fs::write(directory.path().join("source"), &bytes).expect("write SST source");
+    let fs = RealFs::new(directory.path()).expect("open SST source directory");
+    let path = FsPath::new("source");
+    let budget = ResourceBudget::new(2 * 1024 * 1024);
+
+    // Act: publish through the production immutable-file path without a receipt.
+    let proof = storage
+        .publish_immutable_file(
+            ImmutableFileSource {
+                key: &key,
+                fs: &fs,
+                path: &path,
+                size: bytes.len() as u64,
+                checksum: crc32c::crc32c(&bytes),
+            },
+            &budget,
+        )
+        .expect("publish via pinned-readback fallback");
+    let remote = get(&cloud, &key).expect("read published object");
+
+    // Assert: fallback publication preserves exact bytes and releases its budget.
+    assert_eq!(remote, bytes);
+    assert_eq!(budget.used(), 0);
+    drop(proof);
+}
+
 fn assert_sqrzl_streamed_receipt(label: &str, provider: &CloudProviderConfig) {
     use crate::io::{File, FsPath, OpenOptions as FsOpenOptions, RealFs};
     use crate::storage::{
