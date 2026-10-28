@@ -437,6 +437,7 @@ fn is_likely_compressible(value: &[u8]) -> bool {
 ///
 /// Performs a quick entropy check before expensive LZ4 compression to avoid
 /// CPU waste on random/encrypted data in constrained environments.
+#[cfg(any(test, feature = "internal-testing"))]
 #[must_use]
 pub fn compress_wal_value(value: &[u8]) -> (Bytes, Option<u8>) {
     let (encoded, marker) = compress_wal_value_borrowed(value);
