@@ -11,6 +11,8 @@ use crate::config::{CloudProviderConfig, OciCredentialSource};
 use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::time::Duration;
 
+mod receipt_faults;
+
 #[test]
 fn should_run_s3_compatible_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-s3");

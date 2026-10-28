@@ -3,7 +3,7 @@ services:
   sqrzl:
     container_name: sqrzl
     hostname: sqrzl
-    image: ghcr.io/sqrzl/sqrzl-emulator:latest
+    image: ghcr.io/sqrzl/sqrzl-emulator@sha256:da1a2a731fe6de71ce8241e3d9fda9ae48dec6015f8b531f4f3129e4ca9969a8
     ports:
       - "9000:9000"
       - "9001:9001"

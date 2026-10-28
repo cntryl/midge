@@ -80,3 +80,27 @@ capability gap reported in Sqrzl #79. It does not establish live-provider
 qualification, fault-injected wrong/missing receipt behavior on this image,
 engine crash/restart qualification, or the remaining performance evidence for
 #915. Those scopes remain separate from this successful-upload protocol proof.
+
+### Completion-response faults
+
+The `storage::providers::qualification::receipt_faults` tests forward real
+authenticated requests to that same Sqrzl image and change only successful
+completion responses. All twelve schedules (four provider dialects, three
+faults each) pass:
+
+- Contradictory checksum receipts cannot produce a publication proof.
+- Missing receipts either fail closed or require identity-pinned range
+  verification; GCS JSON pins by generation query parameter.
+- A lost successful completion reconciles the original immutable object by
+  pinned range readback, with exactly one successful remote completion.
+
+An independent direct read verifies every completed object against the source,
+and publication releases its admitted memory. These tests exercise production
+`HybridStorage` streaming publication over files larger than two 5 MiB parts.
+The proxy preserves signed request headers and HEAD lengths, and redirects
+resumable session locations back through its loopback endpoint. It does not
+fabricate provider success. Run the qualification command above with the
+`receipt_faults` filter to repeat these schedules.
+
+This is completion-response integrity and ambiguity evidence. Process-abort,
+engine-manifest/restart, and performance evidence retain their own gates.
