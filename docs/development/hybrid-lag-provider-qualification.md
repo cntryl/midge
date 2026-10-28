@@ -30,6 +30,25 @@ stops before the final drain; drain-time zero lag cannot establish sample
 health. A valid cloud row requires nonzero ticks, at least one quarter of
 nominal ticks and no inter-sample gap above 40 ms. It reports achieved mean
 period, maximum gap and tick count.
+
+Cloud rows also report the count and p50/p99/maximum interval between sampled
+increases of `wal_cloud_durable_seq`. This is a sampler-quantized frontier
+interarrival observation, not a catalog compare-and-swap completion timestamp;
+multiple publications between ticks can be coalesced. The configured nominal
+sampling period is recorded with the row, and the achieved period and maximum
+gap bound how to interpret the observed intervals. The metric must not be used
+as an exact per-publication latency claim. A cloud row with fewer than two
+sampled advances is marked inconclusive instead of silently omitting the
+interval distribution.
+
+The default cloud upload policy records four workers and a shared 256 MiB
+upload-memory budget for retained bodies, provider copies and fallback
+verification workspace. Upload admission separately bounds the pending source
+WAL queue at 1,024 entries and 1 GiB, with a 32-entry worker channel. These are
+configured bounds, not observed resident-memory usage. The pending-upload
+observation is a count, not bytes; no live queued-byte gauge is exposed by this
+benchmark.
+
 Probe waits every 64 asynchronous commits provide a separate time-lag signal.
 Probe timeouts, incomplete sampling or failed shutdown make the row inconclusive.
 Commit p50/p99 and sampled lag p50/p99/max remain separate observations.
@@ -71,3 +90,8 @@ five-sample Tier 2 four-client row passed with a 30 ms maximum gap, and the
 five-sample Tier 5 four-client row passed with an 18 ms maximum gap. The 40 ms
 guard is unchanged. The healthy candidate rows can support the required
 alternating A/B campaign, but no three-pair delta is claimed yet.
+
+The current #916 work adds measurement fields only. It has no accepted numeric
+latency target yet, so its cloud-strict observations remain measure-only until
+the target and comparison basis are agreed and recorded under the 0.5.0
+performance policy.

@@ -81,6 +81,11 @@ struct LagSample {
     durable_lag_sequences: Vec<u64>,
     /// `current_sequence - wal_cloud_durable_seq` at each sampler tick.
     visible_lag_sequences: Vec<u64>,
+    /// Time between successive sampled increases in the cloud-durable
+    /// frontier. This is quantized by the sampler period, not a catalog CAS
+    /// completion timestamp.
+    frontier_advance_intervals_us: Vec<u64>,
+    frontier_advances: u64,
     /// Time from a probe commit's return until the cloud frontier covered it.
     probe_wait_us: Vec<u64>,
     probe_timeouts: u64,
@@ -108,6 +113,8 @@ struct ClientSample {
 struct SamplerSample {
     durable_lag_sequences: Vec<u64>,
     visible_lag_sequences: Vec<u64>,
+    frontier_advance_intervals_us: Vec<u64>,
+    frontier_advances: u64,
     ticks: u64,
     max_gap_ms: u64,
     max_pending_uploads: usize,
@@ -122,6 +129,37 @@ struct Traffic {
     transport_errors: u64,
     cancelled: u64,
     malformed: u64,
+}
+
+#[derive(Default)]
+struct FrontierAdvanceIntervals {
+    last_frontier: Option<u64>,
+    last_advance_at: Option<Instant>,
+    intervals_us: Vec<u64>,
+    advances: u64,
+}
+
+impl FrontierAdvanceIntervals {
+    fn observe(&mut self, frontier: u64, observed_at: Instant) {
+        match self.last_frontier {
+            Some(previous) if frontier > previous => {
+                if let Some(previous_advance_at) = self.last_advance_at {
+                    self.intervals_us.push(duration_micros(
+                        observed_at.saturating_duration_since(previous_advance_at),
+                    ));
+                }
+                self.last_frontier = Some(frontier);
+                self.last_advance_at = Some(observed_at);
+                self.advances = self.advances.saturating_add(1);
+            }
+            Some(previous) if frontier < previous => {
+                self.last_frontier = Some(frontier);
+                self.last_advance_at = None;
+            }
+            None => self.last_frontier = Some(frontier),
+            _ => {}
+        }
+    }
 }
 
 impl Traffic {
@@ -201,6 +239,7 @@ fn spawn_sampler(
         let mut previous = Instant::now();
         let mut max_gap = Duration::ZERO;
         let mut max_pending_uploads = 0;
+        let mut frontier_advances = FrontierAdvanceIntervals::default();
         while !stop.load(Ordering::Acquire) {
             let metrics = engine.metrics();
             let frontiers = metrics.get_durability_frontiers();
@@ -210,6 +249,7 @@ fn spawn_sampler(
             let now = Instant::now();
             max_gap = max_gap.max(now.saturating_duration_since(previous));
             previous = now;
+            frontier_advances.observe(frontiers.wal_cloud_durable_seq, now);
             durable.push(
                 frontiers
                     .wal_local_durable_seq
@@ -228,6 +268,8 @@ fn spawn_sampler(
         SamplerSample {
             durable_lag_sequences: durable,
             visible_lag_sequences: visible,
+            frontier_advance_intervals_us: frontier_advances.intervals_us,
+            frontier_advances: frontier_advances.advances,
             ticks,
             max_gap_ms: u64::try_from(max_gap.as_millis()).unwrap_or(u64::MAX),
             max_pending_uploads,
@@ -388,6 +430,8 @@ fn execute_open_engine(
         SamplerSample {
             durable_lag_sequences: Vec::new(),
             visible_lag_sequences: Vec::new(),
+            frontier_advance_intervals_us: Vec::new(),
+            frontier_advances: 0,
             ticks: 0,
             max_gap_ms: 0,
             max_pending_uploads: 0,
@@ -418,6 +462,8 @@ fn execute_open_engine(
         commit_latencies_us,
         durable_lag_sequences: sampler.durable_lag_sequences,
         visible_lag_sequences: sampler.visible_lag_sequences,
+        frontier_advance_intervals_us: sampler.frontier_advance_intervals_us,
+        frontier_advances: sampler.frontier_advances,
         probe_wait_us,
         probe_timeouts,
         write_stalls,
@@ -674,16 +720,8 @@ fn run_measured_case(
     ctx.parameter("transactions_per_writer", TRANSACTIONS / writers);
     ctx.parameter("value_size_bytes", VALUE_SIZE);
     ctx.parameter("sample_interval_ms", SAMPLE_INTERVAL.as_millis());
+    record_cloud_measurement_parameters(ctx, mode);
     ctx.parameter("probe_every_commits", PROBE_EVERY);
-    let upload_policy = cntryl_midge::CloudWritePolicy::default();
-    ctx.parameter(
-        "cloud_wal_upload_concurrency",
-        upload_policy.wal_upload_concurrency,
-    );
-    ctx.parameter(
-        "cloud_wal_upload_memory_cap_bytes",
-        upload_policy.wal_upload_memory_bytes,
-    );
     let sample = execute();
     let period_ms = if mode.is_cloud() {
         sampler_period_ms(&sample)
@@ -700,6 +738,9 @@ fn run_measured_case(
         ctx.record_latency(Duration::from_micros((*latency_us).max(1)));
     }
     record_lag_observations(ctx, &sample, period_ms);
+    if mode.is_cloud() {
+        record_frontier_advance_observations(ctx, &sample);
+    }
     ctx.record_observation(
         "lag_sampler_max_gap_ms",
         u64_to_f64(sample.sampler_max_gap_ms),
@@ -753,5 +794,113 @@ fn run_measured_case(
             traffic.cancelled, 0,
             "provider attempts did not settle; row is inconclusive"
         );
+    }
+}
+
+fn record_cloud_measurement_parameters(ctx: &mut StressContext, mode: CommitMode) {
+    if !mode.is_cloud() {
+        return;
+    }
+    ctx.parameter(
+        "frontier_interval_measurement",
+        "observed_cloud_durable_frontier_advance_interarrival",
+    );
+    ctx.parameter(
+        "frontier_interval_nominal_sample_period_ms",
+        SAMPLE_INTERVAL.as_millis(),
+    );
+    let upload_policy = cntryl_midge::CloudWritePolicy::default();
+    ctx.parameter(
+        "cloud_wal_upload_concurrency",
+        upload_policy.wal_upload_concurrency,
+    );
+    ctx.parameter(
+        "cloud_wal_upload_memory_cap_bytes",
+        upload_policy.wal_upload_memory_bytes,
+    );
+}
+
+fn record_frontier_advance_observations(ctx: &mut StressContext, sample: &LagSample) {
+    assert!(
+        !sample.frontier_advance_intervals_us.is_empty(),
+        "cloud durable frontier produced fewer than two sampled advances; row is inconclusive"
+    );
+    ctx.record_observation(
+        "observed_cloud_durable_frontier_advances",
+        u64_to_f64(sample.frontier_advances),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    for (name, numerator) in [
+        ("observed_cloud_frontier_interarrival_p50_us", 50),
+        ("observed_cloud_frontier_interarrival_p99_us", 99),
+    ] {
+        ctx.record_observation(
+            name,
+            u64_to_f64(percentile(
+                &sample.frontier_advance_intervals_us,
+                numerator,
+                100,
+            )),
+            ObservationUnit::Microseconds,
+            ObservationDirection::Informational,
+        );
+    }
+    let maximum = sample
+        .frontier_advance_intervals_us
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    ctx.record_observation(
+        "observed_cloud_frontier_interarrival_max_us",
+        u64_to_f64(maximum),
+        ObservationUnit::Microseconds,
+        ObservationDirection::Informational,
+    );
+}
+
+#[cfg(test)]
+#[allow(
+    unused_imports,
+    reason = "Harnessless benches compile cfg(test) helpers"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_record_intervals_between_observed_cloud_frontier_advances() {
+        // Arrange
+        let started_at = Instant::now();
+        let mut intervals = FrontierAdvanceIntervals::default();
+
+        // Act
+        intervals.observe(4, started_at);
+        intervals.observe(4, started_at + Duration::from_millis(10));
+        intervals.observe(7, started_at + Duration::from_millis(25));
+        intervals.observe(9, started_at + Duration::from_millis(40));
+
+        // Assert
+        assert_eq!(intervals.advances, 2);
+        assert_eq!(intervals.intervals_us, vec![15_000]);
+    }
+
+    #[test]
+    fn should_reset_interarrival_baseline_when_cloud_frontier_regresses() {
+        // Arrange
+        let started_at = Instant::now();
+        let mut intervals = FrontierAdvanceIntervals::default();
+
+        // Act
+        intervals.observe(8, started_at);
+        intervals.observe(9, started_at + Duration::from_millis(10));
+        intervals.observe(10, started_at + Duration::from_millis(20));
+        intervals.observe(0, started_at + Duration::from_millis(30));
+        intervals.observe(1, started_at + Duration::from_millis(40));
+        intervals.observe(2, started_at + Duration::from_millis(55));
+
+        // Assert
+        assert_eq!(intervals.advances, 4);
+        assert_eq!(intervals.intervals_us, vec![10_000, 15_000]);
     }
 }
