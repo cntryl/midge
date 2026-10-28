@@ -60,6 +60,37 @@ fn should_reject_incorrect_azure_shared_key_for_conditional_write_against_sqrzl(
 }
 
 #[test]
+fn should_validate_streamed_multipart_receipt_from_sqrzl_s3() {
+    // Arrange: explicitly opt into the S3-compatible checksum contract.
+    let mut provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-receipt-s3");
+    let CloudProviderConfig::S3Compatible(config) = &mut provider else {
+        unreachable!("Sqrzl S3 must use the S3-compatible provider");
+    };
+    *config = config.clone().with_checksum_receipts(true);
+    // Act
+    assert_sqrzl_streamed_receipt("sqrzl-s3-receipt", &provider);
+    // Assert: the helper verifies receipt identity and independently read bytes.
+}
+
+#[test]
+fn should_validate_streamed_multipart_receipt_from_sqrzl_gcs_xml() {
+    // Arrange
+    let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-receipt-gcs");
+    // Act
+    assert_sqrzl_streamed_receipt("sqrzl-gcs-receipt", &provider);
+    // Assert: the helper verifies receipt identity and independently read bytes.
+}
+
+#[test]
+fn should_validate_streamed_multipart_receipt_from_sqrzl_gcs_json() {
+    // Arrange
+    let provider = CloudProviderConfig::sqrzl_gcs_json("midge-sqrzl-receipt-gcs-json");
+    // Act
+    assert_sqrzl_streamed_receipt("sqrzl-gcs-json-receipt", &provider);
+    // Assert: the helper verifies receipt identity and independently read bytes.
+}
+
+#[test]
 fn should_validate_streamed_multipart_receipt_from_sqrzl_azure() {
     // Arrange
     let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-receipt-azure");
@@ -76,7 +107,7 @@ fn should_publish_s3_file_when_sqrzl_checksum_receipts_are_disabled() {
     use crate::storage::StorageBackend;
     use std::sync::Arc;
 
-    // Arrange: Sqrzl S3 does not support the checksum multipart receipt path.
+    // Arrange: explicitly exercise the receipt-disabled compatibility path.
     let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-s3-readback");
     let CloudProviderConfig::S3Compatible(config) = &provider else {
         unreachable!("Sqrzl S3 must use the S3-compatible provider");
@@ -186,6 +217,11 @@ fn assert_sqrzl_streamed_receipt(label: &str, provider: &CloudProviderConfig) {
     assert!(
         receipt.matches(&bytes),
         "{label}: provider receipt must match the exact uploaded bytes and identity"
+    );
+    assert_eq!(
+        get(&backend, &format!("{prefix}object.sst")).expect("read completed multipart object"),
+        bytes,
+        "{label}: independently read bytes must match the upload"
     );
 }
 

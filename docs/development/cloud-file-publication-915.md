@@ -51,3 +51,32 @@ protocols. These regressions have been compiled, not run, during the coding
 pass. They do not replace the public-engine publication/restart campaigns,
 missing-receipt/unknown-result campaigns or Sqrzl qualification. No live cloud
 provider result or performance improvement is claimed here.
+
+## Sqrzl streamed receipt qualification (2026-10-28)
+
+Sqrzl image
+`sha256:da1a2a731fe6de71ce8241e3d9fda9ae48dec6015f8b531f4f3129e4ca9969a8`
+passes the streamed receipt cases for S3-compatible checksum opt-in, Azure,
+GCS XML and GCS JSON. Each case uploads 5 MiB plus one byte through the
+production file-upload API, validates the receipt against the exact bytes and
+length, and independently reads the completed object back. The S3-compatible
+receipt-disabled pinned-readback case also passes.
+
+With the Compose fixture credential supplied through
+`SQRZL_SECRET_ACCESS_KEY`, run:
+
+```text
+cargo test --locked --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1 --nocapture
+```
+
+The suite reported 13 passed, zero failed and zero ignored. One case is local
+Azure canonicalization; the optional real-S3 case returned without a configured
+endpoint. The remaining eleven cases exercise the authenticated Sqrzl front
+doors. The first invocation lacked the required fixture credential and failed
+before provider requests; the configured rerun passed in 1.75 seconds.
+
+This resolves the prior S3 checksum multipart and GCS resumable-session
+capability gap reported in Sqrzl #79. It does not establish live-provider
+qualification, fault-injected wrong/missing receipt behavior on this image,
+engine crash/restart qualification, or the remaining performance evidence for
+#915. Those scopes remain separate from this successful-upload protocol proof.
