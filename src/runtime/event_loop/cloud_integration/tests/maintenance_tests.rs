@@ -104,6 +104,23 @@ fn complete_compaction(el: &mut EventLoop, worker: &crossbeam::channel::Receiver
     el.handle_runtime_msg(completion, &rx);
 }
 
+fn complete_compaction_publication(el: &mut EventLoop) {
+    while el.publication.compaction_publication.is_active() {
+        let completion = el
+            .publication
+            .compaction_publish_result_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("compaction publication completion");
+        assert!(
+            completion.result.is_ok(),
+            "compaction publication {:?} failed: {:?}",
+            completion.phase,
+            completion.result.as_ref().err()
+        );
+        CompactionCoordinator::handle_publication_completion(el, completion);
+    }
+}
+
 fn complete_flush(el: &mut EventLoop) {
     for phase in ["build", "publish", "manifest mirror", "intent clear"] {
         let completion = el
@@ -131,6 +148,7 @@ fn should_resume_due_flush_when_compaction_debt_remains_in_another_family(
     // Act
     el.schedule_next_flush_worker();
     complete_compaction(&mut el, &worker);
+    complete_compaction_publication(&mut el);
 
     // Assert: another eligible compaction cannot take the retirement/flush turns.
     assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
