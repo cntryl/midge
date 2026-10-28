@@ -1,6 +1,14 @@
 #![cfg(all(feature = "cloud-all", feature = "sqrzl-tests"))]
 
 #[cfg(feature = "failpoints")]
+#[path = "common/crash.rs"]
+pub mod crash;
+
+#[cfg(feature = "failpoints")]
+#[path = "cloud_provider_engine_qualification/streamed_compaction_crash.rs"]
+mod streamed_cloud_compaction_crash;
+
+#[cfg(feature = "failpoints")]
 use cntryl_midge::MidgeError;
 use cntryl_midge::{
     Bytes, CloudProviderConfig, CloudStorageLocation, CloudStorageTopology, ColumnFamilyHandle,
