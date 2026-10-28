@@ -2425,7 +2425,9 @@ pub(super) fn unique_namespace(scenario: &str) -> String {
     let simple = scenario
         .chars()
         .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .take(24)
         .collect::<String>()
+        .trim_matches('-')
         .to_ascii_lowercase();
     format!("midge-{simple}-{}-{timestamp}", std::process::id())
 }
