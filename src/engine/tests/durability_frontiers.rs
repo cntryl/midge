@@ -1,9 +1,12 @@
+#[cfg(feature = "failpoints")]
 use super::*;
+#[cfg(feature = "failpoints")]
 use crossbeam::channel;
 
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_read_durability_frontiers_while_full_metrics_response_is_held() -> MidgeResult<()> {
+    // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let directory = tempfile::tempdir()?;
@@ -27,6 +30,7 @@ fn should_read_durability_frontiers_while_full_metrics_response_is_held() -> Mid
     )
     .expect("hold the full runtime metrics response");
 
+    // Act
     let metrics = engine.metrics();
     let metrics_thread = std::thread::spawn(move || metrics.get_runtime_metrics());
     let entered = entered_rx.recv_timeout(Duration::from_secs(5)).is_ok();
@@ -39,6 +43,7 @@ fn should_read_durability_frontiers_while_full_metrics_response_is_held() -> Mid
 
     engine.shutdown(Duration::from_secs(5))?;
 
+    // Assert
     assert!(entered, "full metrics request did not reach its failpoint");
     assert!(released, "full metrics response gate was not released");
     let runtime_metrics = runtime_metrics?;
