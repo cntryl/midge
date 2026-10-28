@@ -272,179 +272,184 @@ fn recover_remote_history(
 
 #[test]
 fn should_recover_raw_source_history_when_cloud_fragment_publication_commits() -> MidgeResult<()> {
-    // Arrange: disabled overlap policy exercises conservative fragmentation of
-    // this broad legacy source before remote targets are compacted.
-    let (mut el, worker, _) = cloud_debt(0)?;
-    install_cloud_actor(&mut el, 0);
-    let files = seed_fragment_layout(&mut el)?;
-    let source = &files[0];
-    let targets = &files[1..];
-    let mut metadata = metadata_fixture(&mut el)?;
-    let original = read_original_history(&el, &source.name)?;
-    let plan = el
-        .actors
-        .compaction_actor
-        .check_manual_compaction(&el.state)?
-        .expect("real cloud debt");
-    let CompactionPurpose::Fragment { split_key } = &plan.purpose else {
-        panic!("actual cloud actor must select source fragmentation: {plan:?}");
-    };
-    let cut = split_key.clone();
-    assert_eq!(plan.input_files, vec![source.name.clone()]);
-    assert_eq!((plan.source_level, plan.target_level), (1, 1));
-    assert!(source.size_bytes < u64::try_from(TARGET).unwrap());
+    crate::failpoints::with_read_gate(|| {
+        // Arrange: disabled overlap policy exercises conservative fragmentation of
+        // this broad legacy source before remote targets are compacted.
+        let (mut el, worker, _) = cloud_debt(0)?;
+        install_cloud_actor(&mut el, 0);
+        let files = seed_fragment_layout(&mut el)?;
+        let source = &files[0];
+        let targets = &files[1..];
+        let mut metadata = metadata_fixture(&mut el)?;
+        let original = read_original_history(&el, &source.name)?;
+        let plan = el
+            .actors
+            .compaction_actor
+            .check_manual_compaction(&el.state)?
+            .expect("real cloud debt");
+        let CompactionPurpose::Fragment { split_key } = &plan.purpose else {
+            panic!("actual cloud actor must select source fragmentation: {plan:?}");
+        };
+        let cut = split_key.clone();
+        assert_eq!(plan.input_files, vec![source.name.clone()]);
+        assert_eq!((plan.source_level, plan.target_level), (1, 1));
+        assert!(source.size_bytes < u64::try_from(TARGET).unwrap());
 
-    // Act: hold actual conditional publication after remote compute has uploaded both fragments.
-    el.launch_compaction(plan)?;
-    el.state.set_compaction_enabled(false);
-    let completion = worker
-        .recv_timeout(TEST_WAIT)
-        .expect("real remote fragment compute");
-    let RuntimeMsg::CompactionComplete {
-        succeeded: true,
-        ref output_ssts,
-        ..
-    } = completion
-    else {
-        panic!("real remote fragmentation failed: {completion:?}");
-    };
-    let outputs = output_ssts.clone();
-    assert_eq!(outputs.len(), 2);
-    assert!(outputs
-        .iter()
-        .all(|name| remote_sst_path_for_test(&el, name).exists()));
-    metadata.backend.armed.store(true, Ordering::Release);
-    let (_, messages) = crossbeam::channel::unbounded();
-    el.handle_runtime_msg(completion, &messages);
-    metadata
-        .reached
-        .recv_timeout(TEST_WAIT)
-        .expect("actual publisher authority read held");
-    let before_commit = read_committed_manifest(&metadata)?;
-    let retained = before_commit
-        .files
-        .iter()
-        .any(|file| file.same_identity(source))
-        && !before_commit
+        // Act: hold actual conditional publication after remote compute has uploaded both fragments.
+        el.launch_compaction(plan)?;
+        el.state.set_compaction_enabled(false);
+        let completion = worker
+            .recv_timeout(TEST_WAIT)
+            .expect("real remote fragment compute");
+        let RuntimeMsg::CompactionComplete {
+            succeeded: true,
+            ref output_ssts,
+            ..
+        } = completion
+        else {
+            panic!("real remote fragmentation failed: {completion:?}");
+        };
+        let outputs = output_ssts.clone();
+        assert_eq!(outputs.len(), 2);
+        assert!(outputs
+            .iter()
+            .all(|name| remote_sst_path_for_test(&el, name).exists()));
+        metadata.backend.armed.store(true, Ordering::Release);
+        let (_, messages) = crossbeam::channel::unbounded();
+        el.handle_runtime_msg(completion, &messages);
+        metadata
+            .reached
+            .recv_timeout(TEST_WAIT)
+            .expect("actual publisher authority read held");
+        let before_commit = read_committed_manifest(&metadata)?;
+        let retained = before_commit
             .files
             .iter()
-            .any(|file| outputs.contains(&file.name))
-        && remote_sst_path_for_test(&el, &source.name).exists()
-        && el.state.active_compactions.load(Ordering::Acquire) == 1;
-    metadata.release.release();
-    settle_owned_work(&mut el, &worker);
+            .any(|file| file.same_identity(source))
+            && !before_commit
+                .files
+                .iter()
+                .any(|file| outputs.contains(&file.name))
+            && remote_sst_path_for_test(&el, &source.name).exists()
+            && el.state.active_compactions.load(Ordering::Acquire) == 1;
+        metadata.release.release();
+        settle_owned_work(&mut el, &worker);
 
-    // Assert: fresh metadata and absent local cache still recover every raw source record.
-    assert!(retained);
-    assert_eq!(original.versions.len(), 6);
-    assert!(original.versions.iter().any(|row| row.is_tombstone));
-    assert!(original
-        .versions
-        .iter()
-        .any(|row| row.expiration == Some(1)));
-    assert!(original
-        .versions
-        .iter()
-        .any(|row| row.expiration == Some(u64::MAX)));
-    assert_eq!(
-        original.ranges,
-        vec![RangeTombstone::new(b"a0".to_vec(), b"f9".to_vec(), 87)]
-    );
-    let recovered = recover_remote_history(el, &metadata, &outputs, &source.name, targets, 1)?;
-    assert_eq!(recovered.versions, original.versions);
-    assert_eq!(
-        recovered.ranges,
-        vec![
-            RangeTombstone::new(b"a0".to_vec(), cut.clone(), 87),
-            RangeTombstone::new(cut, b"f9".to_vec(), 87),
-        ]
-    );
-    Ok(())
+        // Assert: fresh metadata and absent local cache still recover every raw source record.
+        assert!(retained);
+        assert_eq!(original.versions.len(), 6);
+        assert!(original.versions.iter().any(|row| row.is_tombstone));
+        assert!(original
+            .versions
+            .iter()
+            .any(|row| row.expiration == Some(1)));
+        assert!(original
+            .versions
+            .iter()
+            .any(|row| row.expiration == Some(u64::MAX)));
+        assert_eq!(
+            original.ranges,
+            vec![RangeTombstone::new(b"a0".to_vec(), b"f9".to_vec(), 87)]
+        );
+        let recovered = recover_remote_history(el, &metadata, &outputs, &source.name, targets, 1)?;
+        assert_eq!(recovered.versions, original.versions);
+        assert_eq!(
+            recovered.ranges,
+            vec![
+                RangeTombstone::new(b"a0".to_vec(), cut.clone(), 87),
+                RangeTombstone::new(cut, b"f9".to_vec(), 87),
+            ]
+        );
+        Ok(())
+    })
 }
 
 #[test]
 fn should_publish_complete_cloud_merge_when_conforming_overlap_exceeds_soft_work_target(
 ) -> MidgeResult<()> {
-    // Arrange: the overlap is legal under the current output budget. Its
-    // input bytes exceed the preferred work target, which is not a hard cap.
-    let (mut el, worker, _) = cloud_debt(0)?;
-    install_cloud_actor(&mut el, 320 * 1024 * 1024);
-    let files = seed_fragment_layout(&mut el)?;
-    let source = files[0].name.clone();
-    let mut metadata = metadata_fixture(&mut el)?;
-    let plan = el
-        .actors
-        .compaction_actor
-        .check_manual_compaction(&el.state)?
-        .expect("real cloud debt");
-    assert_eq!(plan.purpose, CompactionPurpose::Merge);
-    assert_eq!((plan.source_level, plan.target_level), (1, 2));
-    assert_eq!(plan.input_files.len(), 7);
-    assert_eq!(plan.target_files.len(), 6);
-    assert!(
-        files.iter().map(|file| file.size_bytes).sum::<u64>() > u64::try_from(TARGET * 4).unwrap()
-    );
+    crate::failpoints::with_read_gate(|| {
+        // Arrange: the overlap is legal under the current output budget. Its
+        // input bytes exceed the preferred work target, which is not a hard cap.
+        let (mut el, worker, _) = cloud_debt(0)?;
+        install_cloud_actor(&mut el, 320 * 1024 * 1024);
+        let files = seed_fragment_layout(&mut el)?;
+        let source = files[0].name.clone();
+        let mut metadata = metadata_fixture(&mut el)?;
+        let plan = el
+            .actors
+            .compaction_actor
+            .check_manual_compaction(&el.state)?
+            .expect("real cloud debt");
+        assert_eq!(plan.purpose, CompactionPurpose::Merge);
+        assert_eq!((plan.source_level, plan.target_level), (1, 2));
+        assert_eq!(plan.input_files.len(), 7);
+        assert_eq!(plan.target_files.len(), 6);
+        assert!(
+            files.iter().map(|file| file.size_bytes).sum::<u64>()
+                > u64::try_from(TARGET * 4).unwrap()
+        );
 
-    // Act: the real worker reads remote inputs and uploads the actual merge
-    // before publication may replace the complete input set.
-    el.launch_compaction(plan)?;
-    el.state.set_compaction_enabled(false);
-    let completion = worker.recv_timeout(TEST_WAIT).expect("real remote merge");
-    let RuntimeMsg::CompactionComplete {
-        succeeded: true,
-        ref output_ssts,
-        ..
-    } = completion
-    else {
-        panic!("remote merge failed: {completion:?}");
-    };
-    let outputs = output_ssts.clone();
-    metadata.backend.armed.store(true, Ordering::Release);
-    el.handle_runtime_msg(completion, &crossbeam::channel::never());
-    metadata
-        .reached
-        .recv_timeout(TEST_WAIT)
-        .expect("held merge publication");
-    let committed_before = read_committed_manifest(&metadata)?;
-    let retained_inputs = files.iter().all(|input| {
-        committed_before
+        // Act: the real worker reads remote inputs and uploads the actual merge
+        // before publication may replace the complete input set.
+        el.launch_compaction(plan)?;
+        el.state.set_compaction_enabled(false);
+        let completion = worker.recv_timeout(TEST_WAIT).expect("real remote merge");
+        let RuntimeMsg::CompactionComplete {
+            succeeded: true,
+            ref output_ssts,
+            ..
+        } = completion
+        else {
+            panic!("remote merge failed: {completion:?}");
+        };
+        let outputs = output_ssts.clone();
+        metadata.backend.armed.store(true, Ordering::Release);
+        el.handle_runtime_msg(completion, &crossbeam::channel::never());
+        metadata
+            .reached
+            .recv_timeout(TEST_WAIT)
+            .expect("held merge publication");
+        let committed_before = read_committed_manifest(&metadata)?;
+        let retained_inputs = files.iter().all(|input| {
+            committed_before
+                .files
+                .iter()
+                .any(|file| file.same_identity(input))
+                && remote_sst_path_for_test(&el, &input.name).exists()
+        });
+        let no_partial_outputs = committed_before
             .files
             .iter()
-            .any(|file| file.same_identity(input))
-            && remote_sst_path_for_test(&el, &input.name).exists()
-    });
-    let no_partial_outputs = committed_before
-        .files
-        .iter()
-        .all(|file| !outputs.contains(&file.name));
-    metadata.release.release();
-    settle_owned_work(&mut el, &worker);
+            .all(|file| !outputs.contains(&file.name));
+        metadata.release.release();
+        settle_owned_work(&mut el, &worker);
 
-    // Assert: the full merge replaces source and targets together. Cold
-    // recovery sees the latest values and no values masked by range deletion.
-    assert!(retained_inputs);
-    assert!(no_partial_outputs);
-    assert_eq!(outputs.len(), 1);
-    assert!(el
-        .state
-        .manifest
-        .files
-        .iter()
-        .all(|file| !files.iter().any(|old| file.same_identity(old))));
-    let recovered = recover_remote_history(el, &metadata, &outputs, &source, &[], 2)?;
-    let visible = recovered
-        .versions
-        .iter()
-        .map(|row| (row.key.as_slice(), row.value.as_deref()))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        visible,
-        vec![
-            (b"a0".as_slice(), Some(b"left".as_slice())),
-            (b"b0", Some(b"live")),
-            (b"f9", Some(b"right"))
-        ]
-    );
-    assert_eq!(recovered.ranges, [] as [RangeTombstone; 0]);
-    Ok(())
+        // Assert: the full merge replaces source and targets together. Cold
+        // recovery sees the latest values and no values masked by range deletion.
+        assert!(retained_inputs);
+        assert!(no_partial_outputs);
+        assert_eq!(outputs.len(), 1);
+        assert!(el
+            .state
+            .manifest
+            .files
+            .iter()
+            .all(|file| !files.iter().any(|old| file.same_identity(old))));
+        let recovered = recover_remote_history(el, &metadata, &outputs, &source, &[], 2)?;
+        let visible = recovered
+            .versions
+            .iter()
+            .map(|row| (row.key.as_slice(), row.value.as_deref()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            visible,
+            vec![
+                (b"a0".as_slice(), Some(b"left".as_slice())),
+                (b"b0", Some(b"live")),
+                (b"f9", Some(b"right"))
+            ]
+        );
+        assert_eq!(recovered.ranges, [] as [RangeTombstone; 0]);
+        Ok(())
+    })
 }
