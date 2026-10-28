@@ -11,6 +11,20 @@ use std::fmt;
 /// Column family identifier.
 pub type ColumnFamilyId = u32;
 
+/// The latest event-loop-published sequence and WAL durability frontiers.
+///
+/// This snapshot is safe to read without a runtime request. It may briefly lag
+/// the event loop's current state while that loop is processing a message.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DurabilityFrontiersSnapshot {
+    /// Highest sequence currently committed in the runtime.
+    pub current_sequence: u64,
+    /// Highest sequence known durable in the local WAL.
+    pub wal_local_durable_seq: u64,
+    /// Highest sequence confirmed durable in cloud storage.
+    pub wal_cloud_durable_seq: u64,
+}
+
 /// Order of committed shared metadata publications, independent of WAL and journal ids.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,

@@ -572,6 +572,7 @@ impl EventLoop {
             // ordered WAL prefix before admitting another worker message so
             // a receipt or its deadline cannot be starved by that traffic.
             self.progress_wal_pipeline();
+            self.publish_progress_snapshots(false);
             if let Ok(message) = worker_msg_rx.try_recv() {
                 if RuntimeDispatcher::handle(self, message, msg_rx) == HandleOutcome::Break {
                     break;

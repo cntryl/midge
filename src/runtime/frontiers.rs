@@ -1,5 +1,85 @@
 //! WAL durability frontiers that only move forward.
 
+use crate::types::DurabilityFrontiersSnapshot;
+use std::hint::spin_loop;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+/// Event-loop-published coherent frontier values for nonblocking readers.
+///
+/// The event loop is the sole writer. The revision counter makes the three
+/// atomic values a coherent snapshot for concurrent readers without a lock.
+#[derive(Debug)]
+pub(crate) struct ObservedDurabilityFrontiers {
+    revision: AtomicU64,
+    current_sequence: AtomicU64,
+    wal_local_durable_seq: AtomicU64,
+    wal_cloud_durable_seq: AtomicU64,
+}
+
+impl ObservedDurabilityFrontiers {
+    pub(crate) fn new(snapshot: DurabilityFrontiersSnapshot) -> Self {
+        Self {
+            revision: AtomicU64::new(0),
+            current_sequence: AtomicU64::new(snapshot.current_sequence),
+            wal_local_durable_seq: AtomicU64::new(snapshot.wal_local_durable_seq),
+            wal_cloud_durable_seq: AtomicU64::new(snapshot.wal_cloud_durable_seq),
+        }
+    }
+
+    /// Publish a coherent value. Callers must serialize writers on the runtime
+    /// event loop.
+    pub(crate) fn publish(&self, snapshot: DurabilityFrontiersSnapshot) {
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        self.current_sequence
+            .store(snapshot.current_sequence, Ordering::SeqCst);
+        self.wal_local_durable_seq
+            .store(snapshot.wal_local_durable_seq, Ordering::SeqCst);
+        self.wal_cloud_durable_seq
+            .store(snapshot.wal_cloud_durable_seq, Ordering::SeqCst);
+        self.revision.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Read a coherent value without waiting for a runtime request.
+    #[must_use]
+    pub(crate) fn load(&self) -> DurabilityFrontiersSnapshot {
+        loop {
+            let revision_before = self.revision.load(Ordering::SeqCst);
+            if revision_before % 2 == 1 {
+                spin_loop();
+                continue;
+            }
+
+            let snapshot = DurabilityFrontiersSnapshot {
+                current_sequence: self.current_sequence.load(Ordering::SeqCst),
+                wal_local_durable_seq: self.wal_local_durable_seq.load(Ordering::SeqCst),
+                wal_cloud_durable_seq: self.wal_cloud_durable_seq.load(Ordering::SeqCst),
+            };
+            if self.revision.load(Ordering::SeqCst) == revision_before {
+                return snapshot;
+            }
+        }
+    }
+}
+
+/// Event-loop-published queue gauge sampled alongside durability lag.
+#[derive(Debug)]
+pub(crate) struct ObservedPendingCloudUploads(AtomicUsize);
+
+impl ObservedPendingCloudUploads {
+    pub(crate) fn new(value: usize) -> Self {
+        Self(AtomicUsize::new(value))
+    }
+
+    pub(crate) fn publish(&self, value: usize) {
+        self.0.store(value, Ordering::Release);
+    }
+
+    #[must_use]
+    pub(crate) fn load(&self) -> usize {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// The highest sequences known synced, durable locally, and durable in cloud
 /// storage.
 ///
@@ -102,7 +182,10 @@ impl WalFrontiers {
 
 #[cfg(test)]
 mod tests {
-    use super::WalFrontiers;
+    use super::{ObservedDurabilityFrontiers, ObservedPendingCloudUploads, WalFrontiers};
+    use crate::types::DurabilityFrontiersSnapshot;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn should_not_lower_frontiers_when_an_older_sequence_arrives() {
@@ -148,5 +231,55 @@ mod tests {
 
         // Assert
         assert_eq!(frontiers.cloud_durable(), 7);
+    }
+
+    #[test]
+    fn should_read_coherent_frontier_values_during_publication() {
+        // Arrange
+        let published = Arc::new(ObservedDurabilityFrontiers::new(
+            DurabilityFrontiersSnapshot::default(),
+        ));
+        let writer_snapshot = Arc::clone(&published);
+        let writer_finished = Arc::new(AtomicBool::new(false));
+        let writer_finished_thread = Arc::clone(&writer_finished);
+
+        // Act
+        let writer = std::thread::spawn(move || {
+            for sequence in 1..=10_000 {
+                writer_snapshot.publish(DurabilityFrontiersSnapshot {
+                    current_sequence: sequence,
+                    wal_local_durable_seq: sequence,
+                    wal_cloud_durable_seq: sequence,
+                });
+            }
+            writer_finished_thread.store(true, Ordering::Release);
+        });
+        let mut previous_sequence = 0;
+        while !writer_finished.load(Ordering::Acquire) {
+            let snapshot = published.load();
+            assert_eq!(snapshot.current_sequence, snapshot.wal_local_durable_seq);
+            assert_eq!(
+                snapshot.wal_local_durable_seq,
+                snapshot.wal_cloud_durable_seq
+            );
+            assert!(snapshot.current_sequence >= previous_sequence);
+            previous_sequence = snapshot.current_sequence;
+        }
+        writer.join().expect("frontier publisher thread");
+
+        // Assert
+        assert_eq!(published.load().current_sequence, 10_000);
+    }
+
+    #[test]
+    fn should_publish_pending_upload_counts_for_nonblocking_readers() {
+        // Arrange
+        let pending_uploads = ObservedPendingCloudUploads::new(2);
+
+        // Act
+        pending_uploads.publish(5);
+
+        // Assert
+        assert_eq!(pending_uploads.load(), 5);
     }
 }

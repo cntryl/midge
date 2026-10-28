@@ -1,7 +1,8 @@
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::{next_request_id, RuntimeHandle, RuntimeMsg, RuntimeResponse};
 use crate::types::{
-    ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot, StorageLayoutSnapshot,
+    DurabilityFrontiersSnapshot, ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot,
+    RuntimeMetricsSnapshot, StorageLayoutSnapshot,
 };
 use std::time::Duration;
 
@@ -14,6 +15,24 @@ pub struct EngineMetrics {
 impl EngineMetrics {
     pub(super) fn new(runtime_handle: RuntimeHandle) -> Self {
         Self { runtime_handle }
+    }
+
+    /// Return the latest event-loop-published sequence and WAL durability frontiers.
+    ///
+    /// This read is nonblocking and can briefly lag the runtime while it is
+    /// processing a message.
+    #[must_use]
+    pub fn get_durability_frontiers(&self) -> DurabilityFrontiersSnapshot {
+        self.runtime_handle.durability_frontiers.load()
+    }
+
+    /// Return the latest event-loop-published count of pending cloud uploads.
+    ///
+    /// This read is nonblocking and can briefly lag the runtime while it is
+    /// processing a message.
+    #[must_use]
+    pub fn get_pending_cloud_uploads(&self) -> usize {
+        self.runtime_handle.pending_cloud_uploads.load()
     }
 
     /// Return the current read-amplification snapshot.

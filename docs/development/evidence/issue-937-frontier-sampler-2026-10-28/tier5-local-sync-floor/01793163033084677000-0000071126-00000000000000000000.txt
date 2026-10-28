@@ -1,0 +1,10 @@
+Benchmark Suite: tier5-hybrid-durability-lag
+Schema: cntryl-stress.v2
+Profile: default
+Completed: 01793163033084677000-0000071126-00000000000000000000
+Samples: measured=5 warmup=1 cooldown=0
+Total time: 131.91s
+
+Summary
+-------
+  tier5_sqrzl_local_sync_commit_floor_1_client 95.25 transaction/s  tier=5 trust=diagnostic mode=duration quality=acceptable samples=5 wall=131.91s question=mode=duration

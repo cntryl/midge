@@ -1,0 +1,13 @@
+Benchmark Suite: tier2-subsystem-hybrid-durability-lag
+Schema: cntryl-stress.v2
+Profile: default
+Completed: 01793163653012497000-0000071409-00000000000000000000
+Samples: measured=5 warmup=1 cooldown=0
+Total time: 531.87s
+
+Summary
+-------
+  tier2_hybrid_local_sync_commit_floor_1_client 97.73 transaction/s  tier=2 trust=gate mode=fixed_ops quality=acceptable samples=5 wall=127.10s question=mode=fixed_ops
+  tier2_hybrid_cloud_async_commit_vs_durable_lag_1_client 2.18K transaction/s  tier=2 trust=gate mode=fixed_ops quality=acceptable samples=5 wall=6.57s question=mode=fixed_ops
+  tier2_hybrid_cloud_strict_commit_vs_durable_lag_1_client 40.24 transaction/s  tier=2 trust=gate mode=fixed_ops quality=acceptable samples=5 wall=311.39s question=mode=fixed_ops
+  tier2_hybrid_cloud_strict_commit_vs_durable_lag_4_clients 142.76 transaction/s  tier=2 trust=gate mode=fixed_ops quality=acceptable samples=5 wall=86.80s question=mode=fixed_ops

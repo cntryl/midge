@@ -5,6 +5,8 @@ use super::{
     RuntimeLifecycle, RuntimeMsg, RuntimeState, StartupAdmission,
 };
 use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use crate::runtime::frontiers::{ObservedDurabilityFrontiers, ObservedPendingCloudUploads};
+use crate::types::DurabilityFrontiersSnapshot;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::sync::{atomic::Ordering, Arc};
 use std::thread::{self, JoinHandle};
@@ -64,6 +66,10 @@ impl Runtime {
             snapshot_cache,
             snapshot_pins,
             diagnostics: Arc::clone(&diagnostics),
+            durability_frontiers: Arc::new(ObservedDurabilityFrontiers::new(
+                DurabilityFrontiersSnapshot::default(),
+            )),
+            pending_cloud_uploads: Arc::new(ObservedPendingCloudUploads::new(0)),
             storage_budget: None,
             sst_read_fs: None,
             read_authority: None,
@@ -120,6 +126,16 @@ impl Runtime {
 
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
         let snapshot_pins = Arc::clone(&state.snapshot_pins);
+        let durability_frontiers = Arc::new(ObservedDurabilityFrontiers::new(
+            DurabilityFrontiersSnapshot {
+                current_sequence: state.sequence,
+                wal_local_durable_seq: state.wal.frontiers.local_durable(),
+                wal_cloud_durable_seq: state.wal.frontiers.cloud_durable(),
+            },
+        ));
+        let pending_cloud_uploads = Arc::new(ObservedPendingCloudUploads::new(
+            state.cloud.pending_uploads.len(),
+        ));
         // Startup recovery has already recorded counters into this diagnostics
         // instance. Hand the same instance to runtime handles and actors.
         self.diagnostics = Arc::clone(&state.diagnostics);
@@ -137,6 +153,8 @@ impl Runtime {
             snapshot_cache: snapshot_cache.clone(),
             snapshot_pins,
             diagnostics: Arc::clone(&self.diagnostics),
+            durability_frontiers: Arc::clone(&durability_frontiers),
+            pending_cloud_uploads: Arc::clone(&pending_cloud_uploads),
             storage_budget: config.hybrid_storage.clone(),
             sst_read_fs: config.sst_read_fs.clone(),
             read_authority: super::handle::CloudReadAuthority::from_config(&config),
@@ -156,6 +174,8 @@ impl Runtime {
             router,
             router_for_thread,
             snapshot_cache,
+            durability_frontiers,
+            pending_cloud_uploads,
             lifecycle: lifecycle_for_thread,
             worker_msg_tx,
             worker_msg_rx,
@@ -261,6 +281,8 @@ struct WorkerStartup {
     router: Arc<ResponseRouter>,
     router_for_thread: Arc<ResponseRouter>,
     snapshot_cache: Arc<snapshot_cache::SnapshotCache>,
+    durability_frontiers: Arc<ObservedDurabilityFrontiers>,
+    pending_cloud_uploads: Arc<ObservedPendingCloudUploads>,
     lifecycle: Arc<RuntimeLifecycle>,
     worker_msg_tx: Sender<RuntimeMsg>,
     worker_msg_rx: Receiver<RuntimeMsg>,
@@ -278,6 +300,8 @@ impl WorkerStartup {
             router,
             router_for_thread,
             snapshot_cache,
+            durability_frontiers,
+            pending_cloud_uploads,
             lifecycle,
             worker_msg_tx,
             worker_msg_rx,
@@ -285,12 +309,14 @@ impl WorkerStartup {
             init_tx,
             admission,
         } = self;
-        match EventLoop::new(
+        match EventLoop::new_with_observed_frontiers(
             state,
             trace_enabled,
             router,
             config,
             crate::runtime::event_loop::FlushWorkerMode::Background(worker_msg_tx),
+            durability_frontiers,
+            pending_cloud_uploads,
         ) {
             Ok(mut event_loop) => {
                 event_loop.set_snapshot_cache(snapshot_cache);

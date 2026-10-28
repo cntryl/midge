@@ -202,26 +202,26 @@ fn spawn_sampler(
         let mut max_gap = Duration::ZERO;
         let mut max_pending_uploads = 0;
         while !stop.load(Ordering::Acquire) {
-            if let Ok(metrics) = engine.metrics().get_runtime_metrics() {
-                if stop.load(Ordering::Acquire) {
-                    break;
-                }
-                let now = Instant::now();
-                max_gap = max_gap.max(now.saturating_duration_since(previous));
-                previous = now;
-                durable.push(
-                    metrics
-                        .wal_local_durable_seq
-                        .saturating_sub(metrics.wal_cloud_durable_seq),
-                );
-                visible.push(
-                    metrics
-                        .current_sequence
-                        .saturating_sub(metrics.wal_cloud_durable_seq),
-                );
-                max_pending_uploads = max_pending_uploads.max(metrics.pending_cloud_uploads);
-                ticks += 1;
+            let metrics = engine.metrics();
+            let frontiers = metrics.get_durability_frontiers();
+            if stop.load(Ordering::Acquire) {
+                break;
             }
+            let now = Instant::now();
+            max_gap = max_gap.max(now.saturating_duration_since(previous));
+            previous = now;
+            durable.push(
+                frontiers
+                    .wal_local_durable_seq
+                    .saturating_sub(frontiers.wal_cloud_durable_seq),
+            );
+            visible.push(
+                frontiers
+                    .current_sequence
+                    .saturating_sub(frontiers.wal_cloud_durable_seq),
+            );
+            max_pending_uploads = max_pending_uploads.max(metrics.get_pending_cloud_uploads());
+            ticks += 1;
             std::thread::sleep(SAMPLE_INTERVAL);
         }
         max_gap = max_gap.max(previous.elapsed());

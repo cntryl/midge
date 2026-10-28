@@ -21,11 +21,15 @@ the existing Sqrzl namespace setup, `MIDGE_STRESS_SQRZL_ENDPOINT` (default
 Sqrzl or namespace setup fails the row; no provider result is substituted.
 The Tier 2 simulator rows retain gate trust.
 
-The sampler polls runtime frontiers every 10 ms during the commit window and
-records local-durable and visible sequence lag. It stops before the final drain;
-drain-time zero lag cannot establish sample health. A valid cloud row requires
-nonzero ticks, at least one quarter of nominal ticks and no inter-sample gap
-above 40 ms. It reports achieved mean period, maximum gap and tick count.
+The sampler reads the event-loop-published durability-frontier snapshot and a
+separate pending-upload gauge every 10 ms during the commit window. These direct
+reads do not queue a full runtime metrics request; frontier values may briefly
+lag while the event loop processes a message. It records local-durable and
+visible sequence lag and the sampled maximum pending-upload count. The sampler
+stops before the final drain; drain-time zero lag cannot establish sample
+health. A valid cloud row requires nonzero ticks, at least one quarter of
+nominal ticks and no inter-sample gap above 40 ms. It reports achieved mean
+period, maximum gap and tick count.
 Probe waits every 64 asynchronous commits provide a separate time-lag signal.
 Probe timeouts, incomplete sampling or failed shutdown make the row inconclusive.
 Commit p50/p99 and sampled lag p50/p99/max remain separate observations.
@@ -49,13 +53,21 @@ provider A/B comparisons use matching native scope and three alternating pairs.
 The local floor has no provider cost scope. Shutdown costs are included in
 native cost totals, while commit latency and throughput exclude drain/shutdown.
 
-Qualification still owes exact-SHA mock and Sqrzl artifacts, machine/service
-identity, commands, sampler health, all pair deltas and median. Preserve failed
-and inconclusive attempts under the existing evidence procedure. No matched
-SlateDB run or external parity comparison is available.
+Exact-SHA Tier 2 and Sqrzl artifacts, machine/service identity, commands and
+sampler-health results are recorded in
+[`issue-937-frontier-sampler-2026-10-28`](evidence/issue-937-frontier-sampler-2026-10-28/README.md).
+The Tier 2 simulator rows passed with gate trust. The strict Sqrzl rows passed
+the sampler-health guard; the four-client and async throughput rows are noisy
+and remain diagnostic. Pre-fix invalid rows are retained beside the candidate
+reports. These runs do not form the three alternating A/B pairs required for a
+relative performance claim. Preserve future failed and inconclusive attempts
+under the same evidence procedure. No matched SlateDB run or external parity
+comparison is available.
 
 On 2026-10-26, a one-sample local smoke of the new four-client simulator row
 was inconclusive: its maximum sampler gap was 53 ms against the existing 40 ms
-limit. The guard remains unchanged. This host run is retained as a failed
-attempt, not as row evidence; repeat on a runner that meets the existing sample
-health checks before beginning the three alternating A/B pairs.
+limit. That failed attempt remains retained separately. On 2026-10-28, the
+five-sample Tier 2 four-client row passed with a 30 ms maximum gap, and the
+five-sample Tier 5 four-client row passed with an 18 ms maximum gap. The 40 ms
+guard is unchanged. The healthy candidate rows can support the required
+alternating A/B campaign, but no three-pair delta is claimed yet.
