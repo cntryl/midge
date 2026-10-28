@@ -41,7 +41,8 @@ service:
    retaining credentials or private data.
 2. Reproduce the behavior in Sqrzl.
 3. Add or strengthen the Midge provider or engine qualification test.
-4. Pin the updated Sqrzl image by digest in `compose.yml`.
+4. Pull the updated Sqrzl `latest` image and record its resolved digest with
+   the qualification evidence. Keep Compose and CI on `latest`.
 5. Run the scheduled/release cloud qualification gates.
 
 The durable artifact is the deterministic emulator scenario and regression
@@ -68,7 +69,7 @@ the native AWS, Azure, or GCP provider paths.
 
 A release that includes cloud-backed storage must:
 
-- use a digest-pinned Sqrzl image
+- use Sqrzl `latest` and record the resolved image digest for each run
 - pass provider-level and engine-level Sqrzl qualification without skips
 - pass cloud durability, lease, upload, cache-loss, and recovery suites
 - document persisted-format and upgrade implications
