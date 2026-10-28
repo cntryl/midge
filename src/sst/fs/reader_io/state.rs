@@ -204,13 +204,15 @@ impl SstFileIo {
         let mut best_state = KeyState::Absent;
         loop {
             if decoder.offset == layout.interval_end(interval)? {
-                interval += 1;
-                if interval == layout.restart_count
-                    || !layout.restart(interval)?.1
-                    || decoder.key() != key
-                {
+                let next_interval = interval + 1;
+                if next_interval == layout.restart_count {
                     break;
                 }
+                let next_key = layout.validate_restart_link(next_interval, decoder.key())?;
+                if next_key != key {
+                    break;
+                }
+                interval = next_interval;
             }
             let Some(entry) =
                 decoder.next(block_data, self.format_version, None, "point decoder key")?
