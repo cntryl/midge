@@ -19,8 +19,10 @@ representative block: target <=23 entry decodes),
 `sst-v5-point-repeated-versions` (report group length separately),
 `sst-v5-reverse-limit-1` (no full-block key arena), and
 `sst-v5-small-kv-footprint` (engine-produced SST bytes per logical byte).
-Before/after timing, system footprint, cache-only hash evaluation, #937 row
-deltas and broad engine/cloud campaigns remain pending qualification.
+Absolute timing and system-footprint observations, cache-only hash evaluation,
+absolute #937 row measurements and broad engine/cloud campaigns remain
+diagnostic qualification work. No before/after timing or relative performance
+improvement is required.
 
 The existing cargo-fuzz package now has `sst_data_block_decode`,
 `sst_index_decode`, and `sst_filter_decode` targets. They call the production

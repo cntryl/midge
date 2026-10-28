@@ -131,5 +131,5 @@ metadata-only dependency proof does not authorize an SST sweep.
 Active tests cover stale writers learning successor identities, delayed
 predecessor CAS, initialization crashes, bounded snapshot/edit replay and an
 unselected high ordinal. The implementation-first pass defers
-execution, the simulator crash campaign, heartbeat/publication interleavings,
-provider qualification and A/B measurements. Those remain acceptance gates.
+execution, the simulator crash campaign, heartbeat/publication interleavings
+and provider qualification. Those remain acceptance gates.
