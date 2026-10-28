@@ -53,13 +53,21 @@ provider A/B comparisons use matching native scope and three alternating pairs.
 The local floor has no provider cost scope. Shutdown costs are included in
 native cost totals, while commit latency and throughput exclude drain/shutdown.
 
-Qualification still owes exact-SHA mock and Sqrzl artifacts, machine/service
-identity, commands, sampler health, all pair deltas and median. Preserve failed
-and inconclusive attempts under the existing evidence procedure. No matched
-SlateDB run or external parity comparison is available.
+Exact-SHA Tier 2 and Sqrzl artifacts, machine/service identity, commands and
+sampler-health results are recorded in
+[`issue-937-frontier-sampler-2026-10-28`](evidence/issue-937-frontier-sampler-2026-10-28/README.md).
+The Tier 2 simulator rows passed with gate trust. The strict Sqrzl rows passed
+the sampler-health guard; the four-client and async throughput rows are noisy
+and remain diagnostic. Pre-fix invalid rows are retained beside the candidate
+reports. These runs do not form the three alternating A/B pairs required for a
+relative performance claim. Preserve future failed and inconclusive attempts
+under the same evidence procedure. No matched SlateDB run or external parity
+comparison is available.
 
 On 2026-10-26, a one-sample local smoke of the new four-client simulator row
 was inconclusive: its maximum sampler gap was 53 ms against the existing 40 ms
-limit. The guard remains unchanged. This host run is retained as a failed
-attempt, not as row evidence; repeat on a runner that meets the existing sample
-health checks before beginning the three alternating A/B pairs.
+limit. That failed attempt remains retained separately. On 2026-10-28, the
+five-sample Tier 2 four-client row passed with a 30 ms maximum gap, and the
+five-sample Tier 5 four-client row passed with an 18 ms maximum gap. The 40 ms
+guard is unchanged. The healthy candidate rows can support the required
+alternating A/B campaign, but no three-pair delta is claimed yet.
