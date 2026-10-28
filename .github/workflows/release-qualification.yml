@@ -1,0 +1,123 @@
+name: Release Qualification
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-qualification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  clean-container:
+    name: Clean Docker all-feature tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      sqrzl:
+        image: ghcr.io/sqrzl/sqrzl-emulator:latest
+        ports:
+          - 9000:9000
+          - 9001:9001
+        env:
+          SQRZL_BLOBS_PATH: /app/blobs
+          SQRZL_ACCESS_KEY_ID: admin
+          SQRZL_SECRET_ACCESS_KEY: easy-peasy
+    steps:
+      - uses: actions/checkout@v7
+      - name: Capture emulator identity
+        run: docker image inspect ghcr.io/sqrzl/sqrzl-emulator:latest --format '{{json .RepoDigests}}' | tee sqrzl-image.txt
+      - name: Build and test clean release source
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --network=host --progress=plain --build-arg MIDGE_DISCOVERY_SOURCE_REVISION="$GITHUB_SHA" --build-arg MIDGE_DISCOVERY_SOURCE_DIRTY=false --file Dockerfile.tests --tag midge-tests:release . 2>&1 | tee docker-tests.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: release-container-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            docker-tests.log
+            sqrzl-image.txt
+          retention-days: 30
+
+  compatibility:
+    name: Package and compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-compatibility
+      - name: Verify MSRV
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          cargo +1.97.0 check --locked --workspace --all-targets --all-features
+      - name: Check isolated provider features
+        run: |
+          cargo check --locked --no-default-features --features cloud-aws
+          cargo check --locked --no-default-features --features cloud-azure
+          cargo check --locked --no-default-features --features cloud-gcp
+          cargo check --locked --no-default-features --features cloud-oci
+      - name: Verify release build and documentation
+        run: |
+          cargo check --locked --release
+          cargo test --locked --doc --all-features
+          cargo run --locked --example documented_quick_start
+      - name: Verify package
+        run: cargo package --locked
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: release-package-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/package/*.crate
+          if-no-files-found: ignore
+          retention-days: 30
+
+  ycsb:
+    name: YCSB ${{ matrix.workload }} local baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        workload: [a, b, c, d, e, f]
+    env:
+      CARGO_INCREMENTAL: "0"
+      MIDGE_BENCH_PROFILE: smoke
+      STRESS_PROFILE: smoke
+      BENCH_NAME: tier4_ycsb_workload_${{ matrix.workload }}
+      WORKLOAD_NAME: tier4_ycsb_${{ matrix.workload }}_local_64_clients
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - name: Compile benchmark before measurement
+        run: cargo bench --locked --bench "$BENCH_NAME" --no-run
+      - name: Cool down after compilation
+        run: sleep 30
+      - name: Capture environment
+        run: |
+          rustc --version --verbose
+          uname -a
+          uptime
+      - name: Measure three independent repeats with quiet guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          for repeat in 1 2 3; do
+            cargo bench --locked --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples 5 --warmup-samples 1 --no-progress --require-quiet-env --output-dir "target/stress/release-050-ycsb-${repeat}"
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: release-ycsb-${{ matrix.workload }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/stress/**
+          if-no-files-found: ignore
+          retention-days: 30
