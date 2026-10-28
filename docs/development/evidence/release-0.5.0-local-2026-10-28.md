@@ -72,8 +72,11 @@ cargo bench --locked --bench tier2_subsystem_hybrid_durability_lag -- --workload
 
 Earlier simulator strict-one and native strict-one attempts had sampler gaps
 of 57 ms and 42 ms respectively; those attempts are invalid/inconclusive.
-The native strict-one retry remains pending at this checkpoint. The simulator
-strict-one retry above is valid; a failed attempt is not erased by a retry.
+The native strict-one retry at source `6f522167` also failed its sampler guard:
+76 ms versus 40 ms during a host load spike above 30. Its report is retained at
+`target/stress/release-050-sqrzl-strict1-retry`; it supplies no valid performance
+result. The simulator strict-one retry above is valid; a failed attempt is not
+erased by a retry.
 
 ## Recovery
 
@@ -113,10 +116,26 @@ unknown outcomes, heartbeat/control work and retention can add requests.
 
 ## Remaining gates
 
-- Native strict-one healthy sampler run and owning #937 evidence disposition.
+- #1018: the initial local all-feature suite passed 3,732 library tests and
+  failed the queued second-family deadline case; Core CI passed 3,713 and
+  failed its sibling's retirement assertion. The test fixture could reap a
+  generation before its intended delayed dispatch and omitted pending-obsolete
+  GC retries. After correcting only fixture ownership/progress control, all
+  six focused deadline-owner cases pass in 31.90 s with the original caller
+  budgets and authority/byte assertions unchanged. Full-suite requalification
+  remains required; this is not a confirmed runtime data-loss finding.
+- Native strict-one remains inconclusive; owning #937 evidence disposition
+  must identify the valid strict-four diagnostic separately.
 - Complete #929 matrix, including YCSB A–F; preserve historical sources and
   inconclusive rows rather than inventing final-head parity.
 - Four machine-hours of `engine_differential` and registered-target smokes on
   the candidate; no elapsed budget is claimed here.
 - The final release checklist, exact-head CI, version/package/operator docs
   and reviewed promotion. No release tag or publication is claimed.
+
+Candidate preparation passes formatting, strict all-feature Clippy, dependency
+analysis and test-structure validation (4,640 compliant, zero violations).
+The package file list excludes the exploratory 0.5.1 design. The four-hour
+differential campaign is running on the explicitly selected pinned nightly
+toolchain; an earlier stable-toolchain preflight is retained separately and
+does not count as completion. No fuzz elapsed-time budget is claimed yet.
