@@ -123,8 +123,13 @@ Hybrid:
   `cloud_strict()` commit p50/p99 against the cloud-durable lag sampled during
   the run (sequences and probe wait time), provider puts per commit, and bytes
   uploaded per committed byte, with the local `sync()` row as the floor. Rows
-  are `gate` trust; the simulator is not a provider, so Sqrzl and live-provider
-  lag are qualified separately.
+  also report sampled cloud-frontier interarrival and, on cloud rows, the
+  configured upload memory budget; these do not represent exact catalog-CAS
+  timing or live queue-byte utilization. Rows are `gate` trust; the simulator
+  is not a provider, so Sqrzl and live-provider lag are qualified separately.
+  #916 has no accepted numeric latency target yet, so the new cloud-strict
+  observations are measurement-only pending a target and comparison basis
+  under the 0.5.0 performance policy.
 - `tier5_hybrid_durability_lag` contains the Sqrzl diagnostic counterparts and
   local floor. The [provider qualification guide](hybrid-lag-provider-qualification.md)
   defines sampler health and observed native HTTP cost scope; execution and
