@@ -254,24 +254,33 @@ fn check_publication(provider: &CloudProviderConfig, fault: Fault) {
 
 #[test]
 fn should_reject_wrong_streamed_receipts_when_sqrzl_committed_exact_bytes() {
-    // Arrange / Act / Assert: each dialect is exercised through production publication.
-    for provider in providers() {
+    // Arrange
+    let cases = providers();
+    // Act
+    for provider in cases {
+        // Assert: the fixture verifies production publication rejects the receipt.
         check_publication(&provider, Fault::WrongChecksum);
     }
 }
 
 #[test]
 fn should_fail_closed_or_read_back_when_sqrzl_completion_omits_checksum() {
-    // Arrange / Act / Assert: only identity-pinned fallback may return success.
-    for provider in providers() {
+    // Arrange
+    let cases = providers();
+    // Act
+    for provider in cases {
+        // Assert: the fixture requires identity-pinned fallback for success.
         check_publication(&provider, Fault::MissingChecksum);
     }
 }
 
 #[test]
 fn should_reconcile_same_streamed_object_when_sqrzl_completion_response_is_lost() {
-    // Arrange / Act / Assert: the remote object exists once and is independently verified.
-    for provider in providers() {
+    // Arrange
+    let cases = providers();
+    // Act
+    for provider in cases {
+        // Assert: the fixture verifies one completion and exact remote bytes.
         check_publication(&provider, Fault::LostCompletion);
     }
 }
