@@ -1,13 +1,43 @@
 # Migration guide
 
-Midge is a 0.x crate. The `0.4` release line writes database FORMAT 8,
-requires SST V4, and uses cloud WAL publication catalog v3. Older database
+Midge is a 0.x crate. The `0.5.0` candidate writes database FORMAT 9,
+requires SST V5, and uses cloud WAL publication catalog v3. Older database
 formats are rejected without migration. Treat upgrades as application
 migrations: read the release notes, inspect
 [format compatibility](../development/format-compatibility.md), run
 compatibility and recovery tests, and keep a verified application-level
-backup before changing binaries. See [0.3.2 to 0.4.0](#032-to-040) before
-upgrading an existing database.
+backup before changing binaries. Use the applicable release transition below
+before upgrading an existing database.
+
+## 0.4.x to 0.5.0
+
+This is an incompatible format transition, not an in-place upgrade. Local
+FORMAT 8/SST V4 stores and the previous cloud metadata layout cannot be opened
+by 0.5.0. The new cloud layout uses lease v4, initialization sentinel v3 and a
+separate committed pointer selecting immutable manifest snapshots and edits.
+The cloud WAL publication catalog remains v3; that alone does not make an old
+cloud prefix compatible.
+
+1. Quiesce writers and use the matching 0.4.x binary to export application
+   data and column-family definitions. Preserve expiration timestamps in the
+   application export: ordinary public scans do not expose raw TTL metadata.
+   Decide explicitly how to handle values already hidden by expiration.
+2. Complete clean shutdown and retain a verified copy of the entire original
+   directory or cloud prefix with the matching old binary. Preserve this copy
+   independently of any ephemeral cloud cache.
+3. Create a fresh 0.5.0 directory or an empty cloud prefix and fresh cache.
+   Recreate column families and import the logical data and application TTL
+   policy. Do not copy old FORMAT, WAL, SST, lease or pointer files into it.
+4. Verify application counts and contents, reads, writes, TTL behavior and
+   restart recovery before cutover. Run the local storage verifier where
+   applicable and the engine's cloud verification/recovery checks, including
+   complete cache loss, for the deployment's supported topology.
+
+Rollback to the old binary against the new store is unsupported. Return to the
+preserved 0.4.x store and binary; writes accepted after cutover are absent from
+that copy and need application-level reconciliation. Never change format
+markers manually. A proper in-place upgrade from 0.5.0 is required for the
+planned 0.5.1 work but is not implemented by this release.
 
 ## 0.4.0 to 0.4.1
 

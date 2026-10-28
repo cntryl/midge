@@ -6,6 +6,24 @@ and its plan issue [#935](https://github.com/cntryl/midge/issues/935). This
 page is updated when phase decisions change; the issues carry requirements and
 acceptance criteria and are not repeated here.
 
+## Release scope frozen on 2026-10-28
+
+Ship the existing FORMAT 9/SST V5 engine and cloud metadata layout v2 after
+the remaining qualification gates. The current owning issues are #914
+(metadata-publication acceptance), #929 (absolute baseline summary), #937
+(provider hybrid durability measurements), and #935 (final release checklist,
+including the four-machine-hour differential-fuzz budget). Source-pinned local
+evidence is accepted; keep raw reports outside commits, use Sqrzl `latest`
+with its resolved digest recorded, and keep workflows unchanged. Failed,
+inconclusive and pending results remain explicit.
+
+The phase history below does not add speculative implementation to this release.
+The SST redesign is the 0.5.1 program tracked by #922 and #1010–#1016. That
+release requires a crash-safe in-place upgrade from released 0.5.0 databases,
+including mixed V5/new SST reads; it supersedes the exploratory design's
+no-upgrade assumption. No 0.5.1 capability is claimed in 0.5.0. Destructive TTL
+GC #912 and weaker WAL detection floors #904 remain excluded.
+
 The original plan came from a repository-wide architecture review of `develop` at
 `3daa1ac` (2026-10-23). The review found correctness contracts ahead of
 comparable engines (CAS-fenced writer authority, `OutcomeUnknown`, intent-log

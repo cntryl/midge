@@ -2,7 +2,7 @@
 
 ## Current Status
 
-Midge is in the 0.3 release line. It is usable for evaluation and targeted deployments, but it is not yet making a blanket 1.0-style production or compatibility promise.
+Midge is preparing the 0.5.0 release. It is usable for evaluation and targeted deployments, but it is not yet making a blanket 1.0-style production or compatibility promise.
 
 ## What Pre-1.0 Means
 
@@ -10,6 +10,13 @@ Midge is in the 0.3 release line. It is usable for evaluation and targeted deplo
 - Patch version updates are intended to be low risk, but the strongest compatibility contract will not exist until 1.0.
 - Public docs should describe guarantees only where there is matching implementation and test coverage.
 - The crate is pre-1.0; this policy describes the current 0.x compatibility boundary.
+
+The planned 0.5.1 SST work has an explicit narrower requirement: a crash-safe
+in-place upgrade from released 0.5.0 databases, with mixed V5/new SST readers
+and bounded conversion. That requirement supersedes exploratory no-migration
+assumptions for 0.5.1, but it is not implemented by the 0.5.0 candidate and
+does not make older binaries able to read future encodings. See
+[the 0.5.1 program](https://github.com/cntryl/midge/issues/922).
 
 ## What Is Expected To Stay Stable
 
