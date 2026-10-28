@@ -80,3 +80,48 @@ capability gap reported in Sqrzl #79. It does not establish live-provider
 qualification, fault-injected wrong/missing receipt behavior on this image,
 engine crash/restart qualification, or the remaining performance evidence for
 #915. Those scopes remain separate from this successful-upload protocol proof.
+
+### Completion-response faults
+
+The `storage::providers::qualification::receipt_faults` tests forward real
+authenticated requests to that same Sqrzl image and change only successful
+completion responses. All twelve schedules (four provider dialects, three
+faults each) pass:
+
+- Contradictory checksum receipts cannot produce a publication proof.
+- Missing receipts either fail closed or require identity-pinned range
+  verification; GCS JSON pins by generation query parameter.
+- A lost successful completion reconciles the original immutable object by
+  pinned range readback, with exactly one successful remote completion.
+
+An independent direct read verifies every completed object against the source,
+and publication releases its admitted memory. These tests exercise production
+`HybridStorage` streaming publication over files larger than two 5 MiB parts.
+The proxy preserves signed request headers and HEAD lengths, and redirects
+resumable session locations back through its loopback endpoint. It does not
+fabricate provider success. Run the qualification command above with the
+`receipt_faults` filter to repeat these schedules.
+
+### Multipart-sized compaction process-abort recovery
+
+The provider-engine suite's `streamed_cloud_compaction_crash` regression passes
+for S3 checksum opt-in, Azure, GCS XML and GCS JSON on the same Sqrzl image.
+Each child writes two overlapping SST generations, then aborts at
+`slice7::after_compaction_output_durable_before_manifest_publish`. The durable
+compaction intent must describe a new output larger than 10 MiB at that
+boundary, so metadata-only moves cannot satisfy the test. The existing crash
+harness requires a synced exact-trigger sentinel and an actual process abort.
+
+After the original writer lease expires, the parent deletes the complete local
+cache, reopens through the real provider and verifies the committed input file
+set and all 192 latest 64 KiB values. The unpublished streamed output does not
+gain manifest authority. Both harness tests passed; the four recovery schedules
+took 104.44 seconds in the local configured run.
+
+```text
+cargo test --locked --test cloud_provider_engine_qualification --features sqrzl-tests,failpoints streamed_cloud_compaction_crash -- --test-threads=1 --nocapture
+```
+
+This adds the process-abort and cold-cache engine-manifest proof independently
+of completion-response integrity and ambiguity. Performance evidence retains
+its own gate.

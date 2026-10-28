@@ -22,6 +22,9 @@ fn expected_sentinel(scenario: &str, trigger: &str) -> String {
 /// Run one child crash scenario and require independent proof that the named
 /// trigger fired. A fallback panic or unrelated abort cannot create this
 /// exact, synced marker and therefore fails loudly with child output.
+///
+/// # Panics
+/// Panics if the child cannot run or does not prove the exact expected abort.
 pub fn run_child_expect_abort(
     command: &mut Command,
     scenario: &str,
@@ -44,6 +47,9 @@ pub fn run_child_expect_abort(
 /// Remove the filesystem lease-mutation lock left by a child whose exact
 /// process abort has already been observed. Crash tests use private storage
 /// directories, so no live process can own this path after the child exits.
+///
+/// # Panics
+/// Panics if removing an existing acquisition lock fails.
 pub fn clear_crashed_process_acquisition_lock(db_path: &Path) {
     let lock_path = db_path.join(".midge_leader.lock");
     if let Err(error) = fs::remove_file(lock_path) {
@@ -57,6 +63,9 @@ pub fn clear_crashed_process_acquisition_lock(db_path: &Path) {
 
 /// Validate a child result separately from process execution so tests
 /// tests can prove a missing or wrong marker is rejected.
+///
+/// # Errors
+/// Returns an error for an unexpected exit or missing or mismatched sentinel.
 pub fn validate_child_crash(
     output: &Output,
     marker: &Path,
@@ -105,6 +114,9 @@ fn status_is_abort(status: std::process::ExitStatus) -> bool {
 }
 
 /// Require exact, independently persisted evidence for one named trigger.
+///
+/// # Errors
+/// Returns an error if the sentinel cannot be read or does not match.
 pub fn validate_trigger_sentinel(
     marker: &Path,
     scenario: &str,
@@ -149,6 +161,9 @@ pub fn abort_at_trigger(scenario: &str, trigger: &str) -> ! {
 /// Arm a named failpoint so the injection itself records durable evidence and
 /// aborts. The `FailScenario` is deliberately leaked because the process must
 /// terminate at the injected boundary.
+///
+/// # Panics
+/// Panics if the failpoint cannot be configured.
 #[cfg(feature = "failpoints")]
 pub fn configure_abort_failpoint(name: &str, scenario: &str) {
     let fail_scenario = fail::FailScenario::setup();
@@ -162,6 +177,9 @@ pub fn configure_abort_failpoint(name: &str, scenario: &str) {
 }
 
 /// Arm the Nth evaluation of a named failpoint as the intended crash boundary.
+///
+/// # Panics
+/// Panics if the target is zero or the failpoint cannot be configured.
 #[cfg(feature = "failpoints")]
 pub fn configure_nth_abort_failpoint(name: &str, scenario: &str, target: usize) {
     assert!(target > 0, "failpoint target must be positive");
