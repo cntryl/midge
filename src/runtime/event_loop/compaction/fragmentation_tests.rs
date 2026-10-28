@@ -157,6 +157,21 @@ impl FragmentFixture {
     fn publish(&mut self, completion: RuntimeMsg) {
         let (_, unused) = crossbeam::channel::unbounded();
         self.el.handle_runtime_msg(completion, &unused);
+        while self.el.publication.compaction_publication.is_active() {
+            let completion = self
+                .el
+                .publication
+                .compaction_publish_result_rx
+                .recv_timeout(WAIT)
+                .expect("compaction publication completion");
+            assert!(
+                completion.result.is_ok(),
+                "compaction publication {:?} failed: {:?}",
+                completion.phase,
+                completion.result.as_ref().err()
+            );
+            CompactionCoordinator::handle_publication_completion(&mut self.el, completion);
+        }
         assert!(self.el.state.intent_log.is_empty());
         assert!(!self.el.publication.publication_gate.is_active());
         assert!(!self.el.authority.compaction_fence.is_degraded());
