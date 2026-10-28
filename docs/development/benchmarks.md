@@ -86,8 +86,8 @@ memtable-resident set and after a cold reopen, and seekrandom, each one
 operation per transaction with 16-byte keys and 100-byte values on a fresh
 local directory with production defaults. Its rows are named after the
 `db_bench` workloads they are shaped like; a `db_bench` run is context, not a
-parity claim. Performance PRs use three alternating base/candidate pairs;
-the absolute matrix remains release evidence. Both procedures are in
+parity claim. Performance evidence records absolute results for an exact source
+SHA; the absolute matrix remains release evidence. See
 [the baseline procedure](baseline-procedure.md).
 
 Each tier has one workflow, `bench-tier1.yml` through `bench-tier6.yml`,

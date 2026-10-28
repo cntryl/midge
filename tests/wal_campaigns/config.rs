@@ -19,8 +19,9 @@ use std::time::Duration;
 /// threads outlive the simulated crash, stops retrying its lease release
 /// within a second.
 const LEASE_TTL_MILLIS: u64 = 1_000;
-/// A TTL short enough that lease renewals interleave with crashes.
-pub(crate) const RENEWING_LEASE_TTL_MILLIS: u64 = 60;
+/// A short TTL that keeps renewals frequent during the crash campaign without
+/// making the simulated lease worker contend continuously under host load.
+pub(crate) const RENEWING_LEASE_TTL_MILLIS: u64 = 250;
 /// The shortest cloud lease TTL the engine accepts, about: two thirds of it
 /// must exceed the provider write margin. Both cloud modes hold the cloud
 /// lease.

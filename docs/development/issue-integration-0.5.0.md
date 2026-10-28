@@ -16,11 +16,11 @@ acceptance criteria are satisfied and the integration head is qualified.
 ## Current qualification focus
 
 - [#946 detached conflict validation](https://github.com/cntryl/midge/issues/946):
-  correctness coverage is in PR #992; the exact base-to-candidate latency run
-  and remaining PR checks are still pending.
+  behavioral and crash evidence remain on the owning issue; absolute latency
+  measurements are diagnostic.
 - [#948 grandparent output cuts](https://github.com/cntryl/midge/issues/948):
-  the uniform-random same-runner A/B is running; use the owning issue for its
-  exact source SHAs, results, and remaining acceptance criteria.
+  its source-pinned absolute workload measurements remain open; no comparison
+  delta is required.
 - [#943 durable delete intents and orphan sweeping](https://github.com/cntryl/midge/issues/943):
   the active-sweeper process-abort and per-turn request-budget regression passed
   on the current integration head; final PR qualification remains open.

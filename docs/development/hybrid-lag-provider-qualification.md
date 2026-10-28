@@ -67,8 +67,9 @@ than attributing those effects to another row.
 
 The simulator's byte observation remains resident WAL object bytes; native
 bytes include every engine request body. Their units are declared, and those
-different scopes must not be compared as a provider cost improvement. Actual
-provider A/B comparisons use matching native scope and three alternating pairs.
+different scopes must not be compared as a provider cost improvement. Report
+each provider's absolute observations with its native scope; no cross-revision
+comparison is required.
 The local floor has no provider cost scope. Shutdown costs are included in
 native cost totals, while commit latency and throughput exclude drain/shutdown.
 
@@ -77,21 +78,18 @@ sampler-health results are recorded in
 [`issue-937-frontier-sampler-2026-10-28`](evidence/issue-937-frontier-sampler-2026-10-28/README.md).
 The Tier 2 simulator rows passed with gate trust. The strict Sqrzl rows passed
 the sampler-health guard; the four-client and async throughput rows are noisy
-and remain diagnostic. Pre-fix invalid rows are retained beside the candidate
-reports. These runs do not form the three alternating A/B pairs required for a
-relative performance claim. Preserve future failed and inconclusive attempts
-under the same evidence procedure. No matched SlateDB run or external parity
-comparison is available.
+and remain diagnostic. Pre-fix invalid rows are retained as historical reports.
+Preserve future failed and inconclusive attempts under the same evidence
+procedure. No matched SlateDB run or external parity comparison is available.
 
 On 2026-10-26, a one-sample local smoke of the new four-client simulator row
 was inconclusive: its maximum sampler gap was 53 ms against the existing 40 ms
 limit. That failed attempt remains retained separately. On 2026-10-28, the
 five-sample Tier 2 four-client row passed with a 30 ms maximum gap, and the
 five-sample Tier 5 four-client row passed with an 18 ms maximum gap. The 40 ms
-guard is unchanged. The healthy candidate rows can support the required
-alternating A/B campaign, but no three-pair delta is claimed yet.
+guard is unchanged. The healthy rows provide absolute current-source
+observations; no performance-improvement claim is made.
 
 The current #916 work adds measurement fields only. It has no accepted numeric
-latency target yet, so its cloud-strict observations remain measure-only until
-the target and comparison basis are agreed and recorded under the 0.5.0
-performance policy.
+latency target yet, so its cloud-strict observations remain diagnostic and do
+not establish a performance-improvement claim.

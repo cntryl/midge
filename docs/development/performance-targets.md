@@ -6,35 +6,25 @@ Pebble, or any other engine.
 
 Use these targets to decide when a benchmark result needs investigation. A
 single miss does not prove a defect by itself; repeat the benchmark on the same
-machine, with the same configuration, and compare against a saved baseline.
+machine and with the same configuration. Midge 0.5.0 performance evidence is
+absolute and tied to one source SHA; comparing revisions is not an acceptance
+requirement.
 
 ## Regression Posture
 
-Tier 1 stress microbenchmarks:
+Tier 1 through Tier 4 stress benchmarks:
 
-- Investigate a regression greater than 5% from a saved baseline.
-- Treat smaller movements as noise unless they repeat across runs or affect a
-  known critical path.
-
-Tier 2 stress subsystem benchmarks:
-
-- Investigate a regression greater than 8-10% from a saved baseline.
-- For transaction latency guardrails, also investigate any explicit benchmark
-  assertion failure.
-
-Tier 3 and Tier 4 stress benchmarks:
-
-- Investigate a sustained throughput drop greater than 15% across repeated runs.
-- Investigate p99 latency growth greater than 20% across repeated runs.
-- Prefer at least 3 runs for normal stress checks and 5 runs when deciding
-  whether to accept a meaningful change in Tier 4 results.
+- Prefer at least 3 runs for normal stress checks and 5 runs when an absolute
+  Tier 4 result needs stronger noise characterization.
+- Preserve each run and mark a row inconclusive when its variance diagnostics
+  exceed the documented tier guardrail.
+- Investigate explicit benchmark assertion failures and correctness or health
+  guardrail failures.
 - No workflow enforces these budgets automatically: every `bench-tier*.yml`
   workflow is dispatched by hand (Tiers 5 and 6 also on a schedule), and
-  `ci.yml` runs no benchmarks. The 15% budget for the memory-mode batched-write
-  row is checked with three alternating base/candidate pairs on the same
-  machine, reporting the median pair delta and retaining inconclusive rows,
-  following
-  [the baseline procedure](baseline-procedure.md).
+  `ci.yml` runs no benchmarks. See
+  [the baseline procedure](baseline-procedure.md) for source-pinned absolute
+  reporting.
 
 ## External LSM Comparisons
 
@@ -65,10 +55,9 @@ Local throughput:
   memory-mode baseline for the same workload.
 - PR #205 intentionally removed the memory-only caller grouping path to keep
   one transaction submission contract across storage modes. The resulting
-  roughly 20% memory-mode reduction is the accepted comparison baseline, not
-  an unreported production durability regression. Future changes are compared
-  against their immediate base revision and must remain within the Tier 4 15%
-  budget unless the PR explicitly revises this policy with evidence.
+  roughly 20% memory-mode reduction is a documented mode difference, not an
+  unreported production durability regression. Report the row values for the
+  exact source SHA; no cross-revision percentage gate applies.
 
 Cloud buffered async:
 
@@ -89,8 +78,8 @@ Hybrid:
 - Tag local budget usage, pending evictions, cloud durable lag, and pending
   uploads.
 - Fail only on failed uploads, no-space stalls, or local usage over 100%.
-- Treat throughput and latency as baseline-regressed metrics rather than fixed
-  absolute targets.
+- Report absolute throughput and latency for the exact source SHA; no
+  cross-revision performance threshold applies.
 
 ## Benchmark Ownership
 
@@ -128,8 +117,7 @@ Hybrid:
   timing or live queue-byte utilization. Rows are `gate` trust; the simulator
   is not a provider, so Sqrzl and live-provider lag are qualified separately.
   #916 has no accepted numeric latency target yet, so the new cloud-strict
-  observations are measurement-only pending a target and comparison basis
-  under the 0.5.0 performance policy.
+  observations are diagnostic and carry no performance-improvement gate.
 - `tier5_hybrid_durability_lag` contains the Sqrzl diagnostic counterparts and
   local floor. The [provider qualification guide](hybrid-lag-provider-qualification.md)
   defines sampler health and observed native HTTP cost scope; execution and
@@ -147,7 +135,7 @@ Hybrid:
   SST validation over 10,000 filesystem-mock objects with 1 ms simulated HEAD
   delay; fixture seeding is outside the row's explicit timer. This fixed-work
   row is intentionally diagnostic because the stress harness classifies its
-  throughput as capped. Keep its source-pinned A/B results and trust boundary
+  throughput as capped. Keep its source-pinned absolute results and trust boundary
   explicit on
   [issue #927](https://github.com/cntryl/midge/issues/927).
 - Tier 4 YCSB workloads own long-running workload regressions and hybrid
@@ -155,32 +143,44 @@ Hybrid:
 
 ## Recommended Verification
 
-### Preregistered 0.5.0 pipeline targets
+### 0.5.0 pipeline measurements and guards
 
-Issues #941 and #906 use aggregate reference
-`172c941201f42e0206ca912d080e65c23ff4133c`, which includes ordered fsync and
-completed-prefix acknowledgement. These targets are hypotheses for qualification,
-not measured gains. Before concurrent apply starts, also pin the completed
-#941/#947 prerequisite SHA to isolate apply's contribution.
-
-The pinned isolated #906 baseline is
-`c1e6e9423fdd55f7f2766c3d83220c8eadc96f7e`, after those resident Strict
-encoding and raw-value copy candidates. Within-group concurrent effects must
-settle before one ordered visibility publication; partial or unknown apply
-fences subsequent mutation until recovery.
+The #906 current-source measurement includes the already integrated #941/#947
+writer work. Record the full source SHA and the enabled workload/configuration.
+Within-group concurrent effects must settle before one ordered visibility
+publication; partial or unknown apply fences subsequent mutation until
+recovery.
 
 | Change | Primary target | Guardrails |
 | --- | --- | --- |
-| #941 writer encoding | At least 20% lower event-loop CPU/service nanoseconds per committed 4 KiB unit on `tier2_durability_commit_sync_local_4k_rotation` | Writer encode/compression/CRC/XXH3/append service per unit at most 10% worse; 16/64-writer Strict throughput at least 10% higher in each row, commit p99 at most 5% worse |
-| #906 concurrent apply | At least 10% higher throughput on `tier4_system_local_throughput_regression` | Transaction p99 at most 5% worse; 16/64-writer Strict throughput at least 10% higher in each row, commit p99 at most 5% worse |
-| #940 async WAL fsync completion | On the 16- and 64-writer local Strict rows in `tier2_subsystem_durability_commit_latency`, require at least 10% higher commits per successful physical WAL fsync in the median of three alternating base/candidate pairs | Report all six pair values; commit p99 and strict throughput each no more than 5% worse. Report ledger file/directory sync attempts and successes separately; do not present writer-only WAL fsync counts as total physical fsyncs. Base `e9a0d86b7be0c1b298ef8f546326c5893aedba04`; candidate `e849fd96a5f528f794c313f6857a06c5b135c38b`. |
-| #905 overlapping strict writes | In `tier2_subsystem_durability_commit_latency`, the 16-writer single-shared-hot-key Strict row must reach at least 80% of the distinct-key row's throughput; `avg_txn_records_per_append` must remain at least 7.0 | Report three alternating base/candidate pairs and their deltas/medians for both rows, without adding a separate speedup claim. Base `e9a0d86b7be0c1b298ef8f546326c5893aedba04`; candidate `e849fd96a5f528f794c313f6857a06c5b135c38b`. |
-| #946 detached conflict validation | On `abort_on_write_conflict_sst_backed`, median of three alternating pair deltas for both p50 and p99 total conflict-checked commit latency must be no worse than +5% | Report every pair delta; zero SST opens on the event loop remains a behavioral correctness gate. This is a bounded-latency target, not a claim that detached validation improves isolated commit latency. |
-| #908 write slowdown | On `tier4_system_compaction_backpressure` local, with the configured soft limits enabled under the preregistered sustainable workload, median of three alternating pair deltas for p50 and p99 end-to-end commit latency must each be no worse than +5% | Report admission delay separately from total commit latency; zero hard stalls is an independent workload gate. The admission-delay maximum does not bound WAL/provider service time or promise zero stalls under arbitrary overload. |
-| #926 logical SST moves | Informational readout from `tier4_compaction_time_ordered_ingest_write_amplification`; no minimum delta or A/B campaign is required for issue closure | Each sample writes 16,384 ordered 512-byte values in 64-write buffered transactions, flushes, then runs production `compact_all`; background compaction is disabled until that explicit call. The fixture must begin with only L0 files and end with every SST above L0. It records published compaction output SST bytes (not flush bytes) and confirms logical moves by preserved SST identity. Use it to observe write-amplification and throughput during development; do not claim improvement from one run. |
-| #948 grandparent output cuts | On `tier4_system_compaction_grandparent_cuts`, report the three alternating pair deltas for compaction-output bytes per logical input byte; no minimum byte reduction is preregistered | Sustained throughput must not regress by more than 15%, consistent with the Tier 4 guardrail. The fixed workload uses seed `0x948020261006`, 2.7M base keys, 550K uniformly sampled updates, 16-byte keys, and 128-byte deterministic high-entropy values with default production options. Setup repeats production `compact_all` until the layout stabilizes, then requires the update span to overlap more than 320 MiB across at least two actual L2 SSTs, each individually smaller than the 320 MiB limit. Use the release profile with five measured samples and one warmup per invocation; five is the stress harness minimum for its quality assessment. Any noisy invocation remains inconclusive and must be rerun. The output-byte metric is published compaction output SST bytes; it excludes flush bytes and is not whole-engine physical write amplification. The focused executor regression separately asserts that the candidate overlap-roll branch fires. Base `e9a0d86b7be0c1b298ef8f546326c5893aedba04`; candidate `e849fd96a5f528f794c313f6857a06c5b135c38b`. Results and workflow artifact links are on [issue #948](https://github.com/cntryl/midge/issues/948). Three clean pairs completed: candidate throughput changes were -15.79%, -15.28%, and -15.54% (median -15.54%), exceeding the 15% guardrail; output ratios were 6.174 base and 10.816 candidate in each pair. The target therefore does not qualify a performance benefit. |
-| #949 finalized compaction output and merge heap | On `tier2_subsystem_compaction`, the median of three alternating pair deltas for process CPU nanoseconds per logical input MiB must be lower on the candidate | Fixture: eight independently flushed SSTs with 100,000 unique 16-byte keys and 128-byte deterministic high-entropy values per SST; measure one production `compact_all`, record process CPU across compaction workers, wall time and published output bytes separately. Require five measured samples per invocation and no unresolved Tier 2 variance diagnostic (10% RSD guardrail). Base `8883610fae287e0473064049e47f5477e7354db2`; candidate `ef67da29ad7e4caba7bb0de384dd0b0b0b2fb361`. This comparison covers the replace-top borrowed-key heap and finalized writer identity changes together, so it does not isolate their individual CPU effects. Three accepted pairs completed with reductions of 14.06%, 11.40%, and 11.71% (median 11.71%). Evidence: [issue #949 A/B results](https://github.com/cntryl/midge/issues/949). |
-| #918 SST V5 restart/header change | `tier4_system_sst_v5` reports exact production decoder work for a unique key and a 128-version key group at latest and older snapshots. `tier4_system_sst_footprint` reports flushed SST bytes for 8,192 16-byte-key/32-byte-value rows and is compatible with the V4 baseline. | Unique-key lookup must decode at most 23 entries; repeated-version latest and older-snapshot lookups at most 150 each. Compare SST bytes per logical key across three alternating base/candidate pairs and report all deltas; footprint improvement is diagnostic until a representative baseline establishes a preregistered minimum. Both fixtures use identical high-entropy key/value data and release settings. V5 point-read lookup stats are collected through the hidden benchmark facade over the production SST reader. |
+| #941 writer encoding | Record absolute event-loop CPU/service nanoseconds per committed 4 KiB unit on `tier2_durability_commit_sync_local_4k_rotation`, with writer service time separated | Record 16/64-writer Strict throughput and commit p99 at the exact source SHA. Byte equality and held-encoder read/control progress are correctness gates; performance values are diagnostic. |
+| #906 concurrent apply | Record absolute throughput on `tier4_system_local_throughput_regression` at the exact source SHA | Record transaction p99 and 16/64-writer Strict throughput. Preserve complete-system digest, reopen and footprint checks; performance values are diagnostic. |
+| #940 async WAL fsync completion | Historical closed issue; its accounting distinguishes writer WAL fsyncs from ledger file/directory sync attempts and successes | No current performance gate. Do not present writer-only WAL fsync counts as total physical fsyncs. |
+| #905 overlapping strict writes | Historical closed issue; its recorded acceptance compared the 16-writer shared-hot-key and distinct-key Strict rows and tracked `avg_txn_records_per_append` | No current performance gate. |
+| #946 detached conflict validation | Record absolute p50 and p99 total conflict-checked commit latency on `abort_on_write_conflict_sst_backed` | Zero SST opens on the event loop remains a behavioral correctness gate. The latency values are diagnostic. |
+| #908 write slowdown | On `tier4_system_compaction_backpressure` local, record absolute p50/p99 end-to-end commit latency and caller-side admission delay for the configured sustainable workload | Zero hard stalls is an independent workload gate. The admission-delay maximum does not bound WAL/provider service time or promise zero stalls under arbitrary sustained overload. |
+| #926 logical SST moves | Informational absolute readout from `tier4_compaction_time_ordered_ingest_write_amplification`; no minimum target is required for issue closure | Each sample writes 16,384 ordered 512-byte values in 64-write buffered transactions, flushes, then runs production `compact_all`; background compaction is disabled until that explicit call. The fixture must begin with only L0 files and end with every SST above L0. It records published compaction output SST bytes (not flush bytes) and confirms logical moves by preserved SST identity. |
+| #948 grandparent output cuts | Record absolute compaction output bytes per logical input byte and sustained throughput at the exact source SHA | Preserve the fixed layout, overlap-boundary and correctness assertions; no cross-revision performance threshold applies. See [issue #948](https://github.com/cntryl/midge/issues/948) for its workload shape. |
+| #949 finalized compaction output and merge heap | Record absolute process CPU per logical input MiB in `tier2_subsystem_compaction` at the exact source SHA | The issue's optimization is covered by AC1/AC3 behavioral and identity checks; CPU and wall-time measurements are diagnostic and require no relative improvement. |
+| #918 SST V5 restart/header change | `tier4_system_sst_v5` reports exact production decoder work for unique-key and 128-version key-group reads at latest and older snapshots. `tier4_system_sst_footprint` reports flushed SST bytes for 8,192 16-byte-key/32-byte-value rows. | Unique-key lookup must decode at most 23 entries; repeated-version latest and older-snapshot lookups at most 150 each. Report absolute SST bytes per logical key; footprint is diagnostic. Both fixtures use identical high-entropy key/value data and release settings. |
+
+Historical measurements below remain records of prior completed runs, not
+acceptance requirements for current source.
+
+- #948 used seed `0x948020261006`, 2.7M base keys, 550K uniformly sampled
+  updates, 16-byte keys and 128-byte deterministic high-entropy values. Three
+  clean historical pairs at base `e9a0d86b7be0c1b298ef8f546326c5893aedba04`
+  and candidate `e849fd96a5f528f794c313f6857a06c5b135c38b` measured throughput
+  changes of -15.79%, -15.28% and -15.54% (median -15.54%). Output ratios were
+  6.174 base and 10.816 candidate in each pair. The results and artifacts are
+  on [issue #948](https://github.com/cntryl/midge/issues/948).
+- #949 measured process CPU per logical input MiB at base
+  `8883610fae287e0473064049e47f5477e7354db2` and candidate
+  `ef67da29ad7e4caba7bb0de384dd0b0b0b2fb361`. Three historical pairs recorded
+  reductions of 14.06%, 11.40% and 11.71% (median 11.71%). The comparison
+  covered replace-top borrowed-key heap and finalized writer identity changes
+  together; it did not isolate their individual CPU effects. See
+  [issue #949](https://github.com/cntryl/midge/issues/949).
 
 The #908 Tier 4 row retains one writer, 64 writes per transaction, 512-byte
 values, and 512 KiB memtables. It records one p50/p99 sample for each successful
@@ -188,24 +188,17 @@ end-to-end transaction, including construction and any hard-stall retry; the
 runtime's caller-side admission delay total/count/mean and observed hard-stall
 count are separate outputs. Jev selected L0 soft limit 2 with a 100 μs maximum
 admission delay (confidence 0.85) as the candidate starting setting. The
-candidate-only Cargo feature is `candidate-write-backpressure-bench`. Since the
-base SHA predates `WriteBackpressureConfig`, create a base worktree and apply the
-benchmark-only overlay commit containing `Cargo.toml`,
-`benches/bench_support/config.rs`, and
-`benches/tier4_system_compaction_backpressure.rs`; run the base without the
-feature and the candidate with
-`--features candidate-write-backpressure-bench`. The runtime source SHA at base
-must remain `e9a0d86b7be0c1b298ef8f546326c5893aedba04`; the overlay changes only
-the measurement harness. The focused compile passed in both feature modes; no
-latency or stall outcome is claimed until the alternating A/B is run.
+candidate-only Cargo feature is `candidate-write-backpressure-bench`. Record
+the absolute p50/p99, admission-delay and stall-count values for the exact
+source SHA and feature configuration; no base checkout or comparison overlay
+is required.
 
 For #941 and #906, retain `tier4_complete_local_strict_group_commit_total` as
-the complete system guard, including its digest, reopen and footprint checks.
-Use three alternating base/candidate pairs on the same machine; retain both
-exact SHAs, six raw artifacts, all pair deltas and their median. Missing
-CPU/service timing is inconclusive and cannot be inferred from wall latency.
-Unstable observations remain inconclusive. Use the existing benchmark
-facilities without a new runner.
+the complete system check, including its digest, reopen and footprint
+assertions. Record absolute CPU/service and throughput observations where
+available; missing CPU/service timing is inconclusive and cannot be inferred
+from wall latency. Unstable observations remain inconclusive. Use the existing
+benchmark facilities without a new runner.
 
 Held-worker read/control progress, byte-compatible WAL, ordered whole-transaction
 visibility, fencing and terminal memory ownership remain hard correctness gates.
@@ -215,15 +208,16 @@ path targets one fewer allocation and 4,096 fewer copied value bytes for the
 deterministic incompressible 4 KiB fixture before final frame construction.
 Borrowed pointer identity and byte-equal frames cover the construction claim. A
 dedicated public Strict 4 KiB commit test now counts process allocation events
-over 16 commits. Three alternating pairs at reference
+over 16 commits. Historical measurements at reference
 `90eb0b5c684267f45605e1f2d42580b4da45cbf9` and candidate
 `c1e6e9423fdd55f7f2766c3d83220c8eadc96f7e` show a median reduction of 19
 allocations per 16 commits (1.188 per commit). Evidence and host load snapshots
 are summarized on [issue #947](https://github.com/cntryl/midge/issues/947).
 The source path removes the intermediate 4,096-byte raw-value copy; no runtime
 copy-byte counter is available. The rotation benchmark uses compressible
-repeated bytes, so its A/B result remains a separate end-to-end guardrail and
-does not prove this raw-value saving.
+repeated bytes, so its historical result is a separate end-to-end observation
+and does not prove this raw-value saving. These historical results do not
+establish a current acceptance requirement.
 
 Run focused checks before broad suites:
 

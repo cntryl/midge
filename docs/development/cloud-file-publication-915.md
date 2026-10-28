@@ -1,7 +1,7 @@
 # Conditional streaming file publication candidate (#915)
 
 This is the implementation-first candidate on the local 0.5.0 branch. The
-provider qualification, crash campaigns and A/B measurements are still due.
+provider qualification and crash campaigns are still due.
 The source is an owned file handle with the finalized length and CRC32C; the
 uploader checks the exact stream against that identity before the request
 that can commit it. Changing a completed source before upload must fail.

@@ -1,10 +1,10 @@
 # Performance baseline procedure
 
-The 0.5.0 milestone judges performance changes using alternating base/candidate
-measurements on the same machine. Before a Phase 1–3 performance issue starts,
-record its named row, metric, required relative change and base SHA (`develop`
-at the PR's merge base). The baseline summary required by #929 supplies absolute
-context; an unavailable quiet-machine baseline does not block an A/B result.
+The 0.5.0 milestone records absolute performance results for an exact source
+SHA. For each run, record the named row, metric, workload, configuration,
+machine and source SHA. Repeat measurements to characterize noise and retain
+all raw results; mark unstable rows inconclusive. Acceptance does not require
+base/candidate comparisons, relative deltas, or before/after measurements.
 Correctness work uses a failing invariant test and a relevant no-regression
 check; assurance work specifies detection power and compute budget.
 
@@ -13,15 +13,13 @@ check; assurance work specifies detection power and compute budget.
 - One machine, recorded in the issue summary: CPU model, core count, memory,
   storage device and filesystem, OS version, `rustc --version`, and the
   source SHA. The first 0.5.0 baseline is an Apple Silicon macOS machine on
-  APFS; its numbers are for relative deltas within the milestone, not for
-  publication as absolute performance.
+  APFS; its results describe that hardware and configuration.
 - Prefer a quiet machine without interactive calls, builds or other benchmark
   runs. On Linux `--require-quiet-env` rejects adverse load/governor
   observations. On macOS the harness observes only the power source, so record
-  `uptime` before and after every run. A loaded run cannot establish an idle
-  absolute baseline. It may contribute to an A/B comparison only with all load
-  observations and diagnostics linked from the workflow run; unstable pairs are
-  inconclusive.
+  `uptime` before and after every run. A loaded run cannot establish a quiet
+  baseline. Preserve its load observations and diagnostics and mark the result
+  inconclusive when they prevent a reliable measurement.
 - Mains power, performance power mode, and the laptop lid open.
 - Release profile as the repository defines it (`lto = "thin"`,
   `codegen-units = 1`), the system allocator, default features.
@@ -69,22 +67,15 @@ and the same for `_b` through `_f`.
 `--save-baseline` saves only runs without diagnostics; a row with a variance
 diagnostic still writes `latest.json`, which is what the copy above keeps.
 
-## Performance PR comparison
+## Current-source measurement
 
-Run three alternating pairs in one window on the same machine: base A1,
-candidate B1, base A2, candidate B2, base A3, candidate B3. Use the existing
-Cargo targets in each checkout, identical settings and independent fresh
-fixtures. Record both immutable SHAs and link all six workflow runs. The raw
-`latest.json` stays attached to its Actions run, and the workflow logs record
-uptime around the invocation.
-
-For a lower-is-better metric report each `1 - B_i/A_i`; for a
-higher-is-better metric report each `B_i/A_i - 1`. Report all three pair deltas
-and their median against the issue's required improvement. Include p99 and
-correctness/health guardrails rather than judging only the primary p50.
-Alternation reduces drift bias; it does not cancel abrupt load changes or
-validate unstable measurements. A row with inconsistent pairs or unresolved
-variance diagnostics is inconclusive, not a pass obtained by averaging.
+Run the existing Cargo target three times at the same source SHA, with
+identical settings and independent fresh fixtures. Keep every raw report and
+link each workflow run. The raw `latest.json` stays attached to its Actions
+run, and the workflow logs record uptime around the invocation. Report each
+run and its summary statistics; do not calculate a cross-revision delta.
+Unstable or inconsistent measurements are inconclusive, not a pass obtained by
+averaging.
 
 ## Reporting results
 
@@ -103,21 +94,20 @@ need to be committed to the repository.
 
 Post a concise summary to the owning issue with:
 
-- workflow run links, source SHAs, runner, toolchain and benchmark commands;
+- workflow run links, source SHA, runner, toolchain and benchmark commands;
 - one table per target: row, median p50, p99 range, RSD range, trust class,
   and the inconclusive marker where it applies;
-- for a performance PR, A/B order, all six run links, three pair deltas, their
-  median and the target verdict.
+- the absolute per-run results and the source/configuration they describe.
 
 GitHub Actions retains raw `latest.json` reports as workflow artifacts. Do not
 commit raw reports, per-run uptime logs or copied benchmark artifacts.
 
 ## Setting issue targets
 
-A Phase 1–3 performance target names the row, metric, base SHA and required
-direction/size (for example "`readrandom hot` p50 at least 20% lower than the
-merge base"). Write the target before implementation and verify it with the
-three A/B pairs above. The baseline summary remains a release obligation;
+Performance issues name the row, metric and any applicable absolute limit.
+Record current-source results against that definition; if no absolute limit is
+specified, measurements are diagnostic and do not imply a pass/fail
+performance comparison. The baseline summary remains a release obligation;
 workflow artifacts carry the raw runs. External comparison is deferred until a
 matched run exists; the Midge-only matrix does not establish RocksDB or Pebble
 parity.

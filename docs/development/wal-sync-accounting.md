@@ -60,5 +60,5 @@ Behavioral execution remains pending in the implementation-first batch.
 
 Amortized ledger floors remain unapproved. Before considering that proposal,
 complete any broader physical-call accounting needed by its claimed scope,
-run the named A/B and recovery campaigns, and obtain explicit approval of the
-lost-write detection tradeoff. These observations do not grant that approval.
+run the recovery campaigns, and obtain explicit approval of the lost-write
+detection tradeoff. These observations do not grant that approval.

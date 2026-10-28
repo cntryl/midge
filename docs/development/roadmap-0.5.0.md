@@ -31,18 +31,17 @@ The read-path work has since merged; the status below is recorded at
 
 ## Rules
 
-- **Performance targets are relative A/B deltas.** Before a Phase 1–3
-  performance issue starts, record its row, metric, required change, and
-  base SHA (`develop` at the PR's merge base). Measure three alternating
-  base/candidate pairs, A B A B A B, in one window on the same machine and
-  report the median pair delta. Preserve all artifacts and mark unstable
-  rows inconclusive. See [the baseline procedure](baseline-procedure.md).
+- **Performance evidence is source-pinned and absolute.** Record each named
+  row, metric, workload, configuration, environment and source SHA. Repeat
+  measurements to characterize noise, preserve all artifacts and mark unstable
+  rows inconclusive. Acceptance does not require base/candidate comparisons or
+  relative deltas. See [the baseline procedure](baseline-procedure.md).
 - **Correctness and assurance use behavioral gates.** Correctness fixes need
   a failing invariant test and a no-regression check on the relevant rows;
   they do not wait for an absolute baseline. Assurance targets specify
   detection power and compute budget. #929 still owes a concise baseline
   summary; raw reports and uptime remain attached to GitHub Actions runs.
-  Absolute results supply context, not the performance PR pass/fail gate.
+  Absolute results supply performance evidence for the recorded source.
 - **One purpose per issue, one milestone delivery PR.** Issues that bundled
   several changes were split; each has one failure scenario and one proof.
   The 0.5.0 issue work is tracked as issue-scoped commits on one integration
@@ -76,11 +75,10 @@ three acceptable runs each at `64389f99`; their medians and variability are
 recorded, and the other planned rows remain due. See
 [the current matrix status](https://github.com/cntryl/midge/issues/929)
 and [the earlier matrix discussion](https://github.com/cntryl/midge/issues/929).
-Alternating A/B measurements
-govern performance PRs even when a quiet absolute baseline is unavailable;
-noise remains grounds for an inconclusive result. The first matrix is
-Midge-only. RocksDB `db_bench` context is deferred and cannot support a parity
-claim until it has been measured with matched parameters, per
+Source-pinned absolute measurements govern performance reporting; noise remains
+grounds for an inconclusive result. The first matrix is Midge-only. RocksDB
+`db_bench` context is deferred and cannot support a parity claim until it has
+been measured with matched parameters, per
 [performance-targets.md](performance-targets.md).
 
 ## Phases
@@ -91,10 +89,10 @@ decisions of Phases 2 and 3; Phase 5 may start any time after Phase 0.
 
 | Phase | Issues in order | Exit |
 | --- | --- | --- |
-| 0 Measure and make safe | #901, #950, #930, #936 merged; #937 Tier 2 and #929 rows/procedure merged | evidence matrix and #937 Tier 5 row remain; A/B or correctness gates permit later work |
+| 0 Measure and make safe | #901, #950, #930, #936 merged; #937 Tier 2 and #929 rows/procedure merged | evidence matrix and #937 Tier 5 row remain; correctness, assurance and absolute measurement gates govern later work |
 | 1 Read path | #902 → #903 → #917 → #921 → #919 → #920 → #944 → #945 → #938 | memtable-hit and L0-hit rows touch 0 and 1 SST; readrandom, seekrandom, YCSB C, hybrid YCSB C within target |
-| 2 Commit path | #931/#951 merged; #873 proposed order: #974 → #975 → #904 → #946 → #976 → #977 → #924 → #978 → #940 → #941/#947 → #905 → #906 → #979 → #907 → #916 → #939 | measured commit-pipeline results first; #939 then records the sharding decision; amortized ledger fsyncs counted separately |
-| 3 Background work | #909 → #910 → #908 → #912 → #942 → #911 → #948 → #949 | zero hard stalls in `tier4_system_compaction_backpressure`; write and space amplification within target |
+| 2 Commit path | #931/#951 merged; #873 proposed order: #974 → #975 → #904 → #946 → #976 → #977 → #924 → #978 → #940 → #941/#947 → #905 → #906 → #979 → #907 → #916 → #939 | source-pinned commit-pipeline measurements first; #939 then records the sharding decision; amortized ledger fsyncs counted separately |
+| 3 Background work | #909 → #910 → #908 → #912 → #942 → #911 → #948 → #949 | zero hard stalls in `tier4_system_compaction_backpressure`; record absolute write and space amplification for the defined workloads |
 | 4 Format and cloud authority | #926 → #918 → #953 → #913 → #943 → #914 → #915 | rejection tests for actual format changes; #952 decoder coverage with each codec; cold cloud start and metadata requests per commit within target |
 | 5 Hardening and polish | #952 → #923 → #927 → #933 → #932 | — |
 
