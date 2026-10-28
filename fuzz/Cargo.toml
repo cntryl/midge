@@ -9,6 +9,10 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+# engine_differential path-includes tests/support/differential.rs, which uses bytes.
+[package.metadata.cargo-machete]
+ignored = ["bytes"]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 tempfile = "3.27"
