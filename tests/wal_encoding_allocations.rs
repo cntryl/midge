@@ -6,20 +6,30 @@ use cntryl_midge::__internal::wal::encoding::encode_into;
 use cntryl_midge::__internal::wal::{WalOpKind, WalRecord};
 use cntryl_midge::Bytes;
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 struct CountingAllocator;
 
-static TRACK_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
-static ALLOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    static ALLOCATION_COUNT: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+fn record_allocation() {
+    // Const, non-dropping TLS needs no allocation. Other threads and thread
+    // teardown cannot contribute to the synchronous encoder's observation.
+    let _ = ALLOCATION_COUNT.try_with(|counter| {
+        if let Some(count) = counter.get() {
+            counter.set(Some(count + 1));
+        }
+    });
+}
 
 // SAFETY: every allocator operation delegates to System unchanged; the test
-// counter observes allocation calls only while the encoder is measured.
+// counter observes allocation calls only on the measured encoder thread.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
-            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
-        }
+        record_allocation();
         unsafe { System.alloc(layout) }
     }
 
@@ -28,15 +38,13 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if TRACK_ALLOCATIONS.load(Ordering::Relaxed) {
-            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
-        }
+        record_allocation();
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if TRACK_ALLOCATIONS.load(Ordering::Relaxed) && new_size > layout.size() {
-            ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+        if new_size > layout.size() {
+            record_allocation();
         }
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -49,11 +57,9 @@ const VALUE_LEN: usize = 4096;
 const SAMPLES: usize = 16;
 
 fn measured_allocations(run: impl FnOnce()) -> u64 {
-    ALLOCATION_COUNT.store(0, Ordering::Relaxed);
-    TRACK_ALLOCATIONS.store(true, Ordering::SeqCst);
+    ALLOCATION_COUNT.with(|counter| counter.set(Some(0)));
     run();
-    TRACK_ALLOCATIONS.store(false, Ordering::SeqCst);
-    ALLOCATION_COUNT.load(Ordering::Relaxed)
+    ALLOCATION_COUNT.with(|counter| counter.replace(None).expect("active encoder measurement"))
 }
 
 #[test]
@@ -73,17 +79,44 @@ fn should_avoid_owned_intermediate_allocation_for_incompressible_raw_wal_values(
     );
     let mut borrowed_payload = Vec::with_capacity(VALUE_LEN + 128);
     let mut owned_payload = Vec::with_capacity(VALUE_LEN + 128);
+    let allocate_elsewhere = std::sync::Arc::new(AtomicBool::new(false));
+    let allocation_finished = std::sync::Arc::new(AtomicBool::new(false));
+    let unrelated_thread = {
+        let allocate = allocate_elsewhere.clone();
+        let finished = allocation_finished.clone();
+        std::thread::spawn(move || {
+            while !allocate.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            std::hint::black_box(vec![7_u8; VALUE_LEN]);
+            finished.store(true, Ordering::Release);
+        })
+    };
 
     // Act: count allocations only around the production encoder with reusable
     // output capacity. The owned reference reproduces the former intermediate
     // `Bytes::copy_from_slice` before the same production encoder call.
     let borrowed_allocations = measured_allocations(|| {
+        // Test-harness threads may allocate concurrently with this encoder.
+        // Force that interleaving while preserving the exact encoder contract.
+        allocate_elsewhere.store(true, Ordering::Release);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !allocation_finished.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "foreign allocation stalled"
+            );
+            std::thread::yield_now();
+        }
         for _ in 0..SAMPLES {
             borrowed_payload.clear();
             encode_into(&record, &mut borrowed_payload).expect("encode borrowed raw value");
             std::hint::black_box(&borrowed_payload);
         }
     });
+    unrelated_thread
+        .join()
+        .expect("unrelated allocator completed");
     let mut owned_record = record.clone();
     let owned_allocations = measured_allocations(|| {
         for _ in 0..SAMPLES {
