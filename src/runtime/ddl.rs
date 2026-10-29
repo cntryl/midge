@@ -615,13 +615,8 @@ fn apply_local_edit_for(
                 })?,
         )
     };
-    let visibility_result: MidgeResult<()> = (|| {
-        crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
-            MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
-        ));
-        Ok(())
-    })();
-    if let Err(error) = visibility_result {
+    #[cfg(feature = "failpoints")]
+    if let Err(error) = fail_after_local_journal_before_memory() {
         return if journaled_id.is_some() {
             Err(MidgeError::OutcomeUnknown(format!(
                 "column-family journal committed before visibility failed; restart and reconcile: {error}"
@@ -635,6 +630,14 @@ fn apply_local_edit_for(
         state.manifest.note_applied_journal_edit(edit_id);
     }
     apply_family_visibility(state, edit);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn fail_after_local_journal_before_memory() -> MidgeResult<()> {
+    crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
+        MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
+    ));
     Ok(())
 }
 

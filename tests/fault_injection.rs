@@ -215,6 +215,70 @@ mod failure_injection {
         // Assert: the helper checks fencing and recovered authority.
     }
 
+    fn assert_ddl_outcome_unknown_when_runtime_panics_after_journal(drop_family: bool) {
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut engine = open_local_engine(temp_dir.path());
+        let family = drop_family.then(|| {
+            engine
+                .create_column_family("panic-boundary")
+                .expect("create family before drop")
+        });
+        let scenario = fail::FailScenario::setup();
+        let point = "midge::ddl::after_local_journal_before_memory";
+        fail::cfg(point, "1*panic->off").expect("panic after the DDL journal commit");
+
+        let result = if let Some(family) = family {
+            engine.drop_column_family(family.id())
+        } else {
+            engine.create_column_family("panic-boundary").map(|_| ())
+        };
+        fail::remove(point);
+        let _shutdown_result = engine.shutdown(std::time::Duration::from_secs(5));
+        drop(engine);
+        scenario.teardown();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let reopened = loop {
+            let options = OpenOptions::local(temp_dir.path())
+                .background_compaction(false)
+                .build()
+                .expect("local options");
+            match Engine::open(options) {
+                Ok(reopened) => break reopened,
+                Err(MidgeError::LeaseHeld(_)) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("reopen after runtime exit: {error:?}"),
+            }
+        };
+
+        assert_eq!(
+            reopened.get_column_family("panic-boundary").is_none(),
+            drop_family,
+            "recovery must apply the committed DDL"
+        );
+        assert!(
+            matches!(result, Err(MidgeError::OutcomeUnknown(_))),
+            "an admitted DDL operation that lost its response must be uncertain: {result:?}"
+        );
+    }
+
+    #[test]
+    fn should_report_unknown_when_runtime_panics_after_drop_journal_commit() {
+        // Arrange and act
+        assert_ddl_outcome_unknown_when_runtime_panics_after_journal(true);
+        // Assert: the helper checks the response and recovered authority.
+    }
+
+    #[test]
+    fn should_report_unknown_when_runtime_panics_after_create_journal_commit() {
+        // Arrange and act
+        assert_ddl_outcome_unknown_when_runtime_panics_after_journal(false);
+        // Assert: the helper checks the response and recovered authority.
+    }
+
     #[test]
     fn should_fence_until_reopen_when_create_journal_sync_fails() {
         // Arrange

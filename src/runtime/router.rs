@@ -299,10 +299,18 @@ impl ResponseRouter {
             }
             for request_id in pending {
                 if let Some((_, pending)) = self.pending.remove(&request_id) {
-                    let _ = pending.response_tx.send(RuntimeResponse::Error {
-                        request_id,
-                        error: MidgeError::Internal(message.to_string()),
-                    });
+                    let error = match pending.request_kind {
+                        "ManifestCreateColumnFamily" | "ManifestDropColumnFamily" => {
+                            MidgeError::OutcomeUnknown(format!(
+                                "{} may have committed before its response was lost: {message}",
+                                pending.request_kind
+                            ))
+                        }
+                        _ => MidgeError::Internal(message.to_string()),
+                    };
+                    let _ = pending
+                        .response_tx
+                        .send(RuntimeResponse::Error { request_id, error });
                 }
             }
         }

@@ -724,9 +724,10 @@ impl Engine {
     /// restrictions. Returns
     /// [`MidgeError::ResourceLimit`] when the column-family ID space is
     /// exhausted. [`MidgeError::OutcomeUnknown`] means the submitted create
-    /// may have committed after the caller stopped waiting or a local journal
-    /// write failed. Reconcile the family catalog before retrying; an
-    /// uncertain local journal write requires reopening the engine.
+    /// may have committed after the caller stopped waiting, the runtime
+    /// exited, or a local journal write failed. Reconcile the family catalog
+    /// before retrying; an uncertain local journal write or runtime exit
+    /// requires reopening the engine.
     pub fn create_column_family(&self, name: &str) -> MidgeResult<ColumnFamilyHandle> {
         let response =
             self.runtime_handle
@@ -769,10 +770,11 @@ impl Engine {
     /// shutdown -- conditions that clear on their own and say nothing about
     /// unflushed data. Retry the safe drop; never escalate to the destructive
     /// variant on anything but the licence above. [`MidgeError::OutcomeUnknown`]
-    /// means an admitted drop may have committed after its response deadline
-    /// or a local journal write failed. Reconcile the family catalog before
-    /// retrying; an uncertain local journal write requires reopening. A cloud
-    /// DDL authority failure can also require reconciliation before retrying.
+    /// means an admitted drop may have committed after its response deadline,
+    /// a runtime exit, or a local journal write failure. Reconcile the family
+    /// catalog before retrying; an uncertain local journal write or runtime
+    /// exit requires reopening. A cloud DDL authority failure can also require
+    /// reconciliation before retrying.
     pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
         self.drop_column_family_inner(cf_id, false)
     }
