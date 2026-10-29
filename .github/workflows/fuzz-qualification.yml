@@ -109,7 +109,7 @@ jobs:
           retention-days: 30
 
   extended-campaign:
-    name: Extended engine differential (${{ inputs.extended_minutes }} minutes)
+    name: Extended engine differential
     if: inputs.extended_minutes != '' && inputs.extended_minutes != '0'
     needs: bounded-smoke
     runs-on: ubuntu-latest
