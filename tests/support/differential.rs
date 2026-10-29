@@ -9,7 +9,9 @@
 use bytes::Bytes;
 use cntryl_midge::__internal::io::Fs;
 use cntryl_midge::__internal::simulation::{CrashDevice, SimulatedClock};
-use cntryl_midge::{Clock, Engine, OpenOptions, Query, Transaction, TransactionMode, WriteOptions};
+use cntryl_midge::{
+    Clock, Engine, MidgeError, OpenOptions, Query, Transaction, TransactionMode, WriteOptions,
+};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -550,8 +552,15 @@ impl Harness {
         } else {
             WriteOptions::buffered()
         };
-        tx.commit(options).expect("commit");
-        self.model.commit(clock, ops.to_vec(), sync);
+        match tx.commit(options) {
+            Ok(()) => self.model.commit(clock, ops.to_vec(), sync),
+            Err(MidgeError::WriteStall(_)) => {
+                // Local write stalls reject admission before the transaction is applied.
+                // Compare immediately so the model also detects an accidental partial write.
+                self.check_everything("after rejected write stall");
+            }
+            Err(error) => panic!("commit: {error}"),
+        }
     }
 
     /// Everything the engine holds equals the model after every commit.

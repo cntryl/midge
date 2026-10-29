@@ -8,8 +8,9 @@ The FORMAT 8 baseline is the normative profile in
 [`cntryl/lsm-spec`](https://github.com/cntryl/lsm-spec) at commit
 `111bccdd5fa6c9ea2d13d1131b17807016c770c` (`1.0.0-dev`). Keep this reference
 aligned with the commit recorded in Pants's Midge test-parity inventory.
-The local 0.5.0 candidate extends that baseline with FORMAT 9 below; shared
-specification parity and release qualification for that extension are pending.
+Release 0.5.0 extends that baseline with FORMAT 9 below. Shared specification
+parity for that extension is not claimed. Release qualification follows the
+[release checklist](../operations/release-checklist.md).
 
 ## Covered Formats
 
@@ -24,8 +25,8 @@ The compatibility policy applies to:
 
 ## Current Local Format
 
-Database `FORMAT` version 9 is the current local candidate. Version 5 named the WAL's history
-with a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records
+Database `FORMAT` version 9 is the 0.5.0 local format. Version 5 named the WAL's
+history with a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records
 which `wal/{id:020}.wal` files are history, their order, the next segment id and
 the retirement point. Segments carry their final name from creation; there is
 no active `wal.log` and no rename on rotation, and recovery never lists `wal/`
@@ -201,19 +202,26 @@ catalog copies are invalid, startup fails closed. Metadata bootstrap refuses
 any catalog that is not pristine: a catalog whose entries have all retired
 still holds history.
 
-Provider-backed cloud metadata now uses lease document version 3. Its committed
-descriptor names the complete set of mirrored local control files under
-`metadata/generations/`, with exact lengths and CRC32C checksums. The lease CAS
-publishes the descriptor; mutable `metadata/` copies and unreferenced uploads
-do not grant manifest recovery authority. The cloud DDL registry remains a
+Provider-backed cloud metadata uses layout v2, lease document version 4 and
+initialization sentinel version 3. A separately checksummed committed pointer
+at `metadata/committed-pointer.v1` selects the exact closure of immutable
+snapshots and edits under `manifest/`. Heartbeat renewal changes the lease
+identity without changing the pointer identity. Acquiring a successor lease
+must CAS-claim the pointer with its epoch, holder and owner token while
+preserving committed predecessor history. An uploaded ordinal, LIST order,
+legacy `metadata/generations/` objects and mutable metadata copies grant no
+recovery authority. See [the publication protocol](cloud-metadata-914.md).
+The cloud DDL registry remains a
 separate conditional authority. Its version 2 wire format records the active
 lease epoch and omits the legacy required `epoch` field, so older writers cannot
 parse or rewrite it. A successor conditionally fences the registry before
 recovery; a predecessor write that wins first is incorporated before serving.
 The `metadata/authority-initialized.v1` marker starts pending and becomes active
-only after the first lease is stored. Loss of a lease with an active marker is a
-fail-closed condition. A version 3 lease document intentionally cannot be parsed
-by older binaries, which prevents an old writer from renewing the new lease.
+only after the lease and initial pointer claim complete. Loss of a lease or
+committed pointer with an active marker is a fail-closed condition. A version
+4 lease document intentionally cannot be parsed by older binaries, which
+prevents an old writer from renewing the new lease. Legacy lease/sentinel
+versions do not use the pending-initialization repair path.
 
 Legacy provider-backed cloud databases require offline logical export and
 import into a new empty prefix as described in the

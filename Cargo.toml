@@ -1,6 +1,6 @@
 [package]
 name = "cntryl-midge"
-version = "0.4.1"
+version = "0.5.0"
 edition = "2021"
 resolver = "2"
 rust-version = "1.97"
@@ -9,6 +9,7 @@ description = "A high-performance embedded key-value database with LSM-tree stor
 license = "Apache-2.0"
 repository = "https://github.com/cntryl/midge"
 readme = "README.md"
+exclude = ["possible-sst-design.md"]
 keywords = ["database", "kv", "lsm", "embedded", "storage"]
 categories = ["database-implementations"]
 

@@ -1,4 +1,6 @@
-use super::super::tests::{create_test_cloud_event_loop, create_test_event_loop};
+use super::super::tests::{
+    create_test_cloud_event_loop, create_test_event_loop, receive_owned_compaction_completion,
+};
 use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::super::EventLoop;
 use crate::runtime::durability::{DurabilityWaiter, TestDurabilityWaiter};
@@ -135,9 +137,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
     el.schedule_next_flush_worker();
     let active = el.state.active_compactions.load(Ordering::Acquire);
     assert_eq!(active, 1, "ready compaction must receive its turn");
-    let completion = worker_rx
-        .recv_deadline(completion_deadline)
-        .expect("compaction completion");
+    let completion = receive_owned_compaction_completion(&el, &worker_rx, completion_deadline);
     let (_request_tx, request_rx) = crossbeam::channel::unbounded();
     el.handle_runtime_msg(completion, &request_rx);
     drain_prune_completion_for_test(&mut el);
@@ -7532,8 +7532,9 @@ fn should_bound_strict_seal_lease_validation_given_request_deadline_is_exhausted
 #[test]
 fn should_admit_async_cloud_flush_with_nonzero_remaining_caller_budget(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange: the first provider lease read leaves less than the configured
-    // I/O timeout, but enough caller budget for a bounded asynchronous flush.
+    // Arrange: queued time leaves less than the configured I/O timeout, but
+    // enough caller budget for a bounded asynchronous flush. Capture the
+    // existing registration timestamp instead of sleeping through that budget.
     let tmp = tempfile::tempdir().expect("create bounded strict-seal directory");
     let state = RuntimeState::new(tmp.path().to_path_buf(), false);
     let cloud = Arc::new(
@@ -7545,11 +7546,7 @@ fn should_admit_async_cloud_flush_with_nonzero_remaining_caller_budget(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     cloud_persistence(&storage).fence_cloud_wal_catalog(1)?;
-    let leader_store: Arc<dyn crate::lease::LeaderStore> = Arc::new(DelayedLeaderStore::new(
-        Duration::from_millis(80),
-        "writer-1",
-        1,
-    ));
+    let leader_store = Arc::new(CountingLeaderStore::new("writer-1", 1));
     let router = Arc::new(ResponseRouter::new());
     let config = crate::runtime::RuntimeConfig {
         wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
@@ -7557,8 +7554,6 @@ fn should_admit_async_cloud_flush_with_nonzero_remaining_caller_budget(
         runtime_response_timeout: Duration::from_millis(200),
         hybrid_storage: Some(storage),
         writer_epoch: 1,
-        leader_store: Some(leader_store),
-        leader_holder_id: Some("writer-1".to_string()),
         ..crate::runtime::RuntimeConfig::default()
     };
     let mut el = EventLoop::new(
@@ -7569,9 +7564,21 @@ fn should_admit_async_cloud_flush_with_nonzero_remaining_caller_budget(
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
     let sequence = append_cloud_async_put(&mut el)?;
+    // Observe only the target seal's validation, after the real setup append.
+    let authority: Arc<dyn crate::lease::LeaderStore> = leader_store.clone();
+    el.actors
+        .wal_actor
+        .set_leader_store(Arc::clone(&authority), "writer-1".to_string());
+    el.authority.fencing.leader_store = Some(authority);
+    el.authority.fencing.leader_holder_id = Some("writer-1".to_string());
     let active_segment = el.state.wal.open_segment();
     let request_id = 91_102;
-    let response_rx = router.register(request_id, "SealWalForCloud");
+    let registered_at = Instant::now()
+        .checked_sub(Duration::from_millis(80))
+        .expect("fixture supports original queued time");
+    let response_rx = router.register_at_for_test(request_id, "SealWalForCloud", registered_at);
+    let remaining = el.registered_request_deadline(request_id).remaining();
+    assert!(remaining > Duration::ZERO && remaining < Duration::from_millis(150));
     let msg_rx = crossbeam::channel::unbounded::<RuntimeMsg>().1;
     let last_synced_seq = el.state.wal.frontiers.last_synced();
     let local_durable_seq = el.state.wal.frontiers.local_durable();
@@ -7592,12 +7599,11 @@ fn should_admit_async_cloud_flush_with_nonzero_remaining_caller_budget(
     // Assert: the per-I/O timeout is capped to the remaining nonzero caller
     // budget. The accepted worker-owned sync remains pending until progress
     // consumes its completion.
+    assert!(leader_store.reads() > 0, "real seal authority validation");
+    let response = response_rx.try_recv();
     assert!(
-        matches!(
-            response_rx.try_recv(),
-            Err(crossbeam::channel::TryRecvError::Empty)
-        ),
-        "the caller remains pending after async seal admission"
+        matches!(&response, Err(crossbeam::channel::TryRecvError::Empty)),
+        "the caller remains pending after async seal admission: {response:?}"
     );
     assert!(
         el.pipeline.pending_cloud_seal.is_some(),

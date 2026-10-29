@@ -394,6 +394,20 @@ pub fn record_runtime_correctness(ctx: &mut StressContext, report: &RuntimePerfR
         .failures(report.cloud_async_wal_uploads_failed);
 }
 
+/// Record one workload result count on the latest sample.
+///
+/// Duration-based samples naturally complete different numbers of operations,
+/// so result counts belong with sample observations rather than stable run
+/// parameters.
+pub(crate) fn record_sample_count(ctx: &mut StressContext, name: &'static str, value: u64) {
+    ctx.record_observation(
+        name,
+        observation_f64(value),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+}
+
 struct ClientRunStats {
     operations: u64,
     latency_us: Histogram<u64>,

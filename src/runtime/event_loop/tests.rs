@@ -8,6 +8,33 @@ use std::time::Instant;
 
 static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+pub(super) fn receive_owned_compaction_completion(
+    el: &EventLoop,
+    worker: &crossbeam::channel::Receiver<RuntimeMsg>,
+    deadline: Instant,
+) -> RuntimeMsg {
+    let completion = worker
+        .recv_deadline(deadline)
+        .expect("compaction completion notification");
+    assert!(matches!(&completion, RuntimeMsg::CompactionComplete { .. }));
+    assert_eq!(
+        el.state.active_compactions.load(Ordering::Acquire),
+        1,
+        "the ready ticket must belong to the fixture's only compute job"
+    );
+    // The wakeup precedes the pool's owned result ticket. Await that owner
+    // without advancing fairness or publication before dispatching once.
+    while !el.actors.compaction_actor.has_ready_compute() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "owned compaction ticket did not settle"
+        );
+        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+    }
+    completion
+}
+
 #[test]
 fn should_dispatch_compact_all_before_background_cloud_progress() {
     // Arrange

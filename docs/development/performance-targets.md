@@ -6,7 +6,8 @@ Pebble, or any other engine.
 
 Use these targets to decide when a benchmark result needs investigation. A
 single miss does not prove a defect by itself; repeat the benchmark on the same
-machine and with the same configuration. Midge 0.5.0 performance evidence is
+machine and with the same configuration. Performance evidence deferred from
+0.5.0 is part of 0.5.1 and does not block 0.5.0 publication. Evidence is
 absolute and tied to one source SHA; comparing revisions is not an acceptance
 requirement.
 
@@ -92,12 +93,12 @@ Hybrid:
 - `tier4_system_local_throughput_regression` owns the local buffered throughput
   guard against memory mode and end-to-end local batch throughput.
 - `tier2_subsystem_baseline_matrix` owns the `db_bench`-shaped rows every
-  0.5.0 performance change is judged against: fillseq, fillrandom (buffered and
+  performance change is characterized against: fillseq, fillrandom (buffered and
   sync), readrandom hot and cold, and seekrandom, with 16-byte keys and
   100-byte values on production defaults. Baselines are taken with
   [the baseline procedure](baseline-procedure.md). The current three-run
   values for these six rows are in the
-  [0.5.0 baseline matrix status](https://github.com/cntryl/midge/issues/929).
+  [baseline matrix deferred to 0.5.1](https://github.com/cntryl/midge/issues/929).
 - `tier2_subsystem_transaction_latency` owns public transaction lifecycle
   latency, commit percentile reporting, and buffered coalescing.
 - `tier2_subsystem_durability_commit_latency` owns 1-, 16-, and 64-writer local

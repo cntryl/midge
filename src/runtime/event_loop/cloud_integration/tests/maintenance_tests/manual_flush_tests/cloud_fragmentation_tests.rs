@@ -298,9 +298,8 @@ fn should_recover_raw_source_history_when_cloud_fragment_publication_commits() -
         // Act: hold actual conditional publication after remote compute has uploaded both fragments.
         el.launch_compaction(plan)?;
         el.state.set_compaction_enabled(false);
-        let completion = worker
-            .recv_timeout(TEST_WAIT)
-            .expect("real remote fragment compute");
+        let completion =
+            receive_owned_compaction_completion(&el, &worker, Instant::now() + TEST_WAIT);
         let RuntimeMsg::CompactionComplete {
             succeeded: true,
             ref output_ssts,
@@ -393,7 +392,8 @@ fn should_publish_complete_cloud_merge_when_conforming_overlap_exceeds_soft_work
         // before publication may replace the complete input set.
         el.launch_compaction(plan)?;
         el.state.set_compaction_enabled(false);
-        let completion = worker.recv_timeout(TEST_WAIT).expect("real remote merge");
+        let completion =
+            receive_owned_compaction_completion(&el, &worker, Instant::now() + TEST_WAIT);
         let RuntimeMsg::CompactionComplete {
             succeeded: true,
             ref output_ssts,

@@ -81,22 +81,38 @@ fn receive_generation(fixture: &mut BudgetFixture) -> MidgeResult<GenerationRece
     loop {
         match fixture.compute.try_recv() {
             Ok(message @ RuntimeMsg::CompactionComplete { .. }) => {
+                // Notification precedes the pool's owned result ticket. This
+                // fixture has one compute slot; await its real ticket without
+                // letting fairness dispatch the generation we intend to hold.
+                while !fixture.el.actors.compaction_actor.has_ready_compute() {
+                    if Instant::now() >= until {
+                        return Err(MidgeError::Internal(
+                            "actual compute ticket did not settle".into(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 return GenerationReceipt::from_actual(fixture, message);
             }
             Ok(message) => {
-                fixture.el.process_one(message, &messages);
+                fixture.el.handle_runtime_msg(message, &messages);
             }
             Err(crossbeam::channel::TryRecvError::Disconnected) => {
                 return Err(MidgeError::Internal("actual compute channel closed".into()));
             }
             Err(crossbeam::channel::TryRecvError::Empty) => {}
         }
-        if let Some(message) = fixture.el.routing.pending_msg.take() {
-            fixture.el.process_restored_one(message, &messages);
+        if !fixture.el.actors.compaction_actor.has_pending_compute() {
+            if let Some(message) = fixture.el.routing.pending_msg.take() {
+                fixture.el.handle_runtime_msg(message, &messages);
+            }
+            // Drive admission between generations, but park the next accepted
+            // worker once launched. Fairness reaps ready compute tickets, so
+            // running it while awaiting a notification defeats delayed dispatch.
+            if !fixture.el.actors.compaction_actor.has_pending_compute() {
+                fixture.el.run_request_fairness_slot();
+            }
         }
-        // Preserve genuine retirement/flush fairness and accepted handle reaping
-        // between CFs. Never fabricate a completion or clear an owner flag.
-        fixture.el.run_request_fairness_slot();
         if Instant::now() >= until {
             return Err(MidgeError::Internal(format!(
                 "no actual next compute receipt: {}",
@@ -199,6 +215,16 @@ fn drain_retired_inputs(fixture: &mut BudgetFixture, receipts: &[&GenerationRece
     }) && Instant::now() < until
     {
         fixture.el.run_request_fairness_slot();
+        // Publication protection can queue obsolete inputs before it releases
+        // them. Exercise the ordinary retry after that release, not only the
+        // fairness slot's failed-provider-delete and manifest retry schedules.
+        let storage = fixture.el.actors.cloud_coordinator.hybrid_storage.clone();
+        fixture
+            .el
+            .actors
+            .gc_actor
+            .retry_pending(&mut fixture.el.state, storage);
+        fixture.el.actors.gc_actor.shutdown_workers();
         std::thread::sleep(Duration::from_millis(1));
     }
     fixture.el.actors.gc_actor.shutdown_workers();

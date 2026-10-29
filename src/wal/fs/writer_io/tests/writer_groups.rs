@@ -150,6 +150,8 @@ fn assert_native_acknowledgement_budget(request: TimedRequest) -> MidgeResult<()
         ..SyncCountingFs::default()
     });
     let (writer, store) = native_writer(fs.clone(), budget)?;
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    *writer.acknowledgement_budget_observer.lock() = Some(observed_tx);
     let worker_gate = ReleaseGate(Some(release_tx));
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let (unpin, pin) = pin_closed_grant(&store);
@@ -163,25 +165,27 @@ fn assert_native_acknowledgement_budget(request: TimedRequest) -> MidgeResult<()
     let caller = {
         let writer = writer.clone();
         std::thread::spawn(move || {
+            let mut unchanged = None;
             let result = match request {
                 TimedRequest::Append => writer
                     .append_record_accounted(&record(1))
                     .map(|_| ())
-                    .map_err(|failure| failure.error),
+                    .map_err(|failure| {
+                        unchanged = Some(failure.unchanged);
+                        failure.error
+                    }),
                 TimedRequest::Sync => writer.sync_with_timeout(budget),
             };
-            let _ = result_tx.send(result);
+            let _ = result_tx.send((result, unchanged));
         })
     };
-    let started = started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    std::thread::sleep(Duration::from_millis(250));
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     let waiting_for_admission =
         writer.queue.lock().is_empty() && writer.sync_state.lock().requests.is_empty();
     unpin.release();
     pin.join().unwrap();
-    let limit = budget + Duration::from_millis(100);
-    let response = result_rx.recv_timeout(limit.saturating_sub(started.elapsed()));
-    let elapsed = started.elapsed();
+    let observation = observed_rx.recv_timeout(Duration::from_secs(5));
+    let response = result_rx.recv_timeout(Duration::from_secs(5));
     worker_gate.release();
     caller.join().unwrap();
     drop(writer);
@@ -189,13 +193,26 @@ fn assert_native_acknowledgement_budget(request: TimedRequest) -> MidgeResult<()
         waiting_for_admission,
         "request bypassed the closed native grant"
     );
+    let (result, unchanged) = response.expect("operation returns while physical writer is blocked");
     assert!(
-        matches!(response, Ok(Err(crate::common::MidgeError::Timeout(_)))),
-        "{response:?}"
+        matches!(result, Err(crate::common::MidgeError::Timeout(_))),
+        "{result:?}"
     );
-    assert!(
-        elapsed < limit,
-        "native admission restarted the acknowledgement window: {elapsed:?}"
+    if matches!(request, TimedRequest::Append) {
+        assert_eq!(
+            unchanged,
+            Some(false),
+            "submitted append has an unknown outcome"
+        );
+    }
+    let observation = observation.expect("operation reaches acknowledgement waiting");
+    assert!(observation.admission_elapsed > Duration::ZERO);
+    assert!(observation.admission_elapsed < budget);
+    assert_eq!(
+        observation.remaining,
+        budget
+            .checked_sub(observation.admission_elapsed)
+            .expect("admission leaves acknowledgement allowance")
     );
     assert_eq!(
         fs.metadata(&FsPath::new("wal.log")).unwrap().len,
@@ -314,6 +331,8 @@ fn assert_expired_native_submission(request: TimedRequest) -> MidgeResult<()> {
         ..SyncCountingFs::default()
     });
     let (writer, store) = native_writer(fs.clone(), Duration::from_millis(10))?;
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    *writer.acknowledgement_budget_observer.lock() = Some(observed_tx);
     let worker_gate = ReleaseGate(Some(release_tx));
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     writer.set_write_authority(Some(Arc::new(DelayedAdmissionAuthority::new(
@@ -349,6 +368,13 @@ fn assert_expired_native_submission(request: TimedRequest) -> MidgeResult<()> {
     assert_eq!(queued, 0);
     assert_eq!(sync_requests, 0);
     assert!(sticky.is_none());
+    assert!(
+        matches!(
+            observed_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ),
+        "expired submission must never reach acknowledgement waiting"
+    );
     assert_eq!(
         fs.metadata(&FsPath::new("wal.log")).unwrap().len,
         HEADER_LEN as u64

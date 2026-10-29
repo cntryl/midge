@@ -314,7 +314,36 @@ mod cloud_remote_sst {
 
     use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
     use std::path::Path;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    fn wait_for_flushed_wal_retirement(engine: &Engine, root: &Path, initial_charge: u64) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("WAL retirement metrics");
+            let local = metrics.local_storage.expect("bounded cloud storage");
+            assert!(local.total_committed_bytes <= local.max_local_bytes);
+            let active =
+                cntryl_midge::__internal::wal::segment_file_name(metrics.wal_current_segment_id);
+            let sealed_remains = std::fs::read_dir(root.join("wal"))
+                .expect("local WAL directory")
+                .map(|entry| entry.expect("local WAL entry"))
+                .any(|entry| {
+                    entry.path().extension().is_some_and(|ext| ext == "wal")
+                        && entry.file_name().to_str() != Some(active.as_str())
+                });
+            if !sealed_remains && local.usage.wal_bytes <= initial_charge {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "flushed WAL must retire before the next independent row: sealed={sealed_remains}, local={local:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     fn sst_bytes(path: &Path) -> u64 {
         let entries = match std::fs::read_dir(path) {
@@ -422,6 +451,14 @@ mod cloud_remote_sst {
             .expect("options");
         let mut engine = Engine::open(options.clone()).expect("open");
         let cf = engine.create_column_family("data").expect("create CF");
+        let initial_wal_charge = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("initial storage metrics")
+            .local_storage
+            .expect("bounded cloud storage")
+            .usage
+            .wal_bytes;
         // Distinct values prevent repeated-value compression from hiding the
         // relationship between cloud inventory and the ephemeral disk budget.
         let mut random = 0x9e37_79b9_u32;
@@ -453,6 +490,10 @@ mod cloud_remote_sst {
                 0,
                 "published SSTs must be evicted"
             );
+            // Flush acknowledgement publishes this row's SST. Optional WAL
+            // retirement owns a separate completion and disk charge; observe
+            // it before seeding the next row in this SST-inventory fixture.
+            wait_for_flushed_wal_retirement(&engine, dir.path(), initial_wal_charge);
         }
         engine.shutdown(Duration::from_secs(30)).expect("shutdown");
         drop(engine);
