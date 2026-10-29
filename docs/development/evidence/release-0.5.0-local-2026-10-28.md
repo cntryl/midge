@@ -187,6 +187,12 @@ required three accepted repeats, so #929 receives no new accepted matrix row.
 The local native Sqrzl Tier 5 batch completed in 1,016.74 s on the exact
 candidate; raw output is under
 `target/stress/release-050-sqrzl-cf9ee2ff/tier5-hybrid-durability-lag/`.
+The async/local-floor/strict-one batch command was:
+
+```text
+STRESS_PROFILE=smoke cargo bench --locked --features stress-soak --bench tier5_hybrid_durability_lag -- --workload 'tier5_hybrid_durability_lag::tier5_sqrzl_*' --samples 5 --warmup-samples 1 --timeout-secs 1200 --no-progress --require-quiet-env --output-dir target/stress/release-050-sqrzl-cf9ee2ff
+```
+
 The async row completed five samples with diagnostic trust: 885.81 transactions/s,
 5.294 ms commit p99, cloud-durable lag p50/p99/max of 0/192/192 sequences,
 24 ms maximum sampler gap, 1.314 requests/commit and 3.064 uploaded
@@ -207,5 +213,5 @@ the strict-one result remains invalid and no performance A/B is claimed.
 The separate strict-four invocation was:
 
 ```text
-cargo bench --locked --features stress-soak --bench tier5_hybrid_durability_lag -- --workload tier5_hybrid_durability_lag::tier5_sqrzl_cloud_strict_commit_vs_durable_lag_4_clients --samples 5 --warmup-samples 1 --timeout-secs 1200 --no-progress --require-quiet-env --output-dir target/stress/release-050-sqrzl-strict4-cf9ee2ff
+STRESS_PROFILE=smoke cargo bench --locked --features stress-soak --bench tier5_hybrid_durability_lag -- --workload tier5_hybrid_durability_lag::tier5_sqrzl_cloud_strict_commit_vs_durable_lag_4_clients --samples 5 --warmup-samples 1 --timeout-secs 1200 --no-progress --require-quiet-env --output-dir target/stress/release-050-sqrzl-strict4-cf9ee2ff
 ```
