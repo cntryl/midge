@@ -110,6 +110,20 @@ mod failure_injection {
         assert!(reopened.get_column_family("drop-atomic").is_none());
     }
 
+    fn arm_ddl_failpoint_at_local_commit(point: &str) -> crossbeam::channel::Receiver<()> {
+        // Other maintenance can append to the manifest before the caller's
+        // DDL is dispatched. Arm the one-shot fault from the serialized DDL
+        // boundary so an unrelated append cannot consume it first.
+        let (armed_tx, armed_rx) = crossbeam::channel::bounded(1);
+        let point = point.to_string();
+        fail::cfg_callback("midge::ddl::before_local_commit", move || {
+            fail::cfg(&point, "1*return->off").expect("arm DDL journal failure");
+            let _ = armed_tx.try_send(());
+        })
+        .expect("configure DDL journal failure boundary");
+        armed_rx
+    }
+
     fn assert_uncertain_drop_fences_writes(point: &str) {
         // Arrange: a drop journal write may have taken effect. The caller must
         // not lose a later accepted write.
@@ -127,10 +141,11 @@ mod failure_injection {
         let default = default_cf(&engine);
         write_cf_value(&engine, &default, b"retained", b"before-error");
         let scenario = fail::FailScenario::setup();
-        fail::cfg(point, "1*return->off").expect("fail drop journal publication");
+        let armed = arm_ddl_failpoint_at_local_commit(point);
 
         // Act
         let drop_result = engine.drop_column_family(family.id());
+        fail::remove("midge::ddl::before_local_commit");
         fail::remove(point);
         let write_result = engine
             .begin_tx(family.id(), TransactionMode::ReadWrite)
@@ -153,6 +168,10 @@ mod failure_injection {
 
         // Assert: neither family nor metadata can advance until restart has
         // resolved which complete journal records survived.
+        assert!(
+            armed.try_recv().is_ok(),
+            "drop must reach the DDL journal failure boundary"
+        );
         assert!(
             matches!(drop_result, Err(MidgeError::OutcomeUnknown(_))),
             "{drop_result:?}"
@@ -288,14 +307,12 @@ mod failure_injection {
         let temp_dir = TempDir::new().expect("temp dir");
         let mut engine = open_local_engine(temp_dir.path());
         let scenario = fail::FailScenario::setup();
-        fail::cfg(
-            "midge::manifest::inject_required_sync_failure",
-            "1*return->off",
-        )
-        .expect("fail required create sync");
+        let armed =
+            arm_ddl_failpoint_at_local_commit("midge::manifest::inject_required_sync_failure");
 
         // Act
         let create_result = engine.create_column_family("uncertain-create");
+        fail::remove("midge::ddl::before_local_commit");
         fail::remove("midge::manifest::inject_required_sync_failure");
         let retry = engine.create_column_family("uncertain-create");
         let default = default_cf(&engine);
@@ -327,6 +344,10 @@ mod failure_injection {
 
         // Assert: the uncertain create cannot be retried in-process, while
         // reopening restores a usable, single authoritative family.
+        assert!(
+            armed.try_recv().is_ok(),
+            "create must reach the DDL journal failure boundary"
+        );
         assert!(
             matches!(create_result, Err(MidgeError::OutcomeUnknown(_))),
             "{create_result:?}"

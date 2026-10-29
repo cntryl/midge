@@ -1,6 +1,6 @@
 # Performance baseline procedure
 
-Performance evidence is deferred from 0.5.0 to 0.5.1 and does not block the
+Performance evidence is deferred from 0.5.0 to 0.6.0 and does not block the
 0.5.0 release. Record absolute results for an exact source SHA. For each run,
 record the named row, metric, workload, configuration,
 machine and source SHA. Repeat measurements to characterize noise and retain
@@ -108,7 +108,7 @@ commit raw reports, per-run uptime logs or copied benchmark artifacts.
 Performance issues name the row, metric and any applicable absolute limit.
 Record current-source results against that definition; if no absolute limit is
 specified, measurements are diagnostic and do not imply a pass/fail
-performance comparison. The baseline summary is a 0.5.1 evidence obligation;
+performance comparison. The baseline summary is a 0.6.0 evidence obligation;
 workflow artifacts carry the raw runs. External comparison is deferred until a
 matched run exists; the Midge-only matrix does not establish RocksDB or Pebble
 parity.

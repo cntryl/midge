@@ -7,7 +7,7 @@ Pebble, or any other engine.
 Use these targets to decide when a benchmark result needs investigation. A
 single miss does not prove a defect by itself; repeat the benchmark on the same
 machine and with the same configuration. Performance evidence deferred from
-0.5.0 is part of 0.5.1 and does not block 0.5.0 publication. Evidence is
+0.5.0 is part of 0.6.0 and does not block 0.5.0 publication. Evidence is
 absolute and tied to one source SHA; comparing revisions is not an acceptance
 requirement.
 
@@ -98,7 +98,7 @@ Hybrid:
   100-byte values on production defaults. Baselines are taken with
   [the baseline procedure](baseline-procedure.md). The current three-run
   values for these six rows are in the
-  [baseline matrix deferred to 0.5.1](https://github.com/cntryl/midge/issues/929).
+  [baseline matrix deferred to 0.6.0](https://github.com/cntryl/midge/issues/929).
 - `tier2_subsystem_transaction_latency` owns public transaction lifecycle
   latency, commit percentile reporting, and buffered coalescing.
 - `tier2_subsystem_durability_commit_latency` owns 1-, 16-, and 64-writer local

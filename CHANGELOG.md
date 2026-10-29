@@ -9,6 +9,30 @@ Compatibility expectations for pre-1.0 releases are defined in [docs/development
 
 ## [Unreleased]
 
+## [0.5.1] - Unreleased
+
+### Fixed
+
+- Release discarded column-family memtable pressure and wake writers waiting
+  on other families (#1022).
+- Keep the live family catalog aligned with committed column-family changes
+  after a caller timeout, and report an unknown outcome when an admitted DDL
+  response is lost (#1024).
+- Exclude SSTs retained for snapshots of dropped families from write-admission
+  compaction debt while retaining the data for those snapshots (#1025).
+- Fence writes and metadata changes after an uncertain local column-family
+  journal append, preventing later acknowledged writes from being lost if
+  recovery replays the change (#1026).
+
+### Compatibility and rollback
+
+- This candidate retains the 0.5.0 persisted formats and public API. A
+  submitted create or drop can now return the existing `OutcomeUnknown` error;
+  reconcile its result before retrying. An uncertain local DDL journal write
+  requires reopening the engine.
+- Rollback to 0.5.0 reintroduces the defects above. Qualify upgrade and recovery
+  on the final candidate and preserve a verified backup before changing binaries.
+
 ## [0.5.0] - 2026-10-29
 
 ### Added
@@ -80,12 +104,12 @@ Compatibility expectations for pre-1.0 releases are defined in [docs/development
   after cutover separately. Never rewrite a FORMAT marker to force an open.
 - Exact WAL recovery floors and raw TTL retention are preserved. Destructive
   TTL reclamation and weaker WAL detection floors are not enabled. The SST
-  redesign belongs to 0.5.1, whose in-place upgrade is a future requirement,
+  redesign belongs to 0.6.0, whose in-place upgrade is a future requirement,
   not a capability delivered here.
 - Qualification and measured performance are recorded per source and topology.
   Sqrzl evidence is not a live-cloud or RocksDB/Pebble parity claim. Performance
   baselines, hybrid latency/lag/cost evidence and cold-start measurements are
-  deferred to 0.5.1; existing noisy or incomplete rows remain inconclusive.
+  deferred to 0.6.0; existing noisy or incomplete rows remain inconclusive.
   Release publication requires the final candidate to pass the release checklist.
 
 ## [0.4.1] - 2026-10-16

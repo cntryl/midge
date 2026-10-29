@@ -81,7 +81,7 @@ simulator. A row refuses to report when the sampler managed fewer than half
 the expected ticks. The local `sync()` row is the floor.
 
 The Tier 2 baseline matrix target supplies the absolute reference rows for
-performance evidence deferred to 0.5.1:
+performance evidence deferred to 0.6.0:
 fillseq, fillrandom (buffered and sync), readrandom against a
 memtable-resident set and after a cold reopen, and seekrandom, each one
 operation per transaction with 16-byte keys and 100-byte values on a fresh
