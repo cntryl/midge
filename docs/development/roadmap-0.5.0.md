@@ -11,10 +11,11 @@ acceptance criteria and are not repeated here.
 Ship the existing FORMAT 9/SST V5 engine and cloud metadata layout v2 after
 the remaining qualification gates. The current owning issues are #914
 (metadata-publication acceptance), #929 (absolute baseline summary), #937
-(provider hybrid durability measurements), and #935 (final release checklist,
-including the four-machine-hour differential-fuzz budget). Source-pinned local
-evidence is accepted; keep raw reports outside commits, use Sqrzl `latest`
-with its resolved digest recorded, and keep workflows unchanged. Failed,
+(provider hybrid durability measurements), and #935 (final release checklist).
+Qualification follows the [manual release workflow](../operations/release-checklist.md),
+updated on 2026-10-29 to require bounded fuzz checks and make extended campaigns
+optional. Source-pinned local evidence is accepted; keep raw reports outside
+commits and use Sqrzl `latest` with its resolved digest recorded. Failed,
 inconclusive and pending results remain explicit.
 
 The phase history below does not add speculative implementation to this release.
@@ -79,8 +80,9 @@ The read-path work has since merged; the status below is recorded at
   explicit sign-off at implementation; a design merge does not approve that
   behavior-changing slice.
 - **Assurance precedes concurrency.** #931 and #951 have merged, in #971 and
-  #972. Re-run that coverage on #906's changed path. #972's 90-second fuzz
-  smoke is distinct from the four machine-hours per release budget.
+  #972. Re-run that coverage on #906's changed path. The original four
+  machine-hour fuzz budget is superseded by the bounded qualification and
+  optional extended campaigns in the current release checklist.
 - **Hard-prune.** Whatever a PR obsoletes is deleted in that PR.
 
 ## Baseline

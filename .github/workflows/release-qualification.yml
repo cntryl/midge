@@ -2,7 +2,19 @@ name: Release Qualification
 
 on:
   workflow_dispatch:
-  workflow_call:
+    inputs:
+      extended_fuzz_minutes:
+        description: Optional extra differential fuzzing (minutes; zero runs only bounded checks)
+        type: choice
+        options: ["0", "30", "60", "240"]
+        default: "0"
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - '.github/workflows/release-qualification.yml'
+      - '.github/workflows/fuzz-qualification.yml'
+      - '.github/workflows/ci.yml'
+      - 'Dockerfile.tests'
 
 permissions:
   contents: read
@@ -12,8 +24,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  core:
+    name: Linux lint, build and tests
+    uses: ./.github/workflows/ci.yml
+
+  macos:
+    name: macOS tests
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos
+      - name: Record platform and toolchain
+        run: |
+          git rev-parse HEAD
+          uname -a
+          rustc --version --verbose
+      - name: Run workspace tests and fault injection
+        run: cargo test --locked --workspace --features failpoints -- --test-threads=1
+
   clean-container:
-    name: Clean Docker all-feature tests
+    name: Sqrzl and clean all-feature tests
     runs-on: ubuntu-latest
     timeout-minutes: 120
     services:
@@ -28,26 +64,31 @@ jobs:
           SQRZL_SECRET_ACCESS_KEY: easy-peasy
     steps:
       - uses: actions/checkout@v7
-      - name: Capture emulator identity
-        run: docker image inspect ghcr.io/sqrzl/sqrzl-emulator:latest --format '{{json .RepoDigests}}' | tee sqrzl-image.txt
+      - name: Record source, emulator identity and health
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/release-qualification/container
+          git rev-parse HEAD > target/release-qualification/container/source.txt
+          docker image inspect ghcr.io/sqrzl/sqrzl-emulator:latest --format '{{json .RepoDigests}}' | tee target/release-qualification/container/sqrzl-image.txt
+          curl --fail --silent --show-error --retry 10 --retry-connrefused --retry-delay 1 --max-time 5 http://127.0.0.1:9000/healthz | tee target/release-qualification/container/sqrzl-health.json
       - name: Build and test clean release source
         shell: bash
         run: |
           set -euo pipefail
-          docker build --network=host --progress=plain --build-arg MIDGE_DISCOVERY_SOURCE_REVISION="$GITHUB_SHA" --build-arg MIDGE_DISCOVERY_SOURCE_DIRTY=false --file Dockerfile.tests --tag midge-tests:release . 2>&1 | tee docker-tests.log
+          docker build --network=host --progress=plain --build-arg MIDGE_DISCOVERY_SOURCE_REVISION="$GITHUB_SHA" --build-arg MIDGE_DISCOVERY_SOURCE_DIRTY=false --file Dockerfile.tests --tag midge-tests:release . 2>&1 | tee target/release-qualification/container/docker-tests.log
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: release-container-${{ github.sha }}-${{ github.run_attempt }}
-          path: |
-            docker-tests.log
-            sqrzl-image.txt
+          path: target/release-qualification/container
+          if-no-files-found: error
           retention-days: 30
 
   compatibility:
-    name: Package and compatibility
+    name: MSRV, features and package
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CARGO_INCREMENTAL: "0"
     steps:
@@ -56,68 +97,100 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-compatibility
-      - name: Verify MSRV
+      - name: Record source, package and toolchain
         run: |
-          rustup toolchain install 1.97.0 --profile minimal
-          cargo +1.97.0 check --locked --workspace --all-targets --all-features
+          mkdir -p target/release-qualification/package
+          git rev-parse HEAD > target/release-qualification/package/source.txt
+          rustc --version --verbose > target/release-qualification/package/toolchain.txt
+          cargo metadata --locked --no-deps --format-version 1 > target/release-qualification/package/metadata.json
+      - name: Verify declared MSRV
+        run: |
+          msrv="$(jq -er '.packages[] | select(.name == "cntryl-midge") | .rust_version' target/release-qualification/package/metadata.json)"
+          rustup toolchain install "$msrv" --profile minimal
+          cargo "+$msrv" check --locked --workspace --all-targets --all-features
+      - name: Lint without default features
+        run: cargo clippy --locked --workspace --all-targets --no-default-features -- -D warnings -D clippy::pedantic
       - name: Check isolated provider features
         run: |
-          cargo check --locked --no-default-features --features cloud-aws
-          cargo check --locked --no-default-features --features cloud-azure
-          cargo check --locked --no-default-features --features cloud-gcp
-          cargo check --locked --no-default-features --features cloud-oci
-      - name: Verify release build and documentation
+          cargo check --locked --workspace --all-targets --no-default-features --features cloud-aws
+          cargo check --locked --workspace --all-targets --no-default-features --features cloud-azure
+          cargo check --locked --workspace --all-targets --no-default-features --features cloud-gcp
+          cargo check --locked --workspace --all-targets --no-default-features --features cloud-oci
+      - name: Check unused dependencies
         run: |
-          cargo check --locked --release
+          cargo install cargo-machete --version 0.9.2 --locked
+          cargo machete
+      - name: Verify production dependencies and release build
+        run: |
+          cargo tree --locked --edges normal -p cntryl-midge --prefix none > target/release-qualification/package/dependencies.txt
+          if grep -Eq '^fail v' target/release-qualification/package/dependencies.txt; then
+            echo 'The default production dependency tree includes fail' >&2
+            exit 1
+          fi
+          cargo build --locked --release
+      - name: Verify documentation, quick start and database compatibility
+        run: |
           cargo test --locked --doc --all-features
           cargo run --locked --example documented_quick_start
-      - name: Verify package
+          cargo test --locked --test verification_cli
+      - name: Verify crate package
         run: cargo package --locked
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: release-package-${{ github.sha }}-${{ github.run_attempt }}
-          path: target/package/*.crate
-          if-no-files-found: ignore
+          path: |
+            target/package/*.crate
+            target/release-qualification/package
+          if-no-files-found: error
           retention-days: 30
 
-  ycsb:
-    name: YCSB ${{ matrix.workload }} local baseline
+  fuzz:
+    name: Corpus replay and bounded fuzzing
+    uses: ./.github/workflows/fuzz-qualification.yml
+    with:
+      extended_minutes: ${{ inputs.extended_fuzz_minutes || '0' }}
+
+  result:
+    name: Qualification result
+    if: always()
+    needs: [core, macos, clean-container, compatibility, fuzz]
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        workload: [a, b, c, d, e, f]
+    timeout-minutes: 5
     env:
-      CARGO_INCREMENTAL: "0"
-      MIDGE_BENCH_PROFILE: smoke
-      STRESS_PROFILE: smoke
-      BENCH_NAME: tier4_ycsb_workload_${{ matrix.workload }}
-      WORKLOAD_NAME: tier4_ycsb_${{ matrix.workload }}_local_64_clients
+      CORE_RESULT: ${{ needs.core.result }}
+      MACOS_RESULT: ${{ needs.macos.result }}
+      CONTAINER_RESULT: ${{ needs.clean-container.result }}
+      COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
+      FUZZ_RESULT: ${{ needs.fuzz.result }}
+      EXTENDED_FUZZ_MINUTES: ${{ inputs.extended_fuzz_minutes || '0' }}
     steps:
-      - uses: actions/checkout@v7
-      - run: rustup update stable
-      - name: Compile benchmark before measurement
-        run: cargo bench --locked --bench "$BENCH_NAME" --no-run
-      - name: Cool down after compilation
-        run: sleep 30
-      - name: Capture environment
-        run: |
-          rustc --version --verbose
-          uname -a
-          uptime
-      - name: Measure three independent repeats with quiet guard
+      - name: Summarize and require every qualification check
         shell: bash
         run: |
           set -euo pipefail
-          for repeat in 1 2 3; do
-            cargo bench --locked --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples 5 --warmup-samples 1 --no-progress --require-quiet-env --output-dir "target/stress/release-050-ycsb-${repeat}"
-          done
+          mkdir -p target/release-qualification
+          {
+            echo '# Release qualification'
+            printf '\nSource: `%s`  \nRef: `%s`  \nRun: %s/%s/actions/runs/%s\n' "$GITHUB_SHA" "$GITHUB_REF" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf '\n| Check | Result |\n| --- | --- |\n'
+            printf '| Linux lint, build and tests | %s |\n' "$CORE_RESULT"
+            printf '| macOS tests | %s |\n' "$MACOS_RESULT"
+            printf '| Sqrzl and clean all-feature tests | %s |\n' "$CONTAINER_RESULT"
+            printf '| MSRV, features and package | %s |\n' "$COMPATIBILITY_RESULT"
+            printf '| Corpus replay and bounded fuzzing | %s |\n' "$FUZZ_RESULT"
+            printf '\nExtended differential requested: %s minutes (0 = not requested).\n' "$EXTENDED_FUZZ_MINUTES"
+            printf '\nReview the attached artifacts and the remaining manual items in `docs/operations/release-checklist.md`. Performance evidence and publication are separate decisions.\n'
+          } | tee target/release-qualification/summary.md >> "$GITHUB_STEP_SUMMARY"
+          test "$CORE_RESULT" = success
+          test "$MACOS_RESULT" = success
+          test "$CONTAINER_RESULT" = success
+          test "$COMPATIBILITY_RESULT" = success
+          test "$FUZZ_RESULT" = success
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: release-ycsb-${{ matrix.workload }}-${{ github.sha }}-${{ github.run_attempt }}
-          path: target/stress/**
-          if-no-files-found: ignore
+          name: release-result-${{ github.sha }}-${{ github.run_attempt }}
+          path: target/release-qualification/summary.md
+          if-no-files-found: error
           retention-days: 30

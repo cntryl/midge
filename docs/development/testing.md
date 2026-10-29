@@ -130,11 +130,22 @@ input bytes (multi-key transactions, TTL, range deletes, snapshots, flushes,
 compactions, reopens, power-loss crashes) and checks every read against a
 `BTreeMap` model; the driver lives in `tests/support/differential.rs` and
 `tests/engine_differential.rs` runs it as a proptest with 256 cases
-(`PROPTEST_CASES` overrides) plus the corpus seeds. Budget: at least four
-machine-hours per release, `cargo +nightly fuzz run -s none engine_differential
-fuzz/corpus/engine_differential -- -max_len=512`, with new corpus entries
-committed when they reach code the seeds did not. A finding is a `flea` with a
-regression test; the fuzzer is never left failing silently.
+(`PROPTEST_CASES` overrides) plus the corpus seeds. The manual **Release
+Qualification** workflow replays preserved failures, smokes every registered
+parser target for 30 seconds, and runs `engine_differential` for five minutes
+with AddressSanitizer, a 512-byte input bound and a 10-second per-input timeout.
+These are bounded checks, not a proof of exhaustive coverage. Inspect the
+execution/coverage progress and preserve failures and useful new corpus entries.
+
+An extra 30-, 60-, or 240-minute differential campaign can be selected with
+`extended_fuzz_minutes` in Release Qualification, or `extended_minutes` in
+**Fuzz Qualification**. It runs after the bounded checks with `-s none` for
+more history exploration and defaults to off. Longer campaigns are useful for
+storage/recovery changes and recent findings; a fixed four-hour duration is
+not a routine release gate. The weekly fuzz schedule runs the bounded checks.
+A finding is a `flea` with a regression test; the fuzzer is never left failing
+silently. See the [release checklist](../operations/release-checklist.md) for
+the manual workflow and artifact review.
 
 Sqrzl provider-engine tests require the `sqrzl-tests` feature. The
 provider integration workflows use GitHub-managed Sqrzl services and run tests
