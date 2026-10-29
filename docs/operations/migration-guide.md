@@ -9,6 +9,25 @@ compatibility and recovery tests, and keep a verified application-level
 backup before changing binaries. Use the applicable release transition below
 before upgrading an existing database.
 
+## 0.5.0 to 0.5.1
+
+The 0.5.1 candidate preserves the 0.5.0 persisted formats; it does not require
+a logical migration. Stop writers, complete `engine.shutdown(timeout)`,
+preserve the database and cloud prefix, and replace the binary or dependency.
+Qualify application reads, writes and restart recovery, including recovery
+after complete local-cache loss for cloud storage, on the final candidate in
+the deployment's actual environment.
+
+An admitted column-family create or drop can now report `OutcomeUnknown` when
+its result cannot be established. Reconcile the family catalog before
+retrying. An uncertain local DDL journal write fences writes and metadata
+changes until the engine is reopened.
+
+Rollback to 0.5.0 reintroduces the column-family pressure, DDL outcome and
+recovery bugs fixed by this candidate. Keep a verified backup and test the
+intended rollback procedure before changing binaries; this guidance does not
+establish that an unqualified candidate is ready for release.
+
 ## 0.4.x to 0.5.0
 
 This is an incompatible format transition, not an in-place upgrade. Local
@@ -37,7 +56,7 @@ Rollback to the old binary against the new store is unsupported. Return to the
 preserved 0.4.x store and binary; writes accepted after cutover are absent from
 that copy and need application-level reconciliation. Never change format
 markers manually. A proper in-place upgrade from 0.5.0 is required for the
-planned 0.5.1 work but is not implemented by this release.
+planned 0.6.0 SST work but is not implemented by this release.
 
 ## 0.4.0 to 0.4.1
 

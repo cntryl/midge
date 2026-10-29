@@ -11,7 +11,7 @@ acceptance criteria and are not repeated here.
 
 Ship the existing FORMAT 9/SST V5 engine and cloud metadata layout v2 after
 the remaining correctness, assurance and release qualification gates in #935.
-The owner deferred performance evidence to 0.5.1: #929's absolute baseline
+The owner deferred performance evidence to 0.6.0: #929's absolute baseline
 summary, #937's provider hybrid latency/lag/cost evidence, and #914's remaining
 cold-start and performance measurements. Those measurements remain unfinished;
 they do not block 0.5.0 or become accepted results through this deferral.
@@ -24,10 +24,12 @@ commits and use Sqrzl `latest` with its resolved digest recorded. Failed,
 inconclusive and pending results remain explicit.
 
 The phase history below does not add speculative implementation to this release.
-The SST redesign is the 0.5.1 program tracked by #922 and #1010–#1016. That
+The deferred performance and SST program was originally labeled 0.5.1; its
+milestone is now 0.6.0, and 0.5.1 is a separate bug-fix patch.
+The SST redesign is the 0.6.0 program tracked by #922 and #1010–#1016. That
 release requires a crash-safe in-place upgrade from released 0.5.0 databases,
 including mixed V5/new SST reads; it supersedes the exploratory design's
-no-upgrade assumption. No 0.5.1 capability is claimed in 0.5.0. Destructive TTL
+no-upgrade assumption. No 0.6.0 capability is claimed in 0.5.0. Destructive TTL
 GC #912 and weaker WAL detection floors #904 remain excluded.
 
 The original plan came from a repository-wide architecture review of `develop` at
@@ -63,7 +65,7 @@ The read-path work has since merged; the status below is recorded at
 - **Correctness and assurance use behavioral gates.** Correctness fixes need
   a failing invariant test and a no-regression check on the relevant rows;
   they do not wait for an absolute baseline. Assurance targets specify
-  detection power and compute budget. For 0.5.1, #929 still owes a concise baseline
+  detection power and compute budget. For 0.6.0, #929 still owes a concise baseline
   summary; raw reports and uptime remain attached to GitHub Actions runs.
   Absolute results supply performance evidence for the recorded source.
 - **One purpose per issue, one milestone delivery PR.** Issues that bundled
@@ -92,7 +94,7 @@ The read-path work has since merged; the status below is recorded at
 
 ## Baseline
 
-This evidence work is deferred to 0.5.1. The historical 0.5.0 measurements below
+This evidence work is deferred to 0.6.0. The historical 0.5.0 measurements below
 retain their original sources and validity classifications.
 
 The Phase 0 baseline runs on an Apple Silicon macOS machine with APFS. Its
@@ -252,7 +254,7 @@ a proposed recovery-behavior change, not a landed guarantee.
 ## Deferred from 0.5.0
 
 - Performance evidence: #929's baseline matrix, #937's provider hybrid rows,
-  and #914's cold-start and performance acceptance measurements move to 0.5.1.
+  and #914's cold-start and performance acceptance measurements move to 0.6.0.
 - #928 `object_store` transport evaluation: after the cloud layout settles.
 - #922 Table-level filter and partitioned index: gated on a measurement after #918 showing index memory or filter probes binding.
 - #925 Score-based picking and dynamic level sizing: gated on the Phase 3 write and space amplification numbers.
@@ -267,6 +269,6 @@ a proposed recovery-behavior change, not a landed guarantee.
 - Release notes list every actual format rejection and landed caller-visible
   behavior change, including #904's detection window if approved, #901
   severity mapping, #908 opt-in slowdown, #933 shutdown policy and #936's API.
-- Performance characterization belongs to 0.5.1. Preserve source-pinned raw
+- Performance characterization belongs to 0.6.0. Preserve source-pinned raw
   artifacts and inconclusive rows; do not claim performance or external-engine
   parity for 0.5.0 from the deferred matrix.
