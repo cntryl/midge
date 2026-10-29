@@ -304,6 +304,7 @@ impl ManifestCoordinator {
         deadline: &crate::common::OperationDeadline,
     ) {
         Self::cancel_column_family_pending_work(event_loop, cf_id);
+        event_loop.wake_write_stall_waiters();
         event_loop.publish_snapshot();
         let _ = event_loop.retry_gc_within(deadline);
 
