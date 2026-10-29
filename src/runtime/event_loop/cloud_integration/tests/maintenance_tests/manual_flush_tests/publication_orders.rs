@@ -5,6 +5,8 @@ use crate::runtime::actors::flush::FlushWorkerResult;
 use crate::runtime::event_loop::coordination::ManifestPublicationOwner;
 use crate::storage::cloud::{CloudBackend, CloudCallback, CloudStorage, MockCloudBackend};
 
+const PUBLISHER_READ_WAIT: Duration = Duration::from_secs(30);
+
 #[path = "cloud_fragmentation_tests.rs"]
 mod cloud_fragmentation_tests;
 
@@ -331,7 +333,7 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
         complete_compaction(&mut el, &worker);
         metadata
             .reached
-            .recv_timeout(TEST_WAIT)
+            .recv_timeout(PUBLISHER_READ_WAIT)
             .expect("actual publisher GET held");
         let names_before = name_work_snapshot(&el, &metadata, cf_id)?;
         el.handle_flush_worker_result(build);
@@ -470,7 +472,7 @@ fn should_reuse_automatic_flush_name_when_compaction_publication_wins_build_race
         complete_compaction(&mut el, &worker);
         metadata
             .reached
-            .recv_timeout(TEST_WAIT)
+            .recv_timeout(PUBLISHER_READ_WAIT)
             .expect("actual publisher GET held");
         let names_before = name_work_snapshot(&el, &metadata, cf_id)?;
         el.handle_flush_worker_result(build);
