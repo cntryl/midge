@@ -39,6 +39,13 @@ const MAX_BACKOFF_MS: u64 = 100;
 const MAX_WAIT_ATTEMPTS: u32 = 50;
 const MAX_PENDING_SYNC_REQUESTS: usize = 128;
 
+#[cfg(test)]
+#[derive(Debug)]
+struct AcknowledgementBudget {
+    admission_elapsed: Duration,
+    remaining: Duration,
+}
+
 /// Filesystem-backed WAL writer using `io::Fs`.
 ///
 /// This struct is responsible ONLY for writing bytes to the open segment.
@@ -73,6 +80,8 @@ pub struct FsWalWriterIo {
 
     // Maximum wait for append, flush, sync, and close acknowledgements.
     io_timeout: Duration,
+    #[cfg(test)]
+    acknowledgement_budget_observer: Mutex<Option<std::sync::mpsc::Sender<AcknowledgementBudget>>>,
 
     /// The header of the segment this writer appends to.
     header: SegmentHeader,
@@ -196,6 +205,8 @@ impl FsWalWriterIo {
             writer_thread: Mutex::new(None),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             io_timeout,
+            #[cfg(test)]
+            acknowledgement_budget_observer: Mutex::new(None),
             header,
             tail: Arc::new(Mutex::new(SegmentTail::default())),
             raw_submission_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -490,11 +501,14 @@ impl FsWalWriterIo {
                     });
                 }
 
+                let admission_elapsed = admission_start.elapsed();
                 let wait_timeout = if native {
-                    acknowledgement_timeout.saturating_sub(admission_start.elapsed())
+                    acknowledgement_timeout.saturating_sub(admission_elapsed)
                 } else {
                     acknowledgement_timeout
                 };
+                #[cfg(test)]
+                self.observe_acknowledgement_budget(admission_elapsed, wait_timeout);
                 return match ack_rx.recv_timeout(wait_timeout) {
                     Ok(result) => result,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -931,7 +945,11 @@ impl FsWalWriterIo {
             Err(MidgeError::WriteStall(_) | MidgeError::InvalidArgument(_)) => return None,
             Err(error) => return Some(Err(error)),
         };
-        let result = pending.wait_with_timeout(timeout.saturating_sub(started.elapsed()));
+        let admission_elapsed = started.elapsed();
+        let wait_timeout = timeout.saturating_sub(admission_elapsed);
+        #[cfg(test)]
+        self.observe_acknowledgement_budget(admission_elapsed, wait_timeout);
+        let result = pending.wait_with_timeout(wait_timeout);
         if let Err(error @ MidgeError::Timeout(_)) = &result {
             let mut state = self.sync_state.lock();
             state.sync_failed = true;
@@ -940,6 +958,16 @@ impl FsWalWriterIo {
             self.queue_cond.notify_all();
         }
         Some(result.map(|_| ()))
+    }
+
+    #[cfg(test)]
+    fn observe_acknowledgement_budget(&self, admission_elapsed: Duration, remaining: Duration) {
+        if let Some(observer) = self.acknowledgement_budget_observer.lock().as_ref() {
+            let _ = observer.send(AcknowledgementBudget {
+                admission_elapsed,
+                remaining,
+            });
+        }
     }
 }
 
@@ -1031,6 +1059,7 @@ mod tests {
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             current_pos: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             io_timeout: Duration::from_millis(10),
+            acknowledgement_budget_observer: Mutex::new(None),
             header: SegmentHeader {
                 id: 1,
                 epoch: 0,
