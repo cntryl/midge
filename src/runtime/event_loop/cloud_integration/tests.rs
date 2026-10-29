@@ -98,6 +98,33 @@ fn queue_generation_for_maintenance_test(
     Ok(())
 }
 
+fn receive_owned_compaction_completion(
+    el: &EventLoop,
+    worker: &crossbeam::channel::Receiver<RuntimeMsg>,
+    deadline: Instant,
+) -> RuntimeMsg {
+    let completion = worker
+        .recv_deadline(deadline)
+        .expect("compaction completion notification");
+    assert!(matches!(&completion, RuntimeMsg::CompactionComplete { .. }));
+    assert_eq!(
+        el.state.active_compactions.load(Ordering::Acquire),
+        1,
+        "the ready ticket must belong to the fixture's only compute job"
+    );
+    // The wakeup precedes the pool's owned result ticket. Await that owner
+    // without advancing fairness or publication before dispatching once.
+    while !el.actors.compaction_actor.has_ready_compute() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "owned compaction ticket did not settle"
+        );
+        std::thread::sleep(remaining.min(Duration::from_millis(1)));
+    }
+    completion
+}
+
 #[test]
 fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::common::MidgeResult<()>
 {
@@ -135,9 +162,7 @@ fn should_give_ready_compaction_a_turn_before_continuing_flushes() -> crate::com
     el.schedule_next_flush_worker();
     let active = el.state.active_compactions.load(Ordering::Acquire);
     assert_eq!(active, 1, "ready compaction must receive its turn");
-    let completion = worker_rx
-        .recv_deadline(completion_deadline)
-        .expect("compaction completion");
+    let completion = receive_owned_compaction_completion(&el, &worker_rx, completion_deadline);
     let (_request_tx, request_rx) = crossbeam::channel::unbounded();
     el.handle_runtime_msg(completion, &request_rx);
     drain_prune_completion_for_test(&mut el);

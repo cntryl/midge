@@ -97,9 +97,8 @@ fn cloud_debt_with_wal_records(
 }
 
 fn complete_compaction(el: &mut EventLoop, worker: &crossbeam::channel::Receiver<RuntimeMsg>) {
-    let completion = worker
-        .recv_timeout(Duration::from_secs(3))
-        .expect("compaction completion");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let completion = receive_owned_compaction_completion(el, worker, deadline);
     let (_tx, rx) = crossbeam::channel::unbounded();
     el.handle_runtime_msg(completion, &rx);
 }
