@@ -7557,8 +7557,6 @@ fn should_admit_async_cloud_flush_with_nonzero_remaining_caller_budget(
         runtime_response_timeout: Duration::from_millis(200),
         hybrid_storage: Some(storage),
         writer_epoch: 1,
-        leader_store: Some(leader_store),
-        leader_holder_id: Some("writer-1".to_string()),
         ..crate::runtime::RuntimeConfig::default()
     };
     let mut el = EventLoop::new(
@@ -7569,6 +7567,14 @@ fn should_admit_async_cloud_flush_with_nonzero_remaining_caller_budget(
         crate::runtime::event_loop::FlushWorkerMode::Inline,
     )?;
     let sequence = append_cloud_async_put(&mut el)?;
+    // Seed the real WAL before installing the target seal's delayed validation.
+    // The setup append must not spend its acknowledgement allowance on the
+    // unrelated provider delay. Keep both seal authorities and budgets intact.
+    el.actors
+        .wal_actor
+        .set_leader_store(Arc::clone(&leader_store), "writer-1".to_string());
+    el.authority.fencing.leader_store = Some(leader_store);
+    el.authority.fencing.leader_holder_id = Some("writer-1".to_string());
     let active_segment = el.state.wal.open_segment();
     let request_id = 91_102;
     let response_rx = router.register(request_id, "SealWalForCloud");
