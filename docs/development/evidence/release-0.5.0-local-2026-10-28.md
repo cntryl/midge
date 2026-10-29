@@ -1,11 +1,12 @@
-# 0.5.0 local qualification evidence, 2026-10-28
+# 0.5.0 local qualification evidence, through 2026-10-29
 
 This is a source-specific checkpoint, not a release-ready declaration. The
 owning gates remain #914, #929, #937 and the #935 release checklist. The owner
-accepted local evidence and requested unchanged workflows. Raw JSON, uptime
-and image observations remain under `target/stress/release-050-*`; only this
-concise summary is committed. Preserve invalid attempts alongside successful
-reports. No external-engine parity or live-cloud result is claimed.
+accepted local evidence; the two qualification workflow changes in PR #1017
+are retained as an explicit release exception. Raw JSON, uptime and image
+observations remain under `target/stress/release-*` or in the linked GitHub
+Actions artifacts; preserve invalid attempts alongside successful reports.
+No external-engine parity or live-cloud result is claimed.
 
 ## Environment and source attribution
 
@@ -122,20 +123,89 @@ unknown outcomes, heartbeat/control work and retention can add requests.
   generation before its intended delayed dispatch and omitted pending-obsolete
   GC retries. After correcting only fixture ownership/progress control, all
   six focused deadline-owner cases pass in 31.90 s with the original caller
-  budgets and authority/byte assertions unchanged. Full-suite requalification
-  remains required; this is not a confirmed runtime data-loss finding.
-- Native strict-one remains inconclusive; owning #937 evidence disposition
-  must identify the valid strict-four diagnostic separately.
+  budgets and authority/byte assertions unchanged. The full Core test step and
+  clean Docker all-feature suite now also pass on candidate `cf9ee2f`; this is
+  not a confirmed runtime data-loss finding.
+- #937: candidate async completed with diagnostic trust; strict-four passed
+  the sampler but its throughput is noisy, and strict-one failed the 40 ms
+  guard. No A/B or gate-trusted native claim is made; issue disposition and
+  committed evidence remain pending.
+- #914 AC4 remains open: the 10k row times production SST inventory
+  validation, not end-to-end `Engine::open` or provider cold start. This
+  checkpoint records the current candidate's Sqrzl async and noisy strict-four
+  rows and labels them separately from the two-request mock proof; the proof's
+  warm lease/pointer identity, cached fingerprints and validated-receipt
+  assumptions are stated above. Issue-level acceptance remains pending.
 - Complete #929 matrix, including YCSB A–F; preserve historical sources and
   inconclusive rows rather than inventing final-head parity.
-- Four machine-hours of `engine_differential` and registered-target smokes on
-  the candidate; no elapsed budget is claimed here.
-- The final release checklist, exact-head CI, version/package/operator docs
-  and reviewed promotion. No release tag or publication is claimed.
+- Four machine-hours of `engine_differential` on the candidate; the current
+  campaign is running and has not completed. All registered-target fuzz
+  smokes have passed on the candidate.
+- The final release checklist, version/package/operator docs and reviewed
+  promotion. Exact-head PR checks, package/compatibility checks, clean Docker
+  all-feature tests and both all-feature/no-default-feature strict Clippy have
+  passed; no release tag or publication is claimed.
 
-Candidate preparation passes formatting, strict all-feature Clippy, dependency
-analysis and test-structure validation (4,640 compliant, zero violations).
-The package file list excludes the exploratory 0.5.1 design. The four-hour
-differential campaign is running on the explicitly selected pinned nightly
-toolchain; an earlier stable-toolchain preflight is retained separately and
-does not count as completion. No fuzz elapsed-time budget is claimed yet.
+The earlier four-hour campaign, run `40760229631` at source
+`c685b11f589a54c3d90417c63c28abe6073f77d2`, failed after about 2h36. Its
+bounded fuzz smokes, package/compatibility checks and clean all-feature Docker
+tests passed; `engine_differential` stopped when the model panicked on an
+expected pre-admission `WriteStall`. That failure is now modeled as a rejected
+write with a post-rejection state check. The archived failing input replays
+successfully on `37fbb48799d79dcef6172b7703bb423cfe360874`, and the focused
+`engine_differential` integration suite passed 5/5 there. The required four
+machine-hours were not completed by the earlier run.
+
+Candidate `cf9ee2fff7e854acc7e4723b0155a5fad7f03cd7` passes local formatting,
+strict all-target Clippy with and without default features, `cargo machete`,
+and the default normal-dependency tree contains no `fail` crate. D/E benchmark
+compilation and two-sample smoke execution also passed; those short, noisy
+local runs verify execution only and do not qualify performance rows. Release
+Qualification run `40852863342` was dispatched on this exact candidate with
+the pinned nightly, all registered fuzz-target smokes, the four-hour
+differential campaign, clean all-feature Docker tests, package/compatibility
+checks and three-repeat YCSB
+A-F rows. Exact-head PR CI completed successfully, including Core, Azure,
+GCS, S3 and CodeQL. The package/compatibility job passed MSRV, isolated
+provider-feature, release/doc/example and package checks; its 0.5.0 crate
+artifact excludes the untracked `possible-sst-design.md`. The registered fuzz
+target build and all bounded smokes passed. Clean Docker all-feature tests and
+doc-tests passed on the resolved Sqrzl image digest recorded in
+`target/stress/release-container-cf9ee2/sqrzl-image.txt`; the full test log is
+`target/stress/release-container-cf9ee2/docker-tests.log`. Local no-default
+strict Clippy also passed on this head. The four-hour differential campaign
+remains in progress.
+
+All six YCSB jobs compiled and uploaded artifacts, but each was stopped by the
+quiet-environment guard during its second repeat. The rejected repeats saw
+one-minute load averages of 14.71–52.14 on four-core runners. Each artifact
+contains only one completed report: C and F are gate-trusted; A, B, D and E
+are diagnostic. D/E verified-row counts now appear as per-sample observations
+with changing counts and no parameter-change panic. No YCSB row has the
+required three accepted repeats, so #929 receives no new accepted matrix row.
+
+The local native Sqrzl Tier 5 batch completed in 1,016.74 s on the exact
+candidate; raw output is under
+`target/stress/release-050-sqrzl-cf9ee2ff/tier5-hybrid-durability-lag/`.
+The async row completed five samples with diagnostic trust: 885.81 transactions/s,
+5.294 ms commit p99, cloud-durable lag p50/p99/max of 0/192/192 sequences,
+24 ms maximum sampler gap, 1.314 requests/commit and 3.064 uploaded
+bytes/committed byte. The local sync floor also completed five diagnostic
+samples at 100.61 transactions/s. The strict-one row failed its unchanged
+40 ms sampler guard at 47 ms; the suite stopped before strict-four. The Mac
+host load varied during that batch (recent 1/5/15-minute averages ranged
+3.65–15.11 / 7.00–9.47 / 7.29–8.08 on 10 cores).
+
+A separate exact-candidate strict-four run completed in 330.20 s with five
+samples and diagnostic trust: 38.94 transactions/s, 310.261 ms commit p99,
+cloud-durable lag p50/p99/max of 12/12/12 sequences, 20 ms maximum sampler
+gap, 12.340 requests/commit and 144.133 uploaded bytes/committed byte. Its
+36.0% throughput RSD and noisy quality make it diagnostic only. The report is
+under `target/stress/release-050-sqrzl-strict4-cf9ee2ff/tier5-hybrid-durability-lag/`;
+the strict-one result remains invalid and no performance A/B is claimed.
+
+The separate strict-four invocation was:
+
+```text
+cargo bench --locked --features stress-soak --bench tier5_hybrid_durability_lag -- --workload tier5_hybrid_durability_lag::tier5_sqrzl_cloud_strict_commit_vs_durable_lag_4_clients --samples 5 --warmup-samples 1 --timeout-secs 1200 --no-progress --require-quiet-env --output-dir target/stress/release-050-sqrzl-strict4-cf9ee2ff
+```
