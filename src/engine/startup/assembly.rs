@@ -1,4 +1,4 @@
-use super::super::{lease_state::LeaseState, ColumnFamilyHandle, Engine, OpenOptions};
+use super::super::{lease_state::LeaseState, Engine, OpenOptions};
 use super::{
     provider_kind, redact_endpoint_metadata, EngineStartup, FacadeAssembly,
     RuntimeRecoveryMaterialization, RuntimeStorageMaterialization, StartedRuntime, StartupLease,
@@ -55,10 +55,6 @@ impl FacadeAssembly {
         mut startup_lease: StartupLease,
         started: StartedRuntime,
     ) -> MidgeResult<Engine> {
-        let column_families = dashmap::DashMap::new();
-        let default_handle = ColumnFamilyHandle::new(0, "default".to_string());
-        column_families.insert(default_handle.id(), default_handle);
-
         let ingest_coordinators = dashmap::DashMap::new();
         let default_coordinator = Arc::new(ingest::IngestCoordinator::new(0));
         ingest_coordinators.insert(0, default_coordinator);
@@ -67,9 +63,6 @@ impl FacadeAssembly {
 
         for cf_meta in &started.recovered_cf_metas {
             if cf_meta.id != 0 && cf_meta.deleted_at.is_none() {
-                let handle = ColumnFamilyHandle::new(cf_meta.id, cf_meta.name.clone());
-                column_families.insert(cf_meta.id, handle);
-
                 let coordinator = Arc::new(ingest::IngestCoordinator::new(cf_meta.id));
                 ingest_coordinators.insert(cf_meta.id, coordinator);
             }
@@ -115,7 +108,6 @@ impl FacadeAssembly {
                 started.recovered_sequence,
             )),
             next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
-            column_families,
             lease_state: LeaseState::new(lease, lease_guard, lease_heartbeat, hybrid_storage),
             ingest_coordinators,
             transaction_memory_pool: Arc::new(

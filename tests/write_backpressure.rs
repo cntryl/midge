@@ -165,3 +165,55 @@ fn should_enforce_pending_byte_limit_before_the_l0_hard_ceiling() -> MidgeResult
     drop(read);
     reopened.shutdown(Duration::from_secs(10))
 }
+
+#[test]
+fn should_clear_dropped_family_debt_while_an_old_snapshot_pins_its_ssts() -> MidgeResult<()> {
+    // Arrange: the dropped family owns all of the global compaction debt, and
+    // an older transaction keeps its SSTs available for snapshot reads.
+    let directory = tempfile::tempdir().unwrap();
+    let mut engine = Engine::open(
+        OpenOptions::local(directory.path())
+            .goal(cntryl_midge::Goal::Economy)
+            .background_compaction(false)
+            .write_backpressure(WriteBackpressureConfig {
+                pending_compaction_hard_limit: Some(2),
+                ..Default::default()
+            })
+            .build()?,
+    )?;
+    let family = engine.create_column_family("pinned-debt")?;
+    for ordinal in 0_u32..4 {
+        let mut tx = engine.begin_tx(family.id(), TransactionMode::ReadWrite)?;
+        tx.put(ordinal.to_be_bytes().to_vec(), b"value".to_vec(), None)?;
+        tx.commit(WriteOptions::sync())?;
+        engine.flush_cf(&family)?;
+    }
+    let snapshot = engine.begin_tx(family.id(), TransactionMode::ReadOnly)?;
+    assert!(
+        engine
+            .metrics()
+            .get_runtime_metrics()?
+            .estimated_pending_compaction_bytes
+            >= 2
+    );
+
+    // Act
+    engine.drop_column_family(family.id())?;
+    let cleared = engine.wait_for_write_stall_clear(0, Duration::from_millis(500))?;
+    let debt = engine
+        .metrics()
+        .get_runtime_metrics()?
+        .estimated_pending_compaction_bytes;
+    let retained_value = snapshot.get(&0_u32.to_be_bytes())?;
+
+    // Assert: retaining old data must not charge an uncompactable family to
+    // new writers, and the pre-drop snapshot must stay readable.
+    assert!(
+        cleared,
+        "the dropped family no longer creates compaction debt"
+    );
+    assert_eq!(debt, 0);
+    assert_eq!(retained_value.as_deref(), Some(b"value".as_slice()));
+    drop(snapshot);
+    engine.shutdown(Duration::from_secs(10))
+}

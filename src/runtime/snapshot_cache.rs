@@ -8,6 +8,7 @@
 use crate::runtime::read_snapshot::ReadSnapshot;
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ struct FamilySnapshot {
 pub(crate) struct SnapshotCache {
     families: DashMap<u32, ArcSwap<FamilySnapshot>>,
     applied_sequence: AtomicU64,
+    family_catalog: ArcSwap<HashMap<u32, String>>,
 }
 
 impl SnapshotCache {
@@ -26,6 +28,7 @@ impl SnapshotCache {
         Self {
             families: DashMap::new(),
             applied_sequence: AtomicU64::new(0),
+            family_catalog: ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
@@ -45,6 +48,16 @@ impl SnapshotCache {
 
     pub fn retain_families(&self, is_live: impl Fn(u32) -> bool) {
         self.families.retain(|cf_id, _| is_live(*cf_id));
+    }
+
+    /// Publish the runtime's committed family catalog, independent of any
+    /// caller waiting for a DDL response.
+    pub fn publish_family_catalog(&self, families: HashMap<u32, String>) {
+        self.family_catalog.store(Arc::new(families));
+    }
+
+    pub fn family_catalog(&self) -> Arc<HashMap<u32, String>> {
+        self.family_catalog.load_full()
     }
 
     pub fn load_family(&self, cf_id: u32) -> Option<(u64, Arc<ReadSnapshot>)> {

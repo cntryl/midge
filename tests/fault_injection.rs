@@ -110,6 +110,232 @@ mod failure_injection {
         assert!(reopened.get_column_family("drop-atomic").is_none());
     }
 
+    fn assert_uncertain_drop_fences_writes(point: &str) {
+        // Arrange: a drop journal write may have taken effect. The caller must
+        // not lose a later accepted write.
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let db_path = temp_dir.path();
+        let mut engine = open_local_engine(db_path);
+        let family = engine
+            .create_column_family("uncertain-drop")
+            .expect("create family");
+        write_cf_value(&engine, &family, b"seed", b"value");
+        engine.flush_cf(&family).expect("flush before drop");
+        let default = default_cf(&engine);
+        write_cf_value(&engine, &default, b"retained", b"before-error");
+        let scenario = fail::FailScenario::setup();
+        fail::cfg(point, "1*return->off").expect("fail drop journal publication");
+
+        // Act
+        let drop_result = engine.drop_column_family(family.id());
+        fail::remove(point);
+        let write_result = engine
+            .begin_tx(family.id(), TransactionMode::ReadWrite)
+            .and_then(|mut tx| {
+                tx.put(b"after-error".to_vec(), b"acknowledged".to_vec(), None)?;
+                tx.commit(WriteOptions::sync())
+            });
+        let retry_drop = engine.drop_column_family(family.id());
+        let retry_create = engine.create_column_family("must-not-create");
+        let other_write = engine
+            .begin_tx(default.id(), TransactionMode::ReadWrite)
+            .and_then(|mut tx| {
+                tx.put(b"other".to_vec(), b"value".to_vec(), None)?;
+                tx.commit(WriteOptions::sync())
+            });
+        let shutdown_result = engine.shutdown(std::time::Duration::from_secs(5));
+        drop(engine);
+        let reopened = Engine::open(OpenOptions::local(db_path).build().expect("options"));
+        scenario.teardown();
+
+        // Assert: neither family nor metadata can advance until restart has
+        // resolved which complete journal records survived.
+        assert!(
+            matches!(drop_result, Err(MidgeError::OutcomeUnknown(_))),
+            "{drop_result:?}"
+        );
+        assert!(
+            matches!(write_result, Err(MidgeError::Fenced(_))),
+            "{write_result:?}"
+        );
+        assert!(
+            matches!(other_write, Err(MidgeError::Fenced(_))),
+            "{other_write:?}"
+        );
+        assert!(
+            matches!(retry_drop, Err(MidgeError::Fenced(_))),
+            "{retry_drop:?}"
+        );
+        assert!(
+            matches!(retry_create, Err(MidgeError::Fenced(_))),
+            "{retry_create:?}"
+        );
+        assert!(shutdown_result.is_ok(), "{shutdown_result:?}");
+        let reopened = reopened.expect("recover after uncertain drop");
+        assert_eq!(
+            read_cf_value(&reopened, &default_cf(&reopened), b"retained"),
+            Some(Bytes::from_static(b"before-error"))
+        );
+        if let Some(family) = reopened.get_column_family("uncertain-drop") {
+            assert_eq!(
+                read_cf_value(&reopened, &family, b"seed"),
+                Some(Bytes::from_static(b"value"))
+            );
+            assert_eq!(read_cf_value(&reopened, &family, b"after-error"), None);
+        }
+    }
+
+    #[test]
+    fn should_not_acknowledge_lost_writes_when_drop_journal_sync_fails() {
+        // Arrange
+        let point = "midge::manifest::inject_required_sync_failure";
+        // Act
+        assert_uncertain_drop_fences_writes(point);
+        // Assert: the helper checks fencing and recovered authority.
+    }
+
+    #[test]
+    fn should_fence_when_drop_journal_marker_write_fails() {
+        // Arrange
+        let point = "midge::manifest::inject_fsync_marker_write_failure";
+        // Act
+        assert_uncertain_drop_fences_writes(point);
+        // Assert: the helper checks fencing and recovered authority.
+    }
+
+    #[test]
+    fn should_fence_when_drop_visibility_fails_after_journal_commit() {
+        // Arrange
+        let point = "midge::ddl::after_local_journal_before_memory";
+        // Act
+        assert_uncertain_drop_fences_writes(point);
+        // Assert: the helper checks fencing and recovered authority.
+    }
+
+    fn assert_ddl_outcome_unknown_when_runtime_panics_after_journal(drop_family: bool) {
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut engine = open_local_engine(temp_dir.path());
+        let family = drop_family.then(|| {
+            engine
+                .create_column_family("panic-boundary")
+                .expect("create family before drop")
+        });
+        let scenario = fail::FailScenario::setup();
+        let point = "midge::ddl::after_local_journal_before_memory";
+        fail::cfg(point, "1*panic->off").expect("panic after the DDL journal commit");
+
+        let result = if let Some(family) = family {
+            engine.drop_column_family(family.id())
+        } else {
+            engine.create_column_family("panic-boundary").map(|_| ())
+        };
+        fail::remove(point);
+        let _shutdown_result = engine.shutdown(std::time::Duration::from_secs(5));
+        drop(engine);
+        scenario.teardown();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let reopened = loop {
+            let options = OpenOptions::local(temp_dir.path())
+                .background_compaction(false)
+                .build()
+                .expect("local options");
+            match Engine::open(options) {
+                Ok(reopened) => break reopened,
+                Err(MidgeError::LeaseHeld(_)) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("reopen after runtime exit: {error:?}"),
+            }
+        };
+
+        assert_eq!(
+            reopened.get_column_family("panic-boundary").is_none(),
+            drop_family,
+            "recovery must apply the committed DDL"
+        );
+        assert!(
+            matches!(result, Err(MidgeError::OutcomeUnknown(_))),
+            "an admitted DDL operation that lost its response must be uncertain: {result:?}"
+        );
+    }
+
+    #[test]
+    fn should_report_unknown_when_runtime_panics_after_drop_journal_commit() {
+        // Arrange and act
+        assert_ddl_outcome_unknown_when_runtime_panics_after_journal(true);
+        // Assert: the helper checks the response and recovered authority.
+    }
+
+    #[test]
+    fn should_report_unknown_when_runtime_panics_after_create_journal_commit() {
+        // Arrange and act
+        assert_ddl_outcome_unknown_when_runtime_panics_after_journal(false);
+        // Assert: the helper checks the response and recovered authority.
+    }
+
+    #[test]
+    fn should_fence_until_reopen_when_create_journal_sync_fails() {
+        // Arrange
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut engine = open_local_engine(temp_dir.path());
+        let scenario = fail::FailScenario::setup();
+        fail::cfg(
+            "midge::manifest::inject_required_sync_failure",
+            "1*return->off",
+        )
+        .expect("fail required create sync");
+
+        // Act
+        let create_result = engine.create_column_family("uncertain-create");
+        fail::remove("midge::manifest::inject_required_sync_failure");
+        let retry = engine.create_column_family("uncertain-create");
+        let default = default_cf(&engine);
+        let write = engine
+            .begin_tx(default.id(), TransactionMode::ReadWrite)
+            .and_then(|mut tx| {
+                tx.put(b"during-fence".to_vec(), b"value".to_vec(), None)?;
+                tx.commit(WriteOptions::sync())
+            });
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown");
+        drop(engine);
+        let mut reopened = open_local_engine(temp_dir.path());
+        let family = reopened
+            .create_column_family("uncertain-create")
+            .expect("reconcile family after reopen");
+        write_cf_value(&reopened, &family, b"after-reopen", b"value");
+        reopened
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown reopened");
+        drop(reopened);
+        let recovered = open_local_engine(temp_dir.path());
+        let recovered_family = recovered
+            .get_column_family("uncertain-create")
+            .expect("recovered family");
+        let recovered_value = read_cf_value(&recovered, &recovered_family, b"after-reopen");
+        scenario.teardown();
+
+        // Assert: the uncertain create cannot be retried in-process, while
+        // reopening restores a usable, single authoritative family.
+        assert!(
+            matches!(create_result, Err(MidgeError::OutcomeUnknown(_))),
+            "{create_result:?}"
+        );
+        assert!(matches!(retry, Err(MidgeError::Fenced(_))), "{retry:?}");
+        assert!(matches!(write, Err(MidgeError::Fenced(_))), "{write:?}");
+        assert_eq!(recovered_value, Some(Bytes::from_static(b"value")));
+    }
+
     #[test]
     fn should_reject_column_family_create_when_wal_sync_fails() {
         // Arrange
@@ -3022,6 +3248,284 @@ mod failure_injection {
         assert_visible(&reopened, &cf, b"post", b"value-post");
         assert_visible(&reopened, &other, b"other", b"value-other");
         shutdown_engine(reopened);
+    }
+
+    #[test]
+    fn should_reconcile_committed_drop_when_the_caller_times_out_after_authority_switch() {
+        // Arrange: hold the runtime after its durable drop, before it can
+        // answer the caller or finish auxiliary metadata work.
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let options = OpenOptions::local(temp_dir.path())
+            .background_compaction(false)
+            .storage_io_timeout(std::time::Duration::from_millis(900))
+            .runtime_response_timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("options");
+        let mut engine = Engine::open(options.clone()).expect("open engine");
+        let cf = engine
+            .create_column_family("timed-drop")
+            .expect("create family");
+        let scenario = fail::FailScenario::setup();
+        let point = "midge::ddl::after_drop_local_commit_before_metadata_mirror";
+        let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam::channel::bounded::<()>(1);
+        fail::cfg_callback(point, move || {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+        })
+        .expect("hold committed drop");
+
+        // Act: the response deadline passes while the committed drop is held.
+        let result = std::thread::scope(|scope| {
+            let caller = scope.spawn(|| engine.drop_column_family(cf.id()));
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("drop reached the committed boundary");
+            let result = caller.join().expect("join drop caller");
+            release_tx.send(()).expect("release committed drop");
+            result
+        });
+        fail::remove(point);
+        engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime completed drop");
+        let live_family = engine.get_column_family("timed-drop");
+        let still_listed = engine
+            .list_column_families()
+            .expect("list live families")
+            .iter()
+            .any(|family| family.id() == cf.id());
+        let old_handle_result = engine.begin_tx(cf.id(), TransactionMode::ReadOnly);
+        let old_handle_rejected = matches!(&old_handle_result, Err(MidgeError::InvalidArgument(_)));
+        drop(old_handle_result);
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown");
+        drop(engine);
+        let mut reopened = Engine::open(options).expect("reopen engine");
+        let recovered_family = reopened.get_column_family("timed-drop");
+        reopened
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown reopened");
+        scenario.teardown();
+
+        // Assert: committed authority survives restart and the live public
+        // registry must agree; a timed-out committed drop has unknown outcome.
+        assert!(
+            recovered_family.is_none(),
+            "the committed drop must survive restart"
+        );
+        assert!(
+            live_family.is_none(),
+            "the live registry retained a dropped family: {result:?}"
+        );
+        assert!(
+            !still_listed,
+            "the dropped family must not appear in listings"
+        );
+        assert!(
+            old_handle_rejected,
+            "the dropped family must reject new transactions"
+        );
+        assert!(
+            matches!(result, Err(MidgeError::OutcomeUnknown(_))),
+            "an admitted drop with uncertain outcome must not report an ordinary timeout: {result:?}"
+        );
+    }
+
+    #[test]
+    fn should_reconcile_committed_create_when_the_caller_times_out_after_authority_switch() {
+        // Arrange
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let options = OpenOptions::local(temp_dir.path())
+            .background_compaction(false)
+            .storage_io_timeout(std::time::Duration::from_millis(900))
+            .runtime_response_timeout(std::time::Duration::from_secs(1))
+            .build()
+            .expect("options");
+        let mut engine = Engine::open(options.clone()).expect("open engine");
+        let scenario = fail::FailScenario::setup();
+        let point = "midge::ddl::after_create_local_commit_before_metadata_mirror";
+        let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam::channel::bounded::<()>(1);
+        fail::cfg_callback(point, move || {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv_timeout(std::time::Duration::from_secs(10));
+        })
+        .expect("hold committed create");
+
+        // Act: the response deadline passes after the family is durable.
+        let (result, visible_during_hold) = std::thread::scope(|scope| {
+            let caller = scope.spawn(|| engine.create_column_family("timed-create"));
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("create reached the committed boundary");
+            let visible_during_hold = engine.get_column_family("timed-create").is_some();
+            let result = caller.join().expect("join create caller");
+            release_tx.send(()).expect("release committed create");
+            (result, visible_during_hold)
+        });
+        fail::remove(point);
+        engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("runtime completed create");
+        let live_family = engine.get_column_family("timed-create");
+        let live_id = live_family.as_ref().map(|family| family.id());
+        let listed = engine
+            .list_column_families()
+            .expect("list live families")
+            .iter()
+            .any(|family| Some(family.id()) == live_id);
+        let live_read = live_family.as_ref().map(|family| {
+            engine
+                .begin_tx(family.id(), TransactionMode::ReadOnly)
+                .and_then(|transaction| transaction.get(b"missing"))
+        });
+        engine
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown");
+        drop(engine);
+        let mut reopened = Engine::open(options).expect("reopen engine");
+        let recovered_family = reopened.get_column_family("timed-create");
+        reopened
+            .shutdown(std::time::Duration::from_secs(5))
+            .expect("shutdown reopened");
+        scenario.teardown();
+
+        // Assert
+        assert!(
+            recovered_family.is_some(),
+            "the committed create must survive restart"
+        );
+        assert!(
+            visible_during_hold,
+            "committed create must be visible before auxiliary mirror work settles"
+        );
+        assert!(
+            live_family.is_some(),
+            "the live registry missed a committed family: {result:?}"
+        );
+        assert!(listed, "the committed family must appear in listings");
+        assert!(
+            matches!(live_read, Some(Ok(None))),
+            "the committed family must accept reads"
+        );
+        assert!(
+            matches!(result, Err(MidgeError::OutcomeUnknown(_))),
+            "an admitted create with uncertain outcome must not report an ordinary timeout: {result:?}"
+        );
+    }
+
+    #[test]
+    fn should_wake_waiter_when_drop_removes_pending_compaction_debt() {
+        // Arrange: four real L0 files in one family trigger the global pending
+        // byte limit and stall an unrelated family's already waiting caller.
+        use std::time::Duration;
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temp dir");
+        let engine = Engine::open(
+            OpenOptions::local(temp_dir.path())
+                .goal(cntryl_midge::Goal::Economy)
+                .background_compaction(false)
+                .write_backpressure(cntryl_midge::WriteBackpressureConfig {
+                    pending_compaction_hard_limit: Some(2),
+                    ..Default::default()
+                })
+                .build()
+                .expect("options"),
+        )
+        .expect("open engine");
+        let family = engine.create_column_family("debt").expect("create family");
+        let unrelated = engine
+            .create_column_family("unrelated")
+            .expect("create unrelated family");
+        for ordinal in 0_u32..4 {
+            let mut tx = engine
+                .begin_tx(family.id(), TransactionMode::ReadWrite)
+                .expect("begin write");
+            tx.put(ordinal.to_be_bytes().to_vec(), b"value".to_vec(), None)
+                .expect("put value");
+            tx.commit(WriteOptions::sync()).expect("commit");
+            engine.flush_cf(&family).expect("flush");
+        }
+        assert!(
+            engine
+                .metrics()
+                .get_runtime_metrics()
+                .unwrap()
+                .estimated_pending_compaction_bytes
+                >= 2
+        );
+        engine
+            .drop_column_family(unrelated.id())
+            .expect("drop unrelated family");
+        assert!(
+            !engine
+                .wait_for_write_stall_clear(0, Duration::from_millis(20))
+                .expect("check retained debt"),
+            "dropping an unrelated family must not clear another family's debt"
+        );
+        let scenario = fail::FailScenario::setup();
+        let point = "midge::ddl::after_drop_local_commit_before_metadata_mirror";
+        let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
+        let (release_tx, release_rx) = crossbeam::channel::bounded::<()>(1);
+        fail::cfg_callback(point, move || {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+        })
+        .expect("hold auxiliary drop work");
+
+        // Act: drop after the waiter has remained parked; keep later auxiliary
+        // work held until the waiter has either woken or reached its deadline.
+        let (wait_result, drop_result) = std::thread::scope(|scope| {
+            let (started_tx, started_rx) = crossbeam::channel::bounded(1);
+            let (result_tx, result_rx) = crossbeam::channel::bounded(1);
+            let engine_ref = &engine;
+            let waiter = scope.spawn(move || {
+                started_tx.send(()).unwrap();
+                result_tx
+                    .send(engine_ref.wait_for_write_stall_clear(0, Duration::from_secs(2)))
+                    .unwrap();
+            });
+            started_rx.recv().expect("waiter started");
+            assert!(result_rx.recv_timeout(Duration::from_millis(200)).is_err());
+            let dropper = scope.spawn(|| engine.drop_column_family(family.id()));
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("drop committed");
+            let wait_result = result_rx
+                .recv_timeout(Duration::from_secs(3))
+                .expect("wait result");
+            release_tx.send(()).expect("release drop");
+            let drop_result = dropper.join().expect("join dropper");
+            waiter.join().expect("join waiter");
+            (wait_result, drop_result)
+        });
+        fail::remove(point);
+        scenario.teardown();
+        let remaining_debt = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("remaining pressure")
+            .estimated_pending_compaction_bytes;
+
+        // Assert: the committed drop already removed the last source of debt.
+        assert!(drop_result.is_ok(), "{drop_result:?}");
+        assert_eq!(remaining_debt, 0, "the dropped family owned all debt");
+        assert!(
+            matches!(wait_result, Ok(true)),
+            "waiter saw {wait_result:?}"
+        );
     }
 
     #[test]
@@ -7481,15 +7985,22 @@ mod cloud_crash_recovery {
                 "one sweep turn must stay within its shared delete budget"
             );
             if orphan_ssts.iter().all(|orphan_sst| !orphan_sst.exists()) {
-                assert!(current.cloud_orphan_list_attempts > 0);
-                assert_eq!(current.cloud_orphan_probes, orphan_ssts.len() as u64);
+                // The sweep worker can delete more objects between the earlier
+                // metrics snapshot and this filesystem observation. Read the
+                // counters after observing completion before checking totals.
+                let completed = engine
+                    .metrics()
+                    .get_runtime_metrics()
+                    .expect("read completed restarted sweep metrics");
+                assert!(completed.cloud_orphan_list_attempts > 0);
+                assert_eq!(completed.cloud_orphan_probes, orphan_ssts.len() as u64);
                 assert_eq!(
-                    current.cloud_orphan_delete_attempts,
+                    completed.cloud_orphan_delete_attempts,
                     orphan_ssts.len() as u64,
                     "every rediscovered identity must be deleted exactly once"
                 );
                 // One task can inventory SST and retired WAL separately.
-                assert!(current.cloud_orphan_list_attempts <= 2);
+                assert!(completed.cloud_orphan_list_attempts <= 2);
                 return;
             }
             assert!(
@@ -9864,6 +10375,70 @@ mod cloud_ddl_two_phase_hardening {
         engine
             .shutdown(Duration::from_secs(3))
             .expect("shutdown cloud engine");
+    }
+
+    #[test]
+    fn should_publish_cloud_family_catalog_when_committed_ddl_response_times_out() {
+        // Arrange: hold each DDL after its remote authority switch, before the
+        // caller receives the result or local visibility settles.
+        let _guard = DDL_TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for drop_family in [false, true] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            let options = OpenOptions::cloud_simulated(temp.path(), "ddl-timeout", "catalog/")
+                .background_compaction(false)
+                .storage_io_timeout(Duration::from_millis(900))
+                .runtime_response_timeout(Duration::from_secs(1))
+                .build()
+                .expect("cloud options");
+            let engine = Engine::open(options.clone()).expect("open cloud engine");
+            let family = drop_family.then(|| {
+                engine
+                    .create_column_family("timed-cloud")
+                    .expect("seed family")
+            });
+            let scenario = fail::FailScenario::setup();
+            let point = "midge::ddl::after_remote_cas";
+            let (entered_tx, entered_rx) = crossbeam::channel::bounded(1);
+            let (release_tx, release_rx) = crossbeam::channel::bounded::<()>(1);
+            fail::cfg_callback(point, move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            })
+            .expect("hold committed DDL");
+
+            // Act
+            let result = std::thread::scope(|scope| {
+                let caller = scope.spawn(|| {
+                    family.as_ref().map_or_else(
+                        || engine.create_column_family("timed-cloud").map(|_| ()),
+                        |family| engine.drop_column_family(family.id()),
+                    )
+                });
+                if entered_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                    let early_result = caller.join().expect("join DDL caller");
+                    panic!("DDL did not reach the committed boundary; drop={drop_family}, result={early_result:?}");
+                }
+                let result = caller.join().expect("join DDL caller");
+                release_tx.send(()).expect("release DDL");
+                result
+            });
+            fail::remove(point);
+            engine.metrics().get_runtime_metrics().expect("DDL settled");
+            let live_exists = engine.get_column_family("timed-cloud").is_some();
+            shutdown(engine);
+            let reopened = Engine::open(options).expect("reopen cloud engine");
+            let recovered_exists = reopened.get_column_family("timed-cloud").is_some();
+            shutdown(reopened);
+            scenario.teardown();
+
+            // Assert: live and recovered views agree with committed authority.
+            assert_eq!(live_exists, !drop_family, "live catalog: {result:?}");
+            assert_eq!(recovered_exists, !drop_family, "recovered catalog");
+            assert!(matches!(result, Err(MidgeError::OutcomeUnknown(_))));
+        }
     }
 
     #[test]

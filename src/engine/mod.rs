@@ -46,9 +46,6 @@ pub use api::{
     ScanIterator, Storage, Transaction, TransactionMode, Value, WorkloadProfile, WriteOptions,
 };
 pub use backup::{BackupManifest, BackupObject, BackupStorageKind};
-/// Registry of column families, keyed by column family ID
-type ColumnFamilyRegistry = dashmap::DashMap<ColumnFamilyId, ColumnFamilyHandle>;
-
 use lease_state::LeaseState;
 pub use metrics::EngineMetrics;
 pub use verification::StorageVerifier;
@@ -109,8 +106,6 @@ pub struct Engine {
     sequence: Arc<std::sync::atomic::AtomicU64>,
     /// Next snapshot ID counter (local only, not related to sequence numbers)
     next_snapshot_id: std::sync::atomic::AtomicU64,
-    /// Column families registry (CF ID -> Handle)
-    column_families: ColumnFamilyRegistry,
     lease_state: LeaseState,
     /// Per-CF ingest coordinators for write batching
     ingest_coordinators: dashmap::DashMap<ColumnFamilyId, Arc<ingest::IngestCoordinator>>,
@@ -254,12 +249,12 @@ impl Engine {
         if !self.runtime_handle.is_open() {
             return None;
         }
-        for entry in &self.column_families {
-            if entry.value().name() == name {
-                return Some(entry.value().clone());
-            }
-        }
-        None
+        self.runtime_handle
+            .snapshot_cache
+            .family_catalog()
+            .iter()
+            .find(|(_, family_name)| family_name.as_str() == name)
+            .map(|(id, family_name)| ColumnFamilyHandle::new(*id, family_name.clone()))
     }
 
     /// Check if the primary instance lease is healthy.
@@ -373,18 +368,26 @@ impl Engine {
             .runtime_handle
             .begin_snapshot_acquisition(self.sequence.load(std::sync::atomic::Ordering::SeqCst));
 
-        let Some(coordinator) = self
-            .ingest_coordinators
-            .get(&cf_id)
-            .map(|entry| Arc::clone(entry.value()))
-        else {
+        if !self
+            .runtime_handle
+            .snapshot_cache
+            .family_catalog()
+            .contains_key(&cf_id)
+        {
             return Err(MidgeError::InvalidArgument(format!(
                 "column family {cf_id} does not exist"
             )));
-        };
+        }
 
         let (start_sequence, read_snapshot) =
             self.acquire_transaction_snapshot(cf_id, is_read_only)?;
+
+        let coordinator = Arc::clone(
+            self.ingest_coordinators
+                .entry(cf_id)
+                .or_insert_with(|| Arc::new(ingest::IngestCoordinator::new(cf_id)))
+                .value(),
+        );
 
         let read_snapshot = Arc::new(
             (*read_snapshot)
@@ -720,30 +723,22 @@ impl Engine {
     /// Returns [`MidgeError::InvalidArgument`] when a name violates those
     /// restrictions. Returns
     /// [`MidgeError::ResourceLimit`] when the column-family ID space is
-    /// exhausted. Other errors report persistence or runtime failures.
+    /// exhausted. [`MidgeError::OutcomeUnknown`] means the submitted create
+    /// may have committed after the caller stopped waiting, the runtime
+    /// exited, or a local journal write failed. Reconcile the family catalog
+    /// before retrying; an uncertain local journal write or runtime exit
+    /// requires reopening the engine.
     pub fn create_column_family(&self, name: &str) -> MidgeResult<ColumnFamilyHandle> {
-        let response = self.runtime_handle.send_and_wait_filtered(
-            RuntimeMsg::ManifestCreateColumnFamily {
-                request_id: next_request_id()?,
-                name: name.to_string(),
-            },
-            |resp| {
-                matches!(
-                    resp,
-                    RuntimeResponse::ColumnFamilyCreated { .. } | RuntimeResponse::Error { .. }
-                )
-            },
-        )?;
+        let response =
+            self.runtime_handle
+                .send_ddl_and_wait(RuntimeMsg::ManifestCreateColumnFamily {
+                    request_id: next_request_id()?,
+                    name: name.to_string(),
+                })?;
 
         match response {
             RuntimeResponse::ColumnFamilyCreated { cf_id, .. } => {
                 let handle = ColumnFamilyHandle::new(cf_id, name.to_string());
-                // Register CF in local registry
-                self.column_families.insert(cf_id, handle.clone());
-
-                // Start ingest coordinator for new CF
-                let coordinator = Arc::new(ingest::IngestCoordinator::new(cf_id));
-                self.ingest_coordinators.insert(cf_id, coordinator);
                 self.checkpoint_after_committed_ddl("create_column_family");
 
                 Ok(handle)
@@ -769,12 +764,17 @@ impl Engine {
     /// ask [`MidgeError::licenses_unflushed_discard`] rather than matching on
     /// a variant.
     ///
-    /// Every other error, [`MidgeError::Busy`] included, means the drop did
+    /// A definite rejection, [`MidgeError::Busy`] included, means the drop did
     /// not happen. `Busy` here reports in-flight flush publication, a remote
     /// DDL registry CAS conflict, an active storage-verification barrier, or
     /// shutdown -- conditions that clear on their own and say nothing about
     /// unflushed data. Retry the safe drop; never escalate to the destructive
-    /// variant on anything but the licence above.
+    /// variant on anything but the licence above. [`MidgeError::OutcomeUnknown`]
+    /// means an admitted drop may have committed after its response deadline,
+    /// a runtime exit, or a local journal write failure. Reconcile the family
+    /// catalog before retrying; an uncertain local journal write or runtime
+    /// exit requires reopening. A cloud DDL authority failure can also require
+    /// reconciliation before retrying.
     pub fn drop_column_family(&self, cf_id: ColumnFamilyId) -> MidgeResult<()> {
         self.drop_column_family_inner(cf_id, false)
     }
@@ -803,27 +803,23 @@ impl Engine {
         cf_id: ColumnFamilyId,
         discard_unflushed: bool,
     ) -> MidgeResult<()> {
-        let response = self.runtime_handle.send_and_wait_filtered(
-            RuntimeMsg::ManifestDropColumnFamily {
-                request_id: next_request_id()?,
-                cf_id,
-                discard_unflushed,
-            },
-            |resp| {
-                matches!(
-                    resp,
-                    RuntimeResponse::Ok { .. } | RuntimeResponse::Error { .. }
-                )
-            },
-        )?;
+        let response =
+            self.runtime_handle
+                .send_ddl_and_wait(RuntimeMsg::ManifestDropColumnFamily {
+                    request_id: next_request_id()?,
+                    cf_id,
+                    discard_unflushed,
+                });
 
-        match response {
+        if matches!(
+            response,
+            Ok(RuntimeResponse::Ok { .. }) | Err(MidgeError::OutcomeUnknown(_))
+        ) {
+            self.ingest_coordinators.remove(&cf_id);
+        }
+
+        match response? {
             RuntimeResponse::Ok { .. } => {
-                // Drop coordinator for this CF
-                self.ingest_coordinators.remove(&cf_id);
-
-                // Remove from local registry
-                self.column_families.remove(&cf_id);
                 self.checkpoint_after_committed_ddl("drop_column_family");
 
                 Ok(())
@@ -844,9 +840,11 @@ impl Engine {
     pub fn list_column_families(&self) -> MidgeResult<Vec<ColumnFamilyHandle>> {
         self.runtime_handle.ensure_open()?;
         Ok(self
-            .column_families
+            .runtime_handle
+            .snapshot_cache
+            .family_catalog()
             .iter()
-            .map(|ref_multi| ref_multi.value().clone())
+            .map(|(id, name)| ColumnFamilyHandle::new(*id, name.clone()))
             .collect())
     }
 

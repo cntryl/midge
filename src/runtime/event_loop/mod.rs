@@ -691,6 +691,11 @@ impl EventLoop {
         self.authority.fencing.check_health()
     }
 
+    fn local_ddl_requires_restart(&self) -> bool {
+        self.authority.fencing.ddl_authority_ambiguous
+            && self.actors.cloud_coordinator.hybrid_storage.is_none()
+    }
+
     fn validate_runtime_writer_lease_within(
         &self,
         deadline: &crate::common::OperationDeadline,
@@ -723,6 +728,7 @@ impl EventLoop {
         self.authority.snapshot_cache = Some(cache);
         // Publish initial snapshot from current state
         self.publish_snapshot();
+        self.publish_family_catalog();
     }
 
     /// Publish current state to the lock-free snapshot cache.
@@ -732,10 +738,16 @@ impl EventLoop {
     #[inline]
     pub(super) fn publish_snapshot(&self) {
         if self.state.write_pressure.admission.tracks_pending_bytes() {
+            // A dropped family's SSTs may remain pinned for old snapshots,
+            // but they can no longer be compacted and must not stall writers.
             self.state.write_pressure.admission.update_manifest(
-                self.actors
-                    .compaction_actor
-                    .estimated_pending_bytes(&self.state.manifest.files),
+                self.actors.compaction_actor.estimated_pending_bytes(
+                    self.state
+                        .manifest
+                        .files
+                        .iter()
+                        .filter(|file| self.state.column_families.contains_key(&file.cf_id)),
+                ),
             );
         }
         if self.state.write_pressure.admission.enabled()
@@ -767,6 +779,28 @@ impl EventLoop {
                 read_resources.prune_to_live_ssts(&live_names);
             }
         }
+    }
+
+    /// Publish committed DDL visibility separately from caller responses.
+    pub(super) fn publish_family_catalog(&self) {
+        let Some(cache) = &self.authority.snapshot_cache else {
+            return;
+        };
+        let mut families = HashMap::with_capacity(self.state.column_families.len());
+        if self.state.column_families.contains_key(&0) {
+            families.insert(0, "default".to_string());
+        }
+        families.extend(
+            self.state
+                .manifest
+                .column_families
+                .iter()
+                .filter(|cf| {
+                    cf.deleted_at.is_none() && self.state.column_families.contains_key(&cf.id)
+                })
+                .map(|cf| (cf.id, cf.name.clone())),
+        );
+        cache.publish_family_catalog(families);
     }
 
     /// Ordinary commits update only their families. Lifecycle and manifest

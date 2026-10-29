@@ -437,7 +437,10 @@ pub struct CompactionJobActor {
 impl CompactionJobActor {
     /// Conservative excess bytes in levels which can move to a deeper level.
     /// This is an admission estimate, not a prediction of physical rewrite I/O.
-    pub(crate) fn estimated_pending_bytes(&self, files: &[crate::metadata::FileMeta]) -> u64 {
+    pub(crate) fn estimated_pending_bytes<'a>(
+        &self,
+        files: impl IntoIterator<Item = &'a crate::metadata::FileMeta>,
+    ) -> u64 {
         let mut levels = std::collections::BTreeMap::<(u32, u32), (u64, usize)>::new();
         for file in files {
             let entry = levels.entry((file.cf_id, file.level)).or_default();
