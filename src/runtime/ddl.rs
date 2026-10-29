@@ -599,11 +599,37 @@ fn apply_local_edit_for(
     let journaled_id = if memory_mode {
         None
     } else {
-        Some(state.manifest_store.append_for(origin, edit)?)
+        Some(
+            state
+                .manifest_store
+                .append_ddl_for(origin, edit)
+                .map_err(|failure| {
+                    if failure.may_have_written {
+                        MidgeError::OutcomeUnknown(format!(
+                            "column-family journal append may have committed; restart and reconcile before retrying: {}",
+                            failure.error
+                        ))
+                    } else {
+                        failure.error
+                    }
+                })?,
+        )
     };
-    crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
-        MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
-    ));
+    let visibility_result: MidgeResult<()> = (|| {
+        crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
+            MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
+        ));
+        Ok(())
+    })();
+    if let Err(error) = visibility_result {
+        return if journaled_id.is_some() {
+            Err(MidgeError::OutcomeUnknown(format!(
+                "column-family journal committed before visibility failed; restart and reconcile: {error}"
+            )))
+        } else {
+            Err(error)
+        };
+    }
     prepared.commit();
     if let Some(edit_id) = journaled_id {
         state.manifest.note_applied_journal_edit(edit_id);
@@ -898,7 +924,12 @@ pub(crate) fn execute_within(
         return Ok(());
     }
     let Some(storage) = storage else {
-        return apply_local_edit(state, edit);
+        let result = apply_local_edit(state, edit);
+        if matches!(result, Err(MidgeError::OutcomeUnknown(_))) {
+            state.mark_ddl_authority_ambiguous();
+            state.mark_persistence_anomaly();
+        }
+        return result;
     };
 
     let (remote, proof) = read_remote_registry_within(storage, deadline)?;

@@ -164,6 +164,15 @@ unflushed data: it also reports in-flight flush publication, a remote DDL
 registry CAS conflict, an active storage-verification barrier, and shutdown.
 Those clear on their own, so retry the safe drop rather than escalating.
 
+If a submitted create or drop outlives the caller's runtime response deadline,
+it returns `MidgeError::OutcomeUnknown`: the operation may already be committed
+or may still settle. Do not retry blindly. Reconcile the live family catalog
+after the operation settles, or reopen and inspect recovered authority. Cloud
+DDL authority can also remain fenced until its prepared edit is reconciled.
+If a local DDL journal write fails after it starts, its outcome is also
+unknown. The engine fences further writes and metadata changes until it is
+reopened; inspect the recovered family catalog before retrying.
+
 Reclamation is callerless once the drop is locally committed. If authoritative
 manifest publication times out, Midge retains the SSTs and retries publication
 with bounded maintenance attempts; physical deletion starts only after that

@@ -961,6 +961,33 @@ fn should_count_transaction_queue_rejections_once_without_retaining_requests() {
 }
 
 #[test]
+fn should_keep_ddl_rejection_definite_when_the_runtime_queue_is_full() {
+    // Arrange: the runtime cannot receive either DDL request.
+    let (_runtime, mut handle) = Runtime::new();
+    let (tx, rx) = crossbeam::channel::bounded(1);
+    handle.msg_tx = tx;
+    handle.send(RuntimeMsg::RetryGc).expect("fill queue");
+
+    // Act
+    let create = handle.send_ddl_and_wait(RuntimeMsg::ManifestCreateColumnFamily {
+        request_id: 7004,
+        name: "not-admitted".to_string(),
+    });
+    let drop = handle.send_ddl_and_wait(RuntimeMsg::ManifestDropColumnFamily {
+        request_id: 7005,
+        cf_id: 1,
+        discard_unflushed: false,
+    });
+
+    // Assert: neither request was admitted, so retryable backpressure must not
+    // be converted to an unknown outcome.
+    assert!(matches!(create, Err(MidgeError::WriteStall(_))));
+    assert!(matches!(drop, Err(MidgeError::WriteStall(_))));
+    assert!(matches!(rx.try_recv(), Ok(RuntimeMsg::RetryGc)));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn should_reject_new_transactions_given_runtime_is_closing_when_beginning() {
     // Arrange
     let lifecycle = Arc::new(RuntimeLifecycle::new());

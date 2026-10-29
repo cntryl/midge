@@ -15,7 +15,7 @@
 //! the
 //! next operation re-reads the position from disk and repairs a torn tail.
 
-use crate::common::MidgeResult;
+use crate::common::{MidgeError, MidgeResult};
 use crate::io::traits::{Fs, FsError, FsPath};
 use crate::metadata::accounted_fs::account_fs;
 #[cfg(any(test, feature = "internal-testing"))]
@@ -40,6 +40,11 @@ struct KnownPosition {
 struct FileLengths {
     journal: u64,
     snapshot: u64,
+}
+
+pub(crate) struct DdlAppendFailure {
+    pub(crate) error: MidgeError,
+    pub(crate) may_have_written: bool,
 }
 
 // Candidate bounds for #752. One bounded flush record may cross the byte
@@ -160,13 +165,41 @@ impl ManifestStore {
     }
 
     pub(crate) fn append_for(&self, origin: Origin, edit: &ManifestEdit) -> MidgeResult<u64> {
+        self.append_for_with_progress(origin, edit, None)
+    }
+
+    pub(crate) fn append_ddl_for(
+        &self,
+        origin: Origin,
+        edit: &ManifestEdit,
+    ) -> Result<u64, DdlAppendFailure> {
+        let write_started = std::cell::Cell::new(false);
+        self.append_for_with_progress(origin, edit, Some(&write_started))
+            .map_err(|error| DdlAppendFailure {
+                error,
+                may_have_written: write_started.get(),
+            })
+    }
+
+    fn append_for_with_progress(
+        &self,
+        origin: Origin,
+        edit: &ManifestEdit,
+        write_started: Option<&std::cell::Cell<bool>>,
+    ) -> MidgeResult<u64> {
         let operation = self
             .accounting
             .begin(OperationKind::JournalAppend, origin, self.medium);
         let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
         let result = edit.validate_for_append().and_then(|()| {
             self.write_next_with_fs(&fs, |fs, edit_id| {
-                journal::append_validated_edit_with_id_observed(fs, edit, edit_id, Some(&operation))
+                journal::append_validated_edit_with_id_observed(
+                    fs,
+                    edit,
+                    edit_id,
+                    Some(&operation),
+                    write_started,
+                )
             })
         });
         operation.finish(result.is_ok());
@@ -191,6 +224,7 @@ impl ManifestStore {
                         edits,
                         edit_id,
                         Some(&operation),
+                        None,
                     )
                 })
             });

@@ -15,7 +15,7 @@ impl RuntimeFence {
     pub(super) fn check_health(&self) -> crate::common::MidgeResult<()> {
         if self.ddl_authority_ambiguous {
             return Err(crate::common::MidgeError::Fenced(
-                "DDL authority is ambiguous; refusing writes until prepared DDL is reconciled"
+                "DDL authority is ambiguous; refusing writes until it is reconciled or the engine is reopened"
                     .into(),
             ));
         }

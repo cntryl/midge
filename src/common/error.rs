@@ -73,8 +73,8 @@ pub enum MidgeError {
     /// The operation did not complete before its caller-provided deadline.
     Timeout(String),
 
-    /// The write may be committed even though acknowledgement failed. Do not
-    /// retry blindly; reconcile the transaction after recovery.
+    /// The write or column-family change may be committed even though
+    /// acknowledgement failed. Do not retry blindly; reconcile its outcome.
     OutcomeUnknown(String),
 
     /// A bounded resource pool cannot admit more work.
@@ -84,9 +84,10 @@ pub enum MidgeError {
     /// sits in the active memtable.
     ///
     /// This is the only failure that licenses discarding that data. Every
-    /// other error, [`MidgeError::Busy`] included, means the drop did not
-    /// happen and must be retried, never escalated to the destructive
-    /// variant.
+    /// other definite rejection, [`MidgeError::Busy`] included, means the
+    /// drop did not happen and must be retried, never escalated to the
+    /// destructive variant. [`MidgeError::OutcomeUnknown`] requires
+    /// reconciliation before retrying.
     UnflushedDataPresent { cf_id: u32, bytes: usize },
 }
 
