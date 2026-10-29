@@ -542,6 +542,28 @@ fn local_edit_matches(state: &RuntimeState, edit: &ManifestEdit) -> bool {
     FamilyLifecycleEdit::of(edit).is_some_and(|edit| edit.is_reflected_in(&state.manifest))
 }
 
+fn apply_family_visibility(state: &mut RuntimeState, edit: &ManifestEdit) {
+    match edit {
+        ManifestEdit::CreateColumnFamily { id, name, .. } => {
+            state.column_families.entry(*id).or_insert_with(|| {
+                crate::runtime::state::ColumnFamilyState::new(*id, name.clone())
+            });
+        }
+        ManifestEdit::DropColumnFamilyAt { id, .. } => {
+            if let Some(family) = state.column_families.remove(id) {
+                let bytes = family
+                    .immutable_memtables
+                    .iter()
+                    .fold(family.memtable.size_bytes(), |total, memtable| {
+                        total.saturating_add(memtable.size_bytes())
+                    });
+                state.total_memtable_bytes = state.total_memtable_bytes.saturating_sub(bytes);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn apply_remote_committed_visibility(
     state: &mut RuntimeState,
     edit: &ManifestEdit,
@@ -550,17 +572,7 @@ fn apply_remote_committed_visibility(
         return Ok(());
     }
     state.manifest.apply_edit(edit)?;
-    match edit {
-        ManifestEdit::CreateColumnFamily { id, name, .. } => {
-            state.column_families.entry(*id).or_insert_with(|| {
-                crate::runtime::state::ColumnFamilyState::new(*id, name.clone())
-            });
-        }
-        ManifestEdit::DropColumnFamilyAt { id, .. } => {
-            state.column_families.remove(id);
-        }
-        _ => {}
-    }
+    apply_family_visibility(state, edit);
     Ok(())
 }
 
@@ -596,17 +608,7 @@ fn apply_local_edit_for(
     if let Some(edit_id) = journaled_id {
         state.manifest.note_applied_journal_edit(edit_id);
     }
-    match edit {
-        ManifestEdit::CreateColumnFamily { id, name, .. } => {
-            state.column_families.entry(*id).or_insert_with(|| {
-                crate::runtime::state::ColumnFamilyState::new(*id, name.clone())
-            });
-        }
-        ManifestEdit::DropColumnFamilyAt { id, .. } => {
-            state.column_families.remove(id);
-        }
-        _ => {}
-    }
+    apply_family_visibility(state, edit);
     Ok(())
 }
 
@@ -1001,6 +1003,10 @@ fn remote_cas_definitely_not_committed(
 ) -> bool {
     !failure.may_have_committed
 }
+
+#[cfg(test)]
+#[path = "ddl_drop_pressure_tests.rs"]
+mod drop_pressure_tests;
 
 #[cfg(test)]
 mod tests {
