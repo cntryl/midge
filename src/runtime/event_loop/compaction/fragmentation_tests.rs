@@ -1,5 +1,6 @@
 //! Real source-fragment computation and serialized manifest publication.
 
+use super::super::tests::receive_owned_compaction_completion;
 use super::{CompactionCoordinator, EventLoop};
 use crate::common::{MidgeError, MidgeResult};
 use crate::compaction::strategy::CompactionPurpose;
@@ -10,7 +11,7 @@ use crate::sst::traits::RawSstVersion;
 use crate::sst::SstFactory as _;
 use crate::types::EntryType;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(10);
 const SOURCE_KEYS: [&[u8]; 6] = [b"a0", b"b0", b"c0", b"d0", b"e0", b"f9"];
@@ -142,16 +143,17 @@ impl FragmentFixture {
 
     fn compute(&mut self, plan: CompactionPlan) -> MidgeResult<RuntimeMsg> {
         self.el.launch_compaction(plan)?;
-        let completion = self
-            .completions
-            .recv_timeout(WAIT)
-            .expect("real compute completion");
+        let completion = self.receive_compute();
         assert!(matches!(
             &completion,
             RuntimeMsg::CompactionComplete { succeeded: true, output_ssts, .. }
                 if output_ssts.len() >= 2
         ));
         Ok(completion)
+    }
+
+    fn receive_compute(&self) -> RuntimeMsg {
+        receive_owned_compaction_completion(&self.el, &self.completions, Instant::now() + WAIT)
     }
 
     fn publish(&mut self, completion: RuntimeMsg) {
@@ -211,10 +213,7 @@ impl FragmentFixture {
                 return Ok(());
             };
             self.el.launch_compaction(plan)?;
-            let completion = self
-                .completions
-                .recv_timeout(WAIT)
-                .expect("debt compute completion");
+            let completion = self.receive_compute();
             assert!(matches!(
                 &completion,
                 RuntimeMsg::CompactionComplete {
@@ -324,10 +323,7 @@ fn should_recover_fragmented_source_when_critical_l0_work_interrupts_promotion()
         let next = fixture.plan()?;
         assert_eq!(next.source_level, 0);
         fixture.el.launch_compaction(next)?;
-        let completion = fixture
-            .completions
-            .recv_timeout(WAIT)
-            .expect("critical L0 completion");
+        let completion = fixture.receive_compute();
         fixture.publish(completion);
         fixture.drain()?;
         assert!(!fixture.el.state.has_critical_l0_debt(0));
@@ -570,10 +566,7 @@ fn should_start_next_deep_level_job_after_publication_without_flush_or_timer() -
         .check_compaction(&fixture.el.state)?
         .expect("first deep-level debt");
     fixture.el.launch_compaction(first)?;
-    let completion = fixture
-        .completions
-        .recv_timeout(WAIT)
-        .expect("first compute completion");
+    let completion = fixture.receive_compute();
     assert!(matches!(
         completion,
         RuntimeMsg::CompactionComplete {
@@ -585,10 +578,7 @@ fn should_start_next_deep_level_job_after_publication_without_flush_or_timer() -
     // Act
     fixture.publish(completion);
     fixture.el.run_background_compaction_maintenance_if_due();
-    let next = fixture
-        .completions
-        .recv_timeout(WAIT)
-        .expect("follow-up before the one-hour timer");
+    let next = fixture.receive_compute();
 
     // Assert: a real second job publishes and both generations survive restart.
     assert!(matches!(

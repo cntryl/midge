@@ -1,4 +1,6 @@
-use super::super::tests::{create_test_cloud_event_loop, create_test_event_loop};
+use super::super::tests::{
+    create_test_cloud_event_loop, create_test_event_loop, receive_owned_compaction_completion,
+};
 use super::super::wal::{ApplyTransactionRequest, WalCoordinator};
 use super::super::EventLoop;
 use crate::runtime::durability::{DurabilityWaiter, TestDurabilityWaiter};
@@ -96,33 +98,6 @@ fn queue_generation_for_maintenance_test(
     )?;
     el.freeze_active_memtable(0)?;
     Ok(())
-}
-
-fn receive_owned_compaction_completion(
-    el: &EventLoop,
-    worker: &crossbeam::channel::Receiver<RuntimeMsg>,
-    deadline: Instant,
-) -> RuntimeMsg {
-    let completion = worker
-        .recv_deadline(deadline)
-        .expect("compaction completion notification");
-    assert!(matches!(&completion, RuntimeMsg::CompactionComplete { .. }));
-    assert_eq!(
-        el.state.active_compactions.load(Ordering::Acquire),
-        1,
-        "the ready ticket must belong to the fixture's only compute job"
-    );
-    // The wakeup precedes the pool's owned result ticket. Await that owner
-    // without advancing fairness or publication before dispatching once.
-    while !el.actors.compaction_actor.has_ready_compute() {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(
-            !remaining.is_zero(),
-            "owned compaction ticket did not settle"
-        );
-        std::thread::sleep(remaining.min(Duration::from_millis(1)));
-    }
-    completion
 }
 
 #[test]
