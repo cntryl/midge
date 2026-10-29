@@ -7985,15 +7985,22 @@ mod cloud_crash_recovery {
                 "one sweep turn must stay within its shared delete budget"
             );
             if orphan_ssts.iter().all(|orphan_sst| !orphan_sst.exists()) {
-                assert!(current.cloud_orphan_list_attempts > 0);
-                assert_eq!(current.cloud_orphan_probes, orphan_ssts.len() as u64);
+                // The sweep worker can delete more objects between the earlier
+                // metrics snapshot and this filesystem observation. Read the
+                // counters after observing completion before checking totals.
+                let completed = engine
+                    .metrics()
+                    .get_runtime_metrics()
+                    .expect("read completed restarted sweep metrics");
+                assert!(completed.cloud_orphan_list_attempts > 0);
+                assert_eq!(completed.cloud_orphan_probes, orphan_ssts.len() as u64);
                 assert_eq!(
-                    current.cloud_orphan_delete_attempts,
+                    completed.cloud_orphan_delete_attempts,
                     orphan_ssts.len() as u64,
                     "every rediscovered identity must be deleted exactly once"
                 );
                 // One task can inventory SST and retired WAL separately.
-                assert!(current.cloud_orphan_list_attempts <= 2);
+                assert!(completed.cloud_orphan_list_attempts <= 2);
                 return;
             }
             assert!(
