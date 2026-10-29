@@ -213,11 +213,12 @@ fn run_workload_e(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
     let rows =
         ycsb::inventory::verify_inventory(engine.as_ref(), cf.id(), initial_keys, &inventories)
             .expect("E fresh insert cardinality");
-    ctx.parameter(
+    ycsb::record_sample_count(
+        ctx,
         "verified_fresh_inserts",
         rows - initial_keys as u64 - warmup_inserts,
     );
-    ctx.parameter("verified_rows", rows);
+    ycsb::record_sample_count(ctx, "verified_rows", rows);
     let mut engine = Arc::try_unwrap(engine).unwrap_or_else(|_| panic!("E workers must be joined"));
     engine
         .shutdown(Duration::from_secs(30))
