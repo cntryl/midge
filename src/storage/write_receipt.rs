@@ -2,6 +2,8 @@
 
 use super::{StorageBackend, StorageError, StorageEvent, StorageOutcome, StorageRequest};
 
+pub(crate) const FILE_UPLOAD_PART_BYTES: usize = 5 * 1024 * 1024;
+
 /// Identity of the written version and CRC32C validated by the provider.
 /// An `ETag` alone is an identity token, not an integrity checksum.
 #[derive(Clone, Debug)]
@@ -12,18 +14,39 @@ pub struct StorageWriteReceipt {
 
 impl StorageWriteReceipt {
     pub(crate) fn matches(&self, bytes: &[u8]) -> bool {
-        self.metadata.size == bytes.len() as u64
+        self.matches_identity(bytes.len() as u64, crc32c::crc32c(bytes))
+    }
+
+    pub(crate) fn matches_identity(&self, size: u64, checksum: u32) -> bool {
+        self.metadata.size == size
             && super::conditional_object_identity(
                 &self.metadata.etag,
                 self.metadata.generation.as_deref(),
             )
             .is_some()
-            && self.content_crc32c == crc32c::crc32c(bytes)
+            && self.content_crc32c == checksum
     }
 }
 
 pub type WriteReceiptCallback =
     std::sync::mpsc::Sender<Result<Option<StorageWriteReceipt>, StorageError>>;
+
+/// Owned immutable source for a bounded, conditional multipart upload.
+#[cfg_attr(
+    not(any(
+        feature = "cloud-aws",
+        feature = "cloud-azure",
+        feature = "cloud-gcp",
+        feature = "cloud-oci"
+    )),
+    allow(dead_code)
+)]
+pub struct StorageFileUpload {
+    pub(crate) file: std::sync::Arc<dyn crate::io::File>,
+    pub(crate) size: u64,
+    pub(crate) content_crc32c: u32,
+    pub(crate) part_size: usize,
+}
 
 pub(super) fn write_without_receipt(
     backend: &(impl StorageBackend + ?Sized),

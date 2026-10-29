@@ -22,7 +22,7 @@ Midge uses explicit transactions. There is no auto-commit mode.
 
 - `TransactionMode::ReadOnly` provides snapshot-based reads
 - `TransactionMode::ReadWrite` provides snapshot-based reads plus buffered writes
-- `commit()` is the only operation that publishes a read-write transaction
+- `commit()` and `commit_with_sequence()` are the only operations that publish a read-write transaction; the latter also returns the published sequence
 - dropping an uncommitted read-write transaction rolls its writes back
 
 Within a committed transaction:
@@ -30,6 +30,29 @@ Within a committed transaction:
 - all writes publish atomically
 - write operations occupy one contiguous transaction sequence range
 - readers either observe the full committed batch or none of it
+
+Successful writes publish in their admitted sequence order. Preparing or
+queuing a later write does not make it visible ahead of an earlier unapplied
+transaction. A later `best_effort()` commit can wait behind a Strict group;
+that wait does not give the BestEffort write a WAL durability guarantee.
+
+## Shutdown and outliving transactions
+
+Use `Engine::shutdown(timeout)` for explicit graceful shutdown. It returns
+`Busy` while transactions remain live, and cleanup can be retried after those
+transactions finish. A caller timeout does not cancel admitted storage work.
+
+Dropping an Engine delegates cleanup to an owned reaper. Its transaction wait
+defaults to 30 seconds and is configured with
+`OpenOptionsBuilder::drop_transaction_wait_timeout`. When that window expires,
+outliving transactions return `Fenced` from reads, iterator rows and commits,
+including cached reads. This policy applies to memory, local and cloud modes.
+
+The reaper drains admitted WAL/runtime/storage effects before releasing writer
+authority. A physical effect that cannot be storage-fenced must finish first,
+so blocked device or provider I/O can retain the lease beyond the transaction
+wait window. The window bounds retention caused by a leaked transaction; it
+does not promise a hard takeover deadline for unfenceable I/O.
 
 ## Read Semantics
 
@@ -143,17 +166,68 @@ A write can cross several boundaries:
 
 1. visible: the commit has been applied to the memtable and new readers can observe it
 2. locally durable: the write survives restart from local storage
-3. cloud durable: the cloud-backed WAL segment upload has been acknowledged
+3. cloud durable: the cloud-backed WAL segment upload has been acknowledged and published in the WAL catalog
 4. SST-published: the data is represented by manifest-visible SST state instead of WAL replay
 
 `commit()` does not always wait for all of them. The selected `WriteOptions`
 define the acknowledgment boundary on a successful return.
 
-Every synchronous runtime response also has a deadline. If `commit()` returns
-`MidgeError::Timeout`, the runtime may already have accepted the transaction and
-may complete it later; the timeout removes the caller's response route but does
-not cancel the mutation. Treat the outcome as unknown and use an
-application-level idempotency check before retrying.
+### Three frontiers
+
+Every engine tracks three monotonic sequence frontiers. A write at sequence
+`s` has crossed a frontier once the frontier is at or above `s`.
+
+| Frontier | Meaning | How to observe |
+|---|---|---|
+| visible | new readers see the write | `begin_tx` snapshots |
+| local durable | the write survives a process crash while the local disk or cache survives | `RuntimeMetricsSnapshot::wal_local_durable_seq` |
+| cloud durable | the write survives loss of the whole local cache and is recoverable by a successor opening from the cloud | `Engine::cloud_durable_sequence()`, `RuntimeMetricsSnapshot::wal_cloud_durable_seq` |
+
+What each write option guarantees at `commit()` return, and what survives
+each failure:
+
+| Write option | Frontier crossed at return | Process crash | Local disk or cache loss | Writer takeover by another process |
+|---|---|---|---|---|
+| `sync()` | local durable | kept | lost (local-only storage) | not applicable |
+| `buffered()` | visible | kept only if the later fsync ran | lost | not applicable |
+| `best_effort()` | visible | lost unless a later flush published it | lost unless a later flush published it | lost unless a later flush published it; in cloud mode the successor recovers only published state |
+| `cloud_async()` | visible (local durable follows; cloud durable follows asynchronously) | kept on same-cache restart from intact local WAL | kept only if the covering upload was acknowledged | not promised: a successor recovers the published cloud state; unpublished writes stay with the surviving cache and cannot override the shared catalog |
+| `cloud_strict()` | cloud durable | kept | kept | kept: the successor recovers it from the published WAL or SST state |
+
+To take local-latency commits and still get the cloud guarantee where it
+matters, commit with `cloud_async()` through
+`Transaction::commit_with_sequence`, which returns the commit's sequence, and
+call `Engine::wait_cloud_durable(sequence, timeout)` only where the caller
+must know the write survives cache loss. The wait returns `Ok(true)` once the
+cloud frontier covers the sequence and `Ok(false)` when it does not yet: the
+timeout elapsed, or the runtime reported backpressure or a transient failure
+while it keeps retrying the covering upload. Neither is final; call again
+later. A wait may seal the open WAL segment early so the covering upload
+starts, as `cloud_strict()` does.
+Both calls return `MidgeError::InvalidArgument` on storage that is not
+cloud-backed. A `MidgeError::Fenced` from the wait means this writer lost
+authority and can no longer prove cloud durability for anything above the
+frontier it last published.
+
+Reads do not take a durability level: a reader sees every visible write,
+including `cloud_async()` writes that are not yet cloud durable. A read
+pinned at the cloud-durable frontier is tracked as a separate feature (#958).
+
+Every synchronous runtime response also has a deadline. When the response to a
+commit with writes misses it, the runtime may already have accepted the
+transaction and may complete it later: the timeout removes the caller's response
+route but does not cancel the mutation. `commit()` therefore reports that case
+as `MidgeError::OutcomeUnknown`, not as `MidgeError::Timeout`, so
+`severity()` never suggests a retry for a write that may have landed. Use an
+application-level idempotency check before writing it again. A plain
+`MidgeError::Timeout` from `commit()` comes only from commits that cannot have
+changed state.
+
+A writer timeout that carries proof of no physical effects, such as rejection
+before enqueue or a durably completed rollback, therefore remains a typed
+`Timeout` through the runtime response and transaction API. The caller-side
+wait alone has no such proof. WAL append failures retain their existing
+fencing behavior regardless of the error shown to the caller.
 
 When a commit with writes has crossed the WAL or visibility boundary but Midge
 cannot confirm its requested durability, `commit()` reports
@@ -181,8 +255,8 @@ because its record was synced before it was applied.
 `MidgeError::Fenced` from `commit()` means the write was not applied and has
 no WAL record restart could replay. That includes a write that waited
 behind a failed batch and was never logged. Midge never retries a write after
-`OutcomeUnknown` or `Timeout`, so a caller that retries must first check whether
-the write applied, as described above.
+`OutcomeUnknown`, so a caller that retries must first check whether the write
+applied, as described above.
 
 `abandoned_runtime_requests_total` and `late_runtime_responses_total` are global
 diagnostic counters. Their deltas include unrelated requests and both successful

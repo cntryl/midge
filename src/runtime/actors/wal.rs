@@ -87,7 +87,7 @@ struct UnappliedOutcome {
 }
 
 struct TxnWalBatch {
-    wal_record: Option<WalRecord>,
+    unit: Option<crate::wal::sequenced::SequencedWalUnit>,
     total_wal_bytes: usize,
     pending_wal_records: usize,
 }
@@ -122,6 +122,19 @@ pub(crate) struct PreparedTransactionAppend {
     effective_durability: DurabilityPolicy,
 }
 
+/// A streamed transaction whose WAL records are appended but whose durable
+/// sync and memtable publication are owned by the event-loop pipeline.
+pub(crate) struct PreparedSpilledAppend {
+    pub(crate) request_id: u64,
+    pub(crate) last_sequence: u64,
+    pub(crate) op_count: usize,
+    pub(crate) touched_cfs: Vec<crate::types::ColumnFamilyId>,
+    pub(crate) effective_durability: DurabilityPolicy,
+    sequence_plan: TxnSequencePlan,
+    pub(crate) commit_time_millis: u64,
+    pub(crate) logged: bool,
+}
+
 /// Result returned after a prepared transaction has been appended and applied.
 pub(crate) struct TransactionAppendResult {
     pub request_id: u64,
@@ -135,6 +148,76 @@ pub(crate) struct TransactionAppendResult {
 pub(crate) struct PreparedGroupOutcome {
     pub applied: Vec<TransactionAppendResult>,
     pub failure: Option<MidgeError>,
+}
+
+/// The runtime thread retains this lexical root until physical sync and its
+/// ledger proof settle. It intentionally cannot be sent to another thread.
+pub(crate) struct PendingStrictSync {
+    root: Option<crate::lease::WriterEffectGroup>,
+    physical: crate::wal::traits::WalPendingSync,
+    receipt: WalSyncReceipt,
+    expected: crate::wal::traits::WalSyncPrefix,
+    started: std::time::Instant,
+    deadline: crate::common::OperationDeadline,
+}
+
+pub(crate) struct PendingStrictAppend {
+    root: Option<crate::lease::WriterEffectGroup>,
+    physical: crate::wal::append_completion::WalPendingAppend,
+    expected: crate::wal::append_completion::WalAppendPrefix,
+    admitted: u64,
+    previous_position: u64,
+    total_wal_bytes: usize,
+    pending_wal_records: usize,
+    authority_prevalidated: bool,
+    started: std::time::Instant,
+    deadline: crate::common::OperationDeadline,
+}
+
+impl PendingStrictAppend {
+    pub(crate) fn poll(&self) -> Option<crate::wal::append_completion::AppendResult> {
+        self.physical.try_complete()
+    }
+
+    pub(crate) fn deadline_expired(&self) -> bool {
+        self.deadline.is_expired()
+    }
+}
+
+impl PendingStrictSync {
+    pub(crate) fn poll(&self) -> Option<MidgeResult<crate::wal::traits::WalSyncCompletion>> {
+        self.physical.try_complete()
+    }
+
+    pub(crate) fn deadline_expired(&self) -> bool {
+        self.deadline.is_expired()
+    }
+}
+
+pub(crate) enum PendingStrictIo {
+    Append(PendingStrictAppend),
+    Sync(PendingStrictSync),
+}
+
+pub(crate) enum StrictIoCompletion {
+    Append(crate::wal::append_completion::AppendResult),
+    Sync(MidgeResult<crate::wal::traits::WalSyncCompletion>),
+}
+
+impl PendingStrictIo {
+    pub(crate) fn poll(&self) -> Option<StrictIoCompletion> {
+        match self {
+            Self::Append(append) => append.poll().map(StrictIoCompletion::Append),
+            Self::Sync(sync) => sync.poll().map(StrictIoCompletion::Sync),
+        }
+    }
+
+    pub(crate) fn deadline_expired(&self) -> bool {
+        match self {
+            Self::Append(append) => append.deadline_expired(),
+            Self::Sync(sync) => sync.deadline_expired(),
+        }
+    }
 }
 
 enum TransactionIntent<'a> {
@@ -193,6 +276,7 @@ enum WalIoState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WalTransitionOperation {
+    Append,
     Sync,
     CloudFlush,
     Rotate,
@@ -202,6 +286,12 @@ enum WalTransitionOperation {
 pub(crate) struct WalSyncReceipt {
     durable_sequence: u64,
     pending_writes: usize,
+    pending_sync_count: usize,
+    bytes_since_sync: usize,
+    end_offset: Option<u64>,
+    writer_epoch: u64,
+    segment_id: u64,
+    generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +330,9 @@ impl WalRotationReceipt {
 /// Actor handling WAL operations
 pub struct WalActor {
     io: WalIoState,
+    /// Logical fencing cannot detach or synchronously join an admitted worker
+    /// while the runtime still needs to service completion/control messages.
+    fenced_writer: Option<Box<dyn WalWriter>>,
     /// Operational counters of the owning engine; shared with every writer.
     counters: crate::telemetry::CounterSink,
     storage_budget: Option<Arc<crate::storage::HybridStorage>>,
@@ -286,17 +379,83 @@ pub struct WalActor {
     append_total: Duration,
 }
 
+mod append_pipeline;
 mod apply_op;
 mod authority;
 mod durability;
+mod memtable_apply;
+pub(crate) use memtable_apply::{MemtableApplyAuthority, MemtableApplyJob, MemtableApplyPlan};
 mod rotation;
 mod spill;
+mod spill_validation;
+mod staged_writes;
+mod strict_pipeline;
 #[cfg(test)]
 mod test_append;
 mod transaction;
 mod transaction_state;
+mod validation_proof;
+pub(crate) use spill_validation::{SpilledValidationInput, SpilledValidationProof};
+pub(crate) use staged_writes::StagedWriteOverlay;
+pub(crate) use validation_proof::CommitValidationProof;
 
 impl WalActor {
+    #[cfg(test)]
+    pub(crate) fn reopen_empty_writer_from_state_for_test(
+        &mut self,
+        state: &RuntimeState,
+    ) -> crate::common::MidgeResult<()> {
+        if self.pending_sync_count != 0
+            || self.bytes_since_sync != 0
+            || state.wal.pending_writes != 0
+        {
+            return Err(crate::common::MidgeError::Internal(
+                "cannot realign WAL fixture with pending writes or syncs".into(),
+            ));
+        }
+        let fs = state.wal.history.segment_files().ok_or_else(|| {
+            crate::common::MidgeError::Internal(
+                "cannot realign a memory-mode WAL fixture writer".into(),
+            )
+        })?;
+        let writer = match &self.io {
+            WalIoState::Open { writer, .. }
+                if writer.tail().first_seq.is_none()
+                    && writer.tail().last_seq.is_none()
+                    && writer.current_pos() == crate::wal::format::HEADER_LEN as u64 =>
+            {
+                FsWalFactoryIo::new(Arc::clone(&fs))
+                    .with_io_timeout(self.storage_io_timeout)
+                    .with_counters(self.counters.clone())
+                    .with_write_authority(self.write_authority())
+                    .open_segment(state.wal.open_segment())?
+            }
+            WalIoState::Open { .. } => {
+                return Err(crate::common::MidgeError::Internal(
+                    "cannot realign WAL fixture after the writer has accepted records".into(),
+                ));
+            }
+            _ => {
+                return Err(crate::common::MidgeError::Internal(
+                    "cannot realign WAL fixture while the actor is not open".into(),
+                ));
+            }
+        };
+        match &mut self.io {
+            WalIoState::Open {
+                fs: current_fs,
+                writer: current_writer,
+            } => {
+                *current_fs = fs;
+                *current_writer = writer;
+                Ok(())
+            }
+            _ => Err(crate::common::MidgeError::Internal(
+                "WAL actor changed state while realigning fixture writer".into(),
+            )),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn replace_writer_for_test(&mut self, writer: Box<dyn WalWriter>) {
         writer.set_write_authority(self.write_authority());
@@ -552,20 +711,31 @@ impl WalActor {
         let previous = std::mem::replace(&mut self.io, WalIoState::Memory);
         self.io = match previous {
             WalIoState::Memory => WalIoState::Memory,
-            WalIoState::Open { fs, .. } => WalIoState::Fenced {
-                fs,
-                reason,
-                sealed_segment: None,
-                authority_lost,
-            },
+            WalIoState::Open { fs, writer } => {
+                self.fenced_writer = Some(writer);
+                WalIoState::Fenced {
+                    fs,
+                    reason,
+                    sealed_segment: None,
+                    authority_lost,
+                }
+            }
             WalIoState::Transitioning {
-                fs, sealed_segment, ..
-            } => WalIoState::Fenced {
                 fs,
-                reason,
+                writer,
                 sealed_segment,
-                authority_lost,
-            },
+                ..
+            } => {
+                if let Some(writer) = writer {
+                    self.fenced_writer = Some(writer);
+                }
+                WalIoState::Fenced {
+                    fs,
+                    reason,
+                    sealed_segment,
+                    authority_lost,
+                }
+            }
             WalIoState::Fenced {
                 fs,
                 sealed_segment,
@@ -637,6 +807,7 @@ impl WalActor {
         };
 
         let actor = Self {
+            fenced_writer: None,
             io,
             counters,
             storage_budget: None,
@@ -671,8 +842,7 @@ impl WalActor {
         Ok(actor)
     }
 
-    #[cfg(test)]
-    pub fn durability_policy(&self) -> DurabilityPolicy {
+    pub(crate) fn durability_policy(&self) -> DurabilityPolicy {
         self.durability_policy
     }
 
@@ -759,7 +929,7 @@ impl WalActor {
         if matches!(failure.error, crate::common::MidgeError::NoSpace(_)) {
             Self::record_no_space_event(&self.counters);
         }
-        failure.error
+        crate::common::error::classify_commit_error(failure.error, failure.unchanged)
     }
 
     /// Attach a leader store for epoch validation at sync boundaries, along
@@ -811,6 +981,11 @@ impl WalActor {
         state: &mut RuntimeState,
         durability_policy: DurabilityPolicy,
     ) -> MidgeResult<()> {
+        // A fenced filesystem WAL cannot safely accept even BestEffort writes:
+        // without a writer they would otherwise be applied only in memory.
+        if self.is_fenced() {
+            return self.ensure_filesystem_wal_available(state);
+        }
         if matches!(durability_policy, DurabilityPolicy::BestEffort) {
             return Ok(());
         }
@@ -826,6 +1001,11 @@ impl WalActor {
         state: &RuntimeState,
         cf_id: crate::types::ColumnFamilyId,
     ) -> MidgeResult<()> {
+        if state.partial_apply_prefix {
+            return Err(MidgeError::RecoveryFailed(
+                "a transaction holds a partial global applied prefix; restart before writing to any family".into(),
+            ));
+        }
         match state
             .get_cf(cf_id)
             .and_then(crate::runtime::state::ColumnFamilyState::partially_applied_commit)
@@ -861,6 +1041,7 @@ impl WalActor {
         error: MidgeError,
     ) -> MidgeError {
         if outcome.partly_applied {
+            state.partial_apply_prefix = true;
             for plan in plans {
                 if let Some(cf) = state.get_cf_mut(plan.cf_id) {
                     cf.mark_partially_applied(plan.commit_seq);
@@ -894,7 +1075,7 @@ impl WalActor {
         state.mark_persistence_anomaly();
         if outcome.logged {
             // Replay may apply a logged unit, so its outcome is unknown.
-            MidgeError::OutcomeUnknown(message)
+            Self::appended_unit_error(MidgeError::RecoveryFailed(message))
         } else if !outcome.partly_applied && matches!(error, MidgeError::Fenced(_)) {
             // Nothing logged and nothing applied: definitely not applied.
             error
@@ -920,13 +1101,7 @@ impl WalActor {
     /// "retry", either of which could apply the unit twice, so it becomes
     /// `OutcomeUnknown`, including a failed fsync or an ambiguous append.
     fn appended_unit_error(error: MidgeError) -> MidgeError {
-        match error {
-            MidgeError::OutcomeUnknown(_) => error,
-            other => MidgeError::OutcomeUnknown(format!(
-                "the transaction is in the WAL but not applied; it may be applied on \
-                 restart: {other}"
-            )),
-        }
+        crate::common::error::classify_commit_error(error, false)
     }
 
     pub(crate) fn can_coalesce_transaction_append(

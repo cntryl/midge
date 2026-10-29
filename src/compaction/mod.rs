@@ -4,9 +4,17 @@ pub(crate) mod layout;
 mod repair;
 pub mod strategy;
 
+#[cfg(test)]
+mod fragment_tests;
+#[cfg(test)]
+mod grandparent_tests;
+#[cfg(test)]
+mod ttl_gc_tests;
+
 pub(crate) use config::{
     OpenCompactionConfig, DEFAULT_COMPACTION_MEMORY_LIMIT, DEFAULT_TARGET_SST_SIZE,
 };
+pub use executor::GrandparentOverlap;
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
 use crate::common::{MidgeError, MidgeResult};
@@ -40,8 +48,38 @@ pub fn execute_compaction(
     execute_compaction_with_output_sink(plan, sst_factory, output_dir, abort_check, None, None)
 }
 
-pub(crate) type CompactionOutputSink<'a> =
-    dyn Fn(&str, &Path, &crate::common::resource_budget::ResourceBudget) -> MidgeResult<()> + 'a;
+#[cfg(test)]
+pub(crate) fn execute_compaction_with_overlap_roll_counter(
+    plan: &CompactionPlan,
+    sst_factory: &dyn crate::sst::SstFactory,
+    output_dir: &Path,
+    counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) -> MidgeResult<Vec<String>> {
+    execute_compaction_at_target(
+        plan,
+        CompactionResources {
+            target_sst_size: plan.target_sst_size,
+            source_fan_in: LeveledCompactionConfig::default().max_compaction_input_files,
+            budget: crate::common::resource_budget::ResourceBudget::new(
+                plan.compaction_memory_limit,
+            ),
+            grandparent_overlap_rolls: Some(counter),
+        },
+        sst_factory,
+        output_dir,
+        None,
+        None,
+        None,
+    )
+}
+
+pub(crate) type CompactionOutputSink<'a> = dyn Fn(
+        &str,
+        &Path,
+        &crate::common::resource_budget::ResourceBudget,
+        Option<&crate::sst::traits::FinalizedSst>,
+    ) -> MidgeResult<()>
+    + 'a;
 
 #[cfg(test)]
 pub(crate) fn execute_compaction_with_output_sink(
@@ -60,6 +98,7 @@ pub(crate) fn execute_compaction_with_output_sink(
             budget: crate::common::resource_budget::ResourceBudget::new(
                 plan.compaction_memory_limit,
             ),
+            grandparent_overlap_rolls: None,
         },
         sst_factory,
         output_dir,
@@ -73,6 +112,7 @@ pub(crate) struct CompactionResources {
     pub(crate) target_sst_size: usize,
     pub(crate) source_fan_in: usize,
     pub(crate) budget: crate::common::resource_budget::ResourceBudget,
+    pub(crate) grandparent_overlap_rolls: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 pub(crate) fn execute_compaction_at_target(
@@ -90,6 +130,8 @@ pub(crate) fn execute_compaction_at_target(
         ));
     }
 
+    validate_compaction_purpose(plan)?;
+
     // An empty plan is a planner no-op and must not create an unreferenced
     // output. The executor separately rejects non-empty plans whose selected
     // inputs decode to no versions or range tombstones.
@@ -97,17 +139,18 @@ pub(crate) fn execute_compaction_at_target(
         return Ok(Vec::new());
     }
 
-    let same_level_repair = plan.source_level == plan.target_level;
-    if same_level_repair
-        && (plan.source_level == 0
-            || !plan.target_files.is_empty()
-            || plan.point_tombstone_gc_eligible
-            || plan.range_tombstone_gc_eligible)
-    {
-        return Err(MidgeError::Corruption(
-            "same-level repair must preserve all tombstones and use independent L1+ inputs".into(),
-        ));
+    if matches!(plan.purpose, strategy::CompactionPurpose::Fragment { .. }) {
+        return execute_fragmentation(
+            plan,
+            &resources,
+            sst_factory,
+            output_dir,
+            abort_check,
+            output_sink,
+            output_size_limit,
+        );
     }
+    let same_level_repair = matches!(plan.purpose, strategy::CompactionPurpose::Repair);
 
     // --- 1. Open bounded source streams and chained level spans ------------
     let budget = resources.budget;
@@ -153,20 +196,27 @@ pub(crate) fn execute_compaction_at_target(
     let outputs = executor::write_partitioned_compaction_outputs(
         sst_factory,
         output_dir,
-        plan.cf_id,
-        plan.target_level,
-        plan.output_seq,
-        bounded_partition_target_size(target_sst_size, plan.compaction_memory_limit),
         inputs,
         &budget,
-        executor::TombstoneGcPolicy {
-            snapshot_horizon: plan.snapshot_horizon,
-            point_eligible: plan.point_tombstone_gc_eligible,
-            range_eligible: plan.range_tombstone_gc_eligible,
+        &executor::PartitionOutputConfig {
+            cf_id: plan.cf_id,
+            target_level: plan.target_level,
+            generation: plan.output_seq,
+            target_sst_size: bounded_partition_target_size(
+                target_sst_size,
+                plan.compaction_memory_limit,
+            ),
+            tombstone_gc: executor::TombstoneGcPolicy {
+                snapshot_horizon: plan.snapshot_horizon,
+                point_eligible: plan.point_tombstone_gc_eligible,
+                range_eligible: plan.range_tombstone_gc_eligible,
+            },
+            output_size_limit,
+            grandparent_overlap: &plan.grandparent_overlap,
+            grandparent_overlap_rolls: resources.grandparent_overlap_rolls,
         },
         abort_check,
         output_sink,
-        output_size_limit,
     )?;
     if let Some(scratch) = &mut scratch {
         if let Err(error) = scratch.cleanup() {
@@ -183,6 +233,60 @@ pub(crate) fn execute_compaction_at_target(
         }
     }
     Ok(outputs)
+}
+
+fn validate_compaction_purpose(plan: &CompactionPlan) -> MidgeResult<()> {
+    let valid = match &plan.purpose {
+        strategy::CompactionPurpose::Merge => plan.source_level != plan.target_level,
+        strategy::CompactionPurpose::Repair | strategy::CompactionPurpose::Fragment { .. } => {
+            plan.source_level == plan.target_level
+                && plan.source_level > 0
+                && plan.target_files.is_empty()
+                && !plan.point_tombstone_gc_eligible
+                && !plan.range_tombstone_gc_eligible
+                && (!matches!(plan.purpose, strategy::CompactionPurpose::Fragment { .. })
+                    || plan.source_files.len() == 1)
+        }
+    };
+    if !valid {
+        return Err(MidgeError::Corruption(
+            "compaction purpose differs from its level, input, or tombstone retention contract"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_fragmentation(
+    plan: &CompactionPlan,
+    resources: &CompactionResources,
+    sst_factory: &dyn crate::sst::SstFactory,
+    output_dir: &Path,
+    abort_check: Option<&dyn Fn() -> bool>,
+    output_sink: Option<&CompactionOutputSink<'_>>,
+    output_size_limit: Option<usize>,
+) -> MidgeResult<Vec<String>> {
+    let inputs = executor::collect_compaction_stream_inputs(
+        sst_factory,
+        &plan.source_files,
+        &[],
+        plan.source_level,
+        true,
+        &resources.budget,
+        abort_check,
+    )?;
+    executor::write_fragmented_compaction_outputs(
+        sst_factory,
+        output_dir,
+        plan,
+        bounded_partition_target_size(resources.target_sst_size, plan.compaction_memory_limit),
+        inputs,
+        &resources.budget,
+        abort_check,
+        output_sink,
+        output_size_limit,
+    )
 }
 
 fn bounded_partition_target_size(configured_target: usize, compaction_pool: usize) -> usize {
@@ -213,6 +317,113 @@ mod tests {
     use crate::io::FsError;
     use crate::sst::traits::SstFactory;
     use tempfile::tempdir;
+
+    #[test]
+    fn should_retain_range_tombstone_when_planned_with_incomplete_unselected_bounds(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let directory = tempdir()?;
+        let fs = std::sync::Arc::new(
+            crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?,
+        );
+        let factory = crate::sst::FsSstFactoryIo::new(fs, 4096);
+        let source_name = "source.sst";
+        let covered_name = "covered.sst";
+        let incomplete_name = "incomplete-disjoint.sst";
+        let mut source = factory.create()?;
+        source.add_range_tombstone(b"b", b"m", 2)?;
+        source.finish_to_path(&directory.path().join(source_name))?;
+        let mut covered = factory.create()?;
+        covered.add_with_meta(
+            b"h",
+            Some(b"covered"),
+            1,
+            crate::types::EntryType::Put,
+            None,
+        )?;
+        covered.finish_to_path(&directory.path().join(covered_name))?;
+        let mut incomplete = factory.create()?;
+        incomplete.add_with_meta(
+            b"z",
+            Some(b"outside"),
+            1,
+            crate::types::EntryType::Put,
+            None,
+        )?;
+        incomplete.finish_to_path(&directory.path().join(incomplete_name))?;
+        let files = vec![
+            test_file_meta(directory.path(), source_name, 0, (b"b", b"m"), (2, 2), true)?,
+            test_file_meta(
+                directory.path(),
+                covered_name,
+                1,
+                (b"h", b"h"),
+                (1, 1),
+                true,
+            )?,
+            test_file_meta(
+                directory.path(),
+                incomplete_name,
+                1,
+                (b"z", b"z"),
+                (1, 1),
+                false,
+            )?,
+        ];
+        let compactor = Compactor::with_config(LeveledCompactionConfig {
+            l0_compaction_threshold: 1,
+            ..LeveledCompactionConfig::default()
+        });
+        let mut plan = compactor
+            .pick_compaction(&files, 0)?
+            .expect("L0 range delete should produce compaction work");
+        plan.output_seq = 700;
+        assert!(plan.source_files.iter().any(|name| name == source_name));
+        assert!(plan.target_files.iter().any(|name| name == covered_name));
+        assert!(!plan.input_files.iter().any(|name| name == incomplete_name));
+        assert!(plan.point_tombstone_gc_eligible);
+        assert!(!plan.range_tombstone_gc_eligible);
+
+        // Act
+        let outputs = execute_compaction(&plan, &factory, directory.path(), None)?;
+
+        // Assert
+        assert_eq!(outputs.len(), 1);
+        let reader = factory.open(std::path::Path::new(&outputs[0]))?;
+        assert_eq!(reader.range_tombstones().len(), 1);
+        let versions = reader
+            .raw_version_cursor(None, None)?
+            .collect::<MidgeResult<Vec<_>>>()?;
+        assert!(versions.iter().any(|version| {
+            version.key == b"h" && version.value.as_deref() == Some(b"covered")
+        }));
+        assert!(directory.path().join(incomplete_name).exists());
+        Ok(())
+    }
+
+    fn test_file_meta(
+        directory: &std::path::Path,
+        name: &str,
+        level: u32,
+        key_bounds: (&[u8], &[u8]),
+        sequence_bounds: (u64, u64),
+        key_bounds_complete: bool,
+    ) -> MidgeResult<crate::metadata::FileMeta> {
+        let bytes = std::fs::read(directory.join(name))?;
+        Ok(crate::metadata::FileMeta {
+            name: name.to_string(),
+            level,
+            size_bytes: u64::try_from(bytes.len()).expect("SST size fits u64"),
+            content_crc32c: Some(crc32c::crc32c(&bytes)),
+            cf_id: 0,
+            smallest_key: Some(key_bounds.0.to_vec()),
+            largest_key: Some(key_bounds.1.to_vec()),
+            smallest_seq: Some(sequence_bounds.0),
+            largest_seq: Some(sequence_bounds.1),
+            key_bounds_complete,
+            ..Default::default()
+        })
+    }
 
     #[test]
     fn should_merge_repair_component_above_fan_in_without_losing_tombstone_or_ttl(
@@ -252,6 +463,7 @@ mod tests {
                 budget: crate::common::resource_budget::ResourceBudget::new(
                     plan.compaction_memory_limit,
                 ),
+                grandparent_overlap_rolls: None,
             },
             &factory,
             dir.path(),
@@ -321,6 +533,7 @@ mod tests {
                 budget: crate::common::resource_budget::ResourceBudget::new(
                     plan.compaction_memory_limit,
                 ),
+                grandparent_overlap_rolls: None,
             },
             &factory,
             &local_dir,
@@ -464,15 +677,17 @@ mod tests {
         plan.add_test_source("ranges.sst");
         plan.target_sst_size = 128 * 1024;
         let observed = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                let reader = factory.open(Path::new(name))?;
-                observed
-                    .borrow_mut()
-                    .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
-                std::fs::remove_file(path)?;
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            let reader = factory.open(Path::new(name))?;
+            observed
+                .borrow_mut()
+                .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
+            std::fs::remove_file(path)?;
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(
@@ -513,15 +728,17 @@ mod tests {
         plan.add_test_source("ranges.sst");
         plan.target_sst_size = 16 * 1024;
         let observed = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                let reader = factory.open(Path::new(name))?;
-                observed
-                    .borrow_mut()
-                    .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
-                std::fs::remove_file(path)?;
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            let reader = factory.open(Path::new(name))?;
+            observed
+                .borrow_mut()
+                .extend(reader.range_tombstones().into_iter().map(|range| range.seq));
+            std::fs::remove_file(path)?;
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(
@@ -568,17 +785,19 @@ mod tests {
             plan.add_test_source(name);
         }
         let observed = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                assert!(std::fs::metadata(path)?.len() <= 256 * 1024);
-                let reader = factory.open(Path::new(name))?;
-                let entries = reader.scan_range_raw_state(None, None)?;
-                observed
-                    .borrow_mut()
-                    .extend(entries.into_iter().map(|(key, _)| key[0]));
-                std::fs::remove_file(path)?;
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            assert!(std::fs::metadata(path)?.len() <= 256 * 1024);
+            let reader = factory.open(Path::new(name))?;
+            let entries = reader.scan_range_raw_state(None, None)?;
+            observed
+                .borrow_mut()
+                .extend(entries.into_iter().map(|(key, _)| key[0]));
+            std::fs::remove_file(path)?;
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(
@@ -666,18 +885,20 @@ mod tests {
         plan.target_sst_size = 32 * 1024;
         plan.compaction_memory_limit = 128 * 1024;
         let drained = std::cell::RefCell::new(Vec::new());
-        let sink =
-            |name: &str, path: &Path, _budget: &crate::common::resource_budget::ResourceBudget| {
-                for previous in drained.borrow().iter() {
-                    assert!(
-                        !dir.path().join(previous).exists(),
-                        "previous partitions must be gone before advancing"
-                    );
-                }
-                std::fs::remove_file(path)?;
-                drained.borrow_mut().push(name.to_string());
-                Ok(())
-            };
+        let sink = |name: &str,
+                    path: &Path,
+                    _budget: &crate::common::resource_budget::ResourceBudget,
+                    _summary: Option<&crate::sst::traits::FinalizedSst>| {
+            for previous in drained.borrow().iter() {
+                assert!(
+                    !dir.path().join(previous).exists(),
+                    "previous partitions must be gone before advancing"
+                );
+            }
+            std::fs::remove_file(path)?;
+            drained.borrow_mut().push(name.to_string());
+            Ok(())
+        };
 
         // Act
         let outputs = execute_compaction_with_output_sink(
@@ -2434,18 +2655,22 @@ mod tests {
         let outputs = executor::write_partitioned_compaction_outputs(
             &factory,
             temp_dir.path(),
-            0,
-            1,
-            54,
-            target_sst_size,
             inputs,
             &budget,
-            executor::TombstoneGcPolicy {
-                snapshot_horizon: None,
-                point_eligible: false,
-                range_eligible: false,
+            &executor::PartitionOutputConfig {
+                cf_id: 0,
+                target_level: 1,
+                generation: 54,
+                target_sst_size,
+                tombstone_gc: executor::TombstoneGcPolicy {
+                    snapshot_horizon: None,
+                    point_eligible: false,
+                    range_eligible: false,
+                },
+                output_size_limit: None,
+                grandparent_overlap: &executor::GrandparentOverlap::default(),
+                grandparent_overlap_rolls: None,
             },
-            None,
             None,
             None,
         )?;

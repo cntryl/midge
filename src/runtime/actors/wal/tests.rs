@@ -651,15 +651,21 @@ struct FsyncFailingWriter {
 }
 
 impl crate::wal::WalWriter for FsyncFailingWriter {
-    fn append_record(&self, record: &crate::wal::WalRecord) -> MidgeResult<u64> {
-        self.inner.append_record(record)
+    fn append_record_accounted(
+        &self,
+        record: &crate::wal::WalRecord,
+    ) -> Result<u64, crate::wal::traits::WalAppendError> {
+        self.inner.append_record_accounted(record)
     }
 
-    fn append_batch(&self, records: &[crate::wal::WalRecord]) -> MidgeResult<u64> {
-        self.inner.append_batch(records)
+    fn append_batch_accounted(
+        &self,
+        records: &[crate::wal::WalRecord],
+    ) -> Result<u64, crate::wal::traits::WalAppendError> {
+        self.inner.append_batch_accounted(records)
     }
 
-    fn sync(&self) -> MidgeResult<()> {
+    fn sync_with_timeout(&self, _timeout: std::time::Duration) -> MidgeResult<()> {
         Err(MidgeError::Io(std::io::Error::other(
             "injected fsync failure",
         )))
@@ -1853,7 +1859,7 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
                 .append_spilled_transaction(
                     &mut state,
                     &writes.take_source(),
-                    SpilledTransactionAppendParams {
+                    &SpilledTransactionAppendParams {
                         request_id: 2,
                         assertions: Vec::new(),
                         durability_policy: Some(DurabilityPolicy::CloudAsync),
@@ -2111,7 +2117,10 @@ fn assert_best_effort_write_after_fencing(
             conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
         },
     );
-    assert!(best_effort.is_ok(), "explicit BestEffort remains available");
+    assert!(
+        matches!(best_effort, Err(MidgeError::RecoveryFailed(_))),
+        "a fenced filesystem WAL must reject BestEffort writes"
+    );
     assert_eq!(
         state
             .get_cf(0)
@@ -2119,7 +2128,7 @@ fn assert_best_effort_write_after_fencing(
             .memtable
             .iter_all()
             .len(),
-        entries_before + 1
+        entries_before
     );
 }
 
@@ -2128,6 +2137,7 @@ mod admission;
 mod writer_groups;
 
 mod floor;
+mod sync_receipts;
 
 struct DurableSyncCountingFile<'a> {
     inner: Box<dyn File + 'a>,
@@ -2260,9 +2270,11 @@ fn should_fsync_active_segment_before_sealing_cloud_async_wal() -> MidgeResult<(
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     let syncs_before_seal = durable_syncs.load(std::sync::atomic::Ordering::SeqCst);
     let ticket = seal_ticket_for_test(&wal_actor, &state);
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(1));
+    assert!(deadline.remaining() < wal_actor.storage_io_timeout);
 
     // Act
-    wal_actor.flush_for_cloud_upload(&mut state, &ticket)?;
+    wal_actor.flush_for_cloud_upload_within(&mut state, &deadline, &ticket)?;
 
     // Assert
     assert!(
@@ -2390,7 +2402,7 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
     let result = actor.append_spilled_transaction(
         &mut state,
         &source,
-        SpilledTransactionAppendParams {
+        &SpilledTransactionAppendParams {
             request_id: 339,
             assertions: Vec::new(),
             durability_policy: Some(DurabilityPolicy::Strict),
@@ -2450,7 +2462,7 @@ fn should_report_discard_on_restart_when_best_effort_spill_partly_applies() -> M
     let result = actor.append_spilled_transaction(
         &mut state,
         &source,
-        SpilledTransactionAppendParams {
+        &SpilledTransactionAppendParams {
             request_id: 340,
             assertions: Vec::new(),
             durability_policy: Some(DurabilityPolicy::BestEffort),
@@ -2602,6 +2614,9 @@ fn should_exit_after_writing_to_partly_applied_family_in_child() {
     let mut engine = crate::Engine::open(partial_spill_options(&path)).expect("open spill writer");
     let family = engine.get_column_family("default").expect("default family");
     let other = engine.create_column_family("other").expect("other family");
+    let retained = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadOnly)
+        .expect("retain complete visible cut");
     let mut tx = engine
         .begin_tx(family.id(), crate::TransactionMode::ReadWrite)
         .expect("spilled transaction");
@@ -2615,8 +2630,8 @@ fn should_exit_after_writing_to_partly_applied_family_in_child() {
     fail::remove("midge::wal::spilled_apply_op");
     assert!(may_be_applied_on_restart(&commit), "{commit:?}");
 
-    // Act: the other family's write goes first, because a write refused
-    // while the WAL is fenced may stop the whole runtime from writing.
+    // Act: try the other family first so a same-family rejection cannot
+    // mask a later cross-family jump across the incomplete global cut.
     let best_effort_other = put_one(
         &engine,
         &other,
@@ -2631,24 +2646,33 @@ fn should_exit_after_writing_to_partly_applied_family_in_child() {
     );
     let sync_same = put_one(&engine, &family, b"sync", crate::WriteOptions::sync());
     let flushed = engine.flush_cf(&family);
+    let fresh = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadOnly)
+        .expect("read the global cut after rejected writes");
 
-    // Assert: the marked family cannot freeze until restart, so it must not
-    // acknowledge a write it could never persist; the other family, which
-    // holds no partly applied unit, still takes the writes the fenced WAL
-    // allows.
-    assert!(best_effort_other.is_ok(), "{best_effort_other:?}");
+    // Assert: every later write must wait for restart. A cross-family write
+    // would otherwise expose the first partial key through the global cut.
+    assert_eq!(fresh.start_sequence(), retained.start_sequence());
+    for key in [b"first".as_slice(), b"second"] {
+        assert_eq!(fresh.get(key).expect("fresh snapshot read"), None);
+    }
     assert!(
-        matches!(best_effort_same, Err(MidgeError::RecoveryFailed(_))),
+        matches!(best_effort_other, Err(MidgeError::Fenced(_))),
+        "{best_effort_other:?}"
+    );
+    assert!(
+        matches!(best_effort_same, Err(MidgeError::Fenced(_))),
         "{best_effort_same:?}"
     );
     assert!(
-        matches!(
-            sync_same,
-            Err(MidgeError::RecoveryFailed(_) | MidgeError::Fenced(_))
-        ),
+        matches!(sync_same, Err(MidgeError::Fenced(_))),
         "{sync_same:?}"
     );
+    for key in [b"first".as_slice(), b"second"] {
+        assert_eq!(retained.get(key).expect("retained complete cut"), None);
+    }
     assert!(flushed.is_err(), "{flushed:?}");
+    drop(retained);
     let _ = engine.shutdown(std::time::Duration::from_secs(30));
     std::process::exit(76);
 }
@@ -2689,7 +2713,7 @@ const PARTIAL_SPILL_STALL_THRESHOLD: usize = 16 * 1024;
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_exit_after_writing_beside_large_partly_applied_family_in_child() {
+fn should_exit_after_rejecting_writes_beside_large_partly_applied_family_in_child() {
     // Arrange: runs only as the child of the stall test below, so the
     // process-global failpoint cannot reach another test.
     let Some(path) = std::env::var_os(PARTIAL_SPILL_STALL_CHILD) else {
@@ -2722,32 +2746,37 @@ fn should_exit_after_writing_beside_large_partly_applied_family_in_child() {
     fail::remove("midge::wal::spilled_apply_op");
     assert!(may_be_applied_on_restart(&commit), "{commit:?}");
 
-    // Act: a stall hint on the first reply makes the second check the stall.
+    // Act: repeated cross-family writes and the stall-control path must all
+    // preserve the incomplete prefix rather than publish a newer cut.
     let written = [b"best-effort-1".as_slice(), b"best-effort-2"]
         .map(|key| put_one(&engine, &other, key, crate::WriteOptions::best_effort()));
     let cleared = engine.wait_for_write_stall_clear(other.id(), std::time::Duration::from_secs(1));
 
-    // Assert: the marked family holds more than twice the flush threshold
-    // but takes no writes and cannot flush until restart; it must not stall
-    // a family that can.
-    assert!(written.iter().all(Result::is_ok), "{written:?}");
-    assert!(matches!(cleared, Ok(true)), "{cleared:?}");
+    // Assert: memory pressure cannot turn an incomplete global prefix into
+    // an independently writable family, even for WAL-free writes.
+    assert!(
+        written
+            .iter()
+            .all(|result| matches!(result, Err(MidgeError::Fenced(_)))),
+        "{written:?}"
+    );
+    assert!(matches!(cleared, Err(MidgeError::Fenced(_))), "{cleared:?}");
     let _ = engine.shutdown(std::time::Duration::from_secs(30));
     std::process::exit(76);
 }
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_accept_write_beside_family_holding_large_partly_applied_spilled_transaction() {
+fn should_reject_write_beside_family_holding_large_partly_applied_spilled_transaction() {
     // Arrange
     let directory = tempfile::tempdir().expect("database directory");
 
     // Act: a child process partly applies a spilled transaction larger than
-    // twice the flush threshold, then writes to another family.
+    // twice the flush threshold, then attempts writes to another family.
     let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
         .args([
             "--exact",
-            "runtime::actors::wal::tests::should_exit_after_writing_beside_large_partly_applied_family_in_child",
+            "runtime::actors::wal::tests::should_exit_after_rejecting_writes_beside_large_partly_applied_family_in_child",
             "--nocapture",
         ])
         .env(PARTIAL_SPILL_STALL_CHILD, directory.path())
@@ -2803,12 +2832,28 @@ fn should_exit_after_flushing_past_failed_strict_sync_in_child() {
         "{commit:?}"
     );
 
+    let mut later = engine
+        .begin_tx(family.id(), crate::TransactionMode::ReadWrite)
+        .expect("later best-effort transaction");
+    later
+        .put(
+            b"after-failed-sync".to_vec(),
+            b"must-not-be-memory-only".to_vec(),
+            None,
+        )
+        .expect("stage later best-effort write");
+    let later_write = later.commit(crate::WriteOptions::best_effort());
+
     // Act
     let flushed = engine.flush_cf(&family);
     let _ = engine.shutdown(std::time::Duration::from_secs(30));
 
     // Assert
-    std::fs::write(path.join("failed-sync-flushed"), format!("{flushed:?}")).expect("flush marker");
+    std::fs::write(
+        path.join("failed-sync-flushed"),
+        format!("{flushed:?}|{later_write:?}"),
+    )
+    .expect("flush marker");
     std::process::exit(76);
 }
 
@@ -2845,7 +2890,10 @@ fn should_publish_best_effort_write_when_flushed_after_failed_strict_sync() {
     // Assert: none of the failed unit reached the memtable, so a flush past
     // its commit drops it whole on replay; the best-effort write the flush
     // published survives.
-    assert_eq!(flushed, "Ok(())");
+    assert!(
+        flushed.starts_with("Ok(())|Err(RecoveryFailed(\"local WAL is poisoned:"),
+        "{flushed}"
+    );
     {
         let tx = reopened
             .begin_tx(0, crate::TransactionMode::ReadOnly)
@@ -3165,9 +3213,10 @@ fn should_reuse_cached_sst_readers_when_validating_conflicting_transaction_ops()
 }
 
 #[test]
-fn should_fence_as_local_failure_when_wal_state_changes_under_a_sync_receipt() -> MidgeResult<()> {
-    // Arrange: a receipt whose WAL state moved before commit is a local
-    // invariant failure, not lost authority (#537).
+fn should_fence_as_local_failure_when_pending_wal_count_regresses_under_sync_receipt(
+) -> MidgeResult<()> {
+    // Arrange: consumed bookkeeping cannot cover an outstanding captured
+    // prefix. Later sequence allocation alone is allowed by exact receipts.
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
     let mut wal_actor = WalActor::open(
@@ -3188,12 +3237,13 @@ fn should_fence_as_local_failure_when_wal_state_changes_under_a_sync_receipt() -
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     let sync_ticket = WalSyncTicket::for_test(0);
     let receipt = wal_actor.begin_sync_transition(&mut state, &sync_ticket)?;
-    state.sequence += 1;
+    assert!(state.wal.pending_writes > 0);
 
     // Act
+    state.wal.pending_writes = 0;
     let error = wal_actor
         .commit_sync_transition(&mut state, receipt, &sync_ticket)
-        .expect_err("a moved WAL state must reject the receipt");
+        .expect_err("regressed WAL bookkeeping must reject the receipt");
 
     // Assert
     assert!(matches!(error, MidgeError::Internal(_)), "{error:?}");
@@ -3319,7 +3369,7 @@ fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult
                 actor.append_spilled_transaction(
                     &mut state,
                     &writes.take_source(),
-                    SpilledTransactionAppendParams {
+                    &SpilledTransactionAppendParams {
                         request_id: 1,
                         assertions: Vec::new(),
                         durability_policy: Some(policy),

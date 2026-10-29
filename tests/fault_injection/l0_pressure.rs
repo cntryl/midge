@@ -1,6 +1,8 @@
 //! Deterministic public admission rejection while real pressure recovery is held.
-use cntryl_midge::{Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{Engine, MidgeError, MidgeResult, OpenOptions, TransactionMode, WriteOptions};
 use std::time::Duration;
+
+const OVERLAP_ANCHOR: &[u8] = b"held-l0-pressure/anchor";
 
 #[test]
 fn should_reject_before_wal_when_l0_pressure_recovery_is_held() {
@@ -23,16 +25,7 @@ fn should_reject_before_wal_when_l0_pressure_recovery_is_held() {
     // Act: grow genuine L0 debt until admission deterministically rejects.
     for index in 0_u32..64 {
         let before = engine.metrics().get_runtime_metrics().unwrap();
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .unwrap();
-        tx.put(
-            index.to_be_bytes().to_vec(),
-            b"attempt-value".to_vec(),
-            None,
-        )
-        .unwrap();
-        match tx.commit(WriteOptions::sync()) {
+        match commit_pressure_attempt(&engine, &cf, index, b"attempt-value") {
             Ok(()) => engine.flush_cf(&cf).unwrap(),
             Err(MidgeError::WriteStall(_)) => {
                 let after = engine.metrics().get_runtime_metrics().unwrap();
@@ -40,6 +33,11 @@ fn should_reject_before_wal_when_l0_pressure_recovery_is_held() {
                 assert_eq!(after.current_sequence, before.current_sequence);
                 let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
                 assert_eq!(read.get(&index.to_be_bytes()).unwrap(), None);
+                let prior = index.checked_sub(1).map(u32::to_be_bytes);
+                assert_eq!(
+                    read.get(OVERLAP_ANCHOR).unwrap().as_deref(),
+                    prior.as_ref().map(<[u8; 4]>::as_slice)
+                );
                 rejected = Some(index);
                 break;
             }
@@ -75,13 +73,7 @@ fn should_reject_before_wal_when_l0_pressure_recovery_is_held() {
     let cf = reopened.get_column_family("held-l0-pressure").unwrap();
     assert_values(&reopened, &cf, index, false);
 
-    let mut retry = reopened
-        .begin_tx(cf.id(), TransactionMode::ReadWrite)
-        .unwrap();
-    retry
-        .put(index.to_be_bytes().to_vec(), b"retry-value".to_vec(), None)
-        .unwrap();
-    retry.commit(WriteOptions::sync()).unwrap();
+    commit_pressure_attempt(&reopened, &cf, index, b"retry-value").unwrap();
     reopened.flush_cf(&cf).unwrap();
     reopened.shutdown(Duration::from_secs(10)).unwrap();
     drop(reopened);
@@ -89,6 +81,18 @@ fn should_reject_before_wal_when_l0_pressure_recovery_is_held() {
     let cf = reopened.get_column_family("held-l0-pressure").unwrap();
     assert_values(&reopened, &cf, index, true);
     reopened.shutdown(Duration::from_secs(10)).unwrap();
+}
+
+fn commit_pressure_attempt(
+    engine: &Engine,
+    cf: &cntryl_midge::ColumnFamilyHandle,
+    index: u32,
+    value: &[u8],
+) -> MidgeResult<()> {
+    let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+    tx.put(index.to_be_bytes().to_vec(), value.to_vec(), None)?;
+    tx.put(OVERLAP_ANCHOR.to_vec(), index.to_be_bytes().to_vec(), None)?;
+    tx.commit(WriteOptions::sync())
 }
 
 fn wait_for_compaction(engine: &Engine) {
@@ -122,5 +126,15 @@ fn assert_values(
     assert_eq!(
         read.get(&rejected.to_be_bytes()).unwrap().as_deref(),
         retried.then_some(b"retry-value".as_slice())
+    );
+    let anchor = if retried {
+        Some(rejected)
+    } else {
+        rejected.checked_sub(1)
+    }
+    .map(u32::to_be_bytes);
+    assert_eq!(
+        read.get(OVERLAP_ANCHOR).unwrap().as_deref(),
+        anchor.as_ref().map(<[u8; 4]>::as_slice)
     );
 }

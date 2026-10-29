@@ -1,12 +1,10 @@
-use super::range::{
-    lookup_range_index, read_range_header, validate_range_index, write_range_index_file,
-    RangeHeader,
-};
+use super::range::{lookup_range_index, read_range_header, write_range_index_file, RangeHeader};
 use super::{
     consider_lookup, op_heap_bytes, op_primary_key_bytes, IntentLookup, OrdinalOp, SpillDiskBudget,
     SpillDiskCharge, SpillReaderCache, SpillRoot, SpillRun, TransactionMemoryPool, TransactionOp,
     MAX_FRAME_BYTES, RUN_HEADER_LEN, RUN_MAGIC, RUN_VERSION, SPARSE_INDEX_STRIDE,
 };
+use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::stream::{FileReader, FileWriter};
 use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
@@ -20,6 +18,20 @@ use std::sync::Arc;
 /// costs several syscalls per field. The window stays small because the reader
 /// cache bounds how many runs can retain handles at once.
 const RUN_READ_BUFFER_BYTES: usize = 16 * 1024;
+
+fn spill_frame_limit(ops: &[OrdinalOp]) -> MidgeResult<usize> {
+    // Range-tree nodes may repeat an end key from another operation. Twice
+    // the largest operation body covers that duplication and every index
+    // frame; fixed framing fits the additional 64 bytes.
+    ops.iter()
+        .map(|entry| op_heap_bytes(&entry.op))
+        .max()
+        .unwrap_or(0)
+        .checked_mul(2)
+        .and_then(|bytes| bytes.checked_add(64))
+        .map(|bytes| bytes.min(MAX_FRAME_BYTES))
+        .ok_or_else(|| MidgeError::ResourceLimit("transaction spill decode bound overflow".into()))
+}
 
 #[cfg(test)]
 thread_local! {
@@ -85,6 +97,9 @@ pub(super) fn sparse_index_decodes() -> usize {
 pub(super) struct RunFile {
     reader: BufReader<FileReader<Box<dyn File>>>,
     position: u64,
+    decode_budget: Option<ResourceBudget>,
+    frame_limit: usize,
+    _read_buffer: Option<ResourceReservation>,
     #[cfg(test)]
     tracker: Option<Arc<RunFileTracker>>,
 }
@@ -106,6 +121,15 @@ fn spill_file_error(error: FsError) -> MidgeError {
 
 impl RunFile {
     pub(super) fn open(root: &dyn Fs, path: &FsPath) -> MidgeResult<Self> {
+        Self::open_bounded(root, path, None, MAX_FRAME_BYTES)
+    }
+
+    pub(super) fn open_bounded(
+        root: &dyn Fs,
+        path: &FsPath,
+        budget: Option<&ResourceBudget>,
+        frame_limit: usize,
+    ) -> MidgeResult<Self> {
         let file = crate::io::open_persistent_handle(
             root,
             path,
@@ -118,6 +142,9 @@ impl RunFile {
         )
         .map_err(spill_file_error)?;
         let file = FileReader::new(file)?;
+        let read_buffer = budget
+            .map(|budget| budget.reserve(RUN_READ_BUFFER_BYTES, "spill read buffer"))
+            .transpose()?;
         #[cfg(test)]
         let tracker = RUN_FILE_TRACKER.with(|tracker| tracker.borrow().clone());
         #[cfg(test)]
@@ -127,6 +154,9 @@ impl RunFile {
         Ok(Self {
             reader: BufReader::with_capacity(RUN_READ_BUFFER_BYTES, file),
             position: 0,
+            decode_budget: budget.cloned(),
+            frame_limit,
+            _read_buffer: read_buffer,
             #[cfg(test)]
             tracker,
         })
@@ -201,17 +231,30 @@ impl RunReader {
     }
 
     pub(super) fn open(run: &SpillRun) -> MidgeResult<Self> {
-        let mut data = RunFile::open(&*run.root, &run.path)?;
+        Self::open_bounded(run, None)
+    }
+
+    pub(super) fn open_bounded(
+        run: &SpillRun,
+        budget: Option<&ResourceBudget>,
+    ) -> MidgeResult<Self> {
+        let mut data = RunFile::open_bounded(&*run.root, &run.path, budget, run.frame_limit)?;
         let header = read_header(&mut data)?;
         if header.record_count != run.record_count {
             return Err(MidgeError::Corruption(
                 "transaction spill record count changed".to_string(),
             ));
         }
-        let mut range = RunFile::open(&*run.root, &run.range_path)?;
+        let mut range =
+            RunFile::open_bounded(&*run.root, &run.range_path, budget, run.frame_limit)?;
         let range_header = read_range_header(&mut range)?;
+        if range_header.node_count() != run.range_count {
+            return Err(MidgeError::Corruption(
+                "transaction spill range count changed".into(),
+            ));
+        }
         let charge = sparse_charge_upper_bound(&data, &header)?;
-        let (sparse, charged_bytes) = if run.pool.try_reserve(charge) {
+        let (sparse, charged_bytes) = if budget.is_none() && run.pool.try_reserve(charge) {
             // The reservation covers the Vec allocation and every copied key
             // before decoding materializes either of them.
             match read_sparse_entries(&mut data, &header) {
@@ -416,6 +459,12 @@ pub(super) fn write_run_with_reader_cache(
         path,
         range_path,
         record_count: ops.len(),
+        max_operation_bytes: ops
+            .iter()
+            .map(|entry| op_heap_bytes(&entry.op))
+            .max()
+            .unwrap_or(0),
+        frame_limit: spill_frame_limit(ops)?,
         key_bounds: ops.first().zip(ops.last()).map(|(first, last)| {
             (
                 op_primary_key_bytes(&first.op),
@@ -596,11 +645,23 @@ pub(super) fn read_header(file: &mut RunFile) -> MidgeResult<RunHeader> {
     })
 }
 
+#[cfg(test)]
 pub(super) fn for_each_run_ordinal<F>(run: &SpillRun, mut visitor: F) -> MidgeResult<()>
 where
     F: FnMut(OrdinalOp) -> MidgeResult<()>,
 {
-    let mut file = RunFile::open(&*run.root, &run.path)?;
+    for_each_run_ordinal_bounded(run, None, &mut visitor)
+}
+
+pub(super) fn for_each_run_ordinal_bounded<F>(
+    run: &SpillRun,
+    budget: Option<&ResourceBudget>,
+    mut visitor: F,
+) -> MidgeResult<()>
+where
+    F: FnMut(OrdinalOp) -> MidgeResult<()>,
+{
+    let mut file = RunFile::open_bounded(&*run.root, &run.path, budget, run.frame_limit)?;
     let header = read_header(&mut file)?;
     if header.record_count != run.record_count {
         return Err(MidgeError::Corruption(
@@ -634,7 +695,7 @@ where
         visitor(ordinal_op)?;
     }
     validate_sparse_index(&mut file, &header)?;
-    validate_range_index(&*run.root, &run.range_path)
+    super::range::validate_range_index_bounded(&*run.root, &run.range_path, budget, run.frame_limit)
 }
 
 fn validate_sparse_index(file: &mut RunFile, header: &RunHeader) -> MidgeResult<()> {
@@ -675,7 +736,7 @@ where
             ));
         }
         let record_offset = read_u64_at(&payload, key_end)?;
-        let key = Bytes::from(payload).slice(4..key_end);
+        let key = payload.slice(4..key_end);
         if previous_key
             .as_ref()
             .is_some_and(|previous| previous > &key)
@@ -775,8 +836,18 @@ pub(super) fn lookup_run_key(
     ordinal_ceiling: u64,
     latest: &mut Option<(u64, IntentLookup)>,
 ) -> MidgeResult<()> {
-    lookup_run_points(run, key, ordinal_ceiling, latest)?;
-    lookup_run_ranges(run, key, ordinal_ceiling, latest)
+    lookup_run_key_bounded(run, key, ordinal_ceiling, latest, None)
+}
+
+pub(super) fn lookup_run_key_bounded(
+    run: &SpillRun,
+    key: &[u8],
+    ordinal_ceiling: u64,
+    latest: &mut Option<(u64, IntentLookup)>,
+    budget: Option<&ResourceBudget>,
+) -> MidgeResult<()> {
+    lookup_run_points_bounded(run, key, ordinal_ceiling, latest, budget)?;
+    lookup_run_ranges(run, key, ordinal_ceiling, latest, budget)
 }
 
 /// Point writes only. Skips the run without opening it when `key` lies
@@ -787,10 +858,20 @@ pub(super) fn lookup_run_points(
     ordinal_ceiling: u64,
     latest: &mut Option<(u64, IntentLookup)>,
 ) -> MidgeResult<()> {
+    lookup_run_points_bounded(run, key, ordinal_ceiling, latest, None)
+}
+
+fn lookup_run_points_bounded(
+    run: &SpillRun,
+    key: &[u8],
+    ordinal_ceiling: u64,
+    latest: &mut Option<(u64, IntentLookup)>,
+    budget: Option<&ResourceBudget>,
+) -> MidgeResult<()> {
     if !run.holds_point_key(key) {
         return Ok(());
     }
-    run.with_reader(|reader| {
+    run.with_reader_bounded(budget, |reader| {
         let header = reader.header();
         let mut cursor = reader.sparse_start(Some(key))?;
         while cursor < header.ordinal_table_offset {
@@ -825,11 +906,12 @@ fn lookup_run_ranges(
     key: &[u8],
     ordinal_ceiling: u64,
     latest: &mut Option<(u64, IntentLookup)>,
+    budget: Option<&ResourceBudget>,
 ) -> MidgeResult<()> {
     if run.range_count == 0 {
         return Ok(());
     }
-    run.with_reader(|reader| {
+    run.with_reader_bounded(budget, |reader| {
         lookup_range_index(
             &mut reader.range,
             &reader.range_header,
@@ -920,7 +1002,7 @@ pub(super) fn read_op_frame(file: &mut RunFile) -> MidgeResult<(OrdinalOp, u64)>
             "transaction spill key length exceeds its frame".to_string(),
         ));
     }
-    let key = read_crc_vec(file, key_len, &mut crc)?;
+    let key = read_crc_bytes(file, key_len, &mut crc)?;
     consumed = consumed.saturating_add(key_len);
 
     let mut second_len_bytes = [0_u8; 4];
@@ -932,7 +1014,7 @@ pub(super) fn read_op_frame(file: &mut RunFile) -> MidgeResult<(OrdinalOp, u64)>
             "transaction spill value length does not match its frame".to_string(),
         ));
     }
-    let second = read_crc_vec(file, second_len, &mut crc)?;
+    let second = read_crc_bytes(file, second_len, &mut crc)?;
     if crc != expected_crc {
         return Err(MidgeError::Corruption(
             "transaction spill frame checksum mismatch".to_string(),
@@ -941,19 +1023,16 @@ pub(super) fn read_op_frame(file: &mut RunFile) -> MidgeResult<(OrdinalOp, u64)>
     let op = match tag {
         0 | 1 => TransactionOp::Put {
             cf_id,
-            key: Bytes::from(key),
-            value: Bytes::from(second),
+            key,
+            value: second,
             ttl_seconds: (ttl_present == 1).then_some(ttl),
             insert_only: tag == 1,
         },
-        2 if second.is_empty() => TransactionOp::Delete {
-            cf_id,
-            key: Bytes::from(key),
-        },
+        2 if second.is_empty() => TransactionOp::Delete { cf_id, key },
         3 => TransactionOp::DeleteRange {
             cf_id,
-            start_key: Bytes::from(key),
-            end_key: Bytes::from(second),
+            start_key: key,
+            end_key: second,
         },
         _ => {
             return Err(MidgeError::Corruption(format!(
@@ -1008,7 +1087,7 @@ pub(super) fn read_op_primary_key_frame(file: &mut RunFile) -> MidgeResult<(Byte
             "transaction spill key length exceeds its frame".to_string(),
         ));
     }
-    let key = read_crc_vec(file, key_len, &mut crc)?;
+    let key = read_crc_bytes(file, key_len, &mut crc)?;
     consumed = consumed.saturating_add(key_len);
 
     let mut second_len_bytes = [0_u8; 4];
@@ -1038,7 +1117,7 @@ pub(super) fn read_op_primary_key_frame(file: &mut RunFile) -> MidgeResult<(Byte
             "transaction spill frame checksum mismatch".to_string(),
         ));
     }
-    Ok((Bytes::from(key), file.position()))
+    Ok((key, file.position()))
 }
 
 fn write_frame(file: &mut FileWriter, payload: &[u8]) -> MidgeResult<()> {
@@ -1092,9 +1171,10 @@ pub(super) fn read_frame_header(file: &mut RunFile) -> MidgeResult<(usize, u32)>
     let mut frame_header = [0_u8; 8];
     file.read_exact(&mut frame_header)?;
     let length = read_u32_at(&frame_header, 0)? as usize;
-    if length > MAX_FRAME_BYTES {
+    if length > MAX_FRAME_BYTES || length > file.frame_limit {
         return Err(MidgeError::Corruption(format!(
-            "transaction spill frame length {length} exceeds limit"
+            "transaction spill frame length {length} exceeds accepted limit {}",
+            file.frame_limit
         )));
     }
     Ok((length, read_u32_at(&frame_header, 4)?))
@@ -1106,11 +1186,12 @@ pub(super) fn read_crc_exact(file: &mut RunFile, dst: &mut [u8], crc: &mut u32) 
     Ok(())
 }
 
-pub(super) fn read_crc_vec(
+pub(super) fn read_crc_bytes(
     file: &mut RunFile,
     length: usize,
     crc: &mut u32,
-) -> MidgeResult<Vec<u8>> {
+) -> MidgeResult<Bytes> {
+    let reservation = reserve_decoded(file, length)?;
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(length).map_err(|_| {
         MidgeError::ResourceLimit(format!(
@@ -1119,11 +1200,12 @@ pub(super) fn read_crc_vec(
     })?;
     bytes.resize(length, 0);
     read_crc_exact(file, &mut bytes, crc)?;
-    Ok(bytes)
+    Ok(own_decoded(bytes, reservation))
 }
 
-fn read_frame(file: &mut RunFile) -> MidgeResult<(Vec<u8>, u64)> {
+fn read_frame(file: &mut RunFile) -> MidgeResult<(Bytes, u64)> {
     let (length, expected_crc) = read_frame_header(file)?;
+    let reservation = reserve_decoded(file, length)?;
     let mut payload = Vec::new();
     payload.try_reserve_exact(length).map_err(|_| {
         MidgeError::ResourceLimit(format!(
@@ -1137,7 +1219,42 @@ fn read_frame(file: &mut RunFile) -> MidgeResult<(Vec<u8>, u64)> {
             "transaction spill frame checksum mismatch".to_string(),
         ));
     }
-    Ok((payload, file.position()))
+    Ok((own_decoded(payload, reservation), file.position()))
+}
+
+struct DecodedSpillBytes {
+    bytes: Vec<u8>,
+    _reservation: ResourceReservation,
+}
+
+impl AsRef<[u8]> for DecodedSpillBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+fn reserve_decoded(file: &RunFile, length: usize) -> MidgeResult<Option<ResourceReservation>> {
+    file.decode_budget
+        .as_ref()
+        .map(|budget| {
+            let bytes = length
+                .checked_add(size_of::<DecodedSpillBytes>())
+                .ok_or_else(|| {
+                    MidgeError::ResourceLimit("spill decoded ownership overflow".into())
+                })?;
+            budget.reserve(bytes, "decoded spill field")
+        })
+        .transpose()
+}
+
+fn own_decoded(bytes: Vec<u8>, reservation: Option<ResourceReservation>) -> Bytes {
+    match reservation {
+        Some(reservation) => Bytes::from_owner(DecodedSpillBytes {
+            bytes,
+            _reservation: reservation,
+        }),
+        None => Bytes::from(bytes),
+    }
 }
 
 pub(super) fn read_u32_at(bytes: &[u8], offset: usize) -> MidgeResult<u32> {

@@ -22,17 +22,87 @@ const ROTATION_MEMTABLE_BYTES: usize = 128 * 1024;
 const ROTATION_WARMUP_TRANSACTIONS: usize = 64;
 const ROTATION_TRANSACTIONS_PER_RUN: usize = 512;
 const ROTATION_RUNS: usize = 5;
+const SHARED_HOT_KEY: &[u8; 16] = b"strict-hot-key01";
+
+#[derive(Clone, Copy)]
+enum StrictKeyDistribution {
+    Distinct,
+    SharedHotKey,
+}
+
+impl StrictKeyDistribution {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Distinct => "distinct",
+            Self::SharedHotKey => "single_shared_hot_key",
+        }
+    }
+}
 
 struct StrictCommitSample {
+    ledger: LedgerSyncSample,
     elapsed: Duration,
     completed: u64,
     wal_appends: u64,
     physical_fsyncs: u64,
+    wal_append_ns: u64,
+    physical_wal_fsync_ns: u64,
+    wal_sync_transition_p50_ns: u64,
+    wal_sync_transition_p95_ns: u64,
+    wal_sync_transition_p99_ns: u64,
+    wal_sync_phases: WalSyncPhaseSample,
+    wal_encode_ns: u64,
+    wal_write_syscall_ns: u64,
+    event_loop_write_service_ns: u64,
     commit_latencies_us: Vec<u64>,
 }
 
+struct WalSyncPhaseSample {
+    writer_queue_count: u64,
+    writer_queue_ns_total: u64,
+    receipt_delivery_count: u64,
+    receipt_delivery_ns_total: u64,
+    ledger_proof_count: u64,
+    ledger_proof_ns_total: u64,
+}
+
+impl WalSyncPhaseSample {
+    fn between(start: &RuntimeMetricsSnapshot, end: &RuntimeMetricsSnapshot) -> Self {
+        Self {
+            writer_queue_count: end
+                .wal_sync_phases
+                .writer_queue_count
+                .saturating_sub(start.wal_sync_phases.writer_queue_count),
+            writer_queue_ns_total: end
+                .wal_sync_phases
+                .writer_queue_ns_total
+                .saturating_sub(start.wal_sync_phases.writer_queue_ns_total),
+            receipt_delivery_count: end
+                .wal_sync_phases
+                .receipt_delivery_count
+                .saturating_sub(start.wal_sync_phases.receipt_delivery_count),
+            receipt_delivery_ns_total: end
+                .wal_sync_phases
+                .receipt_delivery_ns_total
+                .saturating_sub(start.wal_sync_phases.receipt_delivery_ns_total),
+            ledger_proof_count: end
+                .wal_sync_phases
+                .ledger_proof_count
+                .saturating_sub(start.wal_sync_phases.ledger_proof_count),
+            ledger_proof_ns_total: end
+                .wal_sync_phases
+                .ledger_proof_ns_total
+                .saturating_sub(start.wal_sync_phases.ledger_proof_ns_total),
+        }
+    }
+}
+
 struct RotationRunSample {
+    ledger: LedgerSyncSample,
     elapsed: Duration,
+    event_loop_write_service_ns_total: u64,
+    wal_encode_ns_total: u64,
+    wal_write_syscall_ns_total: u64,
     commit_p50_us: u64,
     commit_p95_us: u64,
     commit_p99_us: u64,
@@ -46,6 +116,75 @@ struct RotationRunSample {
     flush_build_ns_total: u64,
     flush_publish_count: u64,
     flush_publish_ns_total: u64,
+}
+
+#[derive(Default)]
+struct LedgerSyncSample {
+    file_attempts: u64,
+    file_completed: u64,
+    directory_attempts: u64,
+    directory_completed: u64,
+    accounted: u64,
+}
+
+impl LedgerSyncSample {
+    fn between(start: &RuntimeMetricsSnapshot, end: &RuntimeMetricsSnapshot) -> Self {
+        Self {
+            file_attempts: end
+                .wal_ledger_file_sync_attempts
+                .saturating_sub(start.wal_ledger_file_sync_attempts),
+            file_completed: end
+                .wal_ledger_file_syncs
+                .saturating_sub(start.wal_ledger_file_syncs),
+            directory_attempts: end
+                .wal_ledger_directory_sync_attempts
+                .saturating_sub(start.wal_ledger_directory_sync_attempts),
+            directory_completed: end
+                .wal_ledger_directory_syncs
+                .saturating_sub(start.wal_ledger_directory_syncs),
+            accounted: end
+                .wal_accounted_syncs
+                .saturating_sub(start.wal_accounted_syncs),
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.file_attempts += other.file_attempts;
+        self.file_completed += other.file_completed;
+        self.directory_attempts += other.directory_attempts;
+        self.directory_completed += other.directory_completed;
+        self.accounted += other.accounted;
+    }
+
+    fn record(&self, ctx: &mut StressContext) {
+        ctx.parameter("physical_fsync_scope", "successful_writer_runner_barriers");
+        ctx.parameter(
+            "accounted_sync_scope",
+            "writer_barriers_plus_ledger_files_and_directories_excludes_other_syncs",
+        );
+        for (name, count) in [
+            ("ledger_file_sync_attempts", self.file_attempts),
+            ("ledger_file_syncs", self.file_completed),
+            ("ledger_directory_sync_attempts", self.directory_attempts),
+            ("ledger_directory_syncs", self.directory_completed),
+            ("wal_and_ledger_accounted_syncs", self.accounted),
+        ] {
+            ctx.record_observation(
+                name,
+                u64_to_f64(count),
+                ObservationUnit::Count,
+                ObservationDirection::Informational,
+            );
+        }
+        assert_eq!(
+            self.file_attempts, self.file_completed,
+            "ledger file sync errors invalidate cost measurements"
+        );
+        assert_eq!(
+            self.directory_attempts, self.directory_completed,
+            "ledger directory sync errors invalidate cost measurements"
+        );
+    }
 }
 
 fn metrics_delta(start: &RuntimeMetricsSnapshot, end: &RuntimeMetricsSnapshot) -> (u64, u64) {
@@ -166,7 +305,17 @@ fn execute_rotation_run() -> RotationRunSample {
         .expect("capture ending rotation metrics");
 
     RotationRunSample {
+        ledger: LedgerSyncSample::between(&start_metrics, &end_metrics),
         elapsed,
+        event_loop_write_service_ns_total: end_metrics
+            .event_loop_write_service_ns_total
+            .saturating_sub(start_metrics.event_loop_write_service_ns_total),
+        wal_encode_ns_total: end_metrics
+            .wal_encode_ns_total
+            .saturating_sub(start_metrics.wal_encode_ns_total),
+        wal_write_syscall_ns_total: end_metrics
+            .wal_write_syscall_ns_total
+            .saturating_sub(start_metrics.wal_write_syscall_ns_total),
         commit_p50_us: all.value_at_quantile(0.50),
         commit_p95_us: all.value_at_quantile(0.95),
         commit_p99_us: all.value_at_quantile(0.99),
@@ -200,16 +349,20 @@ fn writer_workload(
     cf_id: ColumnFamilyId,
     writer: usize,
     transactions: usize,
+    key_distribution: StrictKeyDistribution,
     barrier: &Barrier,
 ) -> Vec<u64> {
     let mut commit_latencies_us = Vec::with_capacity(transactions);
     barrier.wait();
     for index in 0..transactions {
         let ordinal = writer * transactions + index;
-        let key = stress_config::bench_stress::key16_u64_be(
-            u64::try_from(ordinal).expect("transaction ordinal fits in u64"),
-        )
-        .to_vec();
+        let key = match key_distribution {
+            StrictKeyDistribution::Distinct => stress_config::bench_stress::key16_u64_be(
+                u64::try_from(ordinal).expect("transaction ordinal fits in u64"),
+            )
+            .to_vec(),
+            StrictKeyDistribution::SharedHotKey => SHARED_HOT_KEY.to_vec(),
+        };
         let value = vec![u8::try_from(ordinal % 251).expect("value byte fits in u8"); VALUE_SIZE];
         let mut tx = engine
             .begin_tx(cf_id, TransactionMode::ReadWrite)
@@ -225,7 +378,10 @@ fn writer_workload(
     commit_latencies_us
 }
 
-fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
+fn execute_strict_commit_case(
+    writers: usize,
+    key_distribution: StrictKeyDistribution,
+) -> StrictCommitSample {
     let transactions_per_sample: usize = match writers {
         1 => 2_048,
         16 => 8_192,
@@ -253,7 +409,14 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
         let engine = Arc::clone(&engine);
         let barrier = Arc::clone(&barrier);
         handles.push(std::thread::spawn(move || {
-            writer_workload(&engine, cf_id, writer, transactions_per_writer, &barrier)
+            writer_workload(
+                &engine,
+                cf_id,
+                writer,
+                transactions_per_writer,
+                key_distribution,
+                &barrier,
+            )
         }));
     }
 
@@ -279,15 +442,40 @@ fn execute_strict_commit_case(writers: usize) -> StrictCommitSample {
         .expect("shut down strict commit benchmark engine");
 
     StrictCommitSample {
+        ledger: LedgerSyncSample::between(&start_metrics, &end_metrics),
         elapsed,
         completed: u64::try_from(transactions_per_sample).expect("transaction count fits in u64"),
         wal_appends,
         physical_fsyncs,
+        wal_append_ns: end_metrics
+            .wal_append_ns_total
+            .saturating_sub(start_metrics.wal_append_ns_total),
+        physical_wal_fsync_ns: end_metrics
+            .wal_fsync_ns_total
+            .saturating_sub(start_metrics.wal_fsync_ns_total),
+        wal_sync_transition_p50_ns: end_metrics.latency.wal_fsync.p50_ns,
+        wal_sync_transition_p95_ns: end_metrics.latency.wal_fsync.p95_ns,
+        wal_sync_transition_p99_ns: end_metrics.latency.wal_fsync.p99_ns,
+        wal_sync_phases: WalSyncPhaseSample::between(&start_metrics, &end_metrics),
+        wal_encode_ns: end_metrics
+            .wal_encode_ns_total
+            .saturating_sub(start_metrics.wal_encode_ns_total),
+        wal_write_syscall_ns: end_metrics
+            .wal_write_syscall_ns_total
+            .saturating_sub(start_metrics.wal_write_syscall_ns_total),
+        event_loop_write_service_ns: end_metrics
+            .event_loop_write_service_ns_total
+            .saturating_sub(start_metrics.event_loop_write_service_ns_total),
         commit_latencies_us,
     }
 }
 
-fn run_strict_commit_case(ctx: &mut StressContext, scenario: &'static str, writers: usize) {
+fn run_strict_commit_case(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    writers: usize,
+    key_distribution: StrictKeyDistribution,
+) {
     let transactions = match writers {
         1 => 2_048,
         16 => 8_192,
@@ -300,8 +488,14 @@ fn run_strict_commit_case(ctx: &mut StressContext, scenario: &'static str, write
     ctx.parameter("commit_mode", "sync");
     ctx.parameter("writers", writers);
     ctx.parameter("value_size_bytes", VALUE_SIZE);
+    ctx.parameter("key_distribution", key_distribution.label());
     ctx.parameter("operation_surface", "single_put_single_commit");
-    let sample = execute_strict_commit_case(writers);
+    ctx.parameter(
+        "phase_timing_scope",
+        "runtime_wall_time_counters_and_writer_service_counters",
+    );
+    let sample = execute_strict_commit_case(writers, key_distribution);
+    sample.ledger.record(ctx);
     record_success(
         ctx,
         scenario,
@@ -324,12 +518,95 @@ fn run_strict_commit_case(ctx: &mut StressContext, scenario: &'static str, write
         ObservationUnit::Count,
         ObservationDirection::Informational,
     );
+    assert!(
+        sample.wal_appends > 0,
+        "strict transactions must produce at least one physical WAL append"
+    );
     ctx.record_observation(
         "commits_per_fsync",
         u64_to_f64(sample.completed) / u64_to_f64(sample.physical_fsyncs.max(1)),
         ObservationUnit::Ratio,
         ObservationDirection::HigherIsBetter,
     );
+    ctx.record_observation(
+        "avg_txn_records_per_append",
+        u64_to_f64(sample.completed) / u64_to_f64(sample.wal_appends),
+        ObservationUnit::Ratio,
+        ObservationDirection::HigherIsBetter,
+    );
+    record_strict_phase_observations(ctx, &sample);
+}
+
+fn record_strict_phase_observations(ctx: &mut StressContext, sample: &StrictCommitSample) {
+    let per_commit_ns = |total: u64| u64_to_f64(total) / u64_to_f64(sample.completed.max(1));
+    for (name, total) in [
+        ("wal_append_completion_ns_per_commit", sample.wal_append_ns),
+        (
+            "physical_wal_fsync_ns_per_commit",
+            sample.physical_wal_fsync_ns,
+        ),
+        ("wal_encode_ns_per_commit", sample.wal_encode_ns),
+        (
+            "wal_write_syscall_ns_per_commit",
+            sample.wal_write_syscall_ns,
+        ),
+        (
+            "event_loop_write_service_ns_per_commit",
+            sample.event_loop_write_service_ns,
+        ),
+    ] {
+        ctx.record_observation(
+            name,
+            per_commit_ns(total),
+            ObservationUnit::Nanoseconds,
+            ObservationDirection::Informational,
+        );
+    }
+    for (name, count, total_ns) in [
+        (
+            "wal_sync_writer_queue_ns_per_sync",
+            sample.wal_sync_phases.writer_queue_count,
+            sample.wal_sync_phases.writer_queue_ns_total,
+        ),
+        (
+            "wal_sync_receipt_delivery_ns_per_sync",
+            sample.wal_sync_phases.receipt_delivery_count,
+            sample.wal_sync_phases.receipt_delivery_ns_total,
+        ),
+        (
+            "wal_sync_ledger_proof_ns_per_sync",
+            sample.wal_sync_phases.ledger_proof_count,
+            sample.wal_sync_phases.ledger_proof_ns_total,
+        ),
+    ] {
+        ctx.record_observation(
+            name,
+            u64_to_f64(total_ns) / u64_to_f64(count.max(1)),
+            ObservationUnit::Nanoseconds,
+            ObservationDirection::Informational,
+        );
+    }
+    for (name, value) in [
+        (
+            "wal_sync_transition_p50_ns",
+            sample.wal_sync_transition_p50_ns,
+        ),
+        (
+            "wal_sync_transition_p95_ns",
+            sample.wal_sync_transition_p95_ns,
+        ),
+        (
+            "wal_sync_transition_p99_ns",
+            sample.wal_sync_transition_p99_ns,
+        ),
+    ] {
+        ctx.record_observation(
+            name,
+            u64_to_f64(value),
+            ObservationUnit::Nanoseconds,
+            ObservationDirection::Informational,
+        );
+    }
 }
 
 fn set_rotation_parameters(ctx: &mut StressContext) {
@@ -353,6 +630,11 @@ fn record_rotation_observations(
     samples: &[RotationRunSample],
     elapsed: Duration,
 ) {
+    let mut ledger = LedgerSyncSample::default();
+    for sample in samples {
+        ledger.add(&sample.ledger);
+    }
+    ledger.record(ctx);
     let wal_fsyncs = samples.iter().map(|sample| sample.wal_fsyncs).sum::<u64>();
     let wal_fsync_ns_total = samples
         .iter()
@@ -383,7 +665,6 @@ fn record_rotation_observations(
         .iter()
         .map(|sample| sample.flush_publish_ns_total)
         .sum::<u64>();
-
     for latency_us in [
         median_u64(samples.iter().map(|sample| sample.commit_p50_us)),
         median_u64(samples.iter().map(|sample| sample.commit_p95_us)),
@@ -448,6 +729,52 @@ fn record_rotation_observations(
         ObservationUnit::Nanoseconds,
         ObservationDirection::Informational,
     );
+    record_rotation_service_observations(ctx, samples);
+}
+
+fn record_rotation_service_observations(ctx: &mut StressContext, samples: &[RotationRunSample]) {
+    let event_loop_write_service_ns_total = samples
+        .iter()
+        .map(|sample| sample.event_loop_write_service_ns_total)
+        .sum::<u64>();
+    let wal_encode_ns_total = samples
+        .iter()
+        .map(|sample| sample.wal_encode_ns_total)
+        .sum::<u64>();
+    let wal_write_syscall_ns_total = samples
+        .iter()
+        .map(|sample| sample.wal_write_syscall_ns_total)
+        .sum::<u64>();
+    let measured_commits = u64::try_from(samples.len())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::try_from(ROTATION_TRANSACTIONS_PER_RUN).unwrap_or(u64::MAX));
+    let per_commit_ns = |total: u64| u64_to_f64(total) / u64_to_f64(measured_commits.max(1));
+
+    for (name, value) in [
+        (
+            "event_loop_write_service_ns_per_4k_commit",
+            per_commit_ns(event_loop_write_service_ns_total),
+        ),
+        (
+            "wal_encode_ns_per_4k_commit",
+            per_commit_ns(wal_encode_ns_total),
+        ),
+        (
+            "wal_append_service_ns_per_4k_commit",
+            per_commit_ns(wal_write_syscall_ns_total),
+        ),
+        (
+            "wal_encode_and_append_service_ns_per_4k_commit",
+            per_commit_ns(wal_encode_ns_total.saturating_add(wal_write_syscall_ns_total)),
+        ),
+    ] {
+        ctx.record_observation(
+            name,
+            value,
+            ObservationUnit::Nanoseconds,
+            ObservationDirection::Informational,
+        );
+    }
 }
 
 #[stress(tier = 2)]
@@ -475,17 +802,42 @@ fn tier2_durability_commit_sync_local_4k_rotation(ctx: &mut StressContext) {
 
 #[stress(tier = 2)]
 fn tier2_durability_commit_sync_local(ctx: &mut StressContext) {
-    run_strict_commit_case(ctx, "tier2_durability_commit_sync_local", 1);
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local",
+        1,
+        StrictKeyDistribution::Distinct,
+    );
 }
 
 #[stress(tier = 2)]
 fn tier2_durability_commit_sync_local_16_writers(ctx: &mut StressContext) {
-    run_strict_commit_case(ctx, "tier2_durability_commit_sync_local_16_writers", 16);
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local_16_writers",
+        16,
+        StrictKeyDistribution::Distinct,
+    );
+}
+
+#[stress(tier = 2)]
+fn tier2_durability_commit_sync_local_16_writers_hot_key(ctx: &mut StressContext) {
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local_16_writers_hot_key",
+        16,
+        StrictKeyDistribution::SharedHotKey,
+    );
 }
 
 #[stress(tier = 2)]
 fn tier2_durability_commit_sync_local_64_writers(ctx: &mut StressContext) {
-    run_strict_commit_case(ctx, "tier2_durability_commit_sync_local_64_writers", 64);
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local_64_writers",
+        64,
+        StrictKeyDistribution::Distinct,
+    );
 }
 
 stress_main!();

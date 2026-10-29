@@ -40,10 +40,23 @@ use harness::{Campaign, Stop};
 use images::{assert_clean, load_image};
 use search::campaign;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
 use workload::{control_seeds, Durability, Op, Profile, DEFAULT, DETECTION_SEEDS, KEYS};
+
+// These campaigns use 60 ms simulated lease TTLs and spawn worker threads.
+// Parallel campaigns contend for host scheduling and can produce lease
+// acquisition timeouts unrelated to the invariant each workload checks.
+static CAMPAIGN_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn campaign_test_guard() -> MutexGuard<'static, ()> {
+    CAMPAIGN_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[test]
 fn should_find_no_violation_when_synced_writes_survive_crashes() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange: lease renewals interleave with the crashes.
     if let Some(directory) = std::env::var_os("MIDGE_CAMPAIGN_REPLAY") {
         let image = load_image(Path::new(&directory));
@@ -66,6 +79,7 @@ fn should_find_no_violation_when_synced_writes_survive_crashes() {
 
 #[test]
 fn should_find_no_violation_when_buffered_writes_retire_through_power_loss() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange: a power loss can cut a rotation between creating its segment
     // and recording it in the ledger; the open sweeps that empty orphan and
     // the next rotation creates the same name again. The ledger never named
@@ -85,6 +99,7 @@ fn should_find_no_violation_when_buffered_writes_retire_through_power_loss() {
 
 #[test]
 fn should_keep_created_families_when_process_crash_precedes_power_loss() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange: the review's lead is that a manifest journal created but not
     // dir-synced before a process crash loses its name at the next power
     // loss.
@@ -99,6 +114,7 @@ fn should_keep_created_families_when_process_crash_precedes_power_loss() {
 
 #[test]
 fn should_keep_best_effort_deleted_keys_absent_when_recovering_completed_flushes() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange
     let config = Config {
         segment_reuse: false,
@@ -120,6 +136,7 @@ fn should_keep_best_effort_deleted_keys_absent_when_recovering_completed_flushes
 /// sweeps (#842).
 #[test]
 fn should_keep_deleted_keys_absent_when_wal_removals_fail() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange
     let workloads = control_seeds(32);
 
@@ -136,6 +153,7 @@ fn should_keep_deleted_keys_absent_when_wal_removals_fail() {
 /// segment ledger now allocates every id past each one it ever named (#842).
 #[test]
 fn should_not_reuse_segment_names_when_flushes_retire_every_sealed_segment() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange
     let workloads = control_seeds(32);
 
@@ -152,6 +170,7 @@ fn should_not_reuse_segment_names_when_flushes_retire_every_sealed_segment() {
 /// recovered tail durably before it serves anything (#843).
 #[test]
 fn should_find_no_violation_when_buffered_tails_meet_power_loss() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange
     let workloads = control_seeds(32);
 
@@ -170,6 +189,7 @@ fn should_find_no_violation_when_buffered_tails_meet_power_loss() {
 /// included. The release a clean shutdown completes has no open after it.
 #[test]
 fn should_allow_successor_when_power_loss_follows_completed_lease_release() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange: the operator's workaround is off.
     let config = Config {
         clear_stale_lease_lock: false,
@@ -200,6 +220,7 @@ fn should_allow_successor_when_power_loss_follows_completed_lease_release() {
 /// fsyncs it before serving (#843).
 #[test]
 fn should_keep_recovered_tail_when_power_is_lost_after_a_process_crash() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange: a buffered put, then the process dies and a restarted process
     // recovers and serves the replayed tail.
     let mut campaign = Campaign::new(Config::default(), 0);
@@ -237,6 +258,7 @@ fn should_keep_recovered_tail_when_power_is_lost_after_a_process_crash() {
 /// keeps the WAL from before the delete.
 #[test]
 fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange: a synced put, a buffered delete of it and a completed flush,
     // then power is lost with the WAL page from before the delete.
     let mut campaign = Campaign::new(Config::default(), 0);
@@ -275,6 +297,7 @@ fn should_not_resurrect_flushed_delete_when_power_loss_drops_its_wal_record() {
 
 #[test]
 fn should_find_no_violation_when_provider_writes_survive_takeovers() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange: a power loss can cut a rotation between creating its segment
     // and recording it in the ledger; the open sweeps that empty orphan and
     // the next rotation creates the same name again. The ledger never named
@@ -300,6 +323,7 @@ fn should_find_no_violation_when_provider_writes_survive_takeovers() {
 /// already flushed.
 #[test]
 fn should_keep_strict_put_when_a_fresh_cache_takes_over_after_a_flush() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange: a restart moves the sequence past its predecessor's
     // reservation, then a flush records the family's frontier there.
     let config = Config {
@@ -338,6 +362,7 @@ fn should_keep_strict_put_when_a_fresh_cache_takes_over_after_a_flush() {
 
 #[test]
 fn should_find_no_violation_when_simulated_cloud_writes_survive_crashes() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange: a power loss can cut a rotation between creating its segment
     // and recording it in the ledger; the open sweeps that empty orphan and
     // the next rotation creates the same name again. The ledger never named
@@ -361,6 +386,7 @@ fn should_find_no_violation_when_simulated_cloud_writes_survive_crashes() {
 /// contiguous run, and failed uploads keep retrying.
 #[test]
 fn should_keep_earlier_writes_when_a_segment_exhausts_its_upload_attempts() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange: segment 1's first three upload attempts fail, and segments
     // seal every two asynchronous writes, so later segments upload past it.
     // A successful clean shutdown promises every acknowledged write before
@@ -402,6 +428,7 @@ fn should_keep_earlier_writes_when_a_segment_exhausts_its_upload_attempts() {
 
 #[test]
 fn should_find_no_violation_when_cloud_uploads_fail() {
+    let _campaign_guard = campaign_test_guard();
     // Arrange: WAL and SST uploads and deletes fail before or after their
     // effect, lose their answer or land late.
     let workloads = control_seeds(16);

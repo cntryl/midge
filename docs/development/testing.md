@@ -26,6 +26,40 @@ Validate naming and AAA structure:
 cntryl-tools validate-tests
 ```
 
+Model-check and interpret the lock-free skiplist (#931). All three runs are
+part of the local gate for any change under `src/memtable/`:
+
+```bash
+# Every interleaving of the loom models, with the skiplist's atomics swapped
+# for loom's. Only the models run: ordinary tests build lists outside a model.
+# The separate target directory keeps the cfg from rebuilding the normal one.
+RUSTFLAGS="--cfg midge_loom" cargo test --lib --release --target-dir target/loom \
+  memtable::skiplist::loom_tests
+
+# The models are compiled only under the cfg, so lint them the same way.
+RUSTFLAGS="--cfg midge_loom" cargo clippy --lib --tests --release --target-dir target/loom \
+  -- -D warnings -D clippy::pedantic
+
+# The skiplist unit tests under miri (nightly toolchain with the miri component).
+# Default features pull in provider clients whose native dependencies miri
+# cannot build; isolation is off because proptest looks up the working
+# directory; the case count keeps the interpreted run under a minute.
+MIRIFLAGS="-Zmiri-disable-isolation" PROPTEST_CASES=16 \
+  cargo +nightly miri test --lib --no-default-features memtable::skiplist
+
+# Deeper, about three minutes: the same tests under four scheduler seeds, so
+# the threaded tests take different interleavings.
+MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-many-seeds=0..4" PROPTEST_CASES=16 \
+  cargo +nightly miri test --lib --no-default-features memtable::skiplist::tests
+```
+
+The cfg is crate-specific because dependencies such as tokio react to a global
+`cfg(loom)` by removing APIs other dependencies need. Loom tracks causality
+only through its own atomics, so the models prove the protocol (no lost
+update, every link present and ordered, every lost race reclaimed) and not the
+memory ordering of the plain payload fields each publication hands over; miri's
+data-race detector covers that for the schedules it runs.
+
 Run the repository and packaging qualification gates:
 
 ```bash
@@ -90,6 +124,28 @@ endpoint override, not the native OCI API.
 
 The scheduled fuzz workflow builds every registered target and runs bounded
 smokes. Local smoke commands should use the same time and per-input bounds.
+
+The `engine_differential` target (#951) drives the public engine API from the
+input bytes (multi-key transactions, TTL, range deletes, snapshots, flushes,
+compactions, reopens, power-loss crashes) and checks every read against a
+`BTreeMap` model; the driver lives in `tests/support/differential.rs` and
+`tests/engine_differential.rs` runs it as a proptest with 256 cases
+(`PROPTEST_CASES` overrides) plus the corpus seeds. The manual **Release
+Qualification** workflow replays preserved failures, smokes every registered
+parser target for 30 seconds, and runs `engine_differential` for five minutes
+with AddressSanitizer, a 512-byte input bound and a 10-second per-input timeout.
+These are bounded checks, not a proof of exhaustive coverage. Inspect the
+execution/coverage progress and preserve failures and useful new corpus entries.
+
+An extra 30-, 60-, or 240-minute differential campaign can be selected with
+`extended_fuzz_minutes` in Release Qualification, or `extended_minutes` in
+**Fuzz Qualification**. It runs after the bounded checks with `-s none` for
+more history exploration and defaults to off. Longer campaigns are useful for
+storage/recovery changes and recent findings; a fixed four-hour duration is
+not a routine release gate. The weekly fuzz schedule runs the bounded checks.
+A finding is a `flea` with a regression test; the fuzzer is never left failing
+silently. See the [release checklist](../operations/release-checklist.md) for
+the manual workflow and artifact review.
 
 Sqrzl provider-engine tests require the `sqrzl-tests` feature. The
 provider integration workflows use GitHub-managed Sqrzl services and run tests

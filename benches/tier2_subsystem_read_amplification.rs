@@ -16,6 +16,9 @@ use read_amp::{
 };
 use std::time::Instant;
 
+// Count allocations per operation so the long-scan row reports them (#945).
+cntryl_stress::stress_allocator!();
+
 fn as_f64(value: u64) -> f64 {
     f64::from(u32::try_from(value).expect("benchmark counter fits in u32"))
 }
@@ -27,6 +30,7 @@ fn record_observations(
     bloom_checks: u64,
     bloom_rejects: u64,
     candidate_sst_files_checked: u64,
+    candidate_blocks_checked: u64,
 ) {
     for (name, value) in [
         ("point_reads", result.point_reads),
@@ -50,7 +54,8 @@ fn record_observations(
             ObservationDirection::Informational,
         );
     }
-    for (name, value) in [
+    let cache_lookups = delta.cache_hits + delta.cache_misses;
+    let mut ratios = vec![
         (
             "ssts_touched_per_point_read",
             as_f64(delta.ssts_touched) / as_f64(delta.reads),
@@ -59,11 +64,14 @@ fn record_observations(
             "blocks_read_per_point_read",
             as_f64(delta.blocks_read) / as_f64(delta.reads),
         ),
-        (
+    ];
+    if cache_lookups > 0 {
+        ratios.push((
             "block_cache_hit_rate",
-            as_f64(delta.cache_hits) / as_f64(delta.cache_hits + delta.cache_misses),
-        ),
-    ] {
+            as_f64(delta.cache_hits) / as_f64(cache_lookups),
+        ));
+    }
+    for (name, value) in ratios {
         ctx.record_observation(
             name,
             value,
@@ -71,16 +79,37 @@ fn record_observations(
             ObservationDirection::Informational,
         );
     }
+    if result.point_misses > 0 && result.point_hits == 0 {
+        for (name, count) in [
+            ("bloom_checks_per_point_miss", bloom_checks),
+            ("bloom_rejects_per_point_miss", bloom_rejects),
+            (
+                "candidate_sst_files_checked_per_point_miss",
+                candidate_sst_files_checked,
+            ),
+            (
+                "candidate_blocks_checked_per_point_miss",
+                candidate_blocks_checked,
+            ),
+        ] {
+            ctx.record_observation(
+                name,
+                as_f64(count) / as_f64(result.point_misses),
+                ObservationUnit::Ratio,
+                ObservationDirection::Informational,
+            );
+        }
+    }
 }
 
-fn run_case(ctx: &mut StressContext, scenario: &'static str, point_reads: usize, scans: usize) {
+fn run_case(ctx: &mut StressContext, scenario: &'static str, workload: &ReadWorkload) {
     let fixture = ReadAmpFixture::new();
-    let workload = ReadWorkload::new(point_reads, scans);
     ctx.parameter("storage_profile", "local");
     ctx.parameter("sst_layout", "three_overlapping_l0_ssts");
     ctx.parameter("fixture_keys_per_sst", KEYS_PER_SST);
-    ctx.parameter("point_reads", point_reads);
-    ctx.parameter("scans", scans);
+    ctx.parameter("point_reads", workload.expected_point_reads());
+    ctx.parameter("scans", workload.expected_scans());
+    ctx.parameter("expected_point_misses", workload.expected_point_misses());
     ctx.parameter("scan_width", SCAN_WIDTH);
     ctx.parameter("logical_unit", "read_query");
     ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
@@ -99,7 +128,7 @@ fn run_case(ctx: &mut StressContext, scenario: &'static str, point_reads: usize,
         .engine
         .read_path_diagnostics_snapshot_for_benchmarks();
     let started_at = Instant::now();
-    let result = run_workload(&fixture, &workload);
+    let result = run_workload(&fixture, workload);
     let elapsed = started_at.elapsed();
     let read_after = fixture
         .engine
@@ -119,17 +148,20 @@ fn run_case(ctx: &mut StressContext, scenario: &'static str, point_reads: usize,
     assert_eq!(result.point_reads, workload.expected_point_reads());
     assert_eq!(result.scans, workload.expected_scans());
     assert_eq!(result.point_hits + result.point_misses, result.point_reads);
-    assert_eq!(result.point_hits, result.point_reads * 3 / 4);
-    assert_eq!(result.point_misses, result.point_reads / 4);
+    assert_eq!(result.point_hits, workload.expected_point_hits());
+    assert_eq!(result.point_misses, workload.expected_point_misses());
     assert_eq!(
         result.scan_rows,
         result.scans * u64::try_from(SCAN_WIDTH).expect("scan width fits in u64")
     );
     assert_eq!(delta.reads, result.point_reads);
-    assert!(delta.ssts_touched > 0 && delta.blocks_read > 0);
-    assert!(delta.cache_hits > 0 && delta.cache_misses > 0);
     assert!(path_after.bloom_checks > path_before.bloom_checks);
     assert!(path_after.bloom_rejects > path_before.bloom_rejects);
+    assert!(path_after.candidate_sst_files_checked > path_before.candidate_sst_files_checked);
+    if result.point_hits > 0 {
+        assert!(delta.ssts_touched > 0 && delta.blocks_read > 0);
+        assert!(delta.cache_hits > 0 && delta.cache_misses > 0);
+    }
 
     ctx.record_external_outcome(
         scenario,
@@ -144,6 +176,7 @@ fn run_case(ctx: &mut StressContext, scenario: &'static str, point_reads: usize,
         path_after.bloom_checks - path_before.bloom_checks,
         path_after.bloom_rejects - path_before.bloom_rejects,
         path_after.candidate_sst_files_checked - path_before.candidate_sst_files_checked,
+        path_after.candidate_blocks_checked - path_before.candidate_blocks_checked,
     );
 }
 
@@ -153,7 +186,16 @@ fn run_case(ctx: &mut StressContext, scenario: &'static str, point_reads: usize,
     metadata(component = "engine_read_amplification", scenario = "point_hit_miss")
 )]
 fn point_hit_miss(ctx: &mut StressContext) {
-    run_case(ctx, "point_hit_miss", 32_768, 0);
+    run_case(ctx, "point_hit_miss", &ReadWorkload::new(32_768, 0));
+}
+
+#[stress(
+    tier = 2,
+    role = "diagnostic",
+    metadata(component = "engine_read_amplification", scenario = "point_miss_probe")
+)]
+fn point_miss_probe(ctx: &mut StressContext) {
+    run_case(ctx, "point_miss_probe", &ReadWorkload::misses_only(8_192));
 }
 
 #[stress(
@@ -165,7 +207,55 @@ fn point_hit_miss(ctx: &mut StressContext) {
     )
 )]
 fn mixed_point_short_scan(ctx: &mut StressContext) {
-    run_case(ctx, "mixed_point_short_scan", 32_768, 1_024);
+    run_case(
+        ctx,
+        "mixed_point_short_scan",
+        &ReadWorkload::new(32_768, 1_024),
+    );
+}
+
+/// Full scans over the three overlapping SSTs; the logical unit is the emitted
+/// row, so the harness reports rows per second; allocations per row are
+/// pinned by `tests/scan_allocations.rs` (the harness counts allocations only
+/// for sampled closures) (#945).
+#[stress(
+    tier = 2,
+    role = "diagnostic",
+    metadata(component = "engine_read_amplification", scenario = "long_scan")
+)]
+fn long_scan(ctx: &mut StressContext) {
+    let fixture = ReadAmpFixture::new();
+    let scans = 64;
+    let workload = ReadWorkload::long_scans(scans);
+    ctx.parameter("storage_profile", "local");
+    ctx.parameter("sst_layout", "three_overlapping_l0_ssts");
+    ctx.parameter("fixture_keys_per_sst", KEYS_PER_SST);
+    ctx.parameter("scans", scans);
+    ctx.parameter("logical_unit", "scan_row");
+    ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
+
+    let started_at = Instant::now();
+    let result = run_workload(&fixture, &workload);
+    let elapsed = started_at.elapsed();
+
+    assert_eq!(result.scans, workload.expected_scans());
+    assert_eq!(
+        result.scan_rows,
+        workload.expected_scans() * u64::try_from(KEYS_PER_SST).expect("keys per SST fits in u64")
+    );
+
+    ctx.record_external_outcome(
+        "long_scan",
+        elapsed,
+        LogicalUnit::new("scan_row"),
+        OperationOutcome::success(result.scan_rows),
+    );
+    ctx.record_observation(
+        "scan_rows",
+        as_f64(result.scan_rows),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
 }
 
 stress_main!();

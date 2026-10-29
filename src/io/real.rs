@@ -737,6 +737,30 @@ mod tests {
     }
 
     #[test]
+    fn should_fail_given_read_past_end_of_file_when_reading_at_offset() {
+        // Arrange: a 16-byte file and a positional read that reaches past it.
+        let temp = tempfile::tempdir().expect("temp dir");
+        let fs = RealFs::new(temp.path()).expect("real fs");
+        std::fs::write(temp.path().join("short.bin"), [7_u8; 16]).expect("write fixture");
+        let file = crate::io::Fs::open(
+            &fs,
+            &FsPath::new("short.bin"),
+            crate::io::OpenOptions::READ_ONLY,
+        )
+        .expect("open fixture");
+
+        // Act
+        let short = file.read_at(8, 16);
+        let exact = file.read_at(8, 8).expect("in-bounds read");
+
+        // Assert: a short read is an error, never a padded or partial buffer.
+        assert!(
+            matches!(short, Err(crate::io::FsError::Io(ref message)) if message.contains("EOF"))
+        );
+        assert_eq!(exact.as_ref(), &[7_u8; 8]);
+    }
+
+    #[test]
     fn should_classify_storage_full_as_no_space_when_realfs_error_is_converted() {
         // Arrange: neither message says "no space" or "disk full".
         let errors = [

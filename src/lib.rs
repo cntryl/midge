@@ -126,6 +126,11 @@ pub mod __internal {
             engine.write_admission_snapshot()
         }
 
+        #[must_use]
+        pub fn compaction_grandparent_overlap_roll_count(engine: &crate::Engine) -> u64 {
+            engine.compaction_grandparent_overlap_roll_count_for_benchmarks()
+        }
+
         pub use crate::diagnostics::{
             disable_transaction_commit_timing_for_benchmarks,
             drain_transaction_commit_timings_for_benchmarks,
@@ -171,8 +176,11 @@ pub mod __internal {
     }
     pub mod runtime {
         pub use crate::runtime::keyed_group_commit::KeyedGroupCommit;
+        pub use crate::runtime::read_snapshot::point_read::audit::set_point_read_level_order_audit;
     }
     pub mod startup {
+        #[cfg(feature = "failpoints")]
+        pub use crate::engine::{install_manual_caller_expiry, OwnerExit};
         pub use crate::runtime::{StartupEvent, StartupObserver};
     }
     pub mod maintenance {
@@ -189,14 +197,55 @@ pub mod __internal {
         pub use crate::metadata::recovery_progress_fixture::{
             run_journal_recovery_progress_fixture, JournalRecoveryProgressFixtureResult,
         };
+        pub use crate::metadata::ManifestPersistence;
         pub use crate::runtime::cloud_startup::recovery_progress_fixture::{
-            prepare_recovery_progress_fixture, PreparedRecoveryProgressFixture,
-            RecoveryProgressFixtureMode, RecoveryProgressFixtureResult,
+            prepare_inventory_progress_fixture, prepare_recovery_progress_fixture,
+            PreparedRecoveryProgressFixture, RecoveryProgressFixtureMode,
+            RecoveryProgressFixtureResult,
         };
+        pub use crate::runtime::{IntentLogEntry, IntentPersistence};
     }
     pub mod sst {
+        /// Read-only SST point reader exposing exact decoder work to benchmarks.
+        #[doc(hidden)]
+        pub struct PointLookupReaderForBenchmarks(crate::sst::fs::SstFileIo);
+
+        impl PointLookupReaderForBenchmarks {
+            /// Open one immutable SST using its database root and manifest name.
+            ///
+            /// # Errors
+            /// Returns an error if the root or SST cannot be opened or validated.
+            pub fn open(
+                database_root: &std::path::Path,
+                sst_name: &str,
+            ) -> crate::MidgeResult<Self> {
+                let fs = std::sync::Arc::new(
+                    crate::io::RealFs::open_existing(database_root)
+                        .map_err(crate::io::FsError::into_midge)?,
+                );
+                let reader = crate::sst::fs::SstFileIo::open(&format!("sst/{sst_name}"), fs)?;
+                Ok(Self(reader))
+            }
+
+            /// Return the exact number of encoded entries decoded by one point lookup.
+            ///
+            /// # Errors
+            /// Returns a decoder or filesystem error from the production SST reader.
+            pub fn entries_decoded(
+                &self,
+                key: &[u8],
+                snapshot_seq: u64,
+            ) -> crate::MidgeResult<u64> {
+                let (_, stats) = self.0.get_raw_state_at_with_stats(key, snapshot_seq)?;
+                Ok(stats.entries_decoded)
+            }
+        }
+
+        pub mod decoder {
+            pub use crate::sst::fs::reader_io::{validate_data_block, validate_index_block};
+        }
         pub mod bloom {
-            pub use crate::sst::bloom::{BloomReader, BloomWriter};
+            pub use crate::sst::bloom::{BlockBloomFilter, BloomReader, BloomWriter};
             pub mod writer {
                 pub use crate::sst::bloom::writer::BloomFilterOps;
             }
@@ -293,7 +342,7 @@ pub mod __internal {
 
 // Errors
 pub use cloud_layout::CloudObjectLayout;
-pub use common::{MidgeError, MidgeResult, Severity};
+pub use common::{LatencySummary, MidgeError, MidgeResult, Severity};
 
 // Engine / Transactions
 pub use engine::{
@@ -304,6 +353,7 @@ pub use types::ColumnFamilyId;
 
 // Scan API
 pub use engine::{Direction, IteratorState, Query, ScanIterator};
+pub use sst::cache::CacheFill;
 
 // Observability and diagnostics
 pub use config::{
@@ -312,14 +362,16 @@ pub use config::{
     CloudStorageRole, CloudStorageTopology, CloudValidationFinding, CloudValidationMode,
     CloudValidationReport, EngineHealth, GcsApiStyle, GcsConfig, GcsCredentialSource,
     OciCredentialSource, OciObjectStorageConfig, S3CompatibleConfig, S3CredentialSource,
+    WriteBackpressureConfig,
+};
+pub use types::{
+    DurabilityFrontiersSnapshot, ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot,
+    RuntimeLatencySummaries, RuntimeMetricsSnapshot, SnapshotPinSnapshot, StorageFileLayout,
+    StorageLayoutLevel, StorageLayoutSnapshot, StorageVerificationReport,
 };
 pub use types::{
     HybridStorageBudgetSnapshot, LocalStorageUsage, StorageAdmissionBlock, StorageAdmissionKind,
     StorageAdmissionReason,
-};
-pub use types::{
-    ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot, RuntimeMetricsSnapshot, SnapshotPinSnapshot,
-    StorageFileLayout, StorageLayoutLevel, StorageLayoutSnapshot, StorageVerificationReport,
 };
 
 // Configuration
@@ -340,6 +392,7 @@ pub use common::time::{Clock, SystemClock};
 
 // `engine::Key` is a public alias to `bytes::Bytes`; re-export it as `Bytes`.
 pub use engine::Key as Bytes;
+pub use storage::cloud::CloudRetryPolicy;
 // Re-export BytesMut directly from the `bytes` crate.
 pub use bytes::BytesMut;
 

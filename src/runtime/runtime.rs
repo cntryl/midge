@@ -5,6 +5,8 @@ use super::{
     RuntimeLifecycle, RuntimeMsg, RuntimeState, StartupAdmission,
 };
 use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use crate::runtime::frontiers::{ObservedDurabilityFrontiers, ObservedPendingCloudUploads};
+use crate::types::DurabilityFrontiersSnapshot;
 use crossbeam::channel::{self, Receiver, Sender};
 use std::sync::{atomic::Ordering, Arc};
 use std::thread::{self, JoinHandle};
@@ -58,11 +60,16 @@ impl Runtime {
         let lifecycle = Arc::new(RuntimeLifecycle::new());
 
         let handle = RuntimeHandle {
+            write_admission: Arc::default(),
             msg_tx: msg_tx.clone(),
             router: router.clone(),
             snapshot_cache,
             snapshot_pins,
             diagnostics: Arc::clone(&diagnostics),
+            durability_frontiers: Arc::new(ObservedDurabilityFrontiers::new(
+                DurabilityFrontiersSnapshot::default(),
+            )),
+            pending_cloud_uploads: Arc::new(ObservedPendingCloudUploads::new(0)),
             storage_budget: None,
             sst_read_fs: None,
             read_authority: None,
@@ -119,6 +126,16 @@ impl Runtime {
 
         let snapshot_cache = Arc::new(snapshot_cache::SnapshotCache::new());
         let snapshot_pins = Arc::clone(&state.snapshot_pins);
+        let durability_frontiers = Arc::new(ObservedDurabilityFrontiers::new(
+            DurabilityFrontiersSnapshot {
+                current_sequence: state.sequence,
+                wal_local_durable_seq: state.wal.frontiers.local_durable(),
+                wal_cloud_durable_seq: state.wal.frontiers.cloud_durable(),
+            },
+        ));
+        let pending_cloud_uploads = Arc::new(ObservedPendingCloudUploads::new(
+            state.cloud.pending_uploads.len(),
+        ));
         // Startup recovery has already recorded counters into this diagnostics
         // instance. Hand the same instance to runtime handles and actors.
         self.diagnostics = Arc::clone(&state.diagnostics);
@@ -130,11 +147,14 @@ impl Runtime {
 
         // Handle for callers to use.
         let handle = RuntimeHandle {
+            write_admission: Arc::clone(&state.write_pressure.admission),
             msg_tx: self.msg_tx.clone(),
             router: router.clone(),
             snapshot_cache: snapshot_cache.clone(),
             snapshot_pins,
             diagnostics: Arc::clone(&self.diagnostics),
+            durability_frontiers: Arc::clone(&durability_frontiers),
+            pending_cloud_uploads: Arc::clone(&pending_cloud_uploads),
             storage_budget: config.hybrid_storage.clone(),
             sst_read_fs: config.sst_read_fs.clone(),
             read_authority: super::handle::CloudReadAuthority::from_config(&config),
@@ -154,6 +174,8 @@ impl Runtime {
             router,
             router_for_thread,
             snapshot_cache,
+            durability_frontiers,
+            pending_cloud_uploads,
             lifecycle: lifecycle_for_thread,
             worker_msg_tx,
             worker_msg_rx,
@@ -161,9 +183,10 @@ impl Runtime {
             init_tx,
             admission: admission.clone(),
         };
+        let failpoint_gate = crate::failpoints::worker_gate();
         let event_loop_handle = thread::Builder::new()
             .name("midge-runtime".to_string())
-            .spawn(move || startup.run())
+            .spawn(move || failpoint_gate.run(|| startup.run()))
             .map_err(|e| MidgeError::Internal(format!("Failed to spawn runtime thread: {e}")))?;
 
         self.event_loop_handle = Some(event_loop_handle);
@@ -208,7 +231,9 @@ impl Runtime {
             admission.cancel();
         }
         self.lifecycle.begin_shutdown();
-        self.lifecycle.wait_for_transactions();
+        if self.lifecycle.state() != super::lifecycle::RuntimeLifecycleState::Fenced {
+            self.lifecycle.wait_for_transactions();
+        }
         if self.event_loop_handle.is_some()
             && self.lifecycle.running.load(Ordering::Acquire)
             && self.msg_tx.send(RuntimeMsg::Shutdown).is_err()
@@ -216,6 +241,24 @@ impl Runtime {
             tracing::debug!("Runtime {}: shutdown message send failed", context);
         }
         let _ = self.join_until(Duration::MAX, context);
+    }
+
+    /// Bound client-owned transaction retention, then preserve ownership until
+    /// every admitted runtime/storage effect drains. This is not an I/O timeout.
+    pub(crate) fn shutdown_for_reaper(&mut self, transaction_wait: Duration) {
+        self.lifecycle.begin_shutdown();
+        if !self
+            .lifecycle
+            .wait_for_transactions_within(transaction_wait)
+        {
+            self.lifecycle.fence_transactions();
+            tracing::warn!(
+                active_transactions = self.lifecycle.active_transaction_count(),
+                wait_millis = transaction_wait.as_millis(),
+                "Engine drop wait expired; transactions fenced, draining admitted effects before lease release"
+            );
+        }
+        self.shutdown_inner("bounded drop reaper");
     }
 
     /// Shutdown the runtime and wait for completion.
@@ -238,6 +281,8 @@ struct WorkerStartup {
     router: Arc<ResponseRouter>,
     router_for_thread: Arc<ResponseRouter>,
     snapshot_cache: Arc<snapshot_cache::SnapshotCache>,
+    durability_frontiers: Arc<ObservedDurabilityFrontiers>,
+    pending_cloud_uploads: Arc<ObservedPendingCloudUploads>,
     lifecycle: Arc<RuntimeLifecycle>,
     worker_msg_tx: Sender<RuntimeMsg>,
     worker_msg_rx: Receiver<RuntimeMsg>,
@@ -255,6 +300,8 @@ impl WorkerStartup {
             router,
             router_for_thread,
             snapshot_cache,
+            durability_frontiers,
+            pending_cloud_uploads,
             lifecycle,
             worker_msg_tx,
             worker_msg_rx,
@@ -262,12 +309,14 @@ impl WorkerStartup {
             init_tx,
             admission,
         } = self;
-        match EventLoop::new(
+        match EventLoop::new_with_observed_frontiers(
             state,
             trace_enabled,
             router,
             config,
             crate::runtime::event_loop::FlushWorkerMode::Background(worker_msg_tx),
+            durability_frontiers,
+            pending_cloud_uploads,
         ) {
             Ok(mut event_loop) => {
                 event_loop.set_snapshot_cache(snapshot_cache);

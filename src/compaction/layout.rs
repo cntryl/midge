@@ -157,6 +157,7 @@ mod tests {
                                 smallest_seq: None,
                                 largest_seq: None,
                                 key_bounds_complete: true,
+                                earliest_expiration_millis: None,
                                 sst_seq: 0,
                                 sublevel: 0,
                                 read_count: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(

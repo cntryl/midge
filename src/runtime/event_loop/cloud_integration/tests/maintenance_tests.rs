@@ -64,6 +64,9 @@ fn cloud_debt_with_wal_records(
         })
         .collect();
     seed_cloud_prune_candidate_with_records(&mut el, 81, last, records);
+    el.actors
+        .wal_actor
+        .reopen_empty_writer_from_state_for_test(&el.state)?;
     el.state.wal.frontiers.set_cloud_durable_for_test(last);
     if last > 81 {
         add_valid_versions_manifest_sst_for_test(&mut el, "wal-debt-versions.sst", 82..=last);
@@ -82,6 +85,11 @@ fn cloud_debt_with_wal_records(
         }
     }
     publish_test_flush_frontier(&mut el, 0, last);
+    // Seed setup reserves both families through real journal/mirror work,
+    // before tests measure their accepted asynchronous compute/publication.
+    for _ in [0, other] {
+        el.prefetch_flush_sst_names_if_due();
+    }
     let (tx, rx) = crossbeam::channel::unbounded();
     el.pipeline.worker_msg_tx = Some(tx);
     el.pipeline.inline_flush_worker = false;
@@ -89,15 +97,31 @@ fn cloud_debt_with_wal_records(
 }
 
 fn complete_compaction(el: &mut EventLoop, worker: &crossbeam::channel::Receiver<RuntimeMsg>) {
-    let completion = worker
-        .recv_timeout(Duration::from_secs(3))
-        .expect("compaction completion");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let completion = receive_owned_compaction_completion(el, worker, deadline);
     let (_tx, rx) = crossbeam::channel::unbounded();
     el.handle_runtime_msg(completion, &rx);
 }
 
+fn complete_compaction_publication(el: &mut EventLoop) {
+    while el.publication.compaction_publication.is_active() {
+        let completion = el
+            .publication
+            .compaction_publish_result_rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("compaction publication completion");
+        assert!(
+            completion.result.is_ok(),
+            "compaction publication {:?} failed: {:?}",
+            completion.phase,
+            completion.result.as_ref().err()
+        );
+        CompactionCoordinator::handle_publication_completion(el, completion);
+    }
+}
+
 fn complete_flush(el: &mut EventLoop) {
-    for phase in ["build", "publish", "mirror"] {
+    for phase in ["build", "publish", "manifest mirror", "intent clear"] {
         let completion = el
             .pipeline
             .flush_worker_result_rx
@@ -123,6 +147,7 @@ fn should_resume_due_flush_when_compaction_debt_remains_in_another_family(
     // Act
     el.schedule_next_flush_worker();
     complete_compaction(&mut el, &worker);
+    complete_compaction_publication(&mut el);
 
     // Assert: another eligible compaction cannot take the retirement/flush turns.
     assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
@@ -175,10 +200,12 @@ fn should_keep_compact_all_pending_while_fair_turns_service_other_work(
     complete_compaction(&mut el, &worker);
     drain_prune_completion_for_test(&mut el);
     el.schedule_next_flush_worker();
-    assert!(matches!(
-        response.recv_timeout(Duration::from_secs(1)),
-        Ok(RuntimeResponse::Ok { request_id: 91_001 })
-    ));
+    manual_flush_tests::settle_owned_work(&mut el, &worker);
+    let outcome = response.recv_timeout(Duration::from_secs(1));
+    assert!(
+        matches!(outcome, Ok(RuntimeResponse::Ok { request_id: 91_001 })),
+        "{outcome:?}"
+    );
     assert!(el.state.manifest.files.iter().all(|file| file.level > 0));
     assert!(el.state.pending_compaction_waits.is_empty());
     Ok(())
@@ -245,58 +272,64 @@ fn local_debt() -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Re
 #[test]
 fn should_leave_below_threshold_local_debt_when_no_manual_obligation_exists(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let (mut el, worker) = local_debt()?;
-    el.state.set_compaction_enabled(true);
-    let plan = el
-        .actors
-        .compaction_actor
-        .check_manual_compaction(&el.state)?
-        .unwrap();
-    el.launch_compaction(plan)?;
+    crate::failpoints::with_read_gate(|| {
+        // Arrange
+        let (mut el, worker) = local_debt()?;
+        el.state.set_compaction_enabled(true);
+        let plan = el
+            .actors
+            .compaction_actor
+            .check_manual_compaction(&el.state)?
+            .unwrap();
+        el.launch_compaction(plan)?;
 
-    // Act
-    complete_compaction(&mut el, &worker);
-    el.schedule_one_background_compaction_if_needed("ordinary policy regression")?;
+        // Act
+        complete_compaction(&mut el, &worker);
+        manual_flush_tests::settle_owned_work(&mut el, &worker);
+        el.schedule_one_background_compaction_if_needed("ordinary policy regression")?;
 
-    // Assert
-    assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
-    assert_eq!(
-        el.state
-            .manifest
-            .files
-            .iter()
-            .filter(|file| file.level == 0)
-            .count(),
-        1
-    );
-    assert!(worker.try_recv().is_err());
-    Ok(())
+        // Assert
+        assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
+        assert_eq!(
+            el.state
+                .manifest
+                .files
+                .iter()
+                .filter(|file| file.level == 0)
+                .count(),
+            1
+        );
+        assert!(worker.try_recv().is_err());
+        Ok(())
+    })
 }
 
 #[test]
 fn should_finish_requested_local_debt_when_background_compaction_is_disabled(
 ) -> crate::common::MidgeResult<()> {
-    // Arrange
-    let (mut el, worker) = local_debt()?;
-    el.state.set_compaction_enabled(false);
-    let response = el.routing.router.register(91_007, "CompactAll");
+    crate::failpoints::with_read_gate(|| {
+        // Arrange
+        let (mut el, worker) = local_debt()?;
+        el.state.set_compaction_enabled(false);
+        let response = el.routing.router.register(91_007, "CompactAll");
 
-    // Act
-    CompactionCoordinator::compact_all(&mut el, 91_007);
-    complete_compaction(&mut el, &worker);
-    assert!(
-        response.try_recv().is_err(),
-        "the other CF still needs compaction"
-    );
-    complete_compaction(&mut el, &worker);
+        // Act
+        CompactionCoordinator::compact_all(&mut el, 91_007);
+        complete_compaction(&mut el, &worker);
+        assert!(
+            response.try_recv().is_err(),
+            "the other CF still needs compaction"
+        );
+        complete_compaction(&mut el, &worker);
+        manual_flush_tests::settle_owned_work(&mut el, &worker);
 
-    // Assert
-    assert!(matches!(
-        response.try_recv(),
-        Ok(RuntimeResponse::Ok { request_id: 91_007 })
-    ));
-    assert!(el.state.manifest.files.iter().all(|file| file.level > 0));
-    assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
-    Ok(())
+        // Assert
+        assert!(matches!(
+            response.try_recv(),
+            Ok(RuntimeResponse::Ok { request_id: 91_007 })
+        ));
+        assert!(el.state.manifest.files.iter().all(|file| file.level > 0));
+        assert_eq!(el.state.active_compactions.load(Ordering::Acquire), 0);
+        Ok(())
+    })
 }

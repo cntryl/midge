@@ -62,7 +62,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
         actor.append_spilled_transaction(
             &mut state,
             source,
-            SpilledTransactionAppendParams {
+            &SpilledTransactionAppendParams {
                 request_id,
                 assertions: Vec::new(),
                 durability_policy: Some(DurabilityPolicy::CloudAsync),

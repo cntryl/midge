@@ -185,50 +185,62 @@ impl HybridStorage {
         validate().map_err(ControlWriteFailure::Authority)?;
         self.check_write_authority()
             .map_err(ControlWriteFailure::Authority)?;
-        (|| -> MidgeResult<ControlObject> {
-            self.cloud_backend_for_key(key)
-                .submit_write_receipt_request(request, body, tx);
-            match rx.recv_timeout(timeout) {
-                Ok(Ok(Some(receipt))) => {
-                    if !receipt.matches(bytes) {
-                        return Err(MidgeError::Corruption(
-                            "control write receipt differs".into(),
-                        ));
-                    }
-                    // Transport retains its own upload charge until it drops
-                    // the payload. Cache only the admitted control bytes, not
-                    // an upload workspace for the rest of the engine lifetime.
-                    drop(memory);
-                    let memory = Arc::new(budget.reserve(bytes.len(), "confirmed control object")?);
-                    return Ok(ControlObject {
-                        bytes: bytes.to_vec(),
-                        metadata: receipt.metadata,
-                        confirmed_write: true,
-                        _memory: memory,
-                    });
+        self.cloud_backend_for_key(key)
+            .submit_write_receipt_request(request, body, tx);
+        let completion = rx.recv_timeout(timeout);
+        validate().map_err(ControlWriteFailure::Authority)?;
+        match completion {
+            Ok(Ok(Some(receipt))) => {
+                if !receipt.matches(bytes) {
+                    return Err(ControlWriteFailure::Operation(MidgeError::Corruption(
+                        "control write receipt differs".into(),
+                    )));
                 }
-                Ok(Ok(None)) => {}
-                Ok(Err(error)) if Self::storage_error_indicates_precondition_failure(&error) => {
-                    return Err(MidgeError::Busy(error.to_string()))
-                }
-                Ok(Err(error)) if Self::storage_error_indicates_timeout(&error) => {
-                    return Err(MidgeError::Timeout(error.to_string()))
-                }
-                Ok(Err(error)) => return Err(control_error(&error)),
-                Err(error) => return Err(MidgeError::Timeout(format!("control CAS: {error}"))),
+                // Transport retains its own upload charge until it drops
+                // the payload. Cache only the admitted control bytes, not
+                // an upload workspace for the rest of the engine lifetime.
+                drop(memory);
+                let memory = Arc::new(
+                    budget
+                        .reserve(bytes.len(), "confirmed control object")
+                        .map_err(ControlWriteFailure::Operation)?,
+                );
+                Ok(ControlObject {
+                    bytes: bytes.to_vec(),
+                    metadata: receipt.metadata,
+                    confirmed_write: true,
+                    _memory: memory,
+                })
             }
-            drop(memory);
-            let proof = self
-                .read_control_object(key, budget, deadline)?
-                .ok_or_else(|| MidgeError::Corruption("control CAS readback is missing".into()))?;
-            if proof.bytes() != bytes {
-                return Err(MidgeError::Corruption(
-                    "control CAS readback differs".into(),
-                ));
+            Ok(Ok(None)) => {
+                drop(memory);
+                let proof = self
+                    .read_control_object(key, budget, deadline)
+                    .map_err(ControlWriteFailure::Operation)?
+                    .ok_or_else(|| {
+                        ControlWriteFailure::Operation(MidgeError::Corruption(
+                            "control CAS readback is missing".into(),
+                        ))
+                    })?;
+                validate().map_err(ControlWriteFailure::Authority)?;
+                if proof.bytes() != bytes {
+                    return Err(ControlWriteFailure::Operation(MidgeError::Corruption(
+                        "control CAS readback differs".into(),
+                    )));
+                }
+                Ok(proof)
             }
-            Ok(proof)
-        })()
-        .map_err(ControlWriteFailure::Operation)
+            Ok(Err(error)) if Self::storage_error_indicates_precondition_failure(&error) => Err(
+                ControlWriteFailure::Operation(MidgeError::Busy(error.to_string())),
+            ),
+            Ok(Err(error)) if Self::storage_error_indicates_timeout(&error) => Err(
+                ControlWriteFailure::Operation(MidgeError::Timeout(error.to_string())),
+            ),
+            Ok(Err(error)) => Err(ControlWriteFailure::Operation(control_error(&error))),
+            Err(error) => Err(ControlWriteFailure::Operation(MidgeError::Timeout(
+                format!("control CAS: {error}"),
+            ))),
+        }
     }
 }
 

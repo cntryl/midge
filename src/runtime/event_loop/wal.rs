@@ -14,6 +14,7 @@ pub(super) struct ApplyTransactionRequest {
     pub durability_policy: Option<DurabilityPolicy>,
     pub start_sequence: Option<u64>,
     pub conflict_policy: ConflictPolicy,
+    pub validation: Option<std::sync::Arc<crate::runtime::actors::wal::CommitValidationProof>>,
 }
 
 pub(super) struct SpilledTransactionRequest {
@@ -23,6 +24,7 @@ pub(super) struct SpilledTransactionRequest {
     pub durability_policy: Option<DurabilityPolicy>,
     pub start_sequence: u64,
     pub conflict_policy: ConflictPolicy,
+    pub validation: Option<std::sync::Arc<crate::runtime::actors::wal::SpilledValidationProof>>,
 }
 
 #[cfg(test)]
@@ -42,14 +44,28 @@ impl WalCoordinator {
         request: SpilledTransactionRequest,
         response_tx: Option<Sender<RuntimeResponse>>,
     ) -> HandleOutcome {
-        let SpilledTransactionRequest {
-            request_id,
-            source,
-            assertions,
-            durability_policy,
-            start_sequence,
-            conflict_policy,
-        } = request;
+        if event_loop.wal_group_in_flight() {
+            let SpilledTransactionRequest {
+                request_id,
+                source,
+                assertions,
+                durability_policy,
+                start_sequence,
+                conflict_policy,
+                validation: _,
+            } = request;
+            event_loop.gate_message_for_wal_pipeline(RuntimeMsg::ApplySpilledTransaction {
+                request_id,
+                source,
+                assertions,
+                durability_policy,
+                start_sequence,
+                conflict_policy,
+                response_tx,
+            });
+            return HandleOutcome::Continue;
+        }
+        let request_id = request.request_id;
         if let Some(response_tx) = response_tx {
             event_loop.register_inline_response(request_id, response_tx);
         }
@@ -57,49 +73,76 @@ impl WalCoordinator {
             return HandleOutcome::Continue;
         }
 
-        let touched_cfs = match source.touched_cf_ids() {
-            Ok(cfs) => cfs,
+        let prepared = Self::prepare_spilled_transaction(event_loop, request);
+        let (request, touched_cfs) = match prepared {
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => return HandleOutcome::Continue,
             Err(error) => {
                 event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
                 return HandleOutcome::Continue;
             }
         };
-        if let Err(error) = event_loop.ensure_l0_write_admission(&touched_cfs) {
-            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
-            return HandleOutcome::Continue;
-        }
-        if let Err(error) = event_loop.prepare_cloud_spilled_transaction_memtables(&source) {
-            event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
-            return HandleOutcome::Continue;
-        }
-        match event_loop.actors.wal_actor.append_spilled_transaction(
-            &mut event_loop.state,
-            &source,
-            crate::runtime::actors::wal::SpilledTransactionAppendParams {
+        let SpilledTransactionRequest {
+            source,
+            assertions,
+            durability_policy,
+            start_sequence,
+            conflict_policy,
+            validation,
+            ..
+        } = request;
+        let params = crate::runtime::actors::wal::SpilledTransactionAppendParams {
+            request_id,
+            assertions,
+            durability_policy,
+            start_sequence,
+            conflict_policy,
+        };
+        let is_strict = durability_policy
+            .unwrap_or_else(|| event_loop.actors.wal_actor.durability_policy())
+            == DurabilityPolicy::Strict;
+        if is_strict && !source.is_empty() && event_loop.actors.wal_actor.supports_sync_submission()
+        {
+            event_loop.start_spilled_strict_pipeline(
                 request_id,
-                assertions,
-                durability_policy,
-                start_sequence,
-                conflict_policy,
-            },
-        ) {
-            Ok((last_sequence, op_count, deferred)) => {
-                event_loop.publish_snapshot();
-                event_loop.ack_applied_transaction(
-                    request_id,
-                    &AppliedTransaction {
-                        last_sequence,
-                        op_count,
-                        deferred,
-                        touched_cfs: &touched_cfs,
-                    },
-                );
-            }
-            Err(error) => {
-                event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                source,
+                &params,
+                validation.as_ref(),
+                touched_cfs,
+            );
+        } else {
+            match event_loop
+                .actors
+                .wal_actor
+                .append_spilled_transaction_with_proof(
+                    &mut event_loop.state,
+                    &source,
+                    &params,
+                    validation.as_deref(),
+                ) {
+                Ok((last_sequence, op_count, deferred)) => {
+                    event_loop.publish_snapshots_for(&touched_cfs);
+                    event_loop.ack_applied_transaction(
+                        request_id,
+                        &AppliedTransaction {
+                            last_sequence,
+                            op_count,
+                            deferred,
+                            touched_cfs: &touched_cfs,
+                        },
+                    );
+                }
+                Err(error) => {
+                    event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
+                }
             }
         }
 
+        Self::finish_spilled_transaction_turn(event_loop, msg_rx);
+        HandleOutcome::Continue
+    }
+
+    fn finish_spilled_transaction_turn(event_loop: &mut EventLoop, msg_rx: &Receiver<RuntimeMsg>) {
         if !event_loop.actors.wal_actor.is_cloud_async() {
             const MAX_DRAIN_WRITES_AFTER_BATCH: usize = 1024;
             let _ = event_loop.drain_pending_writes(msg_rx, MAX_DRAIN_WRITES_AFTER_BATCH);
@@ -107,7 +150,20 @@ impl WalCoordinator {
         }
         event_loop.maybe_flush_cloud_async_wal();
         event_loop.drain_auto_flush_memtables();
-        HandleOutcome::Continue
+    }
+
+    fn prepare_spilled_transaction(
+        event_loop: &mut EventLoop,
+        request: SpilledTransactionRequest,
+    ) -> crate::common::MidgeResult<
+        Option<(SpilledTransactionRequest, Vec<crate::types::ColumnFamilyId>)>,
+    > {
+        let touched_cfs = request.source.touched_cf_ids()?;
+        event_loop.ensure_l0_write_admission(&touched_cfs)?;
+        event_loop.prepare_cloud_spilled_transaction_memtables(&request.source)?;
+        Ok(event_loop
+            .prepare_detached_spilled_validation(request, &touched_cfs)
+            .map(|request| (request, touched_cfs)))
     }
 
     pub(super) fn apply_transaction(
@@ -116,18 +172,17 @@ impl WalCoordinator {
         request: ApplyTransactionRequest,
         response_tx: Option<Sender<RuntimeResponse>>,
     ) -> HandleOutcome {
-        let ApplyTransactionRequest {
-            request_id,
-            ops,
-            assertions,
-            durability_policy,
-            start_sequence,
-            conflict_policy,
-        } = request;
-        let touched_cfs = EventLoop::transaction_cf_ids(&ops);
         if let Some(response_tx) = response_tx {
-            event_loop.register_inline_response(request_id, response_tx);
+            event_loop.register_inline_response(request.request_id, response_tx);
         }
+        let Some(request) = event_loop.defer_transaction_behind_wal(request) else {
+            return HandleOutcome::Continue;
+        };
+        let Some(request) = event_loop.prepare_detached_validation(request) else {
+            return HandleOutcome::Continue;
+        };
+        let request_id = request.request_id;
+        let touched_cfs = EventLoop::transaction_cf_ids(&request.ops);
 
         if !Self::accept_write(event_loop, request_id) {
             return HandleOutcome::Continue;
@@ -139,10 +194,23 @@ impl WalCoordinator {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
         }
-        if let Err(error) = event_loop.prepare_cloud_transaction_memtables(&ops) {
+        if let Err(error) = event_loop.prepare_cloud_transaction_memtables(&request.ops) {
             event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
             return HandleOutcome::Continue;
         }
+
+        let Some(request) = event_loop.prepare_detached_validation(request) else {
+            return HandleOutcome::Continue;
+        };
+        let ApplyTransactionRequest {
+            request_id,
+            ops,
+            assertions,
+            durability_policy,
+            start_sequence,
+            conflict_policy,
+            validation,
+        } = request;
 
         if event_loop
             .actors
@@ -159,11 +227,12 @@ impl WalCoordinator {
                     durability_policy,
                     start_sequence,
                     conflict_policy,
+                    validation,
                 },
                 MAX_COALESCED_TRANSACTIONS_AFTER_WAKE,
             );
         } else {
-            match event_loop.actors.wal_actor.append_transaction(
+            match event_loop.actors.wal_actor.append_transaction_with_proof(
                 &mut event_loop.state,
                 crate::runtime::actors::wal::TransactionAppendParams {
                     request_id,
@@ -173,9 +242,10 @@ impl WalCoordinator {
                     start_sequence,
                     conflict_policy,
                 },
+                validation.as_deref(),
             ) {
                 Ok((last_sequence, op_count, deferred)) => {
-                    event_loop.publish_snapshot();
+                    event_loop.publish_snapshots_for(&touched_cfs);
 
                     event_loop.ack_applied_transaction(
                         request_id,
@@ -379,23 +449,14 @@ impl WalCoordinator {
             // is a zero budget, not an unbounded one. This used to be a second
             // copy of the rule that disagreed with it.
             let deadline = event_loop.registered_request_deadline(request_id);
-            match event_loop.seal_current_cloud_segment_within(&deadline) {
-                Ok(Some((segment_id, max_sequence))) => {
-                    if max_sequence < sequence {
-                        event_loop.respond(
-                            request_id,
-                            RuntimeResponse::Error {
-                                request_id,
-                                error: crate::common::MidgeError::Internal(format!(
-                                    "sealed WAL segment up to sequence {max_sequence}, but requested cloud durability for {sequence}"
-                                )),
-                            },
-                        );
-                        return HandleOutcome::Continue;
-                    }
-                    inflight_segment = Some(segment_id);
-                }
-                Ok(None) => {}
+            match event_loop.start_cloud_seal_for_request(
+                &deadline,
+                request_id,
+                sequence,
+                wait_for_ack,
+            ) {
+                Ok(true) => return HandleOutcome::Continue,
+                Ok(false) => {}
                 Err(error) => {
                     event_loop.respond(request_id, RuntimeResponse::Error { request_id, error });
                     return HandleOutcome::Continue;

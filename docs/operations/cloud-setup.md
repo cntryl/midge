@@ -33,6 +33,26 @@ provider's documented default chain over putting secrets in source. Midge does
 not manage secret rotation, a secret store, IAM policy, or network access.
 Never commit credentials or place them in a checked-in example.
 
+### Azure protocol version
+
+Midge pins Azure Blob operations to `2026-10-06`. Shared Key, OAuth and managed
+identity requests send that `x-ms-version`. SAS requests select it through
+`api-version`; the signed `sv`, permissions and encoded signature remain
+unchanged. An older `api-version` embedded in a SAS is replaced by Midge's pin.
+
+The [Azure versioning documentation](https://learn.microsoft.com/en-us/rest/api/storageservices/versioning-for-the-azure-storage-services)
+lists `2026-10-06` as the GA SDK default, with a small number of tenants in
+`useast2euap` and `uscentraleuap` still limited to `2026-04-06` at the
+2026-10-24 review. Verify service-version support for the target account;
+Midge does not silently downgrade the protocol after a failed request.
+
+Qualify the selected version in a dedicated test prefix using authenticated
+writes and reads, conditional create, matching and stale ETags, conditional
+deletion, and engine recovery after local cache loss. A successful HEAD or
+read-only preflight alone does not establish those properties. Local signer
+tests and Sqrzl qualification exercise the modeled contracts; deployment
+credentials, permissions and live Azure acceptance need separate evidence.
+
 The recommended deployment uses one unversioned bucket/container, with provider
 soft-delete retention disabled, and one database prefix. Midge keeps WAL, SST,
 metadata, and lease keys in disjoint namespaces beneath that prefix. Use a

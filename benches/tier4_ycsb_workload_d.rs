@@ -146,12 +146,13 @@ fn run_workload_d(ctx: &mut StressContext, opts: MidgeOptions, profile: &str, cl
         .iter()
         .map(ycsb::inventory::InsertInventory::read_hits)
         .sum();
-    ctx.parameter("verified_read_hits", read_hits - warmup_reads);
-    ctx.parameter(
+    ycsb::record_sample_count(ctx, "verified_read_hits", read_hits - warmup_reads);
+    ycsb::record_sample_count(
+        ctx,
         "verified_fresh_inserts",
         rows - initial_keys as u64 - warmup_inserts,
     );
-    ctx.parameter("verified_rows", rows);
+    ycsb::record_sample_count(ctx, "verified_rows", rows);
     let mut engine = Arc::try_unwrap(engine).unwrap_or_else(|_| panic!("D workers must be joined"));
     engine
         .shutdown(Duration::from_secs(30))

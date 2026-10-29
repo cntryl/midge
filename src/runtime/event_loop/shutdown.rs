@@ -20,11 +20,18 @@ impl EventLoop {
         self.trace_shutdown_start();
         let mut shutdown_error = None;
         self.shutdown.shutting_down = true;
+        // Accepted maintenance must drain without inheriting a configured
+        // low background rate once shutdown has closed foreground admission.
+        self.state.write_pressure.admission.begin_drain();
+        self.fail_validation_requests_on_shutdown();
 
         // Local mode does not checkpoint memtables on shutdown, so the WAL
         // tail is the only copy of buffered commits from the last batch
         // window. Make it durable, and complete the waiters it covers, before
         // held work is rejected below. CloudAsync seals its segment later.
+        trace_shutdown_phase("strict-wal-pipeline-drain", None, || {
+            self.drain_shutdown_wal_pipeline();
+        });
         if let Err(error) =
             trace_shutdown_phase("sync-current-wal", None, || self.sync_current_wal())
         {
@@ -75,6 +82,10 @@ impl EventLoop {
 
         // Establish authoritative remote WAL durability before replacing that
         // recovery authority with an SST/manifest checkpoint.
+        // Shutdown has stopped admitting requests and no longer services the
+        // event loop for ordinary reads or controls. Keep this final seal as a
+        // bounded synchronous drain under `cloud_shutdown_deadline`; active
+        // CloudAsync seals use the pending writer-runner path instead.
         if cloud_async && self.state.wal.pending_writes > 0 {
             match trace_shutdown_phase(
                 "final-cloud-wal-seal",
@@ -151,8 +162,26 @@ impl EventLoop {
         HandleOutcome::Break
     }
 
+    fn drain_shutdown_wal_pipeline(&mut self) {
+        while self.pipeline.wal_commits.has_pending_group()
+            || self.pipeline.memtable_apply.is_pending()
+        {
+            self.progress_wal_pipeline();
+            if self.pipeline.wal_commits.has_pending_group()
+                || self.pipeline.memtable_apply.is_pending()
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+
     fn drain_local_shutdown_flush_pipeline(&mut self) {
-        while self.actors.flush_actor.is_inflight() {
+        while self.actors.flush_actor.is_inflight()
+            || !self.pipeline.pending_flush_mirrors.is_empty()
+        {
+            self.reap_cloud_wal_prune_worker();
+            self.drain_flush_worker_results();
+            self.retry_flush_mirrors_if_due();
             match self
                 .pipeline
                 .flush_worker_result_rx
@@ -212,6 +241,15 @@ impl EventLoop {
         shutdown_error: &mut Option<MidgeError>,
     ) {
         let join_deadline = cloud_async.then_some(cloud_shutdown_deadline);
+        if let Err(error) =
+            trace_shutdown_phase("cloud-catalog-publication-drain", join_deadline, || {
+                self.drain_cloud_publication_within(cloud_shutdown_deadline)
+            })
+        {
+            if shutdown_error.is_none() {
+                *shutdown_error = Some(error);
+            }
+        }
         if let Err(error) = trace_shutdown_phase("flush-worker-join", join_deadline, || {
             self.actors.flush_actor.shutdown_and_join()
         }) {
@@ -310,7 +348,20 @@ impl EventLoop {
     }
 
     fn drain_shutdown_compaction_publication(&mut self) -> crate::common::MidgeResult<()> {
-        while self.actors.compaction_publish_actor.is_inflight() {
+        while self.actors.compaction_publish_actor.is_inflight()
+            || crate::runtime::event_loop::compaction::CompactionCoordinator::has_pending_capture(
+                self,
+            )
+        {
+            self.reap_cloud_wal_prune_worker();
+            crate::runtime::event_loop::compaction::CompactionCoordinator::drain_publish_results(
+                self,
+            );
+            if !self.actors.compaction_publish_actor.is_inflight()
+                && !crate::runtime::event_loop::compaction::CompactionCoordinator::has_pending_capture(self)
+            {
+                break;
+            }
             match self
                 .publication
                 .compaction_publish_result_rx
@@ -361,6 +412,10 @@ impl EventLoop {
         deadline: &crate::common::OperationDeadline,
     ) -> crate::common::MidgeResult<()> {
         loop {
+            self.reap_cloud_wal_prune_worker();
+            self.reap_metadata_mirror();
+            self.drain_flush_worker_results();
+            self.retry_flush_mirrors_if_due();
             let pending = self
                 .state
                 .column_families
@@ -390,6 +445,14 @@ impl EventLoop {
                         ));
                     }
                 }
+                continue;
+            }
+
+            // First-use SST names can be waiting on an admitted immutable
+            // reservation cut while no flush task or long gate is owned.
+            // Its exact completion resumes the queued flush on the next turn.
+            if self.actors.cloud_coordinator.metadata_mirror.is_running() {
+                self.drain_metadata_mirror_within(deadline)?;
                 continue;
             }
 
@@ -546,21 +609,21 @@ mod tests {
     struct CountingSyncWriter(Arc<AtomicUsize>);
 
     impl crate::wal::WalWriter for CountingSyncWriter {
-        fn append_record(
+        fn append_record_accounted(
             &self,
             _record: &crate::wal::WalRecord,
-        ) -> crate::common::MidgeResult<u64> {
+        ) -> Result<u64, crate::wal::traits::WalAppendError> {
             Ok(0)
         }
 
-        fn append_batch(
+        fn append_batch_accounted(
             &self,
             _records: &[crate::wal::WalRecord],
-        ) -> crate::common::MidgeResult<u64> {
+        ) -> Result<u64, crate::wal::traits::WalAppendError> {
             Ok(0)
         }
 
-        fn sync(&self) -> crate::common::MidgeResult<()> {
+        fn sync_with_timeout(&self, _timeout: Duration) -> crate::common::MidgeResult<()> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }

@@ -20,6 +20,10 @@ pub struct CloudStorage {
 }
 
 impl CloudStorage {
+    pub(crate) fn set_retry_policy(&self, policy: super::CloudRetryPolicy) {
+        self.writes.set_retry_policy(policy);
+    }
+
     #[cfg(test)]
     pub fn new(backend: Arc<dyn CloudBackend>, namespace: String) -> Self {
         Self::new_with_timeout(
@@ -174,6 +178,16 @@ impl CloudStorage {
         timeout: std::time::Duration,
         callback: CloudCallback,
     ) {
+        self.submit_get_within_reserved(key, timeout, None, callback);
+    }
+
+    pub(crate) fn submit_get_within_reserved(
+        &self,
+        key: &str,
+        timeout: std::time::Duration,
+        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
+        callback: CloudCallback,
+    ) {
         let timeout = self.scoped_timeout(timeout);
         if timeout.is_zero() {
             let _ = callback.send(super::CloudEvent::Get {
@@ -184,8 +198,9 @@ impl CloudStorage {
             });
             return;
         }
-        let request = CloudRequestOptions::default()
+        let mut request = CloudRequestOptions::default()
             .with_deadline(crate::common::OperationDeadline::from_budget(timeout));
+        request.reservation = reservation;
         self.reads.read(
             &self.full_path(key),
             CloudReadOptions::default().with_request_options(request),
@@ -289,6 +304,32 @@ impl CloudStorage {
                 .with_deadline(crate::common::OperationDeadline::from_budget(timeout)),
             callback,
         );
+    }
+
+    pub(crate) fn submit_list_page_within(
+        &self,
+        prefix: &str,
+        page: super::CloudListPageRequest,
+        deadline: crate::common::OperationDeadline,
+        callback: super::CloudListPageCallback,
+    ) {
+        let timeout = self.scoped_timeout(deadline.clamp(self.callback_timeout()));
+        let full_prefix = self.full_path(prefix);
+        if let Err(error) = page.validate(&full_prefix) {
+            let _ = callback.send(Err(error));
+        } else if timeout.is_zero() {
+            let _ = callback.send(Err(super::CloudError::Timeout(
+                "bounded LIST page has no budget".into(),
+            )));
+        } else {
+            self.lists.list_page(
+                &full_prefix,
+                page,
+                CloudRequestOptions::default()
+                    .with_deadline(crate::common::OperationDeadline::from_budget(timeout)),
+                callback,
+            );
+        }
     }
 
     #[cfg(test)]

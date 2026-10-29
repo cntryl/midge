@@ -55,8 +55,12 @@ feature and dedicated Tier 4 workflow modes. Run the actual same-SHA
 construction smoke before its nine fresh release processes, then retain the
 native diagnostic trust and all invalid attempts during readback. See
 [Checkpoint Write Amplification](checkpoint-write-amplification.md) for the
-fixed cells, commands, gate and filesystem-issued byte limits. Measurement is
-pending.
+fixed cells, commands, gate and filesystem-issued byte limits. The
+[recorded hosted outcome](checkpoint-write-amplification.md#recorded-hosted-outcome)
+has nine fresh release attempts: cells B and C miss the snapshot payload
+target in all three repeats, and A has one time miss. This is historical
+engine-Fs evidence, not approval to change checkpoint cadence or a physical
+device cost measurement.
 
 The Tier 2 read amplification target opens a local Engine with three overlapping
 flushed SSTs. It records Engine point-read amplification and block-cache deltas
@@ -66,6 +70,26 @@ point-read amplification denominator. Cache and bloom observations cover the
 whole measured workload.
 Its row names and results start a new baseline; old simulator numbers cannot
 be compared with Engine throughput or block counts.
+
+The Tier 2 hybrid durability lag target runs one client against the in-memory
+object-store simulator and reports commit latency next to how far cloud
+durability trails it. A sampler reads `wal_local_durable_seq`,
+`wal_cloud_durable_seq`, and `current_sequence` every 10 ms for the lag in
+sequences; every 64th `cloud_async()` commit waits on `wait_cloud_durable` for
+the lag in time; provider requests and uploaded WAL bytes come from the
+simulator. A row refuses to report when the sampler managed fewer than half
+the expected ticks. The local `sync()` row is the floor.
+
+The Tier 2 baseline matrix target supplies the absolute reference rows for
+performance evidence deferred to 0.5.1:
+fillseq, fillrandom (buffered and sync), readrandom against a
+memtable-resident set and after a cold reopen, and seekrandom, each one
+operation per transaction with 16-byte keys and 100-byte values on a fresh
+local directory with production defaults. Its rows are named after the
+`db_bench` workloads they are shaped like; a `db_bench` run is context, not a
+parity claim. Performance evidence records absolute results for an exact source
+SHA; the absolute matrix does not block 0.5.0 publication. See
+[the baseline procedure](baseline-procedure.md).
 
 Each tier has one workflow, `bench-tier1.yml` through `bench-tier6.yml`,
 with a single `profile` dropdown defaulting to `standard`. All jobs use Ubuntu

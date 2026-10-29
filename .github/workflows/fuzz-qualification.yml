@@ -2,6 +2,17 @@ name: Fuzz Qualification
 
 on:
   workflow_dispatch:
+    inputs:
+      extended_minutes:
+        description: Optional extra differential fuzzing after the bounded checks (minutes)
+        type: choice
+        options: ["0", "30", "60", "240"]
+        default: "0"
+  workflow_call:
+    inputs:
+      extended_minutes:
+        type: string
+        default: "0"
   schedule:
     - cron: "23 4 * * 1"
 
@@ -9,14 +20,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: fuzz-${{ github.ref }}
-  cancel-in-progress: true
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   bounded-smoke:
-    name: Bounded fuzz smoke
+    name: Fuzz corpus replay and bounded smoke
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       CARGO_INCREMENTAL: 0
       FUZZ_TOOLCHAIN: nightly-2026-07-01
@@ -35,6 +46,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "fuzz"
+
+      - name: Record source and toolchain
+        run: |
+          mkdir -p fuzz/release-evidence
+          git rev-parse HEAD > fuzz/release-evidence/source.txt
+          rustc --version --verbose > fuzz/release-evidence/toolchain.txt
 
       - name: Build every fuzz target
         run: cargo fuzz build
@@ -63,17 +80,19 @@ jobs:
           '
           cargo fuzz run intent_log_replay fuzz/timeout-regression-corpus -- -runs=2048 -timeout=10
 
-      - name: Smoke WAL frame recovery
-        run: cargo fuzz run wal_frame_recovery -- -max_total_time=30 -timeout=10
-
-      - name: Smoke manifest journal replay
-        run: cargo fuzz run manifest_journal_replay -- -max_total_time=30 -timeout=10
-
-      - name: Smoke intent log replay
-        run: cargo fuzz run intent_log_replay -- -max_total_time=30 -timeout=10
-
-      - name: Smoke SST block decode
-        run: cargo fuzz run sst_block_decode -- -max_total_time=30 -timeout=10
+      - name: Smoke every registered target with AddressSanitizer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fuzz list > fuzz/release-evidence/targets.txt
+          test -s fuzz/release-evidence/targets.txt
+          while IFS= read -r target; do
+            args=(-max_total_time=30 -timeout=10)
+            if [ "$target" = engine_differential ]; then
+              args=(-max_len=512 -max_total_time=300 -timeout=10)
+            fi
+            cargo fuzz run "$target" -- "${args[@]}" 2>&1 | tee "fuzz/release-evidence/${target}.log"
+          done < fuzz/release-evidence/targets.txt
 
       - name: Preserve fuzz corpus and failure artifacts
         if: always()
@@ -85,4 +104,54 @@ jobs:
             fuzz/artifacts
             fuzz/timeout-seed-corpus
             fuzz/timeout-regression-corpus
+            fuzz/release-evidence
           if-no-files-found: ignore
+          retention-days: 30
+
+  extended-campaign:
+    name: Extended engine differential
+    if: inputs.extended_minutes != '' && inputs.extended_minutes != '0'
+    needs: bounded-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      CARGO_INCREMENTAL: 0
+      RUSTUP_TOOLCHAIN: nightly-2026-07-01
+      CAMPAIGN_MINUTES: ${{ inputs.extended_minutes }}
+    steps:
+      - name: Validate campaign duration
+        run: |
+          case "$CAMPAIGN_MINUTES" in
+            30|60|240) ;;
+            *) echo "Unsupported differential duration: $CAMPAIGN_MINUTES" >&2; exit 1 ;;
+          esac
+      - uses: actions/checkout@v7
+      - name: Install pinned fuzz toolchain
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+          cargo install cargo-fuzz --version 0.13.2 --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz-release
+      - name: Record source and toolchain
+        run: |
+          mkdir -p fuzz/release-evidence
+          git rev-parse HEAD > fuzz/release-evidence/source.txt
+          rustc --version --verbose > fuzz/release-evidence/toolchain.txt
+      - name: Run extended differential campaign
+        shell: bash
+        run: |
+          set -euo pipefail
+          date -u > fuzz/release-evidence/started.txt
+          cargo fuzz run -s none engine_differential -- -max_len=512 -max_total_time="$((CAMPAIGN_MINUTES * 60))" -timeout=10 2>&1 | tee fuzz/release-evidence/campaign.log
+          date -u > fuzz/release-evidence/finished.txt
+      - name: Preserve campaign evidence and corpus
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-fuzz-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            fuzz/release-evidence
+            fuzz/corpus
+            fuzz/artifacts
+          retention-days: 30

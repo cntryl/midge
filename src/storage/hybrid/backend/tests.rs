@@ -925,6 +925,187 @@ fn should_recompute_remaining_budget_before_each_round_trip_when_reading_object_
     );
 }
 
+#[test]
+fn should_confirm_filesystem_wal_upload_when_range_identity_is_unchanged() -> MidgeResult<()> {
+    // Arrange: FileSystem has no provider receipt, and ordinary HEAD returns
+    // a content checksum while range HEAD returns the pinned file identity.
+    let local = tempfile::tempdir()?;
+    let remote = tempfile::tempdir()?;
+    let bytes = vec![7; 130 * 1024];
+    let path = local.path().join("segment.wal");
+    std::fs::write(&path, &bytes)?;
+    let cloud: Arc<dyn StorageBackend> =
+        Arc::new(crate::storage::filesystem::FileSystem::new(remote.path())?);
+    let storage = HybridStorage::with_policy(cloud, policy::StorageBudgetPolicy::default());
+    let upload = UploadState {
+        segment_id: 10,
+        object_key: "wal/epochs/7/segment.wal".into(),
+        source: Arc::new(crate::io::FsLocation::host_file(&path)),
+        status: UploadStatus::InFlight {
+            started_at: Instant::now(),
+        },
+        max_sequence: 14,
+        retries: 0,
+        size_bytes: u64::try_from(bytes.len()).unwrap(),
+    };
+    let (terminal, events) = cb::bounded(4);
+    let mut identities = Vec::new();
+
+    // Act: the second attempt reconciles an existing immutable object.
+    for _ in 0..2 {
+        HybridStorage::process_wal_upload_attempt(
+            storage.counters(),
+            &upload,
+            &storage.stores.wal,
+            &storage.event_queue,
+            Some(&terminal),
+            &super::uploads::UploadAttemptAdmission {
+                timeout: Duration::from_secs(2),
+                memory: None,
+            },
+            &storage.verified_uploads,
+        );
+        identities.push(
+            HybridStorage::head_range_object_from_backend(
+                &storage.stores.wal,
+                &upload.object_key,
+                Duration::from_secs(2),
+            )
+            .expect("published WAL range identity"),
+        );
+    }
+    let results = events.try_iter().collect::<Vec<_>>();
+
+    // Assert: complete byte verification grants both ACKs without replacing
+    // the immutable remote object or losing the recoverable local source.
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(
+        results.iter().all(|event| matches!(
+            event,
+            StorageEvent::CloudAck {
+                segment_id: 10,
+                max_sequence: 14,
+            }
+        )),
+        "{results:?}"
+    );
+    assert_eq!(
+        std::fs::read(remote.path().join(&upload.object_key))?,
+        bytes
+    );
+    assert!(identities[0].same_version(&identities[1]));
+    assert_eq!(std::fs::read(path)?, bytes);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_complete_wal_upload_when_spawner_owns_failpoint_gate() -> MidgeResult<()> {
+    // Arrange: the real worker must finish while its test owner holds the
+    // global write gate, exactly as an engine's failpoint fixture does.
+    let local = tempfile::tempdir()?;
+    let remote = tempfile::tempdir()?;
+    let bytes = b"owned upload";
+    let path = local.path().join("segment.wal");
+    std::fs::write(&path, bytes)?;
+    let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(remote.path())?);
+    let (terminal, events) = cb::bounded(4);
+    let guard = crate::failpoints::test_failpoint_guard();
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        cloud,
+        policy::StorageBudgetPolicy::default(),
+        Some(terminal),
+        HybridQueueLimits {
+            worker_concurrency: 1,
+            callback_timeout: Duration::from_secs(2),
+            ..HybridQueueLimits::default()
+        },
+    );
+
+    // Act: release the guard only to clean up a red run's blocked worker.
+    let queued = storage.enqueue_object_upload(
+        42,
+        "wal/owned".into(),
+        crate::io::FsLocation::host_file(&path),
+        43,
+    );
+    storage.process_uploads();
+    let completed = events.recv_timeout(Duration::from_secs(2));
+    if completed.is_ok() {
+        drop(storage);
+        drop(guard);
+    } else {
+        drop(guard);
+        drop(storage);
+    }
+
+    // Assert: actual immutable upload and byte proof completed before release.
+    assert!(queued.is_ok(), "{queued:?}");
+    assert!(
+        matches!(
+            completed,
+            Ok(StorageEvent::CloudAck {
+                segment_id: 42,
+                max_sequence: 43,
+            })
+        ),
+        "{completed:?}"
+    );
+    assert_eq!(std::fs::read(remote.path().join("wal/owned"))?, bytes);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_complete_conditional_delete_when_spawner_owns_failpoint_gate() -> MidgeResult<()> {
+    // Arrange: capture the real immutable file's exact range identity.
+    let remote = tempfile::tempdir()?;
+    let key = "retired.wal";
+    let path = remote.path().join(key);
+    std::fs::write(&path, b"retired")?;
+    let cloud: Arc<dyn StorageBackend> =
+        Arc::new(crate::storage::filesystem::FileSystem::new(remote.path())?);
+    let identity =
+        HybridStorage::head_range_object_from_backend(&cloud, key, Duration::from_secs(2))
+            .expect("retired file range identity");
+    let (terminal, events) = cb::bounded(4);
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        cloud,
+        policy::StorageBudgetPolicy::default(),
+        Some(terminal),
+        HybridQueueLimits::default(),
+    );
+    let guard = crate::failpoints::test_failpoint_guard();
+
+    // Act: the physical deletion must settle under the current owner.
+    let queued = storage.delete_remote_objects_by_identity(vec![(42, key.into(), identity)]);
+    storage.process_uploads();
+    let completed = events.recv_timeout(Duration::from_secs(2));
+    if completed.is_ok() {
+        drop(storage);
+        drop(guard);
+    } else {
+        drop(guard);
+        drop(storage);
+    }
+
+    // Assert: red cleanup releases the guard before join, but cannot turn a
+    // late actual deletion into an on-time terminal completion.
+    assert!(queued.is_ok(), "{queued:?}");
+    assert!(
+        matches!(
+            completed,
+            Ok(StorageEvent::CloudWalPruneComplete {
+                segment_id: 42,
+                result: StorageOutcome::Ok(()),
+            })
+        ),
+        "{completed:?}"
+    );
+    assert!(!path.exists());
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
@@ -960,7 +1141,10 @@ fn should_emit_one_upload_terminal_event_when_wal_ack_logging_panics() {
         &storage.stores.wal,
         &storage.event_queue,
         Some(&external_event_tx),
-        storage.callback_timeout,
+        &super::uploads::UploadAttemptAdmission {
+            timeout: storage.callback_timeout,
+            memory: None,
+        },
         &storage.verified_uploads,
     );
     let terminal_events = external_event_rx.try_iter().collect::<Vec<_>>();
@@ -1382,4 +1566,206 @@ fn should_retain_a_replacement_object_when_a_physical_cleanup_retry_observes_ano
         storage.remote_object_proof(key).unwrap().bytes(),
         b"replacement"
     );
+}
+
+struct HeldWalWrite {
+    bytes: Vec<u8>,
+    options: crate::storage::cloud::CloudRequestOptions,
+    callback: crate::storage::cloud::CloudCallback,
+}
+
+struct ParallelWalUploads {
+    inner: MockCloudBackend,
+    pending: Mutex<HashMap<String, HeldWalWrite>>,
+    entered: cb::Sender<String>,
+}
+
+impl ParallelWalUploads {
+    fn finish(&self, key: &str, fail: bool) {
+        use crate::storage::cloud::{
+            CloudError, CloudEvent, CloudHeadCapability, CloudWriteCapability,
+        };
+        let pending = self.pending.lock().remove(key).expect("held upload");
+        if fail {
+            pending
+                .callback
+                .send(CloudEvent::PutReceipt {
+                    key: key.into(),
+                    result: Err(CloudError::Transport(
+                        "injected transient upload failure".into(),
+                    )),
+                })
+                .unwrap();
+            return;
+        }
+        let checksum = crc32c::crc32c(&pending.bytes);
+        let (tx, rx) = mpsc::channel();
+        self.inner
+            .submit_put(key, pending.bytes, pending.options.headers, tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CloudEvent::Put { result: Ok(()), .. }
+        ));
+        let (tx, rx) = mpsc::channel();
+        self.inner.submit_head(key, tx);
+        let CloudEvent::Head {
+            result: Ok(metadata),
+            ..
+        } = rx.recv().unwrap()
+        else {
+            panic!("uploaded identity");
+        };
+        pending
+            .callback
+            .send(CloudEvent::PutReceipt {
+                key: key.into(),
+                result: Ok(Some(crate::storage::StorageWriteReceipt {
+                    metadata,
+                    content_crc32c: checksum,
+                })),
+            })
+            .unwrap();
+    }
+}
+
+impl crate::storage::cloud::CloudReadCapability for ParallelWalUploads {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata,
+        submit_get_range, submit_get_range_with_identity);
+}
+impl crate::storage::cloud::CloudWriteCapability for ParallelWalUploads {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+    fn write_with_receipt(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        assert!(
+            options.reservation.is_some(),
+            "upload body retains its admission"
+        );
+        self.pending.lock().insert(
+            key.into(),
+            HeldWalWrite {
+                bytes,
+                options,
+                callback,
+            },
+        );
+        self.entered.send(key.into()).unwrap();
+    }
+}
+impl crate::storage::cloud::CloudDeleteCapability for ParallelWalUploads {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+impl crate::storage::cloud::CloudListCapability for ParallelWalUploads {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+impl crate::storage::cloud::CloudHeadCapability for ParallelWalUploads {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+impl crate::storage::cloud::CloudBackend for ParallelWalUploads {}
+
+struct ReleaseWalUploads(Arc<ParallelWalUploads>);
+impl Drop for ReleaseWalUploads {
+    fn drop(&mut self) {
+        let keys = self.0.pending.lock().keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            self.0.finish(&key, false);
+        }
+    }
+}
+
+#[test]
+fn should_preserve_bounded_upload_ownership_when_completions_reorder() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let (entered, arrivals) = cb::unbounded();
+    let backend = Arc::new(ParallelWalUploads {
+        inner: MockCloudBackend::new(),
+        pending: Mutex::new(HashMap::new()),
+        entered,
+    });
+    let cloud = Arc::new(CloudStorage::new(backend.clone(), String::new()));
+    let storage = HybridStorage::with_policy_event_sender_and_limits(
+        cloud,
+        policy::StorageBudgetPolicy::default(),
+        None,
+        HybridQueueLimits {
+            worker_concurrency: 4,
+            upload_memory_bytes: 4
+                * 16
+                * 1024
+                * (3 + crate::storage::CONSERVATIVE_WRITE_PAYLOAD_COPIES),
+            wal_upload_retry: WalUploadRetryPolicy {
+                base_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+            },
+            ..HybridQueueLimits::default()
+        },
+    );
+    let _release = ReleaseWalUploads(Arc::clone(&backend));
+    for id in 1..=4 {
+        let path = directory.path().join(format!("{id}.wal"));
+        std::fs::write(&path, vec![u8::try_from(id).unwrap(); 16 * 1024])?;
+        storage.enqueue_object_upload(
+            id,
+            format!("raw/{id}"),
+            crate::io::FsLocation::host_file(&path),
+            id,
+        )?;
+    }
+
+    // Act: every worker is live before any completion is released.
+    storage.process_uploads();
+    let mut started = (0..4)
+        .map(|_| {
+            arrivals
+                .recv_timeout(Duration::from_secs(2))
+                .expect("parallel upload started")
+        })
+        .collect::<Vec<_>>();
+    started.sort();
+    let retained = backend
+        .pending
+        .lock()
+        .values()
+        .map(|write| {
+            write
+                .options
+                .reservation
+                .as_ref()
+                .expect("retained upload admission")
+                .bytes()
+        })
+        .sum::<usize>();
+    assert_eq!(
+        retained,
+        4 * 16 * 1024 * (3 + crate::storage::CONSERVATIVE_WRITE_PAYLOAD_COPIES)
+    );
+    for key in ["raw/4", "raw/3", "raw/2"] {
+        backend.finish(key, false);
+    }
+    backend.finish("raw/1", true);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let retried = loop {
+        storage.process_uploads();
+        if let Ok(key) = arrivals.try_recv() {
+            break key;
+        }
+        assert!(Instant::now() < deadline, "failed upload was not retried");
+        std::thread::yield_now();
+    };
+    backend.finish(&retried, false);
+    storage.shutdown_wal_upload_worker();
+    storage.process_uploads();
+
+    // Assert
+    assert_eq!(started, ["raw/1", "raw/2", "raw/3", "raw/4"]);
+    assert_eq!(retried, "raw/1");
+    assert_eq!(backend.inner.get_uploads().len(), 4);
+    assert_eq!(storage.pending_upload_count(), 0);
+    assert!(backend.pending.lock().is_empty());
+    Ok(())
 }

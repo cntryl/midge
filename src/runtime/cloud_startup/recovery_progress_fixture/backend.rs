@@ -34,6 +34,7 @@ pub(super) struct FixtureObservations {
     local: PathBuf,
     snapshot: Mutex<ObservationSnapshot>,
     failure: Mutex<Option<String>>,
+    persist_inventory_progress: bool,
 }
 
 impl FixtureObservations {
@@ -41,6 +42,7 @@ impl FixtureObservations {
         root: &Path,
         mode: RecoveryProgressFixtureMode,
         expected_records: usize,
+        persist_inventory_progress: bool,
     ) -> MidgeResult<Self> {
         let observations = Self {
             fs: Arc::new(crate::io::RealFs::new(root).map_err(FsError::into_midge)?),
@@ -62,6 +64,7 @@ impl FixtureObservations {
                 completed_inventory_size_validations: 0,
             }),
             failure: Mutex::new(None),
+            persist_inventory_progress,
         };
         observations.persist()?;
         Ok(observations)
@@ -151,7 +154,9 @@ impl FixtureObservations {
         snapshot.completed_inventory_size_validations += u64::from(expected_size);
         snapshot.mismatches += u64::from(!expected_size);
         drop(snapshot);
-        self.remember_persistence();
+        if self.persist_inventory_progress {
+            self.remember_persistence();
+        }
     }
 }
 
@@ -164,7 +169,8 @@ pub(super) struct InventoryCloudBackend {
     expected_sizes: std::collections::HashMap<String, u64>,
     completed_keys: Mutex<std::collections::HashSet<String>>,
     observations: Arc<FixtureObservations>,
-    held: Mutex<Option<crate::storage::cloud::CloudCallback>>,
+    held: Mutex<Vec<crate::storage::cloud::CloudCallback>>,
+    head_delay: Duration,
 }
 
 #[cfg(any(test, feature = "cloud-common"))]
@@ -174,6 +180,7 @@ impl InventoryCloudBackend {
         mode: RecoveryProgressFixtureMode,
         files: &[crate::metadata::FileMeta],
         observations: Arc<FixtureObservations>,
+        head_delay: Duration,
     ) -> MidgeResult<Self> {
         Ok(Self {
             inner: crate::storage::filesystem::FileSystem::new(remote_root)?,
@@ -184,7 +191,8 @@ impl InventoryCloudBackend {
                 .collect(),
             completed_keys: Mutex::new(std::collections::HashSet::new()),
             observations,
-            held: Mutex::new(None),
+            held: Mutex::new(Vec::new()),
+            head_delay,
         })
     }
 
@@ -197,7 +205,7 @@ impl InventoryCloudBackend {
                     result: Err(CloudError::Protocol(error.to_string())),
                 });
             } else {
-                *self.held.lock() = Some(callback);
+                self.held.lock().push(callback);
             }
             return;
         }
@@ -235,7 +243,7 @@ impl InventoryCloudBackend {
                 .is_some_and(|size| *size == metadata.size)
         });
         if expected_size.is_some() {
-            std::thread::sleep(Duration::from_millis(250));
+            std::thread::sleep(self.head_delay);
         }
         let delivered = callback
             .send(CloudEvent::Head {

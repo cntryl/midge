@@ -1,4 +1,4 @@
-//! Scoped scheduling and owner observations for public timed-open unit tests.
+//! Scoped scheduling and owner observations for timed-open regression tests.
 
 use crate::common::{DeadlineScope, MidgeError, MidgeResult};
 use crossbeam::channel::{self, Receiver, Sender};
@@ -6,8 +6,10 @@ use std::cell::RefCell;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum OwnerExit {
+pub enum OwnerExit {
+    /// The actual startup owner completed its cleanup and returned normally.
     Returned,
+    /// The actual startup owner unwound while owning preparation resources.
     Panicked,
 }
 
@@ -60,6 +62,24 @@ impl Drop for Installation {
     }
 }
 
+/// Install manual expiry for this thread's next actual timed open.
+///
+/// This existing phase-control seam uses one shared cancellation scope with
+/// an explicit expiry signal. It does not measure the configured wall-clock
+/// budget; native real-time deadline cases must run without this installation.
+#[cfg(feature = "failpoints")]
+#[must_use]
+pub fn install_manual_caller_expiry(
+    expire: Receiver<()>,
+    owner_finished: Sender<OwnerExit>,
+) -> impl Drop {
+    install(OpenTestControl {
+        expire: Some(expire),
+        owner_finished,
+        checkpoint: None,
+    })
+}
+
 pub(super) fn take() -> Option<OpenTestControl> {
     CALLER.with(|slot| slot.borrow_mut().control.take())
 }
@@ -99,14 +119,16 @@ pub(super) fn controlled_readiness(
     expire: &Receiver<()>,
     scope: &DeadlineScope,
 ) -> MidgeResult<Result<(), channel::RecvTimeoutError>> {
-    crossbeam::select! {
-        recv(ready) -> result => Ok(result.map_err(|_| channel::RecvTimeoutError::Disconnected)),
+    // An already observed expiry has the same precedence as an exhausted
+    // real deadline at accept_ready, even if readiness became queued later.
+    crossbeam::channel::select_biased! {
         recv(expire) -> result => if result.is_ok() {
             Ok(Err(channel::RecvTimeoutError::Timeout))
         } else {
             scope.cancel();
             Err(MidgeError::Internal("timed-open test controller disconnected without expiry".into()))
-        }
+        },
+        recv(ready) -> result => Ok(result.map_err(|_| channel::RecvTimeoutError::Disconnected)),
     }
 }
 

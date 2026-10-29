@@ -7,11 +7,15 @@ use crate::types::EntryType;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
+mod decoder_corpus;
 mod duplicate_successor;
+mod restart_v5;
 
 struct CountingFs {
     inner: crate::io::RealFs,
     reads: Arc<Mutex<Vec<(u64, u64)>>>,
+    /// Every `open` and `open_persistent` call (#919).
+    opens: std::sync::atomic::AtomicUsize,
     persistent_handles: bool,
 }
 
@@ -20,8 +24,13 @@ impl CountingFs {
         Ok(Self {
             inner: crate::io::RealFs::new(root)?,
             reads: Arc::new(Mutex::new(Vec::new())),
+            opens: std::sync::atomic::AtomicUsize::new(0),
             persistent_handles: true,
         })
+    }
+
+    fn opens(&self) -> usize {
+        self.opens.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn without_persistent_handles(root: &std::path::Path) -> FsResult<Self> {
@@ -110,7 +119,12 @@ impl crate::io::PersistentHandleFs for CountingFs {
                 "test backend uses path-based SST reads".to_string(),
             ));
         }
-        crate::io::open_persistent_handle(&self.inner, path, opts)
+        self.opens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Box::new(CountingFile {
+            inner: crate::io::open_persistent_handle(&self.inner, path, opts)?,
+            reads: Arc::clone(&self.reads),
+        }))
     }
 }
 
@@ -133,6 +147,8 @@ impl Fs for CountingFs {
     }
 
     fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+        self.opens
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Box::new(CountingFile {
             inner: self.inner.open(path, opts)?,
             reads: Arc::clone(&self.reads),
@@ -310,6 +326,37 @@ fn should_isolate_replaced_sst_cache_entries_by_generation_identity() -> MidgeRe
     Ok(())
 }
 
+#[test]
+fn should_open_file_once_given_thousand_block_cache_misses_when_point_reading() -> MidgeResult<()> {
+    // Arrange: no block cache, so every point read fetches its data block.
+    let temp_dir = tempfile::tempdir()?;
+    write_unique_key_sst(&temp_dir, "handle.sst")?;
+    let (counting_fs, reader) = open_counting_reader(&temp_dir, "handle.sst")?;
+    let opens_after_open = counting_fs.opens();
+
+    // Act
+    for i in 0..1_000_u64 {
+        let key = format!("key_{:04}", i % 96);
+        assert!(matches!(
+            reader.get_state_at(key.as_bytes(), u64::MAX)?,
+            KeyState::Value(..)
+        ));
+    }
+
+    // Assert: the reader holds its handle for its lifetime (#919).
+    assert_eq!(
+        counting_fs.opens(),
+        opens_after_open,
+        "block reads reopened the file {} times",
+        counting_fs.opens() - opens_after_open
+    );
+    assert!(
+        opens_after_open <= 2,
+        "reader open used {opens_after_open} opens"
+    );
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn should_finish_scan_from_open_handle_when_backing_sst_is_unlinked_mid_scan() -> MidgeResult<()> {
@@ -433,11 +480,30 @@ fn should_reject_legacy_v2_sst_without_falling_back_to_unchecksummed_blocks() ->
 
     // Act
     let Err(error) = SstFileIo::open(file_name, fs) else {
-        panic!("legacy SST must not open in a V4-only build");
+        panic!("legacy SST must not open in a V5-only build");
     };
 
     // Assert
     assert!(matches!(error, MidgeError::CompatibilityError(_)));
+    Ok(())
+}
+
+#[test]
+fn should_reject_format_nine_sst_v4_directly_with_compatibility_error() -> MidgeResult<()> {
+    // Arrange: this fixture has a current metadata marker and a real V4 SST,
+    // so opening the SST directly exercises the reader's version boundary.
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/compatibility/v9_populated_v4_sst_db/sst");
+    let file_name = "000000_00_00000000000000000001.sst";
+    let fs: Arc<dyn Fs> =
+        Arc::new(crate::io::RealFs::new(&fixture_dir).map_err(FsError::into_midge)?);
+
+    // Act
+    let result = SstFileIo::open(file_name, fs);
+
+    // Assert: V4 is rejected at the SST reader boundary, before metadata
+    // version checks or a best-effort legacy block decode can mask the cause.
+    assert!(matches!(result, Err(MidgeError::CompatibilityError(_))));
     Ok(())
 }
 
@@ -456,12 +522,12 @@ fn should_get_state_at_read_only_candidate_block_when_key_present() -> MidgeResu
     let target_block_idx = 1;
     let target_handle = index[target_block_idx].1;
     let target_block = reader.read_block(&target_handle)?;
-    let entries = reader.scan_block_entries_from_bytes(&target_block)?;
+    let entries = reader.decode_scan_block(&target_block)?;
     assert!(
         entries.len() >= 2,
         "target block should contain multiple keys"
     );
-    let target_key = entries[1].key.clone();
+    let target_key = entries.entry(1).key;
 
     counting_fs.clear_reads();
 
@@ -490,7 +556,7 @@ fn should_get_state_at_read_only_candidate_block_when_key_missing() -> MidgeResu
     let target_block_idx = 1;
     let target_handle = index[target_block_idx].1;
     let target_block = reader.read_block(&target_handle)?;
-    let entries = reader.scan_block_entries_from_bytes(&target_block)?;
+    let entries = reader.decode_scan_block(&target_block)?;
     assert!(
         entries.len() >= 2,
         "target block should contain multiple keys"
@@ -502,7 +568,7 @@ fn should_get_state_at_read_only_candidate_block_when_key_missing() -> MidgeResu
     assert_eq!(block_bloom.num_blocks(), index.len());
     let missing_key = (0..256u16)
         .map(|suffix| {
-            let mut key = entries[1].key.clone();
+            let mut key = entries.entry(1).key.to_vec();
             key.extend_from_slice(format!("-missing-{suffix}").as_bytes());
             key
         })
@@ -707,7 +773,7 @@ fn should_reject_corrupt_sparse_index_given_nonmonotonic_offsets_when_opening() 
     assert_eq!(reader.index_kind, IndexKind::Sparse);
     let index = reader.index_entries()?;
     assert!(index.len() >= 2, "test SST must contain multiple blocks");
-    let index_handle = reader.footer.as_ref().expect("V4 footer").index_handle;
+    let index_handle = reader.footer.as_ref().expect("V5 footer").index_handle;
     let first_data_offset = index[0].1.offset;
 
     let mut bytes = std::fs::read(&path)?;
@@ -766,8 +832,8 @@ fn should_use_trie_accelerator_when_structured_key_is_present() -> MidgeResult<(
     let target_block_idx = 1;
     let target_handle = index[target_block_idx].1;
     let target_block = reader.read_block(&target_handle)?;
-    let entries = reader.scan_block_entries_from_bytes(&target_block)?;
-    let target_key = entries[1].key.clone();
+    let entries = reader.decode_scan_block(&target_block)?;
+    let target_key = entries.entry(1).key;
 
     counting_fs.clear_reads();
 
@@ -1221,7 +1287,7 @@ fn should_reject_oversized_block_handle_before_issuing_filesystem_read() -> Midg
 }
 
 #[test]
-fn should_reject_unreferenced_gap_between_v4_sst_blocks() {
+fn should_reject_unreferenced_gap_between_v5_sst_blocks() {
     // Arrange
     let mut reader = SstFileIo::new("gap.sst", Arc::new(crate::io::MockFs::new()));
     reader.block_region_end = 30;
@@ -1305,7 +1371,7 @@ fn should_reject_persisted_sst_range_when_it_hides_a_decoded_key() -> MidgeResul
     let fs: Arc<dyn Fs> =
         Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
     let reader = SstFileIo::open("narrow-range.sst", Arc::clone(&fs))?;
-    let handle = reader.footer.as_ref().expect("V4 footer").meta_index_handle;
+    let handle = reader.footer.as_ref().expect("V5 footer").meta_index_handle;
     let mut metadata = crate::sst::types::SstMetadata::decode(&reader.read_block(&handle)?)?;
     metadata
         .key_range

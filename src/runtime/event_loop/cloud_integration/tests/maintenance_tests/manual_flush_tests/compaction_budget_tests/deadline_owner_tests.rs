@@ -81,22 +81,38 @@ fn receive_generation(fixture: &mut BudgetFixture) -> MidgeResult<GenerationRece
     loop {
         match fixture.compute.try_recv() {
             Ok(message @ RuntimeMsg::CompactionComplete { .. }) => {
+                // Notification precedes the pool's owned result ticket. This
+                // fixture has one compute slot; await its real ticket without
+                // letting fairness dispatch the generation we intend to hold.
+                while !fixture.el.actors.compaction_actor.has_ready_compute() {
+                    if Instant::now() >= until {
+                        return Err(MidgeError::Internal(
+                            "actual compute ticket did not settle".into(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 return GenerationReceipt::from_actual(fixture, message);
             }
             Ok(message) => {
-                fixture.el.process_one(message, &messages);
+                fixture.el.handle_runtime_msg(message, &messages);
             }
             Err(crossbeam::channel::TryRecvError::Disconnected) => {
                 return Err(MidgeError::Internal("actual compute channel closed".into()));
             }
             Err(crossbeam::channel::TryRecvError::Empty) => {}
         }
-        if let Some(message) = fixture.el.routing.pending_msg.take() {
-            fixture.el.process_restored_one(message, &messages);
+        if !fixture.el.actors.compaction_actor.has_pending_compute() {
+            if let Some(message) = fixture.el.routing.pending_msg.take() {
+                fixture.el.handle_runtime_msg(message, &messages);
+            }
+            // Drive admission between generations, but park the next accepted
+            // worker once launched. Fairness reaps ready compute tickets, so
+            // running it while awaiting a notification defeats delayed dispatch.
+            if !fixture.el.actors.compaction_actor.has_pending_compute() {
+                fixture.el.run_request_fairness_slot();
+            }
         }
-        // Preserve genuine retirement/flush fairness and accepted handle reaping
-        // between CFs. Never fabricate a completion or clear an owner flag.
-        fixture.el.run_request_fairness_slot();
         if Instant::now() >= until {
             return Err(MidgeError::Internal(format!(
                 "no actual next compute receipt: {}",
@@ -187,6 +203,33 @@ fn retired_inputs(fixture: &BudgetFixture, receipt: &GenerationReceipt) -> Vec<b
         .collect()
 }
 
+fn drain_retired_inputs(fixture: &mut BudgetFixture, receipts: &[&GenerationReceipt]) {
+    // A selected metadata cut protects its inputs until its actual terminal
+    // completion. Retirement can therefore enter the existing GC retry queue
+    // before CompactAll responds; keep driving ordinary idle progress afterward.
+    let until = Instant::now() + FIXTURE_WAIT;
+    while receipts.iter().any(|receipt| {
+        retired_inputs(fixture, receipt)
+            .iter()
+            .any(|retired| !retired)
+    }) && Instant::now() < until
+    {
+        fixture.el.run_request_fairness_slot();
+        // Publication protection can queue obsolete inputs before it releases
+        // them. Exercise the ordinary retry after that release, not only the
+        // fairness slot's failed-provider-delete and manifest retry schedules.
+        let storage = fixture.el.actors.cloud_coordinator.hybrid_storage.clone();
+        fixture
+            .el
+            .actors
+            .gc_actor
+            .retry_pending(&mut fixture.el.state, storage);
+        fixture.el.actors.gc_actor.shutdown_workers();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    fixture.el.actors.gc_actor.shutdown_workers();
+}
+
 fn assert_phases_succeeded(phases: &[PhaseEvidence]) {
     assert_eq!(phases.len(), 3);
     assert_eq!(
@@ -233,11 +276,11 @@ fn manifest_names(manifest: &crate::metadata::Manifest) -> BTreeSet<String> {
         .collect()
 }
 
-fn assert_genuine_holds(reads: &[ReadEvidence], expected: usize) {
+fn assert_genuine_holds(reads: &[MetadataIoEvidence], expected: usize) {
     assert_eq!(
         reads.len(),
         expected,
-        "positive actual read observations: {reads:?}"
+        "positive actual metadata IO observations: {reads:?}"
     );
     assert!(
         reads.iter().all(|read| read.genuine_success
@@ -280,13 +323,13 @@ fn should_preserve_background_owner_when_later_manual_waiter_expires() -> MidgeR
         let outcome = fixture.drive_manual_response(&response);
         let rows = rows_for_generation(&fixture, &receipt);
         let committed = fixture.committed_manifest();
-        fixture.el.actors.gc_actor.shutdown_workers();
+        drain_retired_inputs(&mut fixture, &[&receipt]);
         let retired = retired_inputs(&fixture, &receipt);
         let has_intent = fixture
             .el
             .state
             .has_compaction_publication_intent(&receipt.inputs, &receipt.outputs);
-        let reads = fixture.backend.reads.lock().unwrap().clone();
+        let reads = fixture.backend.observations.lock().unwrap().clone();
         let healthy = fixture.el.check_lease_health();
         fixture.stop()?;
 
@@ -354,7 +397,7 @@ fn should_keep_manual_origin_when_later_shorter_waiter_expires() -> MidgeResult<
         let long_outcome = fixture.drive_manual_response(&long_response);
         let rows = rows_for_generation(&fixture, &receipt);
         let committed = fixture.committed_manifest();
-        fixture.el.actors.gc_actor.shutdown_workers();
+        drain_retired_inputs(&mut fixture, &[&receipt]);
         let retired = retired_inputs(&fixture, &receipt);
         let healthy = fixture.el.check_lease_health();
         fixture.stop()?;
@@ -387,7 +430,7 @@ fn should_keep_manual_origin_when_later_shorter_waiter_expires() -> MidgeResult<
 fn should_refuse_budget_extension_when_longer_waiter_joins_accepted_manual_work() -> MidgeResult<()>
 {
     crate::failpoints::with_read_gate(|| {
-        // Arrange: real phase holds each fit the four-second provider cap.
+        // Arrange: each genuine phase hold fits the ordinary provider cap.
         let mut fixture = BudgetFixture::new()?;
         let (started, original_response) = fixture.start_manual();
         let original = OperationDeadline::from_start(started, CALLER_BUDGET);
@@ -401,7 +444,7 @@ fn should_refuse_budget_extension_when_longer_waiter_joins_accepted_manual_work(
 
         // Act: a live longer waiter cannot renew the earlier accepted generation.
         dispatch_generation(&mut fixture, &mut receipt);
-        let first = fixture.complete_actual_phase(Some(ReadHold {
+        let first = fixture.complete_actual_phase(Some(MetadataHold {
             phase: CompactionPublishPhase::ManifestPublished,
             until: started + CALLER_BUDGET + Duration::from_millis(500),
         }));
@@ -426,7 +469,7 @@ fn should_refuse_budget_extension_when_longer_waiter_joins_accepted_manual_work(
             .compaction_publish_result_rx
             .is_empty()
             && !fixture.el.actors.compaction_publish_actor.is_inflight();
-        let reads = fixture.backend.reads.lock().unwrap().clone();
+        let reads = fixture.backend.observations.lock().unwrap().clone();
         let healthy = fixture.el.check_lease_health();
         fixture.stop()?;
 
@@ -443,7 +486,7 @@ fn should_refuse_budget_extension_when_longer_waiter_joins_accepted_manual_work(
             "{second:?}"
         );
         assert!(longer_still_live && no_third_phase);
-        assert_actual_reads_fit_io_cap(&reads, started);
+        assert_actual_metadata_io_fit_cap(&reads, started);
         assert_route_timeout(&original_outcome, MANUAL_REQUEST);
         assert_route_timeout(&long_outcome, LONG_REQUEST);
         assert_one_exact_fixture_row(rows);
@@ -477,7 +520,7 @@ fn should_inherit_original_clock_when_actual_manual_work_reaches_second_family()
         let first_rows = rows_for_generation(&fixture, &first);
         let second_rows = rows_for_generation(&fixture, &second);
         let committed = fixture.committed_manifest();
-        fixture.el.actors.gc_actor.shutdown_workers();
+        drain_retired_inputs(&mut fixture, &[&first, &second]);
         let retired = [
             retired_inputs(&fixture, &first),
             retired_inputs(&fixture, &second),
@@ -603,7 +646,7 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
         let outcome = fixture.drive_manual_response(&response);
         let first_rows = rows_for_generation(&fixture, &first);
         let committed = fixture.committed_manifest();
-        fixture.el.actors.gc_actor.shutdown_workers();
+        drain_retired_inputs(&mut fixture, &[&first]);
         let first_retired = retired_inputs(&fixture, &first);
         let second_retained = retained_inputs(&fixture, &second);
         let second_intent = fixture
@@ -614,7 +657,7 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
             .inputs
             .iter()
             .all(|name| fixture.el.state.manifest_has_file(name));
-        let reads = fixture.backend.reads.lock().unwrap().clone();
+        let reads = fixture.backend.observations.lock().unwrap().clone();
         let healthy = fixture.el.check_lease_health();
         fixture.stop()?;
 
@@ -664,7 +707,7 @@ fn verify_second_family_expiry(queue_past_deadline: bool) -> MidgeResult<()> {
 fn assert_second_family_expiry_phase(
     second_phase: Option<&PhaseEvidence>,
     second_intent: bool,
-    reads: &[ReadEvidence],
+    reads: &[MetadataIoEvidence],
     started: Instant,
     second_budget_bound: Duration,
     original: OperationDeadline,

@@ -563,7 +563,7 @@ impl LeaderStore for FsLeaderStore {
                 if previous.as_ref() == Some(&generation) {
                     return Ok(());
                 }
-                return Err(LeaseError::RenewalFailed(
+                return Err(LeaseError::AcquisitionFailed(
                     "shared metadata predecessor changed".into(),
                 ));
             }
@@ -1217,7 +1217,10 @@ mod tests {
         );
 
         // Assert
-        assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+        assert!(
+            matches!(result, Err(LeaseError::AcquisitionFailed(_))),
+            "{result:?}"
+        );
         assert_eq!(
             store.read_committed_metadata(timeout).unwrap(),
             crate::lease::CloudMetadataHead::Committed(second)

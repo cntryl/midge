@@ -57,6 +57,11 @@ L0 files may overlap arbitrarily, so the read view checks their manifest bounds
 in recency order. A point read opens only files whose complete, valid bounds
 include the key, plus every file with incomplete, missing, or inverted bounds.
 Both endpoints are inclusive so range-tombstone coverage remains conservative.
+Candidates are visited newest-first, one L0 file or one deeper level at a time,
+and the read stops at the first group that yields a point state or a covering
+range tombstone; level order (SST-10) guarantees every older source holds only
+older versions, so a key found in the memtable opens no SST (#903). L0 files
+whose sequence ranges cannot be ordered are visited together.
 Admission bounds steady-state L0 by `H`; historical or recovered backlogs can
 exceed this count and remain readable. Selection then checks the actual L0
 count without imposing a startup limit. Complete L1+ files are ordered by full
@@ -83,7 +88,10 @@ startup inventory cap. Scan work still grows with the files and rows read.
 
 Compaction represents source files and the complete target-level span
 separately. L0 retains one head per bounded selected source plus one chained
-target head. Ordinary inner-level compaction retains one chained source head and
+target head. The L0 batch is selected in level order (SST-10): the oldest file
+first, then only files whose older overlapping siblings are already selected, so
+the batch size bound is the configured file-count threshold, not the overlap
+closure. Ordinary inner-level compaction retains one chained source head and
 one chained target head. Overlap repair instead gives each source its own head;
 components above the configured fan-in use repeated bounded raw merges into
 non-authoritative local scratch runs. Point versions and range-tombstone start/end events share
@@ -192,7 +200,53 @@ total-input resource limit, and disabled compaction formerly allowed continuing
 L0 growth. The corresponding regressions now enforce indexed selection,
 streamed target spans, and pre-WAL admission.
 
+## Concurrent maintenance candidate
+
+`compaction_concurrency` and `flush_concurrency` are independently configurable
+from 1 through 64 and default to 1 pending qualification. Compaction slots keep
+exact worker identities and range/input reservations through publication. The
+picker skips reserved conflicts, admits at most one L0 job per family, keeps
+repair exclusive and charges child budgets against one shared pool. Reusable
+compute workers and bounded completion polling retain terminal ownership even
+when a notification arrives early or is lost. Per-worker scratch scopes keep
+cleanup proof independent of another job's scratch lifetime.
+
+Flush slots admit at most one generation per family and use the same bounded
+global flush budget. Their exact flush IDs bind completion, retries and release.
+Successful compaction publication requests another picker turn immediately;
+deep debt does not need a new flush or the thirty-second timer. Progress still
+depends on a non-conflicting plan fitting the configured budgets and terminal
+storage service. Concurrent held-worker, fairness, budget and restart proofs
+remain active qualification work; publication still serializes through the
+existing intent/manifest gate until #910's ordered-cut protocol is wired.
+
 ## Commands
+
+### Optional admission slowdown
+
+`OpenOptionsBuilder::write_backpressure` accepts `WriteBackpressureConfig`.
+Defaults preserve immediate admission and the existing hard stalls. Configured
+soft limits cover published/reserved L0 slots, admitted memtable bytes and
+estimated pending compaction bytes. The caller waits once, for at most the
+configured admission window within its original response deadline; the loop
+does not sleep. Expiry or lifecycle/lease cancellation before submission leaves
+no queued write. Runtime hard checks remain authoritative when pressure races
+with this advisory snapshot.
+
+Pending bytes sum L0 bytes when its count/byte trigger is reached and excess
+bytes over each compactable inner-level target, separately per family. The
+terminal level is excluded. This is a scheduling estimate, not predicted device
+I/O. An optional pending-byte hard limit participates in the existing stall
+contract and is relieved by compaction publication.
+
+Flush and compaction writers share one optional encoded-byte rate schedule.
+It charges scratch and final writes in bounded chunks on their workers. Hard
+pressure bypasses throttling so maintenance can release occupied slots; shutdown
+keeps that bypass set while admitted work drains. Provider upload bandwidth is
+outside this local output limit. Runtime metrics expose admission time/count,
+rate-limited bytes and the enabled pending-byte estimate separately from stalls.
+Sustainable-load latency, hard-stall reduction and rate tuning still require
+the #908/#935 benchmark qualification; the optional controls imply no gain.
 
 ```text
 cargo test --lib runtime::sst_read_view::tests::should_prove_read_work_bounds_across_synthetic_manifest_cardinalities -- --nocapture

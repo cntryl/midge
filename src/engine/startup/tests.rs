@@ -623,14 +623,14 @@ impl crate::storage::cloud::CloudWriteCapability for LoseMetadataCommitCallbackB
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        if key == crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY
+        if key == "metadata/committed-pointer.v1"
             && self.armed.swap(false, std::sync::atomic::Ordering::AcqRel)
         {
             let (inner_callback, completion) = std::sync::mpsc::channel();
             self.inner.submit_put(key, data, headers, inner_callback);
             match completion
                 .recv()
-                .expect("mock provider completes lease CAS")
+                .expect("mock provider completes metadata pointer CAS")
             {
                 crate::storage::cloud::CloudEvent::Put {
                     result: crate::storage::cloud::CloudOutcome::Ok(()),
@@ -682,7 +682,7 @@ impl crate::storage::cloud::CloudWriteCapability for FailOnceGenerationPutBacken
         headers: Vec<(String, String)>,
         callback: crate::storage::cloud::CloudCallback,
     ) {
-        if key.starts_with("metadata/generations/")
+        if key.starts_with("manifest/")
             && self
                 .fail_next_generation_put
                 .swap(false, std::sync::atomic::Ordering::AcqRel)
@@ -730,14 +730,16 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
     // Assert: the lease points at a complete generation and a new cache can
     // recover it without trusting the original local directory.
     let generation = fixture.committed_generation();
+    let bodies = crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
+        &fixture.cloud,
+        &generation,
+        &crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+    )?;
     for name in [
         crate::metadata::files::FORMAT,
         crate::metadata::files::MANIFEST_SNAPSHOT,
     ] {
-        assert!(generation
-            .objects
-            .iter()
-            .any(|object| object.file_name == name));
+        assert!(bodies.contains_key(name));
         assert!(fixture.local_cache.path().join(name).is_file());
     }
     let fresh_cache = tempfile::tempdir()?;
@@ -748,11 +750,14 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
         fresh_cache.path(),
         crate::config::RecoveryPolicy::Strict,
     )?;
-    let restored: crate::metadata::Manifest = serde_json::from_slice(&std::fs::read(
-        fresh_cache
-            .path()
-            .join(crate::metadata::files::MANIFEST_SNAPSHOT),
-    )?)
+    let restored: crate::metadata::Manifest = crate::metadata::codec::decode(
+        crate::metadata::codec::MANIFEST,
+        &std::fs::read(
+            fresh_cache
+                .path()
+                .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+        )?,
+    )
     .expect("decode committed manifest snapshot");
     assert_eq!(
         restored.flush_frontiers().get(0).unwrap(),
@@ -812,7 +817,8 @@ fn should_retry_provider_metadata_bootstrap_with_same_cache_after_failed_generat
 }
 
 #[test]
-fn should_hydrate_committed_provider_metadata_when_lease_cas_callback_is_lost() -> MidgeResult<()> {
+fn should_hydrate_committed_provider_metadata_when_metadata_pointer_cas_callback_is_lost(
+) -> MidgeResult<()> {
     // Arrange: the provider applies the metadata-pointer CAS but reports a
     // transport error. Readback must resolve the ambiguous publication.
     let backend = std::sync::Arc::new(LoseMetadataCommitCallbackBackend {

@@ -5,9 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and version numbers use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) formatting.
 
-Midge is currently in the 0.4 release line. Compatibility expectations for pre-1.0 releases are defined in [docs/development/stability-policy.md](docs/development/stability-policy.md).
+Compatibility expectations for pre-1.0 releases are defined in [docs/development/stability-policy.md](docs/development/stability-policy.md).
 
 ## [Unreleased]
+
+## [0.5.0] - 2026-10-29
+
+### Added
+
+- Cloud-durable sequence observation and `Engine::wait_cloud_durable`,
+  per-operation latency histograms, WAL sync phase timings, and nonblocking
+  durability-frontier sampling. Cloud-durable historical reads remain deferred.
+- Optional `alloc-mimalloc` for binaries and benchmarks; the library installs
+  no process allocator. Release and benchmark profiles use thin LTO.
+- Loom models of the lock-free skiplist's insert, append and read races under
+  `cfg(midge_loom)`, and a documented miri run of its unit tests, both part of
+  the local gate for memtable changes (#931).
+- A differential fuzz target and proptest, `engine_differential`, that replay
+  random multi-key histories with snapshots, TTL, range deletes, flushes,
+  compactions, reopens and power-loss crashes against a `BTreeMap` model, plus
+  a concurrent-writer mode reconciled by commit sequence (#951).
+
+### Changed
+
+- **Breaking persisted format: database FORMAT 9 and SST V5.** Manifest and
+  intent persistence use bounded binary frames with CRC32C. SST V5 uses compact
+  entry headers, independent restart keys every 16 entries, and checked restart
+  continuation metadata. Older database and SST formats are rejected without
+  mutation; this release has no in-place upgrade from 0.4.x.
+- Cloud metadata layout v2 publishes immutable manifest snapshots/edits through
+  a separately fenced committed pointer. Lease v4 and initialization sentinel
+  v3 replace the prior lease-embedded pointer. WAL publication catalog v3,
+  segment v2 and exact acknowledged recovery floors remain unchanged.
+- Commit/WAL and background maintenance pipelines preserve ordered whole-unit
+  visibility while moving admitted work off the event loop. Cloud cleanup
+  retains snapshot, compaction, intent and in-flight publication dependencies.
+- Point reads stop at a deciding source after preserving L0 sequence order;
+  SST handles remain open, reader caches are sharded, and range-tombstone
+  coverage is indexed. Memtable and SST scans stream with bounded buffers.
+- SST publication streams large immutable files through provider multipart or
+  resumable protocols. Checksums must match exact source bytes and pinned
+  identities; missing receipts retain identity-pinned readback.
+- Cloud mode caches fetched remote SST ranges on local disk, keyed by the
+  object's pinned identity and checksummed, in a quarter of a local storage
+  budget of at least 32 MiB. That quarter is carved out before WAL, spill,
+  flush and staging admission, which now see three quarters of
+  `local_storage_budget`. A reader open fetches the object's last 64 KiB once
+  instead of one request per metadata block, so `remote_range_bytes_total`
+  counts the prefetched tail (#938).
+- Range scans no longer insert the SST blocks they read into the block cache
+  unless they are bounded by a `limit` of at most
+  `Query::SMALL_SCAN_FILL_LIMIT` rows, so a one-pass scan leaves the
+  point-read working set cached; `Query::cache_fill(CacheFill::Normal)` or
+  `CacheFill::Bypass` overrides the choice (#944). `Query` gains the public
+  `cache_fill` field.
+
+### Fixed
+
+- Reject WAL records that carry a `COMPRESSION` tag without a `VALUE` field.
+- Report an admitted write whose commit outcome cannot be established as
+  `OutcomeUnknown`, so callers do not mistake a timeout for proof of no write.
+- Keep SST cache identities structural and validate restart continuation links
+  during point lookup, including user-key histories spanning restart intervals.
+- Preserve progress under local/cloud compaction pressure and reconcile lost
+  conditional cloud mutation responses without blindly replaying effects.
+
+### Compatibility and rollback
+
+- Rust MSRV is 1.97. Database FORMAT 9/SST V5 and cloud metadata layout v2 are
+  required. See [the migration guide](docs/operations/migration-guide.md) for
+  the 0.4.x-to-0.5.0 application-level export/import procedure.
+- **Binary rollback against a 0.5.0 store is unsupported.** Restore the
+  preserved 0.4.x database/prefix and matching binary; reconcile writes made
+  after cutover separately. Never rewrite a FORMAT marker to force an open.
+- Exact WAL recovery floors and raw TTL retention are preserved. Destructive
+  TTL reclamation and weaker WAL detection floors are not enabled. The SST
+  redesign belongs to 0.5.1, whose in-place upgrade is a future requirement,
+  not a capability delivered here.
+- Qualification and measured performance are recorded per source and topology.
+  Sqrzl evidence is not a live-cloud or RocksDB/Pebble parity claim. Performance
+  baselines, hybrid latency/lag/cost evidence and cold-start measurements are
+  deferred to 0.5.1; existing noisy or incomplete rows remain inconclusive.
+  Release publication requires the final candidate to pass the release checklist.
 
 ## [0.4.1] - 2026-10-16
 

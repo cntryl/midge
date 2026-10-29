@@ -7,6 +7,7 @@ use crate::sst::SstStateReader;
 use crate::types::{EntryType, KeyState};
 use crate::MidgeError;
 use std::path::PathBuf;
+mod write_rate;
 
 #[test]
 fn should_reject_valueless_put_when_writing_sst() -> MidgeResult<()> {
@@ -42,6 +43,7 @@ struct RecordingFile<'a> {
 
 impl crate::io::ReadFile for RecordingFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
+        self.events.lock().push(format!("read {}", self.name));
         self.inner.read_at(offset, len)
     }
 
@@ -433,7 +435,8 @@ fn should_release_final_block_reservations_before_reserving_finalization_workspa
         * (std::mem::size_of::<PendingEntry>() + first_key.len() * 4 + value.len() + 64);
     let index_entry_bytes =
         std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>() + first_key.len();
-    let persistent_metadata_bytes = index_entry_bytes + ENTRY_COUNT * 16;
+    let persistent_metadata_bytes =
+        index_entry_bytes + ENTRY_COUNT * 16 + std::mem::size_of::<usize>();
     let finalization_bytes = index_entry_bytes * 4 + 16 * 1024;
     let budget = crate::common::resource_budget::ResourceBudget::new(
         finalization_bytes + persistent_metadata_bytes,
@@ -944,5 +947,100 @@ fn should_return_max_covering_tombstone_seq_when_key_is_in_range() -> MidgeResul
     assert_eq!(unbounded, Some(12));
     assert_eq!(below_all, None);
     assert_eq!(end_is_exclusive, None);
+    Ok(())
+}
+
+#[test]
+fn should_return_exact_finalized_identity_without_output_reads_when_finishing_sst(
+) -> MidgeResult<()> {
+    for streaming in [false, true] {
+        for shape in 0..4 {
+            // Arrange
+            let directory = tempfile::tempdir()?;
+            let fs = Arc::new(RecordingFs::new(directory.path(), false)?);
+            let output_fs: Arc<dyn Fs> = fs.clone();
+            let factory = FsSstFactoryIo::new(Arc::clone(&output_fs), 4096);
+            let mut writer = if streaming {
+                factory.create_for_compaction(
+                    crate::common::resource_budget::ResourceBudget::new(4 * 1024 * 1024),
+                )?
+            } else {
+                factory.create()?
+            };
+            let point_count = match shape {
+                2 => 1_u64,
+                3 => 64,
+                _ => 0,
+            };
+            for index in 0..point_count {
+                if streaming {
+                    writer.add_sorted_with_meta(
+                        &index.to_be_bytes(),
+                        Some(&[b'v'; 256]),
+                        index + 1,
+                        EntryType::Put,
+                        None,
+                    )?;
+                } else {
+                    writer.add_with_meta(
+                        &index.to_be_bytes(),
+                        Some(&[b'v'; 256]),
+                        index + 1,
+                        EntryType::Put,
+                        None,
+                    )?;
+                }
+            }
+            let range_count = u64::from(shape == 1 || shape == 3);
+            if range_count != 0 {
+                writer.add_range_tombstone(b"", b"zzzz", 700)?;
+            }
+
+            // Act
+            let finalized = writer
+                .finish_to_path_with_summary(Path::new("finalized.sst"))?
+                .expect("filesystem writer supplies finalized identity");
+
+            // Assert before the independent verification opens the output.
+            assert!(!fs
+                .events
+                .lock()
+                .iter()
+                .any(|event| event == "read finalized.sst"));
+            assert_eq!(finalized.point_count, point_count);
+            assert_eq!(finalized.range_count, range_count);
+            let identity =
+                crate::sst::fs::file_identity_with_fs(&output_fs, Path::new("finalized.sst"))?;
+            assert_eq!((finalized.size_bytes, finalized.content_crc32c), identity);
+            if shape == 0 {
+                assert!(finalized.summary.is_none());
+            } else {
+                let independently_read = crate::sst::fs::SstFileIo::summarize_with_fs(
+                    "finalized.sst",
+                    Arc::clone(&output_fs),
+                )?;
+                assert_eq!(finalized.summary, Some(independently_read));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn should_return_no_finalized_identity_when_directory_sync_fails() -> MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let fs: Arc<dyn Fs> = Arc::new(RecordingFs::new(directory.path(), true)?);
+    let factory = FsSstFactoryIo::new(fs, 4096);
+    let mut writer = factory.create_for_compaction(
+        crate::common::resource_budget::ResourceBudget::new(1024 * 1024),
+    )?;
+    writer.add_sorted_with_meta(b"key", Some(b"value"), 1, EntryType::Put, None)?;
+
+    // Act
+    let result = writer.finish_to_path_with_summary(Path::new("failed.sst"));
+
+    // Assert
+    assert!(result.is_err());
     Ok(())
 }

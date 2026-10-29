@@ -87,16 +87,17 @@ pub(super) fn storage_error_from_cloud(error: CloudError) -> crate::storage::Sto
         match &error {
             CloudError::NotFound(_) => StorageErrorKind::NotFound,
             CloudError::PreconditionFailed(_) => StorageErrorKind::PreconditionFailed,
+            CloudError::LocalReadAdmission(_) => StorageErrorKind::ResourceLimit,
             #[cfg(any(test, feature = "cloud-common"))]
             CloudError::Unauthorized(_) => StorageErrorKind::Unauthorized,
             CloudError::Transport(_) => StorageErrorKind::Transport,
+            #[cfg(any(test, feature = "cloud-common"))]
+            CloudError::ServerError(_) => StorageErrorKind::Transport,
             CloudError::Protocol(_) | CloudError::ConditionalConflict(_) => {
                 StorageErrorKind::Protocol
             }
             #[cfg(any(test, feature = "cloud-common"))]
-            CloudError::InvalidRequest(_) | CloudError::ServerError(_) => {
-                StorageErrorKind::Protocol
-            }
+            CloudError::InvalidRequest(_) => StorageErrorKind::Protocol,
             _ => StorageErrorKind::Io,
         }
     };
@@ -112,28 +113,21 @@ impl CloudStorage {
     ) {
         let deadline = crate::common::OperationDeadline::from_budget(self.scoped_timeout(timeout));
         let (tx, rx) = std::sync::mpsc::channel();
-        self.head_with_timeout(key, deadline.remaining(), &tx);
-        let result = match deadline.clamp_nonzero(self.scoped_timeout(timeout)) {
-            Some(remaining) => rx.recv_timeout(remaining),
-            None => Err(std::sync::mpsc::RecvTimeoutError::Timeout),
-        };
-        let result = match result {
-            Ok(StorageEvent::HeadComplete {
+        let full_key = self.full_path(key);
+        self.heads.head_for_range(
+            &full_key,
+            CloudRequestOptions::default().with_deadline(deadline),
+            tx,
+        );
+        let result = match await_cloud_event(self, &rx, &deadline, "range HEAD") {
+            Ok(CloudEvent::Head {
                 key: actual,
                 result,
-            }) if actual == key => {
-                if deadline.is_expired() || self.scoped_timeout(timeout).is_zero() {
-                    StorageOutcome::Err(crate::storage::storage_timeout_error(
-                        "range HEAD crossed its deadline",
-                    ))
-                } else {
-                    result
-                }
-            }
+            }) if actual == full_key => cloud_to_storage_outcome(result),
             Ok(event) => StorageOutcome::Err(
                 format!("range HEAD returned a different object: {event:?}").into(),
             ),
-            Err(error) => StorageOutcome::Err(crate::storage::storage_timeout_error(error)),
+            Err(error) => StorageOutcome::Err(error),
         };
         let _ = callback.send(StorageEvent::HeadComplete {
             key: key.to_string(),
@@ -162,6 +156,48 @@ impl CloudStorage {
 }
 
 impl StorageBackend for CloudStorage {
+    fn supports_file_upload(&self) -> bool {
+        self.writes.supports_file_upload()
+    }
+
+    fn submit_file_write_receipt_request(
+        &self,
+        request: crate::storage::StorageRequest,
+        source: crate::storage::StorageFileUpload,
+        callback: crate::storage::WriteReceiptCallback,
+    ) {
+        let result = (|| {
+            if request.precondition != crate::storage::StoragePrecondition::IfAbsent {
+                return Err(crate::storage::StorageError::protocol(
+                    "streaming publication requires IfAbsent",
+                ));
+            }
+            let timeout = self.scoped_timeout(request.remaining_timeout());
+            let deadline = crate::common::OperationDeadline::from_budget(timeout);
+            let key = self.full_path(&request.key);
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.writes.write_file_with_receipt(
+                &key,
+                source,
+                CloudRequestOptions::default()
+                    .with_deadline(deadline)
+                    .with_headers(request.precondition.headers()?)
+                    .with_reservation(request.reservation),
+                tx,
+            );
+            match await_cloud_event(self, &rx, &deadline, "streaming PUT receipt")? {
+                CloudEvent::PutReceipt {
+                    key: actual,
+                    result,
+                } if actual == key => result.map_err(storage_error_from_cloud),
+                _ => Err(crate::storage::StorageError::protocol(
+                    "streaming upload completed a different operation",
+                )),
+            }
+        })();
+        let _ = callback.send(result);
+    }
+
     fn write_payload_copies(&self) -> usize {
         self.writes.write_payload_copies()
     }

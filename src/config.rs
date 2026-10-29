@@ -10,6 +10,7 @@ use std::time::Duration;
 pub(crate) const DEFAULT_STORAGE_IO_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_RUNTIME_RESPONSE_TIMEOUT: Duration = Duration::from_mins(1);
 pub(crate) const DEFAULT_CLOUD_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_mins(1);
+pub(crate) const DEFAULT_MAX_IMMUTABLE_MEMTABLES: usize = 10;
 const RUNTIME_RESPONSE_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 
 /// Derive the enclosing runtime deadline from the storage deadline.
@@ -61,6 +62,8 @@ pub(crate) fn validate_memtable_limits(
 
 pub(crate) mod cloud_validation;
 mod provider;
+mod write_backpressure;
+pub use write_backpressure::WriteBackpressureConfig;
 
 pub use cloud_validation::{
     CloudCheckCode, CloudCheckOutcome, CloudPreflightOptions, CloudProviderKind, CloudStorageRole,
@@ -238,9 +241,12 @@ pub enum RecoveryPolicy {
 }
 
 /// High-level engine health state for operators and diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub enum EngineHealth {
     Healthy,
+    /// Conservative value for an unpopulated observation. Runtime snapshots
+    /// always replace this with the owner's observed health.
+    #[default]
     Degraded,
     SalvageMode,
     WriteStalled,

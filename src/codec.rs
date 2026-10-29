@@ -437,25 +437,42 @@ fn is_likely_compressible(value: &[u8]) -> bool {
 ///
 /// Performs a quick entropy check before expensive LZ4 compression to avoid
 /// CPU waste on random/encrypted data in constrained environments.
+#[cfg(any(test, feature = "internal-testing"))]
 #[must_use]
 pub fn compress_wal_value(value: &[u8]) -> (Bytes, Option<u8>) {
+    let (encoded, marker) = compress_wal_value_borrowed(value);
+    let owned = match encoded {
+        std::borrow::Cow::Borrowed(bytes) => Bytes::copy_from_slice(bytes),
+        std::borrow::Cow::Owned(bytes) => Bytes::from(bytes),
+    };
+    (owned, marker)
+}
+
+/// Borrow a passthrough value so the WAL frame can copy it directly into its
+/// final buffer. A compressed result retains the compressor's owned buffer.
+pub(crate) fn compress_wal_value_borrowed(
+    value: &[u8],
+) -> (std::borrow::Cow<'_, [u8]>, Option<u8>) {
     if value.len() < MIN_COMPRESSION_INPUT_BYTES {
-        return (Bytes::copy_from_slice(value), None);
+        return (std::borrow::Cow::Borrowed(value), None);
     }
 
     // Fast entropy check: skip expensive compression for incompressible data
     if !is_likely_compressible(value) {
-        return (Bytes::copy_from_slice(value), None);
+        return (std::borrow::Cow::Borrowed(value), None);
     }
 
     let compressed = lz4_flex::compress_prepend_size(value);
 
     // Only use compression if it actually saves space
     if compressed.len() >= value.len() {
-        return (Bytes::copy_from_slice(value), None);
+        return (std::borrow::Cow::Borrowed(value), None);
     }
 
-    (Bytes::from(compressed), Some(CompressionAlgo::Lz4.to_u8()))
+    (
+        std::borrow::Cow::Owned(compressed),
+        Some(CompressionAlgo::Lz4.to_u8()),
+    )
 }
 
 /// Decompress a WAL record value based on the compression byte.
@@ -1157,6 +1174,40 @@ mod tests {
         assert!(!likely, "random bytes must not be treated as compressible");
         assert_eq!(codec, None);
         assert_eq!(stored.as_ref(), value.as_slice());
+    }
+
+    #[test]
+    fn should_borrow_passthrough_wal_value_without_an_intermediate_payload_copy() {
+        // Arrange
+        let values = [vec![b'x'; 17], pseudo_random_bytes(4096)];
+
+        // Act: the final frame can read the caller's actual buffer.
+        for value in values {
+            let (encoded, marker) = super::compress_wal_value_borrowed(&value);
+            // Assert: pointer identity makes the eliminated copy observable.
+            assert!(matches!(encoded, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(encoded.as_ptr(), value.as_ptr());
+            assert_eq!(encoded.as_ref(), value.as_slice());
+            assert_eq!(marker, None);
+        }
+    }
+
+    #[test]
+    fn should_preserve_lz4_bytes_when_borrowed_wal_encoding_uses_compression() {
+        // Arrange
+        let value = b"repetitive transaction value".repeat(256);
+        let reference = lz4_flex::compress_prepend_size(&value);
+
+        // Act
+        let (encoded, marker) = super::compress_wal_value_borrowed(&value);
+
+        // Assert
+        assert!(matches!(encoded, std::borrow::Cow::Owned(_)));
+        assert_eq!(encoded.as_ref(), reference.as_slice());
+        assert_eq!(marker, Some(super::CompressionAlgo::Lz4.to_u8()));
+        let decoded =
+            super::decompress_wal_value(encoded.as_ref(), marker).expect("legacy decoder");
+        assert_eq!(decoded.as_ref(), value.as_slice());
     }
 
     #[test]

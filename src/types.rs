@@ -11,6 +11,20 @@ use std::fmt;
 /// Column family identifier.
 pub type ColumnFamilyId = u32;
 
+/// The latest event-loop-published sequence and WAL durability frontiers.
+///
+/// This snapshot is safe to read without a runtime request. It may briefly lag
+/// the event loop's current state while that loop is processing a message.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DurabilityFrontiersSnapshot {
+    /// Highest sequence currently committed in the runtime.
+    pub current_sequence: u64,
+    /// Highest sequence known durable in the local WAL.
+    pub wal_local_durable_seq: u64,
+    /// Highest sequence confirmed durable in cloud storage.
+    pub wal_cloud_durable_seq: u64,
+}
+
 /// Order of committed shared metadata publications, independent of WAL and journal ids.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -261,9 +275,77 @@ pub struct RecoveryMetricsSnapshot {
     pub intent_log_entries_replayed: u64,
 }
 
+/// Exact phase accounting for successful pipelined local Strict WAL syncs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct WalSyncPhaseMetricsSnapshot {
+    /// Number of barriers measured from submission until physical fsync
+    /// service begins, excluding the physical fsync duration.
+    pub writer_queue_count: u64,
+    pub writer_queue_ns_total: u64,
+    /// Number and total duration from physical completion until runtime
+    /// receipt handling begins.
+    pub receipt_delivery_count: u64,
+    pub receipt_delivery_ns_total: u64,
+    /// Number and total duration spent persisting strict sync ledger proofs.
+    pub ledger_proof_count: u64,
+    pub ledger_proof_ns_total: u64,
+}
+
+/// Per-operation latency distributions of one engine, as bucketed
+/// percentiles. Every histogram is always on; each costs one relaxed atomic
+/// increment per record.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct RuntimeLatencySummaries {
+    /// `WriteOptions::sync()` commits, from `commit()` entry to return.
+    pub commit_sync: crate::common::LatencySummary,
+    /// `WriteOptions::buffered()` commits.
+    pub commit_buffered: crate::common::LatencySummary,
+    /// `WriteOptions::best_effort()` commits.
+    pub commit_best_effort: crate::common::LatencySummary,
+    /// `WriteOptions::cloud_async()` commits.
+    pub commit_cloud_async: crate::common::LatencySummary,
+    /// `WriteOptions::cloud_strict()` commits.
+    pub commit_cloud_strict: crate::common::LatencySummary,
+    /// `Transaction::get`, write set and snapshot included. Sampled: one read
+    /// in sixteen per thread is timed, so `count` is the sample count, not the
+    /// read count; the percentiles describe the whole population.
+    pub point_read: crate::common::LatencySummary,
+    /// Whole scans, from `Transaction::scan` to the iterator's drop.
+    pub scan: crate::common::LatencySummary,
+    /// Flushes, from memtable freeze to local manifest publication.
+    pub flush: crate::common::LatencySummary,
+    /// Compactions, from worker start to manifest publication.
+    pub compaction: crate::common::LatencySummary,
+    /// Logical WAL sync waits as seen by the runtime, one per barrier.
+    pub wal_fsync: crate::common::LatencySummary,
+    /// Cloud WAL segment uploads that completed.
+    pub cloud_wal_upload: crate::common::LatencySummary,
+    /// Cloud metadata mirrors against a provider, successful or not.
+    pub cloud_metadata_mirror: crate::common::LatencySummary,
+}
+
 /// Stable operator-facing snapshot of runtime metrics.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct RuntimeMetricsSnapshot {
+    /// Durable ledger file sync calls, including failed/unknown attempts.
+    pub wal_ledger_file_sync_attempts: u64,
+    /// Ledger file sync calls which returned success, including checkpoints.
+    pub wal_ledger_file_syncs: u64,
+    /// Durable ledger checkpoint directory sync attempts.
+    pub wal_ledger_directory_sync_attempts: u64,
+    /// Ledger checkpoint directory sync calls which returned success.
+    pub wal_ledger_directory_syncs: u64,
+    /// Successful writer barrier plus ledger file/directory sync calls. This
+    /// excludes segment initialization/repair and other filesystem syncs.
+    pub wal_accounted_syncs: u64,
+    /// Caller time spent in admission slowdown before submission.
+    pub write_slowdown_ns_total: u64,
+    /// Submissions which entered caller-side slowdown.
+    pub write_slowdown_count: u64,
+    /// Encoded background bytes admitted through the shared rate limiter.
+    pub background_rate_limited_bytes: u64,
+    /// Estimated excess bytes assigned to compactable levels.
+    pub estimated_pending_compaction_bytes: u64,
     pub health: EngineHealth,
     pub current_sequence: u64,
     pub active_memtables: usize,
@@ -309,9 +391,19 @@ pub struct RuntimeMetricsSnapshot {
     pub wal_flush_count: u64,
     pub wal_fsync_count: u64,
     pub wal_append_ns_total: u64,
+    /// WAL nested encoding and frame construction time across this engine.
+    pub wal_encode_ns_total: u64,
+    /// Writer append service time, including file-handle checks and segment digest updates.
+    pub wal_write_syscall_ns_total: u64,
+    /// Event-loop wall service time spent in write coalescing/admission handlers.
+    pub event_loop_write_service_ns_total: u64,
     pub wal_fsync_ns_total: u64,
     /// Maximum latency of one physical WAL fsync.
     pub wal_fsync_ns_max: u64,
+    /// Exact phase accounting for successful pipelined local Strict WAL syncs.
+    pub wal_sync_phases: WalSyncPhaseMetricsSnapshot,
+    /// Per-operation latency distributions for this engine.
+    pub latency: RuntimeLatencySummaries,
     /// Durability waiters completed through keyed fan-out events.
     pub durability_waiters_fanned_out_total: u64,
     /// Runtime requests whose caller stopped waiting before a response arrived.
@@ -332,7 +424,7 @@ pub struct RuntimeMetricsSnapshot {
     pub sst_bloom_checks_total: u64,
     /// Checksummed SST data blocks read through the point/range read path.
     pub sst_data_blocks_read_total: u64,
-    /// Immutable flushes waiting for the single worker. Gauge.
+    /// Immutable flushes waiting for an available worker. Gauge.
     pub flush_queue_depth: usize,
     /// Whether any immutable flush is building, built, or publishing. Gauge (zero or one).
     pub flush_inflight: usize,
@@ -344,6 +436,9 @@ pub struct RuntimeMetricsSnapshot {
     pub flush_publish_count: u64,
     pub flush_publish_ns_total: u64,
     pub flush_publish_ns_max: u64,
+    /// Verified flush publication phases first parked behind another local
+    /// publication owner. Re-polls and capture-memory waits are excluded.
+    pub flush_publication_deferred_by_gate: u64,
     pub flush_failures_total: u64,
     pub flush_retries_total: u64,
     pub write_stall_ns_total: u64,
@@ -351,6 +446,12 @@ pub struct RuntimeMetricsSnapshot {
     /// Elapsed nanoseconds in the currently active stall, or zero. Gauge.
     pub write_stall_active_ns: u64,
     pub cloud_async_wal_segments_sealed: u64,
+    /// Bounded remote orphan discovery attempts, including deferred work.
+    pub cloud_orphan_list_attempts: u64,
+    pub cloud_orphan_probes: u64,
+    pub cloud_orphan_delete_attempts: u64,
+    pub cloud_orphan_retained: u64,
+    pub cloud_orphan_inventory_unavailable: u64,
     pub cloud_async_wal_bytes_sealed: u64,
     pub cloud_async_wal_seal_latency_us: u64,
     pub cloud_async_wal_uploads_started: u64,

@@ -4,6 +4,18 @@
 
 mod common;
 
+#[path = "observability/latency_histograms.rs"]
+mod latency_histograms;
+
+#[path = "observability/spans.rs"]
+mod spans;
+
+#[path = "observability/first_hit_reads.rs"]
+mod first_hit_reads;
+
+#[path = "observability/scan_cache_fill.rs"]
+mod scan_cache_fill;
+
 mod telemetry_integration {
     //! Operation-integrity checks for code paths that are expected to emit
     //! telemetry when instrumentation is available, plus direct assertions
@@ -117,8 +129,9 @@ mod telemetry_integration {
     fn should_preserve_all_values_given_compaction_when_requested() {
         cntryl_midge::init_benchmark_telemetry().expect("enable test-visible compaction metrics");
 
-        for_each_storage_mode(&["local", "cloud"], |mode, opts| {
+        for_each_storage_mode(&["local", "cloud"], |mode, mut opts| {
             // Arrange
+            opts.enable_compaction = false;
             let engine = open_with_mode(&opts, mode);
             let cf = engine.create_column_family("test").expect("create cf");
 
@@ -137,6 +150,12 @@ mod telemetry_integration {
                     tx.put(key.as_bytes().to_vec(), value, None)
                         .expect("put compaction batch value");
                 }
+                tx.put(
+                    b"shared-compaction-key".to_vec(),
+                    format!("gen{batch}").into_bytes(),
+                    None,
+                )
+                .expect("overlap real inputs so compaction rewrites bytes");
                 tx.commit(buffered_write_options(mode)).expect("commit");
                 engine.flush_cf(&cf).expect("flush batch");
             }
@@ -282,6 +301,33 @@ mod read_amplification_benchmark {
         assert!(path_after.bloom_checks > path_before.bloom_checks);
         assert!(path_after.bloom_rejects > path_before.bloom_rejects);
     }
+
+    #[test]
+    fn should_measure_bloom_work_for_point_misses_separately() {
+        // Arrange
+        let fixture = ReadAmpFixture::new();
+        let workload = ReadWorkload::misses_only(64);
+        assert_eq!(workload.expected_point_hits(), 0);
+        assert_eq!(workload.expected_point_misses(), 64);
+        let path_before = fixture
+            .engine
+            .read_path_diagnostics_snapshot_for_benchmarks();
+
+        // Act
+        let result = run_workload(&fixture, &workload);
+        let path_after = fixture
+            .engine
+            .read_path_diagnostics_snapshot_for_benchmarks();
+
+        // Assert
+        assert_eq!(result.point_reads, 64);
+        assert_eq!(result.point_hits, 0);
+        assert_eq!(result.point_misses, 64);
+        assert_eq!(result.scans, 0);
+        assert!(path_after.bloom_checks > path_before.bloom_checks);
+        assert!(path_after.bloom_rejects > path_before.bloom_rejects);
+        assert!(path_after.candidate_sst_files_checked > path_before.candidate_sst_files_checked);
+    }
 }
 
 mod read_amp_api {
@@ -344,21 +390,26 @@ mod read_amp_api {
 
     #[test]
     fn should_track_exact_l0_overlap_across_overlapping_ssts() -> MidgeResult<()> {
-        // Arrange
+        // Arrange: three L0 files span the key; none holds it, so no source
+        // decides the read early (#903) and every candidate is touched.
         let temp_dir = TempDir::new().expect("temp dir");
         let engine = open_local_without_compaction(&temp_dir);
         let cf = engine.create_column_family("l0-overlap")?;
-        for generation in 0..3 {
-            flush_hot_key_generation(&engine, &cf, generation)?;
+        for generation in 0..3_u8 {
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+            tx.put(b"hot-key-a".to_vec(), vec![generation], None)?;
+            tx.put(b"hot-key-z".to_vec(), vec![generation], None)?;
+            tx.commit(WriteOptions::buffered())?;
+            engine.flush_cf(&cf)?;
         }
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 
         // Act
-        let value = tx.get(b"hot-key")?;
+        let value = tx.get(b"hot-key-m")?;
         let metrics = engine.metrics().get_read_amp_metrics()?;
 
         // Assert
-        assert_eq!(value.as_deref(), Some(b"value-02".as_slice()));
+        assert_eq!(value, None);
         assert_eq!(metrics.reads_total, 1);
         assert_eq!(metrics.ssts_touched_total, 3);
         assert_eq!(metrics.l0_ssts_touched_total, 3);
@@ -402,7 +453,8 @@ mod read_amp_api {
         }
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 
-        // Act
+        // Act: the newest L0 file decides every read, so each touches one SST
+        // (#903).
         for _ in 0..10 {
             let _ = tx.get(b"hot-key")?;
         }
@@ -410,36 +462,42 @@ mod read_amp_api {
 
         // Assert
         assert_eq!(metrics.reads_total, 10);
-        assert_eq!(metrics.ssts_touched_total, 20);
-        assert_eq!(metrics.l0_ssts_touched_total, 20);
-        assert!((metrics.avg_ssts_per_read - 2.0).abs() <= f64::EPSILON);
-        assert!((metrics.avg_l0_ssts_per_read - 2.0).abs() <= f64::EPSILON);
+        assert_eq!(metrics.ssts_touched_total, 10);
+        assert_eq!(metrics.l0_ssts_touched_total, 10);
+        assert!((metrics.avg_ssts_per_read - 1.0).abs() <= f64::EPSILON);
+        assert!((metrics.avg_l0_ssts_per_read - 1.0).abs() <= f64::EPSILON);
         Ok(())
     }
 
     #[test]
-    fn should_report_budget_violations_for_one_high_amplification_read() -> MidgeResult<()> {
-        // Arrange
+    fn should_report_sst_budget_violation_for_one_high_amplification_miss() -> MidgeResult<()> {
+        // Arrange: eleven L0 files span the key and none holds it, so the read
+        // is decided by no source and touches every file (#903); each costs
+        // its index block and a bloom rejection.
         let temp_dir = TempDir::new().expect("temp dir");
         let engine = open_local_without_compaction(&temp_dir);
         let cf = engine.create_column_family("budget-violation")?;
-        for generation in 0..11 {
-            flush_hot_key_generation(&engine, &cf, generation)?;
+        for generation in 0..11_u8 {
+            let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+            tx.put(b"hot-key-a".to_vec(), vec![generation], None)?;
+            tx.put(b"hot-key-z".to_vec(), vec![generation], None)?;
+            tx.commit(WriteOptions::buffered())?;
+            engine.flush_cf(&cf)?;
         }
         let tx = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
 
         // Act
-        let value = tx.get(b"hot-key")?;
+        let value = tx.get(b"hot-key-m")?;
         let metrics = engine.metrics().get_read_amp_metrics()?;
 
         // Assert
-        assert_eq!(value.as_deref(), Some(b"value-10".as_slice()));
+        assert_eq!(value, None);
         assert_eq!(metrics.reads_total, 1);
         assert_eq!(metrics.ssts_touched_total, 11);
         assert_eq!(metrics.l0_ssts_touched_total, 11);
-        assert_eq!(metrics.blocks_read_total, 22);
+        assert_eq!(metrics.blocks_read_total, 11);
         assert!((metrics.sst_budget_violation_rate - 1.0).abs() <= f64::EPSILON);
-        assert!((metrics.block_budget_violation_rate - 1.0).abs() <= f64::EPSILON);
+        assert!(metrics.block_budget_violation_rate.abs() <= f64::EPSILON);
         Ok(())
     }
 }
@@ -620,15 +678,9 @@ mod recovery_metrics_api {
     //! Validates engine-level visibility into startup recovery work.
 
     use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
-    use serde::Serialize;
-    use std::fs;
+    use std::sync::Arc;
     use std::time::Duration;
     use tempfile::TempDir;
-
-    #[derive(Serialize)]
-    enum TestIntentLogEntry {
-        WalSynced { segment_id: u64, seqno: u64 },
-    }
 
     fn initialize_format_marker(db_path: &std::path::Path) {
         let mut engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))
@@ -731,18 +783,20 @@ mod recovery_metrics_api {
         initialize_format_marker(db_path);
 
         let intents = vec![
-            TestIntentLogEntry::WalSynced {
+            cntryl_midge::__internal::recovery::IntentLogEntry::WalSynced {
                 segment_id: 7,
                 seqno: 11,
             },
-            TestIntentLogEntry::WalSynced {
+            cntryl_midge::__internal::recovery::IntentLogEntry::WalSynced {
                 segment_id: 8,
                 seqno: 12,
             },
         ];
 
-        let intent_json = serde_json::to_string_pretty(&intents).expect("serialize intent fixture");
-        fs::write(db_path.join("intent_log.json"), intent_json).expect("write intent fixture");
+        let fs: Arc<dyn cntryl_midge::__internal::io::Fs> =
+            Arc::new(cntryl_midge::__internal::io::RealFs::open_existing(db_path).unwrap());
+        cntryl_midge::__internal::recovery::IntentPersistence::save_with_fs(&fs, &intents)
+            .expect("persist real checksummed intent suffix edits");
 
         // Act
         let engine = Engine::open(OpenOptions::local(db_path).build().expect("build options"))

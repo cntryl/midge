@@ -1,5 +1,5 @@
 use super::format::{
-    create_spill_file, field_len_bytes, read_crc_exact, read_crc_vec, read_frame_header,
+    create_spill_file, field_len_bytes, read_crc_bytes, read_crc_exact, read_frame_header,
     read_u32_at, read_u64_at, u64_to_usize, usize_to_u64, write_frame_parts, RunFile,
 };
 use super::{
@@ -348,9 +348,9 @@ fn read_range_node_frame(file: &mut RunFile) -> MidgeResult<RangeNode> {
         ordinal,
         left,
         right,
-        start_key: Bytes::from(start_key),
-        end_key: Bytes::from(end_key),
-        max_end: Bytes::from(max_end),
+        start_key,
+        end_key,
+        max_end,
     })
 }
 
@@ -359,7 +359,7 @@ fn read_crc_field(
     payload_len: usize,
     consumed: &mut usize,
     crc: &mut u32,
-) -> MidgeResult<Vec<u8>> {
+) -> MidgeResult<Bytes> {
     let mut length_bytes = [0_u8; 4];
     read_crc_exact(file, &mut length_bytes, crc)?;
     *consumed = consumed.saturating_add(4);
@@ -369,7 +369,7 @@ fn read_crc_field(
             "transaction range field exceeds its frame".to_string(),
         ));
     }
-    let value = read_crc_vec(file, length, crc)?;
+    let value = read_crc_bytes(file, length, crc)?;
     *consumed = consumed.saturating_add(length);
     Ok(value)
 }
@@ -384,59 +384,49 @@ pub(super) fn lookup_range_index(
     if header.node_count == 0 {
         return Ok(());
     }
-    let node_count = header.node_count;
-    let mut lookup = RangeLookup {
-        file,
-        header,
-        key,
-        ordinal_ceiling,
-        latest,
-    };
-    lookup_range_subtree(&mut lookup, 0, None, node_count)
-}
-
-struct RangeLookup<'a> {
-    file: &'a mut RunFile,
-    header: &'a RangeHeader,
-    key: &'a [u8],
-    ordinal_ceiling: u64,
-    latest: &'a mut Option<(u64, IntentLookup)>,
-}
-
-fn lookup_range_subtree(
-    lookup: &mut RangeLookup<'_>,
-    node_index: u64,
-    loaded: Option<RangeNode>,
-    remaining_nodes: usize,
-) -> MidgeResult<()> {
-    if remaining_nodes == 0 {
-        return Err(MidgeError::Corruption(
-            "transaction range index contains a child cycle".to_string(),
-        ));
-    }
-    let node = match loaded {
-        Some(node) => node,
-        None => read_range_node(lookup.file, lookup.header, node_index)?,
-    };
-    if node.left != NO_RANGE_CHILD {
-        let left = read_range_node(lookup.file, lookup.header, node.left)?;
-        if lookup.key < left.max_end.as_ref() {
-            lookup_range_subtree(lookup, node.left, Some(left), remaining_nodes - 1)?;
+    // The writer builds a balanced tree, so a valid path needs at most the
+    // bit width of node_count pending indices. Fixed storage also bounds
+    // malformed trees without retaining ancestor key buffers on the stack.
+    let mut pending = [0_u64; usize::BITS as usize];
+    let mut count = 1;
+    let mut remaining = header.node_count;
+    while count != 0 {
+        if remaining == 0 {
+            return Err(MidgeError::Corruption(
+                "transaction range index contains a child cycle".into(),
+            ));
+        }
+        remaining -= 1;
+        count -= 1;
+        let node = read_range_node(file, header, pending[count])?;
+        if node.ordinal < ordinal_ceiling
+            && node.start_key.as_ref() <= key
+            && key < node.end_key.as_ref()
+            && latest
+                .as_ref()
+                .is_none_or(|(ordinal, _)| node.ordinal > *ordinal)
+        {
+            *latest = Some((node.ordinal, IntentLookup::Deleted));
+        }
+        if node.right != NO_RANGE_CHILD && node.start_key.as_ref() <= key {
+            push_range_child(&mut pending, &mut count, node.right)?;
+        }
+        if node.left != NO_RANGE_CHILD {
+            let left = read_range_node(file, header, node.left)?;
+            if key < left.max_end.as_ref() {
+                push_range_child(&mut pending, &mut count, node.left)?;
+            }
         }
     }
-    if node.ordinal < lookup.ordinal_ceiling
-        && node.start_key.as_ref() <= lookup.key
-        && lookup.key < node.end_key.as_ref()
-        && lookup
-            .latest
-            .as_ref()
-            .is_none_or(|(ordinal, _)| node.ordinal > *ordinal)
-    {
-        *lookup.latest = Some((node.ordinal, IntentLookup::Deleted));
-    }
-    if node.right != NO_RANGE_CHILD && node.start_key.as_ref() <= lookup.key {
-        lookup_range_subtree(lookup, node.right, None, remaining_nodes - 1)?;
-    }
+    Ok(())
+}
+
+fn push_range_child(pending: &mut [u64], count: &mut usize, child: u64) -> MidgeResult<()> {
+    let slot = pending.get_mut(*count).ok_or_else(|| {
+        MidgeError::Corruption("transaction range index exceeds balanced traversal depth".into())
+    })?;
+    *slot = child;
+    *count += 1;
     Ok(())
 }
 
@@ -501,8 +491,13 @@ pub(super) fn read_ordered_range(
     })
 }
 
-pub(super) fn validate_range_index(root: &dyn Fs, path: &FsPath) -> MidgeResult<()> {
-    let mut file = RunFile::open(root, path)?;
+pub(super) fn validate_range_index_bounded(
+    root: &dyn Fs,
+    path: &FsPath,
+    budget: Option<&crate::common::resource_budget::ResourceBudget>,
+    frame_limit: usize,
+) -> MidgeResult<()> {
+    let mut file = RunFile::open_bounded(root, path, budget, frame_limit)?;
     let header = read_range_header(&mut file)?;
     for position in 0..header.node_count {
         for order in [RangeOrder::Start, RangeOrder::End] {

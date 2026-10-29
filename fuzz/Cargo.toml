@@ -9,9 +9,14 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+# engine_differential path-includes tests/support/differential.rs, which uses bytes.
+[package.metadata.cargo-machete]
+ignored = ["bytes"]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 tempfile = "3.27"
+bytes = "1.12"
 cntryl-midge = { path = "..", features = ["internal-testing"] }
 
 [[bin]]
@@ -38,6 +43,34 @@ bench = false
 [[bin]]
 name = "sst_block_decode"
 path = "fuzz_targets/sst_block_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sst_data_block_decode"
+path = "fuzz_targets/sst_data_block_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sst_index_decode"
+path = "fuzz_targets/sst_index_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sst_filter_decode"
+path = "fuzz_targets/sst_filter_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine_differential"
+path = "fuzz_targets/engine_differential.rs"
 test = false
 doc = false
 bench = false

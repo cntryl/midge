@@ -33,13 +33,13 @@ const FIXTURE_WAIT: Duration = Duration::from_secs(8);
 const MANUAL_REQUEST: u64 = 92_400;
 
 #[derive(Clone, Copy, Debug)]
-struct ReadHold {
+struct MetadataHold {
     phase: CompactionPublishPhase,
     until: Instant,
 }
 
 #[derive(Clone, Debug)]
-struct ReadEvidence {
+struct MetadataIoEvidence {
     phase: CompactionPublishPhase,
     key: String,
     delegated_at: Instant,
@@ -58,14 +58,16 @@ struct CasEvidence {
     after: Vec<u8>,
     before_etag: String,
     after_etag: String,
+    lease_before: Vec<u8>,
+    lease_after: Vec<u8>,
 }
 
 #[derive(Default)]
 struct PhasedMetadataBackend {
     inner: MockCloudBackend,
-    hold: Mutex<Option<ReadHold>>,
+    hold: Mutex<Option<MetadataHold>>,
     release: AtomicBool,
-    reads: Mutex<Vec<ReadEvidence>>,
+    observations: Mutex<Vec<MetadataIoEvidence>>,
     cas_hold: Mutex<Option<Instant>>,
     cas_writes: Mutex<Vec<CasEvidence>>,
 }
@@ -97,14 +99,20 @@ impl PhasedMetadataBackend {
         headers: Vec<(String, String)>,
         callback: CloudCallback,
     ) {
+        if key.starts_with("manifest/")
+            || (key.starts_with("metadata/") && key != "metadata/committed-pointer.v1")
+        {
+            if let Some(hold) = self.hold.lock().unwrap().take() {
+                self.held_metadata_put(key, data, headers, &callback, hold);
+                return;
+            }
+        }
         let condition = headers.iter().find_map(|(header, value)| {
             header
                 .eq_ignore_ascii_case("if-match")
                 .then(|| value.clone())
         });
-        let hold = if key == crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY
-            && condition.is_some()
-        {
+        let hold = if key == "metadata/committed-pointer.v1" && condition.is_some() {
             self.cas_hold.lock().unwrap().take()
         } else {
             None
@@ -114,6 +122,9 @@ impl PhasedMetadataBackend {
             return;
         };
         let (before, before_metadata) = self.descriptor(key);
+        let lease_before = self
+            .descriptor(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+            .0;
         let (tx, rx) = std::sync::mpsc::channel();
         self.inner.submit_put(key, data, headers, tx);
         let event = rx
@@ -134,16 +145,67 @@ impl PhasedMetadataBackend {
                 after,
                 before_etag: before_metadata.etag,
                 after_etag: after_metadata.etag,
+                lease_before,
+                lease_after: self
+                    .descriptor(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+                    .0,
             });
         }
         let _ = callback.send(event);
     }
 
+    fn held_metadata_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: &CloudCallback,
+        hold: MetadataHold,
+    ) {
+        let provider_budget = headers
+            .iter()
+            .find(|(name, _)| {
+                name.eq_ignore_ascii_case(crate::storage::cloud::REQUEST_TIMEOUT_HEADER)
+            })
+            .and_then(|(_, value)| crate::storage::cloud::parse_request_timeout(value).ok());
+        let length = data.len();
+        let checksum = crc32c::crc32c(&data);
+        let delegated_at = Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.inner.submit_put(key, data, headers, tx);
+        let event = rx
+            .recv_timeout(PROVIDER_CAP)
+            .expect("actual immutable metadata PUT");
+        let genuine_success = matches!(&event, CloudEvent::Put { key: actual, result: Ok(()) } if actual == key)
+            && {
+                let (actual, metadata) = self.descriptor(key);
+                actual.len() == length
+                    && crc32c::crc32c(&actual) == checksum
+                    && !metadata.etag.is_empty()
+            };
+        while Instant::now() < hold.until && !self.release.load(Ordering::Acquire) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        self.observations.lock().unwrap().push(MetadataIoEvidence {
+            phase: hold.phase,
+            key: key.into(),
+            delegated_at,
+            forwarded_at: Instant::now(),
+            provider_budget,
+            genuine_success,
+        });
+        let _ = callback.send(event);
+    }
+
     fn arm(&self, phase: CompactionPublishPhase, until: Instant) {
-        let previous = self.hold.lock().unwrap().replace(ReadHold { phase, until });
+        let previous = self
+            .hold
+            .lock()
+            .unwrap()
+            .replace(MetadataHold { phase, until });
         assert!(
             previous.is_none(),
-            "the preceding real read must consume its hold"
+            "the preceding real metadata write must consume its hold"
         );
     }
 
@@ -153,24 +215,7 @@ impl PhasedMetadataBackend {
         let event = result
             .recv_timeout(PROVIDER_CAP)
             .expect("actual delegated metadata read");
-        let hold = self.hold.lock().unwrap().take();
-        if let Some(hold) = hold {
-            let delegated_at = Instant::now();
-            let genuine_success = matches!(&event,
-                CloudEvent::GetWithMetadata { key: actual, result: Ok((_, metadata)) }
-                if actual == key && !metadata.etag.is_empty() && metadata.size > 0);
-            while Instant::now() < hold.until && !self.release.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            self.reads.lock().unwrap().push(ReadEvidence {
-                phase: hold.phase,
-                key: key.to_string(),
-                delegated_at,
-                forwarded_at: Instant::now(),
-                provider_budget: timeout,
-                genuine_success,
-            });
-        }
+        let _ = timeout;
         // Forward the unchanged real result. Production checks the absolute
         // deadline after synchronous submission before crediting a late reply.
         let _ = callback.send(event);
@@ -258,6 +303,14 @@ impl BudgetFixture {
 
     fn new_with_all_families(all_families: bool) -> MidgeResult<Self> {
         let (mut el, compute, _) = cloud_debt(4)?;
+        // Finish the seed's accepted mirror/name continuations under their
+        // original authority before this fixture installs its own provider.
+        el.drain_metadata_mirror_within(&OperationDeadline::from_budget(FIXTURE_WAIT))?;
+        assert_eq!(
+            el.publication.metadata_publication_lock.pending_captures(),
+            0,
+            "seed authority must have no unresolved metadata cut before rebinding"
+        );
         // One actual generation; independent multi-CF coverage is separate.
         if !all_families {
             el.state
@@ -320,6 +373,15 @@ impl BudgetFixture {
             stopped: false,
         };
         fixture.seed_committed_metadata()?;
+        assert_eq!(
+            fixture
+                .el
+                .publication
+                .metadata_publication_lock
+                .pending_captures(),
+            0,
+            "manual origin must start without inherited metadata ownership"
+        );
         Ok(fixture)
     }
 
@@ -369,9 +431,10 @@ impl BudgetFixture {
     }
 
     fn complete_actual_compute(&mut self) {
+        let observation = OperationDeadline::from_budget(FIXTURE_WAIT);
         let completion = self
             .compute
-            .recv_timeout(FIXTURE_WAIT)
+            .recv_timeout(observation.remaining())
             .expect("actual compute result");
         match &completion {
             RuntimeMsg::CompactionComplete {
@@ -387,11 +450,23 @@ impl BudgetFixture {
             }
             actual => panic!("required successful real compute phase: {actual:?}"),
         }
+        // The native wakeup precedes the pool's owned result ticket. The real
+        // loop polls that ticket; this phase fixture must await the same owner
+        // before dispatching once, without consuming any later publication.
+        // This fixture has one compute slot and only its first generation is
+        // accepted here, so any ready ticket belongs to this exact job.
+        while !self.el.actors.compaction_actor.has_ready_compute() {
+            assert!(
+                !observation.is_expired(),
+                "actual compute ticket must settle within its original observation bound"
+            );
+            std::thread::sleep(observation.remaining().min(Duration::from_millis(1)));
+        }
         let (_, messages) = crossbeam::channel::unbounded();
         self.el.handle_runtime_msg(completion, &messages);
     }
 
-    fn complete_actual_phase(&mut self, next_hold: Option<ReadHold>) -> PhaseEvidence {
+    fn complete_actual_phase(&mut self, next_hold: Option<MetadataHold>) -> PhaseEvidence {
         let completion = self
             .el
             .publication
@@ -473,6 +548,63 @@ impl BudgetFixture {
         }
     }
 
+    fn drain_retired_inputs_after_clear(&mut self) -> MidgeResult<()> {
+        let inputs = self
+            .inputs
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
+        assert!(!self
+            .el
+            .state
+            .has_compaction_publication_intent(&inputs, &self.outputs));
+        let uploads = self.backend.inner.get_uploads();
+        let storage = self.el.actors.cloud_coordinator.hybrid_storage.clone();
+        eprintln!(
+            "post-clear GC: captures={}, publication={}, compacting={:?}",
+            self.el
+                .publication
+                .metadata_publication_lock
+                .pending_captures(),
+            self.el.actors.compaction_publish_actor.is_inflight(),
+            self.el.state.compaction.compacting_ssts,
+        );
+        // This bounds observation of independently authorized GC only. The
+        // original publication deadline and its already captured caller result
+        // remain unchanged; do not run metadata publication/fairness here.
+        let deadline = OperationDeadline::from_budget(FIXTURE_WAIT);
+        loop {
+            crate::common::DeadlineScope::new(deadline).check("post-clear fixture retirement")?;
+            self.el
+                .actors
+                .gc_actor
+                .retry_failed_cloud_deletes_if_due(&mut self.el.state, storage.clone());
+            self.el
+                .actors
+                .gc_actor
+                .retry_pending(&mut self.el.state, storage.clone());
+            self.el.actors.gc_actor.shutdown_workers();
+            if inputs
+                .iter()
+                .all(|name| !remote_sst_path_for_test(&self.el, name).exists())
+            {
+                self.el
+                    .actors
+                    .gc_actor
+                    .retry_pending(&mut self.el.state, storage.clone());
+                self.el.actors.gc_actor.shutdown_workers();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            self.backend.inner.get_uploads(),
+            uploads,
+            "post-clear GC cannot retry or renew metadata authority publication"
+        );
+        Ok(())
+    }
+
     fn stop(&mut self) -> MidgeResult<()> {
         if self.stopped {
             return Ok(());
@@ -525,11 +657,11 @@ fn assert_one_exact_fixture_row(rows: MidgeResult<Vec<(Bytes, KeyState)>>) {
     );
 }
 
-fn assert_actual_reads_fit_io_cap(reads: &[ReadEvidence], started: Instant) {
+fn assert_actual_metadata_io_fit_cap(reads: &[MetadataIoEvidence], started: Instant) {
     assert_eq!(
         reads.len(),
         2,
-        "both actual phased read holds must execute: {reads:?}"
+        "both actual phased metadata write holds must execute: {reads:?}"
     );
     assert!(reads.iter().all(|read| read.genuine_success
         && !read.key.is_empty()
@@ -566,6 +698,7 @@ fn complete_manual_case() -> MidgeResult<()> {
     let committed = fixture.committed_manifest();
     let outcome = fixture.drive_manual_response(&response);
     let route_state = describe_settle_state(&fixture.el);
+    fixture.drain_retired_inputs_after_clear()?;
     fixture.el.actors.gc_actor.shutdown_workers();
     let input_retired: Vec<_> = fixture
         .inputs
@@ -641,7 +774,7 @@ fn should_retain_both_authorities_when_second_real_phase_exceeds_caller_budget()
 }
 
 fn second_phase_timeout_case() -> MidgeResult<()> {
-    // Arrange: each delayed GET fits the ordinary four-second I/O cap.
+    // Arrange: each delayed metadata PUT fits the ordinary provider I/O cap.
     let mut fixture = BudgetFixture::new()?;
     let (started, response) = fixture.start_manual();
     fixture.backend.arm(
@@ -651,7 +784,7 @@ fn second_phase_timeout_case() -> MidgeResult<()> {
 
     // Act: compute plus first durable phase are real successful accepted work.
     fixture.complete_actual_compute();
-    let first = fixture.complete_actual_phase(Some(ReadHold {
+    let first = fixture.complete_actual_phase(Some(MetadataHold {
         phase: CompactionPublishPhase::ManifestPublished,
         until: started + CALLER_BUDGET + Duration::from_millis(500),
     }));
@@ -695,12 +828,12 @@ fn second_phase_timeout_case() -> MidgeResult<()> {
         .outputs
         .iter()
         .all(|name| fixture.el.state.manifest_has_file(name));
-    let reads = fixture.backend.reads.lock().unwrap().clone();
+    let reads = fixture.backend.observations.lock().unwrap().clone();
     fixture.stop()?;
 
     // Assert after actual worker joins and conditional lease release.
     assert_one_exact_fixture_row(rows);
-    assert_actual_reads_fit_io_cap(&reads, started);
+    assert_actual_metadata_io_fit_cap(&reads, started);
     let committed = committed?;
     assert!(
         matches!(&phases[1].error, Some(MidgeError::Timeout(_))),

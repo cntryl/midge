@@ -273,8 +273,9 @@ fn run_child(campaign: &Campaign, config: &Path, phase: &str, expected_code: i32
             child.kill().expect("kill timed-out qualification child");
             let _ = child.wait();
             panic!(
-                "{phase} exceeded its campaign deadline; log: {}",
-                log.display()
+                "{phase} exceeded its campaign deadline; log: {}\n{}",
+                log.display(),
+                std::fs::read_to_string(&log).expect("child output")
             );
         }
         std::thread::sleep(Duration::from_millis(50));

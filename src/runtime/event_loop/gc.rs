@@ -9,6 +9,13 @@ impl GcCoordinator {
         event_loop: &mut EventLoop,
         deadline: &crate::common::OperationDeadline,
     ) -> HandleOutcome {
+        if event_loop.publication.publication_gate.is_active() {
+            event_loop
+                .actors
+                .gc_actor
+                .defer_manifest_reclamation_retry();
+            return HandleOutcome::Continue;
+        }
         let hybrid_storage = event_loop.actors.cloud_coordinator.hybrid_storage.clone();
         event_loop
             .actors
@@ -34,32 +41,49 @@ impl GcCoordinator {
                 // Reclamation cannot use salvage-mode best effort. Until
                 // the remote manifest mirror succeeds, its old snapshot
                 // may still reference every queued SST.
-                event_loop.mirror_metadata_to_authoritative_cloud_within(deadline)
+                event_loop.start_metadata_mirror(
+                    super::metadata_mirror::MirrorContinuation::Reclamation,
+                    *deadline,
+                )
             });
-            if let Err(error) = published {
-                event_loop
-                    .actors
-                    .gc_actor
-                    .defer_manifest_reclamation_retry();
-                event_loop.state.mark_persistence_anomaly();
-                tracing::warn!(%error, "dropped column-family manifest publication failed; retaining files");
+            if matches!(published, Ok(true)) {
                 return HandleOutcome::Continue;
             }
-            let reclaimed = event_loop.actors.gc_actor.take_manifest_reclamation();
-            // Stop new transactions from capturing the reclaimed generation
-            // before GC samples the pins held by older snapshots.
-            event_loop.publish_snapshot();
-            event_loop.actors.gc_actor.delete_ssts(
-                &mut event_loop.state,
-                &reclaimed,
-                hybrid_storage.clone(),
-            );
+            if published.is_err() {
+                Self::finish_manifest_reclamation(event_loop, published.map(|_| ()));
+                return HandleOutcome::Continue;
+            }
+            Self::finish_manifest_reclamation(event_loop, Ok(()));
         }
         event_loop
             .actors
             .gc_actor
             .retry_pending(&mut event_loop.state, hybrid_storage);
         HandleOutcome::Continue
+    }
+
+    pub(super) fn finish_manifest_reclamation(
+        event_loop: &mut EventLoop,
+        result: crate::common::MidgeResult<()>,
+    ) {
+        if let Err(error) = result {
+            event_loop
+                .actors
+                .gc_actor
+                .defer_manifest_reclamation_retry();
+            event_loop.state.mark_persistence_anomaly();
+            tracing::warn!(%error, "dropped column-family manifest publication failed; retaining files");
+            return;
+        }
+        let reclaimed = event_loop.actors.gc_actor.take_manifest_reclamation();
+        // The exact publication completion, not caller timeout, releases the
+        // old manifest's references. Snapshot pins still protect old readers.
+        event_loop.publish_snapshot();
+        event_loop.actors.gc_actor.delete_ssts(
+            &mut event_loop.state,
+            &reclaimed,
+            event_loop.actors.cloud_coordinator.hybrid_storage.clone(),
+        );
     }
 
     #[cfg(test)]

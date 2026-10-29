@@ -10,17 +10,58 @@ use std::sync::Arc;
 use crate::common::{MidgeError, MidgeResult};
 use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::sst::bloom::BlockBloomFilter;
-use crate::sst::cache::BlockCache;
+use crate::sst::cache::{BlockCache, CacheFill};
 use crate::sst::index::tuner::IndexKind;
 use crate::sst::trie::TrieReader;
-use crate::sst::types::{BlockHandle, Footer, SstEntry, SST_FORMAT_V4};
+use crate::sst::types::{BlockHandle, Footer, SST_FORMAT_V5};
 use crate::types::{EntryType, KeyState, RangeTombstone};
 
 type IndexEntries = Arc<Vec<(Vec<u8>, BlockHandle)>>;
 
+/// Exercise the same restart/entry decoder used by point and streaming reads.
+///
+/// # Errors
+/// Returns the production decoder error for malformed data or restart entries.
+#[cfg(feature = "internal-testing")]
+#[doc(hidden)]
+pub fn validate_data_block(data: &[u8]) -> MidgeResult<()> {
+    let layout = crate::sst::data_block::DataBlockLayout::parse(data)?;
+    let block = Bytes::copy_from_slice(data);
+    let mut decoder = BlockEntryDecoder::default();
+    while decoder
+        .next(&block, SST_FORMAT_V5, None, "fuzz data key")?
+        .is_some()
+    {}
+    for key in [
+        b"".as_slice(),
+        &data[..data.len().min(32)],
+        &data[data.len().saturating_sub(32)..],
+    ] {
+        let _ = layout.seek_interval(key)?;
+    }
+    for reverse in [false, true] {
+        let mut cursor = BlockEntryCursor::new(block.clone(), SST_FORMAT_V5, reverse)?;
+        while cursor.next()?.is_some() {}
+    }
+    Ok(())
+}
+
+/// Decode sparse index bytes through the production extent/order validator.
+///
+/// # Errors
+/// Returns corruption for malformed entries, handles or key ordering.
+#[cfg(feature = "internal-testing")]
+#[doc(hidden)]
+pub fn validate_index_block(data: &[u8]) -> MidgeResult<()> {
+    let mut reader = SstFileIo::new("fuzz.sst", Arc::new(crate::io::MockFs::new()));
+    reader.block_region_end = u64::MAX - crate::sst::types::SST_FOOTER_SIZE as u64;
+    reader.decode_index_entries(data).map(|_| ())
+}
+
 /// Stable summary of the physical contents of a single SST file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SstFileSummary {
+    pub earliest_expiration_millis: Option<u64>,
     pub size_bytes: u64,
     pub smallest_key: Vec<u8>,
     pub largest_key: Vec<u8>,
@@ -41,6 +82,7 @@ pub(crate) struct SstVerificationStats {
 pub(crate) struct SstPointReadStats {
     pub sst_touched: bool,
     pub blocks_read: u64,
+    pub entries_decoded: u64,
 }
 
 /// SST file reader using `io::Fs` abstraction
@@ -48,6 +90,11 @@ pub(crate) struct SstPointReadStats {
 pub struct SstFileIo {
     path: FsPath,
     fs: Arc<dyn Fs>,
+    /// The file handle held for the reader's lifetime when the backend offers
+    /// owned handles (#919): block reads and scans share it, so the file is
+    /// opened and its path checked once per reader instead of once per block.
+    /// Backends without owned handles leave it `None` and open per read.
+    handle: Option<Box<dyn File>>,
     footer: Option<Footer>,
     /// Exclusive end of the block region (the footer starts here).
     block_region_end: u64,
@@ -67,21 +114,72 @@ pub struct SstFileIo {
     largest_key: Option<Vec<u8>>,
     range_tombstone_handle: Option<BlockHandle>,
     range_tombstones: Vec<RangeTombstone>,
+    /// Fragmented view of `range_tombstones` for point lookups, built once at
+    /// open; `None` when they nest too deeply for its memory bound (#921).
+    range_tombstone_index:
+        Option<crate::memtable::range_tombstone_index::FragmentedRangeTombstones>,
     metadata_budget: Option<crate::common::resource_budget::ResourceBudget>,
     metadata_reservations: Vec<crate::common::resource_budget::ResourceReservation>,
 }
 
-enum BlockEntryCursor {
-    Forward(std::vec::IntoIter<SstEntry>),
-    Reverse(std::iter::Rev<std::vec::IntoIter<SstEntry>>),
+/// Walks one decoded block's entries in either direction without copying.
+struct BlockEntryCursor {
+    encoded: Bytes,
+    format_version: u32,
+    block: Option<state::DecodedScanBlock>,
+    /// Entries handed out so far, counted from the walk's starting end.
+    taken: usize,
+    reverse: bool,
+    next_interval: usize,
+    remaining_intervals: usize,
 }
 
 impl BlockEntryCursor {
-    fn next(&mut self) -> Option<SstEntry> {
-        match self {
-            Self::Forward(entries) => entries.next(),
-            Self::Reverse(entries) => entries.next(),
+    fn new(encoded: Bytes, format_version: u32, reverse: bool) -> MidgeResult<Self> {
+        let count = crate::sst::data_block::DataBlockLayout::read(&encoded)?.restart_count;
+        Ok(Self {
+            encoded,
+            format_version,
+            block: None,
+            taken: 0,
+            reverse,
+            next_interval: if reverse { count - 1 } else { 0 },
+            remaining_intervals: count,
+        })
+    }
+
+    fn next(&mut self) -> MidgeResult<Option<state::ScanEntry>> {
+        let remaining = self
+            .block
+            .as_ref()
+            .map_or(0, |block| block.len().saturating_sub(self.taken));
+        if remaining == 0 {
+            self.block = None;
+            if self.remaining_intervals == 0 {
+                return Ok(None);
+            }
+            self.block = Some(SstFileIo::decode_scan_interval(
+                &self.encoded,
+                self.format_version,
+                self.next_interval,
+            )?);
+            self.remaining_intervals -= 1;
+            self.next_interval = if self.reverse {
+                self.next_interval.saturating_sub(1)
+            } else {
+                self.next_interval + 1
+            };
+            self.taken = 0;
         }
+        let block = self.block.as_ref().expect("decoded restart interval");
+        let remaining = block.len() - self.taken;
+        let index = if self.reverse {
+            remaining - 1
+        } else {
+            self.taken
+        };
+        self.taken += 1;
+        Ok(Some(block.entry(index)))
     }
 }
 
@@ -91,9 +189,43 @@ struct BlockEntryDecoder {
     offset: usize,
     previous_key: Vec<u8>,
     key_reservation: Option<crate::common::resource_budget::ResourceReservation>,
+    data_end: Option<usize>,
+    restart_count: usize,
+    next_restart: usize,
+    entries_in_interval: usize,
+    skip_initial_continuation: bool,
 }
 
 impl BlockEntryDecoder {
+    fn at_restart(block: &Bytes, restart: usize) -> MidgeResult<Self> {
+        let layout = crate::sst::data_block::DataBlockLayout::read(block)?;
+        let (offset, _) = layout.restart(restart)?;
+        Ok(Self {
+            offset,
+            data_end: Some(layout.data_end),
+            restart_count: layout.restart_count,
+            next_restart: restart,
+            skip_initial_continuation: restart > 0,
+            ..Self::default()
+        })
+    }
+
+    fn exhausted(&self) -> bool {
+        self.data_end.is_some_and(|end| self.offset >= end)
+    }
+
+    fn restart_at(&self, block: &Bytes, index: usize) -> MidgeResult<(usize, bool)> {
+        let start = self.data_end.expect("initialized layout") + index * 4;
+        let bytes = block
+            .get(start..start + 4)
+            .ok_or_else(|| MidgeError::Corruption("truncated restart offset".into()))?;
+        let raw = u32::from_le_bytes(bytes.try_into().expect("restart word"));
+        Ok((
+            (raw & !crate::sst::data_block::CONTINUED_KEY) as usize,
+            raw & crate::sst::data_block::CONTINUED_KEY != 0,
+        ))
+    }
+
     fn next<'a>(
         &mut self,
         block: &'a Bytes,
@@ -101,11 +233,60 @@ impl BlockEntryDecoder {
         budget: Option<&crate::common::resource_budget::ResourceBudget>,
         resource: &'static str,
     ) -> MidgeResult<Option<crate::sst::encoding::EntryView<'a>>> {
-        if self.offset >= block.len() {
+        if self.data_end.is_none() {
+            *self = Self::at_restart(block, 0)?;
+        }
+        let data_end = self.data_end.expect("initialized layout");
+        if self.offset >= data_end {
             return Ok(None);
         }
-        let (entry, next_offset) =
-            crate::sst::encoding::decode_with_format(block, self.offset, format_version)?;
+        let restart = if self.next_restart < self.restart_count {
+            let (offset, continued) = self.restart_at(block, self.next_restart)?;
+            if self.offset > offset {
+                return Err(MidgeError::Corruption(
+                    "restart offset is inside an SST entry".into(),
+                ));
+            }
+            (self.offset == offset).then_some(continued)
+        } else {
+            None
+        };
+        if restart.is_some() {
+            if self.entries_in_interval != 0
+                && self.entries_in_interval != crate::sst::data_block::RESTART_INTERVAL
+            {
+                return Err(MidgeError::Corruption(
+                    "incorrect SST restart interval".into(),
+                ));
+            }
+            self.entries_in_interval = 0;
+            self.next_restart += 1;
+        } else if self.entries_in_interval == crate::sst::data_block::RESTART_INTERVAL {
+            return Err(MidgeError::Corruption("missing SST restart entry".into()));
+        }
+        let (entry, next_offset) = crate::sst::encoding::decode_with_format(
+            &block[..data_end],
+            self.offset,
+            format_version,
+        )?;
+        if let Some(continued) = restart {
+            if entry.shared_len != 0
+                || (!self.skip_initial_continuation
+                    && continued != (self.offset > 0 && self.previous_key == entry.key_delta))
+            {
+                return Err(MidgeError::Corruption(
+                    "invalid independent SST restart key".into(),
+                ));
+            }
+            self.skip_initial_continuation = false;
+        }
+        if self.next_restart < self.restart_count
+            && next_offset > self.restart_at(block, self.next_restart)?.0
+        {
+            return Err(MidgeError::Corruption(
+                "SST entry crosses a restart offset".into(),
+            ));
+        }
         let shared_len =
             SstFileIo::shared_prefix_len(usize::from(entry.shared_len), self.previous_key.len())?;
         let key_len = shared_len
@@ -125,6 +306,7 @@ impl BlockEntryDecoder {
             self.previous_key.extend_from_slice(entry.key_delta);
         }
         self.offset = next_offset;
+        self.entries_in_interval += 1;
         Ok(Some(entry))
     }
 
@@ -147,15 +329,18 @@ pub(crate) struct SstStateScan {
     snapshot_seq: u64,
     now_millis: u64,
     raw_state: bool,
+    /// Whether blocks this scan fetches are inserted into the block cache.
+    cache_fill: CacheFill,
     initialized: bool,
     lifecycle: SstScanLifecycle,
-    file: Option<Box<dyn File>>,
     index: Option<IndexEntries>,
     first_block: usize,
     last_block: usize,
     next_block: usize,
     block_entries: Option<BlockEntryCursor>,
-    pending_entry: Option<SstEntry>,
+    pending_entry: Option<state::ScanEntry>,
+    /// Bytes read ahead of the current block for large scans (#945).
+    window: Option<index::ReadWindow>,
 }
 
 /// Fallible, block-at-a-time cursor over every persisted logical version.
@@ -169,7 +354,6 @@ struct SstRawVersionScan {
     end: Option<Vec<u8>>,
     initialized: bool,
     lifecycle: SstScanLifecycle,
-    file: Option<Box<dyn File>>,
     index: Option<IndexEntries>,
     first_block: usize,
     last_block: usize,
@@ -197,27 +381,12 @@ impl SstRawVersionScan {
             .as_ref()
             .map(|budget| budget.reserve(bounds_bytes, "raw cursor bounds"))
             .transpose()?;
-        let (file, lifecycle) = match crate::io::open_persistent_handle(
-            reader.fs.as_ref(),
-            &reader.path,
-            OpenOptions {
-                mode: OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        ) {
-            Ok(file) => (Some(file), SstScanLifecycle::Active),
-            Err(FsError::Unsupported(_)) => (None, SstScanLifecycle::Active),
-            Err(error) => (None, SstScanLifecycle::Failed(error.into_midge())),
-        };
         Ok(Self {
             reader,
             start,
             end,
             initialized: false,
-            lifecycle,
-            file,
+            lifecycle: SstScanLifecycle::Active,
             index: None,
             first_block: 0,
             last_block: 0,
@@ -244,7 +413,9 @@ impl SstRawVersionScan {
             return Ok(());
         }
 
-        let index = self.reader.index_entries_from(self.file.as_deref())?;
+        let index = self
+            .reader
+            .index_entries_from(self.reader.handle.as_deref())?;
         if index.is_empty() {
             self.lifecycle = SstScanLifecycle::Exhausted;
             return Ok(());
@@ -283,7 +454,7 @@ impl SstRawVersionScan {
             self.next_block = block_index + 1;
         }
 
-        let opened_file = if self.file.is_none() {
+        let opened_file = if self.reader.handle.is_none() {
             Some(
                 self.reader
                     .fs
@@ -302,7 +473,8 @@ impl SstRawVersionScan {
             None
         };
         let file = self
-            .file
+            .reader
+            .handle
             .as_deref()
             .or(opened_file.as_deref())
             .expect("SST file opened");
@@ -337,10 +509,7 @@ impl SstRawVersionScan {
     fn next_version(&mut self) -> MidgeResult<Option<crate::sst::traits::RawSstVersion>> {
         self.yield_reservation = None;
         loop {
-            let needs_block = self
-                .block
-                .as_ref()
-                .is_none_or(|block| self.decoder.offset >= block.len());
+            let needs_block = self.block.as_ref().is_none_or(|_| self.decoder.exhausted());
             if needs_block {
                 self.block = None;
                 self.block_reservation = None;
@@ -440,20 +609,6 @@ impl SstStateScan {
         snapshot_seq: u64,
         now_millis: u64,
     ) -> Self {
-        let (file, lifecycle) = match crate::io::open_persistent_handle(
-            reader.fs.as_ref(),
-            &reader.path,
-            OpenOptions {
-                mode: OpenMode::ReadOnly,
-                create: false,
-                create_new: false,
-                truncate: false,
-            },
-        ) {
-            Ok(file) => (Some(file), SstScanLifecycle::Active),
-            Err(FsError::Unsupported(_)) => (None, SstScanLifecycle::Active),
-            Err(error) => (None, SstScanLifecycle::Failed(error.into_midge())),
-        };
         Self {
             reader,
             start,
@@ -462,15 +617,16 @@ impl SstStateScan {
             snapshot_seq,
             now_millis,
             raw_state: false,
+            cache_fill: CacheFill::Normal,
             initialized: false,
-            lifecycle,
-            file,
+            lifecycle: SstScanLifecycle::Active,
             index: None,
             first_block: 0,
             last_block: 0,
             next_block: 0,
             block_entries: None,
             pending_entry: None,
+            window: None,
         }
     }
 
@@ -488,7 +644,9 @@ impl SstStateScan {
             return Ok(());
         }
 
-        let index = self.reader.index_entries_from(self.file.as_deref())?;
+        let index = self
+            .reader
+            .index_entries_from(self.reader.handle.as_deref())?;
         if index.is_empty() {
             self.lifecycle = SstScanLifecycle::Exhausted;
             return Ok(());
@@ -542,29 +700,49 @@ impl SstStateScan {
             .diagnostics
             .sst_metrics()
             .record_candidate_blocks_checked(1);
-        let block = self
-            .reader
-            .read_cached_data_block_from(&handle, self.file.as_deref())?;
-        let entries = self.reader.scan_block_entries_from_bytes(&block)?;
-        self.block_entries = Some(if self.reverse {
-            BlockEntryCursor::Reverse(entries.into_iter().rev())
-        } else {
-            BlockEntryCursor::Forward(entries.into_iter())
-        });
+        // The bytes this scan can still visit: readahead never leaves them.
+        let span = self
+            .index
+            .as_ref()
+            .and_then(|index| {
+                let (_, first) = index.get(self.first_block)?;
+                let (_, last) = index.get(self.last_block)?;
+                Some(first.offset..last.offset.saturating_add(last.size))
+            })
+            .unwrap_or(handle.offset..handle.offset.saturating_add(handle.size));
+        let block = self.reader.read_cached_data_block_windowed(
+            &handle,
+            self.reader.handle.as_deref(),
+            self.cache_fill,
+            self.reverse,
+            &span,
+            &mut self.window,
+        )?;
+        self.block_entries = Some(BlockEntryCursor::new(
+            block,
+            self.reader.format_version,
+            self.reverse,
+        )?);
         Ok(true)
     }
 
-    fn next_raw_entry(&mut self) -> MidgeResult<Option<SstEntry>> {
+    fn next_raw_entry(&mut self) -> MidgeResult<Option<state::ScanEntry>> {
         loop {
-            if let Some(entry) = self.block_entries.as_mut().and_then(BlockEntryCursor::next) {
+            let next = self
+                .block_entries
+                .as_mut()
+                .map(BlockEntryCursor::next)
+                .transpose()?
+                .flatten();
+            if let Some(entry) = next {
                 if self
                     .start
                     .as_deref()
-                    .is_some_and(|start| entry.key.as_slice() < start)
+                    .is_some_and(|start| entry.key.as_ref() < start)
                     || self
                         .end
                         .as_deref()
-                        .is_some_and(|end| entry.key.as_slice() >= end)
+                        .is_some_and(|end| entry.key.as_ref() >= end)
                 {
                     continue;
                 }
@@ -577,17 +755,11 @@ impl SstStateScan {
         }
     }
 
-    fn consider_entry(&self, best: &mut KeyState, entry: SstEntry) -> MidgeResult<()> {
+    fn consider_entry(&self, best: &mut KeyState, entry: state::ScanEntry) -> MidgeResult<()> {
         if self.snapshot_seq != u64::MAX && entry.sequence > self.snapshot_seq {
             return Ok(());
         }
-
-        let candidate = if entry.is_tombstone() {
-            KeyState::Tombstone(entry.sequence)
-        } else {
-            SstFileIo::state_from_entry(entry)
-        };
-        SstFileIo::merge_newer_state(best, candidate)
+        SstFileIo::merge_newer_state(best, SstFileIo::state_from_scan_entry(entry))
     }
 
     fn next_state(&mut self) -> MidgeResult<Option<(Bytes, KeyState)>> {
@@ -600,6 +772,8 @@ impl SstStateScan {
                 return Ok(None);
             };
 
+            // A reference count, not a copy: the key is a slice of its
+            // block's key arena (#945).
             let key = first.key.clone();
             let mut best = KeyState::Absent;
             self.consider_entry(&mut best, first)?;
@@ -626,7 +800,7 @@ impl SstStateScan {
                         state => state,
                     }
                 };
-                return Ok(Some((Bytes::from(key), state)));
+                return Ok(Some((key, state)));
             }
         }
     }
@@ -680,6 +854,7 @@ impl SstFileIo {
         Self {
             path: FsPath::new(path_str),
             fs,
+            handle: None,
             footer: None,
             block_region_end: 0,
             // Readers without a cache never consume this placeholder. Cache
@@ -692,12 +867,13 @@ impl SstFileIo {
                 crate::sst::read_path_metrics::DetachedSstReadObserver::default(),
             ),
             index_entries: ArcSwapOption::empty(),
-            format_version: SST_FORMAT_V4,
+            format_version: SST_FORMAT_V5,
             index_kind: IndexKind::Sparse,
             smallest_key: None,
             largest_key: None,
             range_tombstone_handle: None,
             range_tombstones: Vec::new(),
+            range_tombstone_index: None,
             metadata_budget: None,
             metadata_reservations: Vec::new(),
         }
@@ -787,6 +963,12 @@ impl SstFileIo {
         self
     }
 
+    /// The identity this reader's blocks are cached under.
+    #[cfg(test)]
+    pub(crate) fn block_cache_sst_id(&self) -> u64 {
+        self.sst_id
+    }
+
     /// Attach the runtime that owns this reader's diagnostics.
     #[must_use]
     pub(crate) fn with_read_path_diagnostics(
@@ -821,9 +1003,11 @@ impl SstFileIo {
         end: Option<Vec<u8>>,
         reverse: bool,
         snapshot_seq: u64,
+        cache_fill: CacheFill,
     ) -> SstStateScan {
         let mut scan = self.state_scan(start, end, reverse, snapshot_seq, 0);
         scan.raw_state = true;
+        scan.cache_fill = cache_fill;
         scan
     }
 
@@ -862,6 +1046,7 @@ impl SstFileIo {
         for version in &mut cursor {
             let version = version?;
             accumulator.observe(size_bytes, &version.key, version.seq, budget.as_ref())?;
+            accumulator.observe_expiration(version.expiration);
         }
         accumulator
             .summary

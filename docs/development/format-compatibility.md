@@ -2,6 +2,16 @@
 
 This document defines the rules Midge will use to freeze and verify on-disk compatibility on the path to `1.0`.
 
+## Shared specification target
+
+The FORMAT 8 baseline is the normative profile in
+[`cntryl/lsm-spec`](https://github.com/cntryl/lsm-spec) at commit
+`111bccdd5fa6c9ea2d13d1131b17807016c770c` (`1.0.0-dev`). Keep this reference
+aligned with the commit recorded in Pants's Midge test-parity inventory.
+Release 0.5.0 extends that baseline with FORMAT 9 below. Shared specification
+parity for that extension is not claimed. Release qualification follows the
+[release checklist](../operations/release-checklist.md).
+
 ## Covered Formats
 
 The compatibility policy applies to:
@@ -15,8 +25,8 @@ The compatibility policy applies to:
 
 ## Current Local Format
 
-Database `FORMAT` version 8 is current. Version 5 named the WAL's history
-with a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records
+Database `FORMAT` version 9 is the 0.5.0 local format. Version 5 named the WAL's
+history with a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records
 which `wal/{id:020}.wal` files are history, their order, the next segment id and
 the retirement point. Segments carry their final name from creation; there is
 no active `wal.log` and no rename on rotation, and recovery never lists `wal/`
@@ -75,17 +85,35 @@ object identity. Shared metadata publication order is a separate checked ordinal
 from the manifest journal horizon. New generations preserve every old frontier,
 never regress live families, and never revive dropped families.
 
-Version 8 is an intentional pre-1.0 break with no in-place upgrade and no
-migration: current binaries reject database FORMAT versions 1 through 7 with
+Version 9 (#953) stores manifest snapshots and manifest journal payloads in a
+shared binary codec. MessagePack maps retain explicit field names and encode
+integers and key bytes compactly. Each frame records its kind and length and
+has a big-endian CRC32C over the header and exact payload. Checksum byte order
+preserves a useful checksum over the complete encoded object, including its
+checksum field. Length fields remain little-endian. The same decoder reads local
+checkpoints and cloud metadata bodies. Decoding checks the complete extent,
+checksum and nesting bound before applying semantic manifest validation.
+
+The intent file is an append-only sequence of binary suffix edits. Each edit
+names its predecessor checksum and next sequence, retains a prefix of the prior
+intent set and records the replacement suffix. A torn final append retains the
+prior complete intent set; an invalid complete frame or predecessor chain fails
+recovery. A subsequent append first durably repairs any torn tail. At 1 MiB or
+1,024 records the log atomically checkpoints its current intent set. Existing
+metadata filenames retain their historical `.json` suffix, but their contents
+are binary and there is no JSON fallback under FORMAT 9.
+
+Version 9 is an intentional pre-1.0 break with no in-place upgrade and no
+migration: current binaries reject database FORMAT versions 1 through 8 with
 `CompatibilityError`, and leave the marker untouched. Cloud databases are
 rejected the same way, because their hydrated metadata carries the marker,
 and a publication catalog of any other format version fails with
-`CompatibilityError` and neither catalog copy changes. FORMAT 8 requires SST
-V4; current binaries also reject SST versions 1 through 3 and unknown future
-versions. There is no legacy decoder or best-effort fallback in the V4
+`CompatibilityError` and neither catalog copy changes. FORMAT 9 requires SST
+V5; current binaries reject SST versions 1 through 4 and unknown future
+versions. There is no legacy decoder or best-effort fallback in the V5
 reader.
 
-SST V4 has the following integrity and compatibility boundaries:
+SST V5 has the following integrity and compatibility boundaries:
 
 - an 84-byte fixed footer containing its version, encoded footer length,
   self-identifying magic, and CRC32C
@@ -94,19 +122,32 @@ SST V4 has the following integrity and compatibility boundaries:
   persisted block
 - explicit TTL presence, so `None` and `Some(u64::MAX)` remain distinct
 - codec identifiers 0 through 3 only: raw, LZ4, Zstd level 3, and Zstd level 9
+- canonical unsigned varint shared-prefix, key-delta and value lengths, an
+  eight-byte sequence, and one type/TTL flag byte; an expiration contributes
+  eight bytes only when present
+- an independent key every 16 entries and a checked restart-offset directory
+  at the end of each data block; the high bit marks a continued user-key group
 
 Removed codec identifiers and malformed or unknown identifiers fail with
 corruption or compatibility errors. The reader never retries such bytes as an
 uncompressed block.
 
-New writes enforce a 64 MiB encoded-entry admission ceiling, including key and
-header bytes, and validate range-tombstone endpoints before staging. This does
-not change SST V4. Historical V4 raw blocks larger than that ceiling remain
-readable and can be rewritten by budgeted compaction; their output stays raw
-even if compression is configured. Compaction still requires enough memory for
-its reserved working buffers. Oversized compressed blocks remain corruption
-errors under the existing decoded-size limit. See the
-[PR #278 compatibility regressions](evidence/pr278-review-fixes.md).
+New writes enforce a 64 MiB complete single-entry block admission ceiling,
+including the key, worst-case TTL and restart trailer, and validate
+range-tombstone endpoints before staging. Compressed decode limits and
+compaction working-buffer admission remain enforced. V4 bytes require a
+logical export with a V4-capable binary and import into a fresh database.
+
+Point reads binary-search independent restart keys. For unique keys, decoding
+cost is at most the binary-search probes, one 16-entry interval and one
+lookahead entry. Equal keys can cross any number of restarts: search finds the
+first equal restart and its continuation bit includes the preceding interval
+when the group began there. The bound is therefore the search probes plus at
+most 16 preceding entries, all versions of that user key, and one lookahead;
+an older snapshot cannot skip a visible version. Reverse scans decode one
+restart interval at a time, retaining the existing snapshot, tombstone and TTL
+rules. Small entries without TTL use a 12-byte header instead of 26 bytes;
+the directory adds four bytes per 16 entries and a four-byte count per block.
 
 ## Required Rules For 1.0
 
@@ -161,19 +202,26 @@ catalog copies are invalid, startup fails closed. Metadata bootstrap refuses
 any catalog that is not pristine: a catalog whose entries have all retired
 still holds history.
 
-Provider-backed cloud metadata now uses lease document version 3. Its committed
-descriptor names the complete set of mirrored local control files under
-`metadata/generations/`, with exact lengths and CRC32C checksums. The lease CAS
-publishes the descriptor; mutable `metadata/` copies and unreferenced uploads
-do not grant manifest recovery authority. The cloud DDL registry remains a
+Provider-backed cloud metadata uses layout v2, lease document version 4 and
+initialization sentinel version 3. A separately checksummed committed pointer
+at `metadata/committed-pointer.v1` selects the exact closure of immutable
+snapshots and edits under `manifest/`. Heartbeat renewal changes the lease
+identity without changing the pointer identity. Acquiring a successor lease
+must CAS-claim the pointer with its epoch, holder and owner token while
+preserving committed predecessor history. An uploaded ordinal, LIST order,
+legacy `metadata/generations/` objects and mutable metadata copies grant no
+recovery authority. See [the publication protocol](cloud-metadata-914.md).
+The cloud DDL registry remains a
 separate conditional authority. Its version 2 wire format records the active
 lease epoch and omits the legacy required `epoch` field, so older writers cannot
 parse or rewrite it. A successor conditionally fences the registry before
 recovery; a predecessor write that wins first is incorporated before serving.
 The `metadata/authority-initialized.v1` marker starts pending and becomes active
-only after the first lease is stored. Loss of a lease with an active marker is a
-fail-closed condition. A version 3 lease document intentionally cannot be parsed
-by older binaries, which prevents an old writer from renewing the new lease.
+only after the lease and initial pointer claim complete. Loss of a lease or
+committed pointer with an active marker is a fail-closed condition. A version
+4 lease document intentionally cannot be parsed by older binaries, which
+prevents an old writer from renewing the new lease. Legacy lease/sentinel
+versions do not use the pending-initialization repair path.
 
 Legacy provider-backed cloud databases require offline logical export and
 import into a new empty prefix as described in the
@@ -215,14 +263,15 @@ new database, an older binary must not open it.
 
 ## Fixture Coverage
 
-The publication gate verifies the checked-in populated FORMAT 8/SST V4 fixture
-at `tests/fixtures/compatibility/v8_populated_v4_sst_db`. Compatibility tests
+Compatibility tests verify the checked-in populated FORMAT 9/SST V5 fixture
+at `tests/fixtures/compatibility/v9_populated_v5_sst_db`. They
 also open a copy with strict recovery and read its persisted value across a
-shutdown and reopen. This fixture retains the prior fixture's SST bytes with
-current manifest key bounds and per-family flush frontiers, and omits the
+shutdown and reopen. This fixture records new writer-produced SST bytes with
+their finalized size/CRC, binary key bounds and per-family frontiers, and omits the
 pre-ledger WAL.
 
-Repository gates reject the populated FORMAT 3/SST V4 fixture, a prior FORMAT 2
-fixture and a synthetic future FORMAT 9 fixture with `CompatibilityError`,
+Repository tests retain and reject the FORMAT 9/SST V4 fixture under strict
+and salvage recovery. They also reject the populated FORMAT 8 and FORMAT 3/SST V4 fixtures, a prior FORMAT 2
+fixture and a synthetic future FORMAT 10 fixture with `CompatibilityError`,
 without rewriting their markers. Format changes must update these fixtures and
 their CI assertions together.

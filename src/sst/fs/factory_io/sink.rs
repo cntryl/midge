@@ -33,8 +33,7 @@ pub(super) trait BlockSink {
     fn prepare_block(
         &self,
         block_bytes: usize,
-        first_key: Option<&[u8]>,
-        key_count: usize,
+        retained_metadata_bytes: usize,
     ) -> MidgeResult<Self::FlushReservation>;
 
     fn finish_block(&mut self, reservation: Self::FlushReservation);
@@ -82,8 +81,7 @@ impl BlockSink for VecBlockSink {
     fn prepare_block(
         &self,
         _block_bytes: usize,
-        _first_key: Option<&[u8]>,
-        _key_count: usize,
+        _retained_metadata_bytes: usize,
     ) -> MidgeResult<Self::FlushReservation> {
         Ok(())
     }
@@ -97,6 +95,7 @@ impl BlockSink for VecBlockSink {
 
 /// Scratch-file destination used by flush and compaction writers.
 pub(super) struct ScratchBlockSink {
+    limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
     scratch: super::super::scratch::TrackedScratch,
     offset: u64,
     budget: Option<ResourceBudget>,
@@ -117,12 +116,20 @@ impl ScratchBlockSink {
         directory: Option<&Path>,
     ) -> MidgeResult<Self> {
         Ok(Self {
+            limiter: None,
             scratch: super::super::scratch::TrackedScratch::new(fs, outstanding, directory)?,
             offset: 0,
             budget,
             current_reservations: Vec::new(),
             persistent_reservations: Vec::new(),
         })
+    }
+
+    pub(super) fn set_write_limiter(
+        &mut self,
+        limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+    ) {
+        self.limiter = limiter;
     }
 
     pub(super) fn reserve_finalization(
@@ -146,7 +153,13 @@ impl BlockSink for ScratchBlockSink {
     }
 
     fn append(&mut self, bytes: &[u8]) -> MidgeResult<()> {
-        self.scratch.append(bytes)
+        for chunk in bytes.chunks(64 * 1024) {
+            if let Some(limiter) = &self.limiter {
+                limiter.acquire(chunk.len())?;
+            }
+            self.scratch.append(chunk)?;
+        }
+        Ok(())
     }
 
     fn advance_after_append(&mut self, bytes: u64) -> MidgeResult<()> {
@@ -172,8 +185,7 @@ impl BlockSink for ScratchBlockSink {
     fn prepare_block(
         &self,
         block_bytes: usize,
-        first_key: Option<&[u8]>,
-        key_count: usize,
+        retained_metadata_bytes: usize,
     ) -> MidgeResult<Self::FlushReservation> {
         let compression_workspace_bytes = block_bytes.saturating_mul(2).saturating_add(4096);
         let compression_workspace = self
@@ -181,18 +193,10 @@ impl BlockSink for ScratchBlockSink {
             .as_ref()
             .map(|budget| budget.reserve(compression_workspace_bytes, "SST compression workspace"))
             .transpose()?;
-        let persistent_bytes = first_key
-            .map_or(0, |key| {
-                key.len()
-                    .saturating_add(
-                        std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>(),
-                    )
-            })
-            .saturating_add(key_count.saturating_mul(16));
         let persistent = self
             .budget
             .as_ref()
-            .map(|budget| budget.reserve(persistent_bytes, "SST index and bloom metadata"))
+            .map(|budget| budget.reserve(retained_metadata_bytes, "SST index and bloom metadata"))
             .transpose()?;
         Ok(ScratchFlushReservation {
             _compression_workspace: compression_workspace,

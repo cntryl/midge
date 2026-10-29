@@ -13,9 +13,11 @@ CI on Ubuntu, Cloud against Sqrzl, and GitHub-managed CodeQL run on PRs into
 `develop` and promotion PRs into `main`. Verify that each promotion PR
 comes from this repository's `develop` branch. Require passing checks on the
 current PR head before merging; verify the resulting `main` checks before
-tagging or publishing. Documentation and packaging checks run in the tagged
-publish workflow. Scheduled qualification tests the default `develop` revision.
-Dispatch CI and Cloud against `main` when qualifying a release.
+tagging or publishing. The manually dispatched **Release Qualification**
+workflow combines CI, macOS tests, clean all-feature Sqrzl tests,
+package/compatibility checks and bounded fuzzing on the selected candidate
+commit. Scheduled qualification tests the default `develop` revision. Run
+Release Qualification on the resulting `main` commit before publishing it.
 
 Promote one PR at a time against the latest `main`. Promotion checks run on
 the proposed merge commit. The `main` ruleset does not require `develop` to
@@ -43,8 +45,19 @@ Every release candidate must pass:
 - full test suite
 - trust-critical smoke suite
 - compatibility smoke suite
-- release check script
+- manual **Release Qualification** workflow on the candidate commit
 - documentation consistency review
+
+The [release checklist](../operations/release-checklist.md) describes the
+workflow and the remaining human review. Routine qualification includes corpus
+replay and bounded differential fuzzing. Extended fuzz campaigns are optional
+and selected according to the change and recent findings. Performance evidence
+requires a suitable measurement environment and is reviewed separately; noisy
+hosted measurements do not become release evidence through a green workflow.
+The owner deferred the 0.5.0 baseline matrix, hybrid latency/lag/cost evidence
+and cold-start performance measurements to 0.5.1. They remain unfinished and
+do not block 0.5.0. Correctness, recovery, fencing, compatibility and mandatory
+automated qualification remain required.
 
 ## Qualification Evidence
 

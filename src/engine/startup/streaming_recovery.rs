@@ -120,10 +120,10 @@ impl CloudReplay {
             .or_else(|| materialized.state.startup_scope.clone());
         let (tx, rx) = crossbeam::channel::bounded(1);
         let mut actor = FlushActor::new_with_memory_limit(
-            Arc::clone(&materialized.state.fs),
+            &materialized.state.fs,
             false,
-            materialized.runtime_config.compression_policy.clone(),
-            tx,
+            &materialized.runtime_config.compression_policy,
+            &tx,
             materialized.runtime_config.flush_memory_limit,
         )?;
         let mut memtables = HashMap::new();
@@ -178,7 +178,7 @@ impl CloudReplay {
             }
             Ok(stats)
         })();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "failpoints"))]
         super::test_control::actor_join_started();
         let shutdown = actor.shutdown_and_join();
         let stats = recovery?;
@@ -228,6 +228,10 @@ impl CloudReplay {
             .map(|cf| cf.memtable.size_bytes())
             .sum();
         runtime.reinitialize_active_memtable_segment_tracking();
+        // Replay installs only complete WAL units, after every checkpoint and
+        // final memtable has succeeded. Snapshot visibility must follow that
+        // installed cut; allocation alone never publishes it on an error path.
+        runtime.applied_sequence = runtime.sequence;
         Ok(())
     }
 }
@@ -360,8 +364,12 @@ fn checkpoint_family(
     ));
     let completion = super::timing::measure("recovery_checkpoint_construction", || {
         actor.submit_build(identity, table, staging_path, config.hybrid_storage.clone())?;
-        let FlushWorkerResult::Build(completion) =
-            receive_completion(rx, state.startup_scope.as_ref(), "recovery flush build")?
+        let FlushWorkerResult::Build(completion) = receive_completion(
+            actor,
+            rx,
+            state.startup_scope.as_ref(),
+            "recovery flush build",
+        )?
         else {
             return Err(MidgeError::Internal(
                 "unexpected recovery publication completion".into(),
@@ -424,10 +432,14 @@ fn publish_checkpoint_output(
             leader_store: config.leader_store.clone(),
             leader_holder_id: config.leader_holder_id.clone(),
         })?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "failpoints"))]
         super::test_control::before_publish_receive();
-        let FlushWorkerResult::Publish(completion) =
-            receive_completion(rx, state.startup_scope.as_ref(), "recovery flush publish")?
+        let FlushWorkerResult::Publish(completion) = receive_completion(
+            actor,
+            rx,
+            state.startup_scope.as_ref(),
+            "recovery flush publish",
+        )?
         else {
             return Err(MidgeError::Internal(
                 "unexpected recovery build completion".into(),
@@ -436,7 +448,7 @@ fn publish_checkpoint_output(
         Ok(completion)
     })?;
     let delta = completion.result?;
-    actor.finish_pipeline();
+    actor.finish_pipeline(completion.identity.flush_id);
     let cloud_metadata_published =
         commit_and_mirror_checkpoint(state, config, actor, rx, &delta, completion.reservation)?;
     super::timing::measure("recovery_checkpoint_installation", || {
@@ -476,9 +488,11 @@ fn commit_and_mirror_checkpoint(
         require_snapshot: config.hybrid_storage.is_some(),
     })?;
     actor.submit_mirror(FlushMirrorTask {
+        phase: crate::runtime::actors::flush::FlushMirrorPhase::IntentCleared,
         delta: delta.clone(),
         reservation,
         fs: Arc::clone(&state.fs),
+        metadata_cut: None,
         storage: Arc::new(crate::runtime::actors::flush::HybridFlushStorage::new(
             config.hybrid_storage.clone(),
             config.cloud_metadata_storage.clone(),
@@ -488,22 +502,24 @@ fn commit_and_mirror_checkpoint(
         lease_healthy: config.lease_healthy.clone(),
         leader_store: config.leader_store.clone(),
         leader_holder_id: config.leader_holder_id.clone(),
-        runtime_response_timeout: state
-            .startup_scope
-            .as_ref()
-            .map_or(config.runtime_response_timeout, |scope| {
-                scope.clamp(config.runtime_response_timeout)
-            }),
+        deadline: state.startup_scope.as_ref().map_or_else(
+            || crate::common::OperationDeadline::from_budget(config.runtime_response_timeout),
+            crate::common::DeadlineScope::deadline,
+        ),
     })?;
-    let FlushWorkerResult::Mirror(mirror) =
-        receive_completion(rx, state.startup_scope.as_ref(), "recovery flush mirror")?
+    let FlushWorkerResult::Mirror(mirror) = receive_completion(
+        actor,
+        rx,
+        state.startup_scope.as_ref(),
+        "recovery flush mirror",
+    )?
     else {
         return Err(MidgeError::Internal(
             "unexpected recovery mirror completion".into(),
         ));
     };
     let cloud_metadata_published = mirror.result?;
-    actor.finish_pipeline();
+    actor.finish_pipeline(mirror.delta.identity.flush_id);
     Ok(cloud_metadata_published)
 }
 
@@ -648,6 +664,7 @@ fn validate_monotonic_lease(config: &crate::runtime::RuntimeConfig) -> MidgeResu
 }
 
 fn receive_completion(
+    actor: &mut FlushActor,
     rx: &crossbeam::channel::Receiver<FlushWorkerResult>,
     scope: Option<&crate::common::DeadlineScope>,
     context: &str,
@@ -673,5 +690,11 @@ fn receive_completion(
     if let Some(scope) = scope {
         scope.check(context)?;
     }
-    result
+    let completion = result?;
+    if !actor.take_completion(&completion) {
+        return Err(MidgeError::Fenced(format!(
+            "{context} did not match its physical task owner"
+        )));
+    }
+    Ok(completion)
 }

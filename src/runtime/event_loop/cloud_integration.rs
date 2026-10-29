@@ -9,7 +9,8 @@ use std::convert::TryFrom;
 mod ack;
 mod metadata;
 mod publication;
-mod sealing;
+pub(super) mod publication_worker;
+pub(super) mod sealing;
 
 impl EventLoop {
     pub(super) fn elapsed_micros_to_u64(duration: std::time::Duration) -> u64 {

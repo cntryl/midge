@@ -37,6 +37,16 @@ pub use crate::types::SharedGenerationId;
 pub(crate) use clock::LeaseClock;
 pub use cloud::{CloudLeaseConfig, CloudStorageLease};
 pub use filesystem::FileSystemLease;
+
+#[cfg(test)]
+mod auto_trait_tests {
+    #[test]
+    fn should_derive_thread_safety_for_lease_fields_without_unsafe_implementations() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<super::FileSystemLease>();
+        assert_send_sync::<super::CloudStorageLease>();
+    }
+}
 pub use heartbeat::LeaseHeartbeat;
 pub(crate) use scoped_leader_store::scoped_leader_store;
 #[cfg(test)]

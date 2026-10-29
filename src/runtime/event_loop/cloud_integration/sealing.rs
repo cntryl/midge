@@ -12,13 +12,452 @@ struct CloudSealPlan {
     bytes_buffered: u64,
 }
 
+pub(in crate::runtime::event_loop) struct PendingCloudSeal {
+    ticket: crate::runtime::wal_transition::WalSealTicket,
+    stage: Option<CloudSealStage>,
+    plan: CloudSealPlan,
+    deadline: crate::common::OperationDeadline,
+    started: Instant,
+    failed: bool,
+    waiters: Vec<CloudSealWaiter>,
+}
+
+enum CloudSealStage {
+    PrefixSync {
+        physical: crate::wal::traits::WalPendingSync,
+        expected: crate::wal::traits::WalSyncPrefix,
+    },
+    FooterAppend {
+        physical: crate::wal::footer_completion::WalPendingFooter,
+        prepared: crate::runtime::wal_history::PreparedRotation,
+    },
+    FooterSync {
+        physical: crate::wal::traits::WalPendingSync,
+        expected: crate::wal::traits::WalSyncPrefix,
+        prepared: crate::runtime::wal_history::PreparedRotation,
+    },
+}
+
+struct CloudSealWaiter {
+    request_id: u64,
+    sequence: u64,
+    wait_for_ack: bool,
+}
+
 impl EventLoop {
+    pub(in crate::runtime::event_loop) fn start_cloud_seal_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<bool> {
+        let result = self.try_start_cloud_seal_within(deadline);
+        if result.is_err() && self.pipeline.durability.cloud_seal_retry_needed() {
+            self.pipeline.durability.defer_cloud_seal_retry();
+        }
+        result
+    }
+
+    fn try_start_cloud_seal_within(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+    ) -> crate::common::MidgeResult<bool> {
+        if self.pipeline.pending_cloud_seal.is_some() {
+            return Ok(true);
+        }
+        let Some(plan) = self.prepare_cloud_seal(deadline)? else {
+            return Ok(false);
+        };
+        let ticket = self.pipeline.wal_transition.begin_seal(
+            plan.segment_id,
+            plan.next_segment_id,
+            plan.expected_max_sequence,
+        )?;
+        let submitted =
+            self.actors
+                .wal_actor
+                .submit_cloud_upload_flush(&mut self.state, deadline, &ticket);
+        let (physical, expected, submitted_max) = match submitted {
+            Ok(submitted) => submitted,
+            Err(error) => {
+                self.settle_failed_seal_step(ticket, &error);
+                return Err(error);
+            }
+        };
+        if submitted_max != plan.expected_max_sequence {
+            let error = crate::common::MidgeError::Internal(
+                "CloudAsync seal prefix changed during sync admission".into(),
+            );
+            self.fence_wal_transition(&error, None);
+            return Err(error);
+        }
+        self.pipeline.pending_cloud_seal = Some(PendingCloudSeal {
+            ticket,
+            stage: Some(CloudSealStage::PrefixSync { physical, expected }),
+            plan,
+            deadline: *deadline,
+            started: Instant::now(),
+            failed: false,
+            waiters: Vec::new(),
+        });
+        Ok(true)
+    }
+
+    pub(in crate::runtime::event_loop) fn start_cloud_seal_for_request(
+        &mut self,
+        deadline: &crate::common::OperationDeadline,
+        request_id: u64,
+        sequence: u64,
+        wait_for_ack: bool,
+    ) -> crate::common::MidgeResult<bool> {
+        let started = self.start_cloud_seal_within(deadline)?;
+        if started {
+            if let Some(pending) = self.pipeline.pending_cloud_seal.as_mut() {
+                pending.waiters.push(CloudSealWaiter {
+                    request_id,
+                    sequence,
+                    wait_for_ack,
+                });
+            }
+        }
+        Ok(started)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_cloud_seal_waiter_request_ids(&self) -> Vec<u64> {
+        self.pipeline
+            .pending_cloud_seal
+            .as_ref()
+            .map(|pending| {
+                pending
+                    .waiters
+                    .iter()
+                    .map(|waiter| waiter.request_id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(in crate::runtime::event_loop) fn progress_cloud_seal(&mut self) {
+        let Some(mut pending) = self.pipeline.pending_cloud_seal.take() else {
+            return;
+        };
+        if !pending.failed && pending.deadline.is_expired() {
+            let error = crate::common::MidgeError::OutcomeUnknown(
+                "CloudAsync WAL seal deadline expired; admitted sync remains owned until completion".into(),
+            );
+            self.fence_wal_transition(&error, None);
+            for waiter in &pending.waiters {
+                self.respond(
+                    waiter.request_id,
+                    crate::runtime::RuntimeResponse::Error {
+                        request_id: waiter.request_id,
+                        error: error.replay(),
+                    },
+                );
+            }
+            pending.failed = true;
+        }
+        if pending.failed {
+            self.progress_failed_cloud_seal(pending);
+            return;
+        }
+        let Some(stage) = pending.stage.take() else {
+            return;
+        };
+        match stage {
+            CloudSealStage::PrefixSync { physical, expected } => {
+                self.progress_cloud_seal_prefix(pending, physical, expected);
+            }
+            CloudSealStage::FooterAppend { physical, prepared } => {
+                self.progress_cloud_seal_footer_append(pending, physical, prepared);
+            }
+            CloudSealStage::FooterSync {
+                physical,
+                expected,
+                prepared,
+            } => self.progress_cloud_seal_footer_sync(pending, physical, expected, prepared),
+        }
+    }
+
+    fn progress_failed_cloud_seal(&mut self, mut pending: PendingCloudSeal) {
+        let Some(stage) = pending.stage.take() else {
+            return;
+        };
+        let terminal = match &stage {
+            CloudSealStage::PrefixSync { physical, .. }
+            | CloudSealStage::FooterSync { physical, .. } => physical.try_complete().is_some(),
+            CloudSealStage::FooterAppend { physical, .. } => physical.try_complete().is_some(),
+        };
+        if terminal {
+            drop(stage);
+            self.actors
+                .wal_actor
+                .release_fenced_writer_after_completion();
+        } else {
+            pending.stage = Some(stage);
+            self.pipeline.pending_cloud_seal = Some(pending);
+        }
+    }
+
+    fn progress_cloud_seal_prefix(
+        &mut self,
+        mut pending: PendingCloudSeal,
+        physical: crate::wal::traits::WalPendingSync,
+        expected: crate::wal::traits::WalSyncPrefix,
+    ) {
+        let Some(completion) = physical.try_complete() else {
+            pending.stage = Some(CloudSealStage::PrefixSync { physical, expected });
+            self.pipeline.pending_cloud_seal = Some(pending);
+            return;
+        };
+        drop(physical);
+        if let Err(error) =
+            self.actors
+                .wal_actor
+                .finish_cloud_upload_flush(&mut self.state, expected, completion)
+        {
+            self.fence_wal_transition(&error, None);
+            self.actors
+                .wal_actor
+                .release_fenced_writer_after_completion();
+            self.fail_cloud_seal_waiters(pending.waiters, &error);
+            return;
+        }
+        if let Err(error) = Self::after_cloud_flush_boundary() {
+            let Err(error) = self.cancel_reversible_cloud_seal(pending.ticket, error) else {
+                unreachable!("a failed cloud flush boundary cannot succeed");
+            };
+            self.fail_cloud_seal_waiters(pending.waiters, &error);
+            return;
+        }
+        if let Err(error) = self.validate_runtime_writer_lease_within(&pending.deadline) {
+            if let Err(cancel_error) = self
+                .actors
+                .wal_actor
+                .cancel_reversible_cloud_flush(&pending.ticket)
+            {
+                self.fence_wal_transition(&cancel_error, None);
+            } else {
+                self.pipeline
+                    .wal_transition
+                    .abandon_prepared_seal(pending.ticket);
+                if self.actors.wal_actor.is_fenced() {
+                    self.fence_wal_transition(&error, None);
+                }
+            }
+            self.fail_cloud_seal_waiters(pending.waiters, &error);
+            return;
+        }
+        match self.actors.wal_actor.submit_cloud_rotation_footer(
+            &mut self.state,
+            &pending.deadline,
+            &pending.ticket,
+        ) {
+            Ok((physical, prepared)) => {
+                pending.stage = Some(CloudSealStage::FooterAppend { physical, prepared });
+                self.pipeline.pending_cloud_seal = Some(pending);
+            }
+            Err(error) => {
+                self.settle_failed_seal_step(pending.ticket, &error);
+                self.fail_cloud_seal_waiters(pending.waiters, &error);
+            }
+        }
+    }
+
+    fn progress_cloud_seal_footer_append(
+        &mut self,
+        mut pending: PendingCloudSeal,
+        physical: crate::wal::footer_completion::WalPendingFooter,
+        prepared: crate::runtime::wal_history::PreparedRotation,
+    ) {
+        let Some(completion) = physical.try_complete() else {
+            pending.stage = Some(CloudSealStage::FooterAppend { physical, prepared });
+            self.pipeline.pending_cloud_seal = Some(pending);
+            return;
+        };
+        drop(physical);
+        let footer = match completion {
+            Ok(completion) => completion.prefix,
+            Err(error) => {
+                self.actors
+                    .wal_actor
+                    .fence_transition(&mut self.state, error.to_string());
+                self.fence_wal_transition(&error, None);
+                self.actors
+                    .wal_actor
+                    .release_fenced_writer_after_completion();
+                self.fail_cloud_seal_waiters(pending.waiters, &error);
+                return;
+            }
+        };
+        match self.actors.wal_actor.submit_cloud_footer_sync(
+            &mut self.state,
+            &pending.deadline,
+            &pending.ticket,
+            footer,
+        ) {
+            Ok((physical, expected)) => {
+                pending.stage = Some(CloudSealStage::FooterSync {
+                    physical,
+                    expected,
+                    prepared,
+                });
+                self.pipeline.pending_cloud_seal = Some(pending);
+            }
+            Err(error) => {
+                self.fence_wal_transition(&error, None);
+                self.actors
+                    .wal_actor
+                    .release_fenced_writer_after_completion();
+                self.fail_cloud_seal_waiters(pending.waiters, &error);
+            }
+        }
+    }
+
+    fn progress_cloud_seal_footer_sync(
+        &mut self,
+        mut pending: PendingCloudSeal,
+        physical: crate::wal::traits::WalPendingSync,
+        expected: crate::wal::traits::WalSyncPrefix,
+        prepared: crate::runtime::wal_history::PreparedRotation,
+    ) {
+        let Some(completion) = physical.try_complete() else {
+            pending.stage = Some(CloudSealStage::FooterSync {
+                physical,
+                expected,
+                prepared,
+            });
+            self.pipeline.pending_cloud_seal = Some(pending);
+            return;
+        };
+        drop(physical);
+        let receipt = match self.actors.wal_actor.finish_cloud_rotation_footer(
+            &mut self.state,
+            &pending.ticket,
+            prepared,
+            completion,
+            expected,
+        ) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.fence_wal_transition(&error, None);
+                self.actors
+                    .wal_actor
+                    .release_fenced_writer_after_completion();
+                self.fail_cloud_seal_waiters(pending.waiters, &error);
+                return;
+            }
+        };
+        let plan = pending.plan;
+        let deadline = pending.deadline;
+        let started = pending.started;
+        let waiters = pending.waiters;
+        if let Err(error) = self.commit_rotated_cloud_seal(pending.ticket, receipt) {
+            self.fail_cloud_seal_waiters(waiters, &error);
+            return;
+        }
+        self.finish_cloud_seal_upload(&plan, deadline, started, waiters);
+    }
+
+    fn fail_cloud_seal_waiters(
+        &mut self,
+        waiters: Vec<CloudSealWaiter>,
+        error: &crate::common::MidgeError,
+    ) {
+        for waiter in waiters {
+            self.respond(
+                waiter.request_id,
+                crate::runtime::RuntimeResponse::Error {
+                    request_id: waiter.request_id,
+                    error: error.replay(),
+                },
+            );
+        }
+    }
+
+    fn finish_cloud_seal_upload(
+        &mut self,
+        plan: &CloudSealPlan,
+        deadline: crate::common::OperationDeadline,
+        started: Instant,
+        waiters: Vec<CloudSealWaiter>,
+    ) {
+        if crate::failpoints::is_active("midge::cloud::inject_fail_after_wal_rotate_before_enqueue")
+        {
+            self.state.mark_persistence_anomaly();
+            for waiter in waiters {
+                self.respond(
+                    waiter.request_id,
+                    crate::runtime::RuntimeResponse::Error {
+                        request_id: waiter.request_id,
+                        error: crate::common::MidgeError::Internal(
+                            "failpoint: cloud seal failed after WAL rotate before enqueue".into(),
+                        ),
+                    },
+                );
+            }
+            self.actors
+                .cloud_coordinator
+                .cloud_wal
+                .defer_uploads_after_failure();
+            return;
+        }
+        if let Err(error) = self.try_drain_cloud_wal_upload_backlog_within(&deadline) {
+            self.actors
+                .cloud_coordinator
+                .cloud_wal
+                .defer_uploads_after_failure();
+            self.state.mark_persistence_anomaly();
+            tracing::warn!(%error, "could not admit sealed CloudAsync WAL upload");
+            self.fail_cloud_seal_waiters(waiters, &error);
+            return;
+        }
+        self.state.diagnostics.record(|metrics| {
+            metrics.record_cloud_async_wal_segment_sealed(
+                plan.bytes_buffered,
+                Self::elapsed_micros_to_u64(started.elapsed()),
+            );
+        });
+        for waiter in waiters {
+            if waiter.sequence > plan.expected_max_sequence {
+                self.respond(
+                    waiter.request_id,
+                    crate::runtime::RuntimeResponse::Error {
+                        request_id: waiter.request_id,
+                        error: crate::common::MidgeError::Internal(format!(
+                        "sealed WAL segment through sequence {}, requested cloud durability for {}",
+                        plan.expected_max_sequence, waiter.sequence
+                    )),
+                    },
+                );
+            } else if !waiter.wait_for_ack
+                || self.state.wal.frontiers.cloud_durable() >= waiter.sequence
+            {
+                self.drain_auto_flush_memtables();
+                self.respond(
+                    waiter.request_id,
+                    crate::runtime::RuntimeResponse::Ok {
+                        request_id: waiter.request_id,
+                    },
+                );
+            } else {
+                self.drain_auto_flush_memtables();
+                self.pipeline.durability.queue_waiter_for_key(
+                    plan.segment_id,
+                    crate::runtime::durability::DurabilityWaiter::CloudDurability {
+                        request_id: waiter.request_id,
+                    },
+                );
+            }
+        }
+    }
+
     /// Seal the active cloud WAL segment on the event loop thread.
     ///
     /// Everything queued behind this call - reads, writes, acks, shutdown -
     /// waits for it, so it gets the budget the runtime promises its callers
     /// instead of waiting on the provider indefinitely. A timeout is a normal
     /// failure: the caller logs it and the seal is attempted again later.
+    #[cfg(test)]
     pub(crate) fn seal_current_cloud_segment(
         &mut self,
     ) -> crate::common::MidgeResult<Option<(u64, u64)>> {
@@ -119,6 +558,12 @@ impl EventLoop {
     ) -> crate::common::MidgeResult<Option<CloudSealPlan>> {
         if !self.actors.wal_actor.is_cloud_async() {
             return Ok(None);
+        }
+        if self.wal_group_in_flight() && !self.pipeline.wal_transition.is_fenced() {
+            self.pipeline.durability.mark_cloud_seal_retry_needed();
+            return Err(crate::common::MidgeError::WriteStall(
+                "CloudAsync WAL sealing is deferred while WAL work is in flight".into(),
+            ));
         }
         // A fenced protocol refuses before reading the ledger, which may
         // already have recorded the rotation that fenced it.
@@ -381,7 +826,7 @@ impl EventLoop {
                 "CloudAsync WAL recovery uploads are still draining".to_string(),
             ));
         }
-        storage.ensure_wal_write_admission(self.actors.cloud_coordinator.cloud_wal.held_uploads())
+        storage.ensure_wal_write_admission(self.actors.cloud_coordinator.held_uploads())
     }
 
     pub(in crate::runtime::event_loop) fn drain_cloud_wal_upload_backlog(&mut self) {
@@ -434,24 +879,13 @@ impl EventLoop {
             return;
         }
 
-        let seal_result = self.seal_current_cloud_segment();
-        let Ok(Some((segment_id, max_sequence))) = seal_result else {
+        let deadline = self.event_loop_cloud_deadline();
+        let seal_result = self.start_cloud_seal_within(&deadline);
+        let Ok(true) = seal_result else {
             if let Err(error) = seal_result {
                 tracing::error!(error = %error, "CloudAsync: forced WAL seal failed");
             }
             return;
         };
-
-        if std::env::var_os("MIDGE_TRACE_CLOUD_ASYNC").is_some() {
-            // Throttle: log every 1000 segments to avoid noise.
-            if segment_id.is_multiple_of(1000) {
-                eprintln!(
-                    "[midge] CloudAsync flush: segment_id={segment_id} max_sequence={max_sequence} pending_cloud={} ",
-                    self.state.wal.pending_writes > 0
-                );
-            }
-        }
-
-        self.drain_auto_flush_memtables();
     }
 }

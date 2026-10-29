@@ -20,6 +20,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// One point read in this many, per thread, is timed for the point-read
+/// latency histogram. A memtable hit costs about 250 ns and two clock reads
+/// cost about 25 ns, so timing every read would be a 10% tax; sampling keeps
+/// the histogram always on at well under 2%.
+const POINT_READ_SAMPLE_INTERVAL: u32 = 16;
+
+thread_local! {
+    static POINT_READ_SAMPLE: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 const ASSERTION_ACCOUNTING_OVERHEAD: usize = 256;
 
 /// Transaction mode controls read/write capabilities
@@ -603,13 +613,42 @@ impl Transaction {
     /// means the write crossed a point where it may be visible or replayed
     /// after restart, but Midge could not confirm the requested durability.
     /// Check whether it applied, for example with an application-level
-    /// idempotency key, before writing it again. A runtime response
-    /// [`MidgeError::Timeout`](crate::MidgeError::Timeout) also leaves the
-    /// outcome unknown because it does not cancel accepted work. Midge never
+    /// idempotency key, before writing it again. A runtime response timeout
+    /// for a commit with writes is reported as `OutcomeUnknown` too, because
+    /// the timeout removes the caller's response route without cancelling the
+    /// admitted transaction, which may still be applied and synced. A plain
+    /// [`MidgeError::Timeout`](crate::MidgeError::Timeout) therefore only
+    /// comes back from commits that cannot have changed state. Midge never
     /// retries a write after either response itself. `Fenced` is returned
     /// when the transaction was not applied and has no WAL record to replay.
-    pub fn commit(mut self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
+    pub fn commit(self, opts: crate::engine::api::WriteOptions) -> MidgeResult<()> {
+        self.commit_with_sequence(opts).map(|_sequence| ())
+    }
+
+    /// Commit and return the sequence the caller can wait on for cloud
+    /// durability through [`Engine::wait_cloud_durable`](crate::Engine::wait_cloud_durable).
+    ///
+    /// For a commit with writes this is the sequence the write was assigned.
+    /// A commit without writes allocates no sequence and returns the
+    /// transaction's start sequence: everything it read is at or below it, so
+    /// waiting on it covers what the transaction depended on. Errors and their
+    /// meaning are those of [`Self::commit`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::commit`].
+    #[tracing::instrument(
+        name = "commit",
+        level = "debug",
+        skip_all,
+        fields(sync = opts.is_sync(), cloud_strict = opts.is_cloud_strict())
+    )]
+    pub fn commit_with_sequence(
+        mut self,
+        opts: crate::engine::api::WriteOptions,
+    ) -> MidgeResult<u64> {
         let mut timing = CommitTiming::maybe_start();
+        let commit_started = Instant::now();
 
         self.validate_assertions()?;
 
@@ -618,7 +657,7 @@ impl Transaction {
             self.unregister_snapshot();
             CommitTiming::record_unregister(&mut timing, unregister_started_at);
             CommitTiming::finish(timing, true);
-            return Ok(());
+            return Ok(self.start_sequence);
         }
 
         let had_writes = self.has_writes();
@@ -633,7 +672,8 @@ impl Transaction {
             self.unregister_snapshot();
             CommitTiming::record_unregister(&mut timing, unregister_started_at);
             CommitTiming::finish(timing, sync_result.is_ok());
-            return sync_result;
+            self.record_commit_latency(opts, commit_started);
+            return sync_result.map(|()| self.start_sequence);
         }
 
         let conflict_policy = match self.conflict_policy() {
@@ -694,7 +734,7 @@ impl Transaction {
                         }
                     });
                 CommitTiming::record_durability(&mut timing, durability_started_at);
-                result
+                result.map(|()| sequence)
             }
             Err(error) => {
                 if matches!(error, MidgeError::WriteStall(_)) {
@@ -712,7 +752,31 @@ impl Transaction {
         self.unregister_snapshot();
         CommitTiming::record_unregister(&mut timing, unregister_started_at);
         CommitTiming::finish(timing, result.is_ok());
+        self.record_commit_latency(opts, commit_started);
         result
+    }
+
+    /// Attribute this commit's wall-clock latency to the durability it asked
+    /// for. Commits that fail after reaching the runtime count too, since a
+    /// caller waited for them; commits rejected before any engine work (an
+    /// invalid option combination, a missing snapshot) are not timed.
+    fn record_commit_latency(&self, opts: crate::engine::api::WriteOptions, started: Instant) {
+        use crate::telemetry::metrics::CommitDurabilityKind;
+        let kind = if opts.is_cloud_strict() {
+            CommitDurabilityKind::CloudStrict
+        } else if opts.is_cloud_async() {
+            CommitDurabilityKind::CloudAsync
+        } else if opts.is_best_effort() {
+            CommitDurabilityKind::BestEffort
+        } else if opts.is_sync() {
+            CommitDurabilityKind::Sync
+        } else {
+            CommitDurabilityKind::Buffered
+        };
+        let elapsed = started.elapsed();
+        self.runtime_handle
+            .diagnostics
+            .record(|m| m.record_commit_latency(kind, elapsed));
     }
 
     fn validate_assertions(&self) -> MidgeResult<()> {
@@ -835,8 +899,25 @@ impl Transaction {
     /// Returns an error when the transaction snapshot is unavailable, or
     /// [`MidgeError::Fenced`] when a cloud transaction's lease is no longer valid.
     pub fn get(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
+        let sampled = POINT_READ_SAMPLE.with(|counter| {
+            let seen = counter.get();
+            counter.set(seen.wrapping_add(1));
+            seen % POINT_READ_SAMPLE_INTERVAL == 0
+        });
+        if !sampled {
+            return self
+                .runtime_handle
+                .read_with_authority(|| self.get_value(key));
+        }
+        let started = Instant::now();
+        let result = self
+            .runtime_handle
+            .read_with_authority(|| self.get_value(key));
+        let elapsed = started.elapsed();
         self.runtime_handle
-            .read_with_authority(|| self.get_value(key))
+            .diagnostics
+            .record(|m| m.record_point_read_latency(elapsed));
+        result
     }
 
     fn get_value(&self, key: &[u8]) -> MidgeResult<Option<bytes::Bytes>> {
@@ -872,8 +953,11 @@ impl Transaction {
     /// [`MidgeError::Fenced`] after lease loss; an existing iterator reports the
     /// same sticky error on its next advance.
     pub fn scan(&self, query: &super::query::Query) -> MidgeResult<super::iterator::Iterator<'_>> {
-        self.runtime_handle
-            .read_with_authority(|| self.build_scan(query))
+        let started = Instant::now();
+        let iterator = self
+            .runtime_handle
+            .read_with_authority(|| self.build_scan(query))?;
+        Ok(iterator.observing_latency(Arc::clone(&self.runtime_handle.diagnostics), started))
     }
 
     fn build_scan(
@@ -893,8 +977,13 @@ impl Transaction {
         let start = query.effective_start().map(<[u8]>::to_vec);
         let end = query.effective_end();
         let reverse = query.direction == super::iterator::Direction::Reverse;
-        let snapshot_scan =
-            snapshot.state_scan(start.clone(), end.clone(), reverse, self.start_sequence);
+        let snapshot_scan = snapshot.state_scan_with_cache_fill(
+            start.clone(),
+            end.clone(),
+            reverse,
+            self.start_sequence,
+            query.effective_cache_fill(),
+        );
         let intent_scan = self
             .write_set
             .key_scan(start.as_deref(), end.as_deref(), reverse)?;
@@ -936,7 +1025,6 @@ fn post_apply_durability_error(error: MidgeError, sequence: u64) -> MidgeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn should_report_unknown_outcome_when_durability_step_fails_after_apply_with_retryable_error() {
         // Arrange

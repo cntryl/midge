@@ -35,6 +35,8 @@ mod ingest;
 mod lease_state;
 mod metrics;
 mod startup;
+#[cfg(feature = "failpoints")]
+pub use startup::{install_manual_caller_expiry, OwnerExit};
 mod verification;
 
 pub use crate::types::ColumnFamilyId;
@@ -115,6 +117,7 @@ pub struct Engine {
     /// Shared bounded pool for resident transaction intents.
     transaction_memory_pool: Arc<crate::runtime::transaction_spill::TransactionMemoryPool>,
     ttl_clock: Arc<crate::common::time::ObservedClock>,
+    drop_transaction_wait_timeout: Duration,
 }
 
 impl Drop for Engine {
@@ -126,8 +129,10 @@ impl Drop for Engine {
         // Runtime teardown can legitimately wait for a transaction owned by
         // the dropping thread or for a blocked storage worker. Hand that wait
         // to a detached reaper and move all fencing resources with it. The
-        // lease remains renewed and owned until every runtime worker exits.
-        self.lease_state.detach_reaper(self.runtime.take());
+        // Client retention is bounded; the lease remains renewed and owned
+        // until every admitted runtime worker exits.
+        self.lease_state
+            .detach_reaper(self.runtime.take(), self.drop_transaction_wait_timeout);
     }
 }
 
@@ -237,6 +242,7 @@ impl Engine {
     ///
     /// Returns an error when the engine cannot initialize its storage, runtime,
     /// manifest, or recovery state.
+    #[tracing::instrument(level = "info", skip_all)]
     pub fn open(opts: OpenOptions) -> MidgeResult<Self> {
         startup::EngineStartup::open_owned(opts)
     }
@@ -289,6 +295,7 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error when the flush cannot be scheduled or completed.
+    #[tracing::instrument(level = "debug", skip_all, fields(cf_id = cf.id()))]
     pub fn flush_cf(&self, cf: &ColumnFamilyHandle) -> MidgeResult<()> {
         let response = self
             .runtime_handle
@@ -425,16 +432,12 @@ impl Engine {
         is_read_only: bool,
     ) -> MidgeResult<(u64, Arc<crate::runtime::ReadSnapshot>)> {
         let committed_sequence = self.sequence.load(std::sync::atomic::Ordering::SeqCst);
-        let cache_guard = self.runtime_handle.snapshot_cache.load();
-        let cached_snapshot = cache_guard
-            .cf_snapshots
-            .get(&cf_id)
-            .map(|data| Arc::clone(&data.snapshot));
-        let cached_sequence = cache_guard.sequence;
-        let cached_snapshot = cached_snapshot.filter(|_| cached_sequence >= committed_sequence);
-        drop(cache_guard);
-
-        if let Some(snapshot) = cached_snapshot {
+        if let Some((cached_sequence, snapshot)) = self
+            .runtime_handle
+            .snapshot_cache
+            .load_family(cf_id)
+            .filter(|(sequence, _)| *sequence >= committed_sequence)
+        {
             if is_read_only {
                 self.runtime_handle
                     .diagnostics
@@ -483,9 +486,93 @@ impl Engine {
         self.runtime_handle.read_path_diagnostics_snapshot()
     }
 
+    /// Count production grandparent-overlap output rolls for one engine.
+    #[cfg(feature = "internal-testing")]
+    #[must_use]
+    #[doc(hidden)]
+    pub fn compaction_grandparent_overlap_roll_count_for_benchmarks(&self) -> u64 {
+        self.runtime_handle
+            .diagnostics
+            .grandparent_overlap_roll_count()
+    }
+
     #[cfg(feature = "internal-testing")]
     pub(crate) fn write_admission_snapshot(&self) -> crate::diagnostics::WriteAdmissionSnapshot {
         self.runtime_handle.diagnostics.write_admission_snapshot()
+    }
+
+    /// Highest sequence the cloud authority has acknowledged as durable.
+    ///
+    /// Every commit at or below this sequence survives loss of the local cache
+    /// and is recoverable by a successor that opens from the cloud. Commits
+    /// above it are visible and may be locally durable, but are promised to
+    /// nothing beyond the surviving local cache. The frontier only advances.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` on storage that is not
+    /// cloud-backed, where there is no cloud frontier to report, and
+    /// propagates a runtime metrics failure.
+    pub fn cloud_durable_sequence(&self) -> MidgeResult<u64> {
+        if !self.cloud_mode {
+            return Err(MidgeError::InvalidArgument(
+                "cloud durability is tracked only on cloud-backed storage".to_string(),
+            ));
+        }
+        Ok(self.metrics().get_runtime_metrics()?.wal_cloud_durable_seq)
+    }
+
+    /// Wait until the cloud durability frontier covers `sequence`.
+    ///
+    /// Pair this with [`Transaction::commit_with_sequence`](api::Transaction::commit_with_sequence):
+    /// commit at local latency with `WriteOptions::cloud_async()`, then wait
+    /// here only where the stronger guarantee is needed. Waiting may seal the
+    /// open WAL segment early so the covering upload starts, as
+    /// `cloud_strict()` does.
+    ///
+    /// Returns `Ok(true)` once the frontier covers `sequence`, and `Ok(false)`
+    /// when it does not yet: the caller's deadline passed, the runtime
+    /// exhausted its own confirmation budget, or it reported backpressure or a
+    /// transient failure. None of those is final; the runtime keeps retrying
+    /// the covering upload where one exists, and a later wait may succeed.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::InvalidArgument` on storage that is not
+    /// cloud-backed, `MidgeError::Fenced` when this writer no longer holds
+    /// authority and can no longer prove cloud durability, and other
+    /// non-retryable runtime failures as reported.
+    pub fn wait_cloud_durable(&self, sequence: u64, timeout: Duration) -> MidgeResult<bool> {
+        if !self.cloud_mode {
+            return Err(MidgeError::InvalidArgument(
+                "cloud durability is tracked only on cloud-backed storage".to_string(),
+            ));
+        }
+        let request_id = next_request_id()?;
+        let msg = RuntimeMsg::SealWalForCloud {
+            request_id,
+            sequence,
+            wait_for_ack: true,
+        };
+        match self.runtime_handle.send_and_wait_timeout(msg, timeout)? {
+            Some(RuntimeResponse::Ok { .. }) => Ok(true),
+            // The caller's deadline passed, or the runtime reported a retryable
+            // condition (its own confirmation budget, upload backpressure, a
+            // transient provider failure): all mean "not covered yet".
+            None => Ok(false),
+            Some(RuntimeResponse::Error { error, .. })
+                if matches!(
+                    error.severity(),
+                    crate::common::Severity::Backpressure | crate::common::Severity::Transient
+                ) =>
+            {
+                Ok(false)
+            }
+            Some(RuntimeResponse::Error { error, .. }) => Err(error),
+            Some(other) => Err(MidgeError::Internal(format!(
+                "Unexpected response to SealWalForCloud: {other:?}"
+            ))),
+        }
     }
 
     /// Wait for a write stall to clear for `cf_id`.
@@ -532,6 +619,10 @@ impl Engine {
     /// is the runtime's terminal durability result and is replayed on later
     /// calls. The caller timeout does not cancel in-flight durability I/O.
     /// Writer fencing remains held until every runtime worker has exited.
+    /// Dropping the Engine instead uses the configured transaction wait window
+    /// (30 seconds by default), then fences outliving transactions and drains
+    /// admitted effects before releasing writer authority. A blocked physical
+    /// effect can therefore retain the lease beyond that transaction window.
     ///
     /// # Errors
     ///
@@ -764,6 +855,7 @@ impl Engine {
     /// # Errors
     ///
     /// Returns an error when compaction scheduling or completion fails.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn compact_all(&self) -> MidgeResult<()> {
         let request_id = next_request_id()?;
         let resp = self

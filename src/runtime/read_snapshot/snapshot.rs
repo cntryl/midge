@@ -1,9 +1,13 @@
+use super::point_read::{Extent, Observe};
 #[cfg(test)]
 use super::BTreeMap;
 use super::{
-    Arc, FileMeta, Fs, KeyState, MidgeResult, RangeCandidates, ReadResources, ReadSnapshot,
-    SkipListMemtable, SnapshotScan, SstFileIo, SstReadView, SstStateReader,
+    Arc, FileMeta, Fs, MidgeResult, RangeCandidates, ReadResources, ReadSnapshot, SkipListMemtable,
+    SnapshotScan, SstFileIo, SstReadView,
 };
+#[cfg(test)]
+use super::{KeyState, SstStateReader};
+use crate::sst::cache::CacheFill;
 use crate::sst::read_path_metrics::SstReadObserver as _;
 
 impl ReadSnapshot {
@@ -32,6 +36,7 @@ impl ReadSnapshot {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_resources(
         memtable: Arc<SkipListMemtable>,
@@ -73,18 +78,38 @@ impl ReadSnapshot {
             || Arc::new(crate::diagnostics::RuntimeDiagnostics::default()),
             |resources| resources.diagnostics(),
         );
+        #[cfg(any(test, feature = "internal-testing"))]
+        diagnostics.record_read_snapshot_build();
         Self {
-            cf_id,
-            memtable,
-            immutable_memtables,
-            sst_view,
-            sst_fs,
-            sst_path_prefix,
-            memory_mode,
             read_time_millis,
-            read_resources,
-            diagnostics,
+            sources: Arc::new(super::ReadSnapshotSources {
+                cf_id,
+                memtable,
+                immutable_memtables,
+                sst_view,
+                sst_fs,
+                sst_path_prefix,
+                memory_mode,
+                read_resources,
+                diagnostics,
+            }),
         }
+    }
+
+    pub(crate) fn has_sources(
+        &self,
+        memtable: &Arc<SkipListMemtable>,
+        immutable_memtables: &[Arc<SkipListMemtable>],
+        sst_view: &Arc<SstReadView>,
+    ) -> bool {
+        Arc::ptr_eq(&self.memtable, memtable)
+            && Arc::ptr_eq(&self.sst_view, sst_view)
+            && self.immutable_memtables.len() == immutable_memtables.len()
+            && self
+                .immutable_memtables
+                .iter()
+                .zip(immutable_memtables)
+                .all(|(left, right)| Arc::ptr_eq(left, right))
     }
 
     pub(crate) fn with_read_time_millis(mut self, read_time_millis: u64) -> Self {
@@ -92,6 +117,8 @@ impl ReadSnapshot {
         self
     }
 
+    /// A scan whose SST block reads bypass block-cache insertion (#944).
+    #[cfg(test)]
     pub(crate) fn state_scan(
         self: &Arc<Self>,
         start: Option<Vec<u8>>,
@@ -99,7 +126,18 @@ impl ReadSnapshot {
         reverse: bool,
         sequence: u64,
     ) -> SnapshotScan {
-        SnapshotScan::new(Arc::clone(self), start, end, reverse, sequence)
+        self.state_scan_with_cache_fill(start, end, reverse, sequence, CacheFill::Bypass)
+    }
+
+    pub(crate) fn state_scan_with_cache_fill(
+        self: &Arc<Self>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        reverse: bool,
+        sequence: u64,
+        cache_fill: CacheFill,
+    ) -> SnapshotScan {
+        SnapshotScan::new(Arc::clone(self), start, end, reverse, sequence, cache_fill)
     }
 
     pub(super) fn sst_reader(
@@ -129,71 +167,20 @@ impl ReadSnapshot {
     }
 
     /// Perform a point read on this snapshot without copying the value.
+    ///
+    /// Sources are visited newest-first and the walk stops at the first one
+    /// that decides the key (#903); level order (SST-10) guarantees the rest
+    /// hold only older versions. `read_amp_metrics` counts the SSTs touched.
     pub fn get_bytes(&self, key: &[u8], seq: u64) -> MidgeResult<Option<bytes::Bytes>> {
-        let mut best_state = None;
-        // Only the highest covering tombstone matters, so none is copied.
-        let mut covering_tombstone_seq = None;
-        let mut ssts_touched = 0u64;
-        let mut l0_ssts_touched = 0u64;
-        let mut blocks_read = 0u64;
-
-        let state = self.memtable.get_raw_key_state_at(key, seq);
-        Self::merge_best_state(&mut best_state, state)?;
-
-        for imm in &self.immutable_memtables {
-            let state = imm.get_raw_key_state_at(key, seq);
-            Self::merge_best_state(&mut best_state, state)?;
-            covering_tombstone_seq =
-                covering_tombstone_seq.max(imm.max_covering_tombstone_seq(key, seq));
-        }
-        covering_tombstone_seq =
-            covering_tombstone_seq.max(self.memtable.max_covering_tombstone_seq(key, seq));
-
-        // Complete manifest bounds drive indexed selection. Legacy bounds stay
-        // in the view's fallback bucket and are still opened conservatively.
-        if !self.memory_mode {
-            for file_meta in self.sst_view.point_candidates(key) {
-                file_meta.record_read();
-                self.diagnostics
-                    .sst_metrics()
-                    .record_candidate_sst_file_checked();
-                let reader = self.sst_reader(&file_meta)?;
-                let (state, read_stats) = reader.get_raw_state_at_with_stats(key, seq)?;
-                if read_stats.sst_touched {
-                    ssts_touched = ssts_touched.saturating_add(1);
-                    if file_meta.level == 0 {
-                        l0_ssts_touched = l0_ssts_touched.saturating_add(1);
-                    }
-                }
-                blocks_read = blocks_read.saturating_add(read_stats.blocks_read);
-                Self::merge_best_state(&mut best_state, state)?;
-
-                self.diagnostics.sst_metrics().record_range_tombstone_scan();
-                covering_tombstone_seq =
-                    covering_tombstone_seq.max(reader.max_covering_tombstone_seq(key, seq));
-            }
-        }
-
-        self.diagnostics
-            .read_amp_metrics()
-            .record_read(ssts_touched, l0_ssts_touched, blocks_read);
-
-        let Some(state) = best_state else {
-            return Ok(None);
-        };
-        let state_seq = Self::state_sequence(&state).unwrap_or(0);
-        if covering_tombstone_seq.is_some_and(|tombstone_seq| tombstone_seq >= state_seq) {
-            return Ok(None);
-        }
-
-        Ok(match state {
-            KeyState::Value(value, _, exp, _)
-                if !crate::common::time::is_expired_at(exp, self.read_time_millis) =>
-            {
-                Some(value)
-            }
-            _ => None,
-        })
+        let walk = self.walk_point(key, seq, Observe::Reads, Extent::FirstHit)?;
+        self.diagnostics.read_amp_metrics().record_read(
+            walk.ssts_touched,
+            walk.l0_ssts_touched,
+            walk.blocks_read,
+        );
+        #[cfg(any(test, feature = "internal-testing"))]
+        self.audit_point_walk(key, seq, &walk)?;
+        Ok(walk.resolve(self.read_time_millis))
     }
 
     /// Perform a point read on this snapshot.
@@ -206,56 +193,14 @@ impl ReadSnapshot {
     ///
     /// Includes tombstones and range tombstones so conflict detection can
     /// identify any write after a transaction start snapshot.
+    ///
+    /// The walk stops at the first deciding source like [`Self::get_bytes`];
+    /// it records neither read heat nor read-amplification metrics.
     pub fn latest_state_sequence(&self, key: &[u8]) -> MidgeResult<Option<u64>> {
-        let mut best_state = None;
-        let mut range_tombstones = Vec::new();
-
-        let state = self.memtable.get_raw_key_state_at(key, u64::MAX);
-        Self::merge_best_state(&mut best_state, state)?;
-
-        for imm in &self.immutable_memtables {
-            let state = imm.get_raw_key_state_at(key, u64::MAX);
-            Self::merge_best_state(&mut best_state, state)?;
-            range_tombstones.extend(
-                imm.range_tombstones_at(u64::MAX)
-                    .into_iter()
-                    .filter(|tombstone| tombstone.covers(key)),
-            );
-        }
-        range_tombstones.extend(
-            self.memtable
-                .range_tombstones_at(u64::MAX)
-                .into_iter()
-                .filter(|tombstone| tombstone.covers(key)),
-        );
-
-        if !self.memory_mode {
-            for file_meta in self.sst_view.point_candidates(key) {
-                let reader = self.sst_reader(&file_meta)?;
-                let (state, _) = reader.get_raw_state_at_with_stats(key, u64::MAX)?;
-                Self::merge_best_state(&mut best_state, state)?;
-
-                range_tombstones.extend(
-                    reader
-                        .range_tombstones()
-                        .into_iter()
-                        .filter(|tombstone| tombstone.covers(key)),
-                );
-            }
-        }
-
-        let state_seq = best_state
-            .as_ref()
-            .and_then(Self::state_sequence)
-            .unwrap_or(0);
-        let range_tombstone_seq = range_tombstones.iter().map(|t| t.seq).max().unwrap_or(0);
-        let max_seq = state_seq.max(range_tombstone_seq);
-
-        if max_seq == 0 {
-            Ok(None)
-        } else {
-            Ok(Some(max_seq))
-        }
+        let walk = self.walk_point(key, u64::MAX, Observe::Nothing, Extent::FirstHit)?;
+        #[cfg(any(test, feature = "internal-testing"))]
+        self.audit_point_walk(key, u64::MAX, &walk)?;
+        Ok(walk.decided_sequence().filter(|sequence| *sequence > 0))
     }
 
     /// Find one sequence newer than `threshold` touching [start, end).
@@ -330,6 +275,7 @@ impl ReadSnapshot {
                     end_opt.map(<[u8]>::to_vec),
                     false,
                     u64::MAX,
+                    CacheFill::Normal,
                 ) {
                     let (_, state) = entry?;
                     if let Some(seq) = Self::state_sequence(&state).filter(|seq| *seq > threshold) {
@@ -426,5 +372,16 @@ impl ReadSnapshot {
                 }
             })
             .collect())
+    }
+}
+
+impl Clone for ReadSnapshot {
+    fn clone(&self) -> Self {
+        #[cfg(any(test, feature = "internal-testing"))]
+        self.diagnostics.record_read_snapshot_build();
+        Self {
+            sources: Arc::clone(&self.sources),
+            read_time_millis: self.read_time_millis,
+        }
     }
 }

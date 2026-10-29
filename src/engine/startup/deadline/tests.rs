@@ -5,6 +5,50 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::Layer;
 
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_inherit_caller_failpoint_scope_when_timed_open_starts_runtime() {
+    // Arrange: a real timed open creates both startup and runtime threads.
+    let guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let observed = Arc::new(AtomicUsize::new(0));
+    let callback_observed = Arc::clone(&observed);
+    fail::cfg_callback(
+        "midge::runtime::before_get_runtime_metrics_response",
+        move || {
+            callback_observed.fetch_add(1, Ordering::AcqRel);
+        },
+    )
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let options = OpenOptions::local(directory.path())
+        .background_compaction(false)
+        .open_timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+
+    // Act: the runtime must evaluate its callback while the caller owns the gate.
+    let opened = Engine::open(options);
+    let response = opened.as_ref().map(|engine| {
+        engine
+            .metrics()
+            .get_runtime_metrics_with_timeout(Duration::from_millis(500))
+    });
+    let succeeded = matches!(response, Ok(Ok(_)));
+    let response_debug = format!("{response:?}");
+    let count = observed.load(Ordering::Acquire);
+    // Release even on failure so blocked child threads can finish cleanup.
+    scenario.teardown();
+    drop(guard);
+    if let Ok(mut engine) = opened {
+        engine.shutdown(Duration::from_secs(5)).unwrap();
+    }
+
+    // Assert: actual startup and routed runtime work retained the same scope.
+    assert!(succeeded, "{response_debug}");
+    assert_eq!(count, 1);
+}
+
 #[derive(Debug, Default)]
 struct Events {
     prepared: AtomicUsize,

@@ -48,6 +48,9 @@ pub struct MidgeOptions {
     pub cloud_write_policy: Option<cntryl_midge::CloudWritePolicy>,
     /// Internal simulated-cloud storage tuning used only by tests.
     pub simulated_cloud_overrides: Option<SimulatedCloudOverrides>,
+    /// Candidate-only admission settings for the #908 Tier 4 benchmark.
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    pub write_backpressure: Option<cntryl_midge::WriteBackpressureConfig>,
 }
 
 impl Default for MidgeOptions {
@@ -62,6 +65,8 @@ impl Default for MidgeOptions {
             memory_budget: None,
             cloud_write_policy: None,
             simulated_cloud_overrides: None,
+            #[cfg(feature = "candidate-write-backpressure-bench")]
+            write_backpressure: None,
         }
     }
 }
@@ -92,9 +97,28 @@ impl MidgeOptions {
         self
     }
 
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    #[must_use]
+    pub fn with_write_backpressure(
+        mut self,
+        config: cntryl_midge::WriteBackpressureConfig,
+    ) -> Self {
+        self.write_backpressure = Some(config);
+        self
+    }
+
     /// Convert `MidgeOptions` to `OpenOptions` for use with `Engine::open`.
     #[must_use]
     pub fn to_open_options(&self) -> cntryl_midge::OpenOptions {
+        self.to_open_options_with_compaction_concurrency(1)
+    }
+
+    /// Convert `MidgeOptions` to `OpenOptions` with an explicit compaction worker count.
+    #[must_use]
+    pub fn to_open_options_with_compaction_concurrency(
+        &self,
+        workers: usize,
+    ) -> cntryl_midge::OpenOptions {
         let storage = match &self.storage_mode {
             StorageMode::Memory => cntryl_midge::Storage::InMemory,
             StorageMode::LocalDisk { db_path } => cntryl_midge::Storage::Local {
@@ -129,6 +153,7 @@ impl MidgeOptions {
             .workload(cntryl_midge::WorkloadProfile::default())
             .goal(cntryl_midge::Goal::default())
             .background_compaction(self.enable_compaction)
+            .compaction_concurrency(workers)
             .with_memtable_size_limit(self.memtable_size)
             .with_memtable_flush_threshold(self.memtable_size);
 
@@ -146,6 +171,11 @@ impl MidgeOptions {
         {
             open_opts =
                 open_opts.with_simulated_cloud_local_storage_budget(local_storage_budget_bytes);
+        }
+
+        #[cfg(feature = "candidate-write-backpressure-bench")]
+        if let Some(config) = self.write_backpressure.clone() {
+            open_opts = open_opts.write_backpressure(config);
         }
 
         open_opts.build().expect("build benchmark open options")
@@ -219,6 +249,20 @@ pub fn write_coordination_opts_for_mode(mode: &str) -> MidgeOptions {
     opts
 }
 
+fn mode_directory(mode: &str, unique_id: u64) -> PathBuf {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let directory = PathBuf::from(format!(
+        "target/tmp/midge_test_{mode}_{}_{}_{}",
+        std::process::id(),
+        unique_id,
+        timestamp
+    ));
+    let _ = std::fs::create_dir_all(&directory);
+    directory
+}
+
 /// Generate appropriate `MidgeOptions` for the given storage mode (lowercase convention).
 ///
 /// # Arguments
@@ -245,18 +289,11 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
             memory_budget: None,
             cloud_write_policy: None,
             simulated_cloud_overrides: None,
+            #[cfg(feature = "candidate-write-backpressure-bench")]
+            write_backpressure: None,
         },
         "local" => {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos());
-            let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_local_{}_{}_{}",
-                std::process::id(),
-                unique_id,
-                timestamp
-            ));
-            let _ = std::fs::create_dir_all(&test_dir);
+            let test_dir = mode_directory("local", unique_id);
             MidgeOptions {
                 storage_mode: StorageMode::LocalDisk { db_path: test_dir },
                 wal_sync: false,
@@ -267,19 +304,12 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 memory_budget: None,
                 cloud_write_policy: None,
                 simulated_cloud_overrides: None,
+                #[cfg(feature = "candidate-write-backpressure-bench")]
+                write_backpressure: None,
             }
         }
         "cloud" => {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos());
-            let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_cloud_{}_{}_{}",
-                std::process::id(),
-                unique_id,
-                timestamp
-            ));
-            let _ = std::fs::create_dir_all(&test_dir);
+            let test_dir = mode_directory("cloud", unique_id);
             MidgeOptions {
                 storage_mode: StorageMode::CloudBacked {
                     local_cache_path: test_dir,
@@ -296,19 +326,12 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 memory_budget: None,
                 cloud_write_policy: None,
                 simulated_cloud_overrides: None,
+                #[cfg(feature = "candidate-write-backpressure-bench")]
+                write_backpressure: None,
             }
         }
         "hybrid" => {
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos());
-            let test_dir = PathBuf::from(format!(
-                "target/tmp/midge_test_hybrid_{}_{}_{}",
-                std::process::id(),
-                unique_id,
-                timestamp
-            ));
-            let _ = std::fs::create_dir_all(&test_dir);
+            let test_dir = mode_directory("hybrid", unique_id);
             let local_storage_budget_bytes = std::env::var("MIDGE_BENCH_HYBRID_LOCAL_BUDGET_BYTES")
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
@@ -332,6 +355,8 @@ pub fn opts_for_mode(mode: &str) -> MidgeOptions {
                 simulated_cloud_overrides: Some(SimulatedCloudOverrides {
                     local_storage_budget_bytes: Some(local_storage_budget_bytes),
                 }),
+                #[cfg(feature = "candidate-write-backpressure-bench")]
+                write_backpressure: None,
             }
         }
         _ => panic!("unknown storage mode: {mode}"),
@@ -386,6 +411,8 @@ pub fn compaction_test_opts() -> MidgeOptions {
         memory_budget: None,
         cloud_write_policy: None,
         simulated_cloud_overrides: None,
+        #[cfg(feature = "candidate-write-backpressure-bench")]
+        write_backpressure: None,
     }
 }
 
@@ -404,6 +431,8 @@ pub fn manual_compaction_test_opts() -> MidgeOptions {
         memory_budget: None,
         cloud_write_policy: None,
         simulated_cloud_overrides: None,
+        #[cfg(feature = "candidate-write-backpressure-bench")]
+        write_backpressure: None,
     }
 }
 
@@ -422,5 +451,7 @@ pub fn durability_opts() -> MidgeOptions {
         memory_budget: None,
         cloud_write_policy: None,
         simulated_cloud_overrides: None,
+        #[cfg(feature = "candidate-write-backpressure-bench")]
+        write_backpressure: None,
     }
 }

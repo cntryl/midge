@@ -131,13 +131,15 @@ impl EventLoop {
     ) -> bool {
         (self.shutdown.shutting_down && !allow_during_shutdown)
             || self.state.is_memory_mode()
-            || self.actors.flush_actor.is_inflight()
-            || self.publication.publication_gate.is_active()
+            || (!self.actors.flush_actor.has_capacity()
+                && !self.state.has_due_immutable_flush_matching(|cf, id| {
+                    self.actors.flush_actor.owns_pipeline(cf, id)
+                }))
+            || (self.pipeline.inline_flush_worker && self.publication.publication_gate.is_active())
             || (!allow_during_shutdown && self.routing.pending_msg.is_some())
             || (!allow_during_shutdown
                 && self.cloud_maintenance_enabled()
-                && (self.cloud_maintenance_control_blocked()
-                    || (self.compaction_compute_owned() && !self.has_manual_flush_obligation())))
+                && self.cloud_maintenance_control_blocked())
     }
 
     pub(super) fn schedule_next_flush_worker_with_shutdown(&mut self, allow_during_shutdown: bool) {
@@ -151,7 +153,11 @@ impl EventLoop {
         if self.flush_start_blocked(allow_during_shutdown) {
             return;
         }
-        let Some(mut flush) = self.state.begin_next_immutable_flush() else {
+        let actor = &self.actors.flush_actor;
+        let Some(mut flush) = self
+            .state
+            .begin_next_immutable_flush_matching(|cf, id| actor.can_start_or_resume(cf, id))
+        else {
             return;
         };
         let Some((cf_id, _)) = self.state.immutable_flush_by_id(flush.flush_id) else {
@@ -165,6 +171,17 @@ impl EventLoop {
         };
         let (sst_name, sst_seq) = match self.ensure_flush_sst_identity(identity) {
             Ok(identity) => identity,
+            Err(crate::common::MidgeError::Busy(_))
+                if self.actors.cloud_coordinator.metadata_mirror.is_running() =>
+            {
+                // Reservation owns its own completion. Retain the immutable
+                // and original flush waiters until its exact name is covered.
+                if let Some((_, current)) = self.state.immutable_flush_by_id_mut(flush.flush_id) {
+                    current.phase = ImmutableFlushPhase::Queued;
+                }
+                self.actors.cloud_coordinator.metadata_mirror.pending_flush = Some(flush.flush_id);
+                return;
+            }
             Err(error) => {
                 self.fail_flush_pipeline(flush.flush_id, None, &error);
                 return;
@@ -226,8 +243,8 @@ impl EventLoop {
             );
             return;
         };
-        // The worker's result is installed onto the in-memory manifest, so
-        // memory must be current before another publication starts (#500).
+        // The loop later validates and applies the returned edit to its live
+        // manifest. The worker only finalizes/uploads its owned SST.
         if let Err(error) = self.state.retry_metadata_reload() {
             self.fail_flush_pipeline(flush.flush_id, build.reservation, &error);
             return;
@@ -236,10 +253,11 @@ impl EventLoop {
             crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
                 flush_id: flush.flush_id,
             };
-        if !self
-            .publication
-            .publication_gate
-            .try_acquire(publication_owner.clone())
+        if self.pipeline.inline_flush_worker
+            && !self
+                .publication
+                .publication_gate
+                .try_acquire(publication_owner.clone())
         {
             if let Some((_, current)) = self.state.immutable_flush_by_id_mut(flush.flush_id) {
                 current.phase = ImmutableFlushPhase::Queued;
@@ -288,6 +306,56 @@ impl EventLoop {
         &mut self,
         result: FlushWorkerResult,
     ) {
+        let identity = result.identity();
+        #[cfg(test)]
+        let fixture = self.pipeline.inline_flush_worker
+            && !self.actors.flush_actor.has_pipeline(identity.flush_id);
+        #[cfg(not(test))]
+        let fixture = false;
+        if !fixture && !self.actors.flush_actor.completion_is_ready(&result) {
+            tracing::debug!(flush_id = identity.flush_id, "ignored unowned flush result");
+            return;
+        }
+        let owner = crate::runtime::event_loop::coordination::ManifestPublicationOwner::Flush {
+            flush_id: identity.flush_id,
+        };
+        let local_turn = !matches!(&result, FlushWorkerResult::Build(_));
+        let acquired_here = local_turn && !self.publication.publication_gate.is_owned_by(&owner);
+        if acquired_here && !self.publication.publication_gate.try_acquire(owner.clone()) {
+            // One terminal result per admitted physical phase; its pipeline
+            // retains capacity until this exact callback can take a local turn.
+            if !self
+                .pipeline
+                .deferred_flush_results
+                .iter()
+                .any(|held| held.identity().flush_id == identity.flush_id)
+            {
+                if !fixture {
+                    self.state.flush_metrics.publication_deferred_by_gate = self
+                        .state
+                        .flush_metrics
+                        .publication_deferred_by_gate
+                        .saturating_add(1);
+                }
+                self.pipeline.deferred_flush_results.push_back(result);
+            }
+            return;
+        }
+        if !self.actors.flush_actor.take_completion(&result) {
+            // Inline unit fixtures also exercise settlement without submitting
+            // a physical task. An existing owner always requires its terminal
+            // proof, including under Inline mode; production has no bypass.
+            if !fixture {
+                if acquired_here {
+                    self.publication.publication_gate.release(&owner);
+                }
+                tracing::debug!(
+                    flush_id = identity.flush_id,
+                    "ignored stale, duplicate or early flush worker completion"
+                );
+                return;
+            }
+        }
         let should_continue = match result {
             FlushWorkerResult::Build(completion) => self.handle_flush_build_completion(completion),
             FlushWorkerResult::Publish(completion) => {
@@ -297,6 +365,9 @@ impl EventLoop {
                 self.handle_flush_mirror_completion(completion)
             }
         };
+        if local_turn && !self.pipeline.inline_flush_worker {
+            self.publication.publication_gate.release(&owner);
+        }
         if !should_continue {
             return;
         }

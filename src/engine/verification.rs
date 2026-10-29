@@ -205,6 +205,9 @@ fn verify_manifest_sst(
         .map_err(|mismatch| MidgeError::Corruption(mismatch.to_string()))?;
 
     let reader = crate::sst::fs::SstFileIo::open(path, Arc::clone(fs)).map_err(|error| {
+        if matches!(error, MidgeError::CompatibilityError(_)) {
+            return error;
+        }
         MidgeError::Corruption(format!(
             "failed to open verified SST '{}': {error}",
             name.as_str()

@@ -73,7 +73,9 @@ pub(crate) mod hybrid;
 pub(crate) mod inventory;
 pub(crate) mod providers;
 mod write_receipt;
-pub use write_receipt::{StorageWriteReceipt, WriteReceiptCallback};
+pub(crate) use write_receipt::FILE_UPLOAD_PART_BYTES;
+pub use write_receipt::{StorageFileUpload, StorageWriteReceipt, WriteReceiptCallback};
+pub(crate) mod remote_block_cache;
 pub(crate) mod remote_sst;
 pub(crate) mod retained_callback;
 pub(crate) mod simulated;
@@ -328,6 +330,18 @@ pub enum StorageEvent {
     /// Cloud upload acknowledged - segment is now durable
     /// WAL Actor MUST apply pending writes to memtable on receipt
     CloudAck { segment_id: u64, max_sequence: u64 },
+    /// A runtime-owned cloud WAL publication worker has a terminal result.
+    /// The operation owner retains the typed result and applies it once.
+    CloudWalPublicationComplete {
+        operation_id: u64,
+        writer_epoch: u64,
+    },
+    /// A loop-owned metadata mirror has a terminal result. The typed result
+    /// stays with its operation owner until the matching completion is applied.
+    CloudMetadataMirrorComplete {
+        operation_id: u64,
+        writer_epoch: u64,
+    },
     /// Cloud upload attempt failed - segment NOT durable.
     ///
     /// `HybridStorage` keeps a failed WAL upload queued and retries it with
@@ -665,6 +679,21 @@ pub(crate) const SHARED_BODY_WRITE_PAYLOAD_COPIES: usize = 2;
 ///   content hash for HEAD, and stamps each new version with a later modified
 ///   time so a reused inode cannot repeat an old identity (#557).
 pub trait StorageBackend: Send + Sync + 'static {
+    fn supports_file_upload(&self) -> bool {
+        false
+    }
+
+    fn submit_file_write_receipt_request(
+        &self,
+        _request: StorageRequest,
+        _source: StorageFileUpload,
+        callback: WriteReceiptCallback,
+    ) {
+        let _ = callback.send(Err(StorageError::protocol(
+            "backend has no conditional streaming upload capability",
+        )));
+    }
+
     /// Copies of an upload's payload the write path may hold at once: the
     /// submitted body and any provider or transport staging. The caller's
     /// source bytes and fixed, bounded request/response buffers are extra.

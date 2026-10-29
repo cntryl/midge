@@ -23,9 +23,9 @@ pub(super) fn open(opts: OpenOptions, budget: Duration) -> MidgeResult<Engine> {
             "open timeout cannot be represented at startup".into(),
         ));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "failpoints"))]
     let mut test_control = super::test_control::take();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "failpoints"))]
     let deadline = if test_control
         .as_ref()
         .is_some_and(|control| control.expire.is_some())
@@ -35,7 +35,7 @@ pub(super) fn open(opts: OpenOptions, budget: Duration) -> MidgeResult<Engine> {
         deadline
     };
     let scope = DeadlineScope::new(deadline);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "failpoints"))]
     let test_expire = test_control
         .as_mut()
         .and_then(|control| control.expire.take());
@@ -46,21 +46,24 @@ pub(super) fn open(opts: OpenOptions, budget: Duration) -> MidgeResult<Engine> {
     let worker_scope = scope.clone();
     let caller_dispatch = tracing::dispatcher::get_default(Clone::clone);
     let caller_span = tracing::Span::current();
+    let failpoint_gate = crate::failpoints::worker_gate();
     std::thread::Builder::new()
         .name("midge-startup".into())
         .spawn(move || {
-            #[cfg(test)]
-            let _observation = super::test_control::enter_worker(test_control);
-            tracing::dispatcher::with_default(&caller_dispatch, || {
-                caller_span.in_scope(|| {
-                    run_worker(
-                        &opts,
-                        &worker_scope,
-                        start,
-                        &worker_slot,
-                        &ready_tx,
-                        &decision_rx,
-                    );
+            failpoint_gate.run(|| {
+                #[cfg(any(test, feature = "failpoints"))]
+                let _observation = super::test_control::enter_worker(test_control);
+                tracing::dispatcher::with_default(&caller_dispatch, || {
+                    caller_span.in_scope(|| {
+                        run_worker(
+                            &opts,
+                            &worker_scope,
+                            start,
+                            &worker_slot,
+                            &ready_tx,
+                            &decision_rx,
+                        );
+                    });
                 });
             });
         })
@@ -68,12 +71,12 @@ pub(super) fn open(opts: OpenOptions, budget: Duration) -> MidgeResult<Engine> {
             MidgeError::ResourceLimit(format!("cannot spawn startup worker: {error}"))
         })?;
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "failpoints"))]
     let readiness = match test_expire {
         Some(expire) => super::test_control::controlled_readiness(&ready_rx, &expire, &scope)?,
         None => ready_rx.recv_timeout(scope.clamp(Duration::MAX)),
     };
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "failpoints")))]
     let readiness = ready_rx.recv_timeout(scope.clamp(Duration::MAX));
     match readiness {
         Ok(()) => accept_ready(&slot, &scope, &decision_tx, start),

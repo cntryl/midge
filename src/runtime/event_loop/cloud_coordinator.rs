@@ -11,11 +11,22 @@ pub(in crate::runtime) struct CloudCoordinator {
     pub(super) cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
     pub(super) provider_ddl_fencing: bool,
     pub(super) cloud_wal: CloudWalUploadTracker,
+    pub(super) cloud_publication:
+        super::cloud_integration::publication_worker::CloudPublicationPipeline,
+    pub(super) metadata_mirror: super::metadata_mirror::MetadataMirrorPipeline,
     pub(super) cloud_wal_prune_worker: Option<std::thread::JoinHandle<()>>,
     pub(super) cloud_maintenance: CloudMaintenance,
 }
 
 impl CloudCoordinator {
+    pub(super) fn held_uploads(&self) -> crate::storage::hybrid::backend::HeldUploads {
+        let mut held = self.cloud_wal.held_uploads();
+        let verification = self.cloud_publication.held_uploads();
+        held.entries = held.entries.saturating_add(verification.entries);
+        held.bytes = held.bytes.saturating_add(verification.bytes);
+        held
+    }
+
     pub(super) fn new(config: &crate::runtime::RuntimeConfig) -> Self {
         Self {
             hybrid_storage: None,
@@ -27,6 +38,9 @@ impl CloudCoordinator {
                 config.retry_policy,
             ),
             cloud_wal_prune_worker: None,
+            cloud_publication:
+                super::cloud_integration::publication_worker::CloudPublicationPipeline::default(),
+            metadata_mirror: super::metadata_mirror::MetadataMirrorPipeline::default(),
             cloud_maintenance: CloudMaintenance::default(),
         }
     }

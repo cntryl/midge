@@ -11,6 +11,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+const LOCAL_STORAGE_BYTES: u64 = 2 * 1024 * 1024;
+const TRANSACTION_POOL_BYTES: usize = 128 * 1024;
+
 struct ControlledClock(AtomicU64);
 impl Clock for ControlledClock {
     fn now_millis(&self) -> u64 {
@@ -90,6 +94,96 @@ fn sst_files(engine: &Engine) -> Vec<String> {
         .collect()
 }
 
+fn assert_only_flushed_wal_blocks_staging(
+    metrics: &cntryl_midge::RuntimeMetricsSnapshot,
+    cf: &ColumnFamilyHandle,
+) -> cntryl_midge::StorageAdmissionBlock {
+    let local = metrics.local_storage.expect("cloud disk ledger");
+    let blocked = local
+        .blocked_admission
+        .expect("staging admission rejection");
+    assert_eq!(
+        blocked.operation,
+        cntryl_midge::StorageAdmissionKind::Compaction
+    );
+    assert_eq!(
+        blocked.reason,
+        cntryl_midge::StorageAdmissionReason::LocalCapacity
+    );
+    assert!(blocked.requested_bytes > blocked.free_bytes_at_rejection);
+    assert_eq!(
+        local.total_committed_bytes, local.usage.wal_bytes,
+        "{local:?}"
+    );
+    assert_eq!(
+        local.total_committed_bytes + local.free_bytes,
+        local.max_local_bytes
+    );
+    assert_eq!(
+        [
+            local.usage.transaction_spill_bytes,
+            local.usage.resident_sst_bytes,
+            local.usage.startup_residue_bytes,
+            local.usage.flush_staging_reserved_bytes,
+            local.usage.flush_headroom_reserved_bytes,
+            local.usage.compaction_staging_reserved_bytes,
+            local.usage.wal_headroom_reserved_bytes,
+        ],
+        [0; 7],
+        "only acknowledged WAL may delay staging: {local:?}"
+    );
+    assert_eq!(metrics.wal_pending_writes, 0);
+    assert_eq!(metrics.total_memtable_bytes, 0);
+    assert_eq!(metrics.active_compactions, 0);
+    assert_eq!(metrics.flush_inflight, 0);
+    assert!(metrics.wal_cloud_durable_seq >= metrics.current_sequence);
+    assert!(metrics.manifest_flush_frontiers.get(&cf.id()).is_some_and(
+        |frontier| frontier.is_some_and(|through| through >= metrics.current_sequence)
+    ));
+    blocked
+}
+
+fn compact_after_flushed_wal_retires(engine: &Engine, cf: &ColumnFamilyHandle, round: usize) {
+    let Err(error) = engine.compact_all() else {
+        return;
+    };
+    assert!(
+        matches!(&error, MidgeError::WriteStall(message)
+            if message == "local compaction staging budget unavailable: RejectNoSpace"),
+        "snapshot rewrite round {round}: {error}"
+    );
+    let before = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("retirement metrics");
+    let blocked = assert_only_flushed_wal_blocks_staging(&before, cf);
+    let initial = before.local_storage.unwrap();
+    // Retirement may finish between the rejection and its metrics response.
+    // The rejection records the occupied bytes at that exact admission point.
+    let blocked_wal = initial.max_local_bytes - blocked.free_bytes_at_rejection;
+    assert!(initial.usage.wal_bytes <= blocked_wal);
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        // Metrics requests leave ordinary runtime fairness/retirement active.
+        // Retry only after the measured blocking WAL charge actually decreases.
+        let current = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("retirement progress");
+        let local = current.local_storage.expect("cloud disk ledger");
+        assert_eq!(current.current_sequence, before.current_sequence);
+        assert_eq!(local.total_committed_bytes, local.usage.wal_bytes);
+        if local.usage.wal_bytes < blocked_wal && local.free_bytes >= blocked.requested_bytes {
+            break;
+        }
+        assert!(Instant::now() < until, "WAL did not retire: {local:?}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    engine
+        .compact_all()
+        .expect("one retry after verified WAL retirement");
+}
+
 fn rewrite_rows_under_snapshot(
     engine: &Engine,
     cf: &ColumnFamilyHandle,
@@ -117,7 +211,7 @@ fn rewrite_rows_under_snapshot(
             .expect("bounded mixed transaction fits the cloud staging window");
         expected = candidate;
         engine.flush_cf(cf).unwrap();
-        engine.compact_all().unwrap();
+        compact_after_flushed_wal_retires(engine, cf, round);
         assert_exact(old, initial);
         let current = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
         assert_exact(&current, &expected);
@@ -129,7 +223,7 @@ fn exhaust_spill_capacity(
     engine: &Engine,
     cf: &ColumnFamilyHandle,
     directory: &Path,
-) -> Transaction {
+) -> (Transaction, u64) {
     let mut hog = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
         .unwrap();
@@ -150,15 +244,78 @@ fn exhaust_spill_capacity(
         }
     }
     assert!(spill_boundary, "must exhaust actual spill capacity");
+    let spill_charge = assert_spill_budget_pressure(engine, directory);
+    (hog, spill_charge)
+}
+
+fn assert_spill_budget_pressure(engine: &Engine, directory: &Path) -> u64 {
     let spill_bytes = std::fs::read_dir(directory.join("txn"))
         .unwrap()
         .map(|entry| entry.unwrap().metadata().unwrap().len())
         .sum::<u64>();
+    let local = engine
+        .metrics()
+        .get_runtime_metrics()
+        .unwrap()
+        .local_storage
+        .expect("cloud disk ledger at spill rejection");
+    eprintln!("measured spill bytes={spill_bytes}; local storage={local:?}");
     assert!(
-        spill_bytes > 1536 * 1024,
-        "actual caller-owned spill files must consume most of the 2 MiB local budget"
+        spill_bytes > u64::try_from(TRANSACTION_POOL_BYTES).unwrap(),
+        "real spill files must exceed the resident transaction pool: {spill_bytes}"
     );
-    hog
+    let blocked = local
+        .blocked_admission
+        .expect("actual spill admission failure");
+    assert_eq!(
+        blocked.operation,
+        cntryl_midge::StorageAdmissionKind::TransactionSpill
+    );
+    assert_eq!(
+        blocked.reason,
+        cntryl_midge::StorageAdmissionReason::LocalCapacity
+    );
+    assert!(blocked.requested_bytes > blocked.free_bytes_at_rejection);
+    assert!(blocked.requested_bytes <= local.max_local_bytes);
+    assert_eq!(local.max_local_bytes, LOCAL_STORAGE_BYTES);
+    let usage = local.usage;
+    assert!(usage.transaction_spill_bytes >= spill_bytes);
+    assert_eq!(
+        local.total_committed_bytes,
+        [
+            usage.wal_bytes,
+            usage.transaction_spill_bytes,
+            usage.resident_sst_bytes,
+            usage.startup_residue_bytes,
+            usage.flush_staging_reserved_bytes,
+            usage.flush_headroom_reserved_bytes,
+            usage.compaction_staging_reserved_bytes,
+            usage.wal_headroom_reserved_bytes,
+        ]
+        .into_iter()
+        .sum::<u64>(),
+        "every shared disk charge is accounted: {local:?}"
+    );
+    assert_eq!(
+        local.total_committed_bytes + local.free_bytes,
+        LOCAL_STORAGE_BYTES
+    );
+    usage.transaction_spill_bytes
+}
+
+fn assert_spill_capacity_released(engine: &Engine, directory: &Path, released: u64) {
+    assert_eq!(std::fs::read_dir(directory.join("txn")).unwrap().count(), 0);
+    let local = engine
+        .metrics()
+        .get_runtime_metrics()
+        .unwrap()
+        .local_storage
+        .expect("cloud disk ledger after spill owner drops");
+    assert_eq!(local.usage.transaction_spill_bytes, 0, "{local:?}");
+    assert!(
+        local.free_bytes >= released,
+        "released spill capacity returns: {local:?}"
+    );
 }
 
 fn assert_rejects_write_under_pressure(engine: &Engine, cf: &ColumnFamilyHandle) {
@@ -254,10 +411,10 @@ fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
     let clock = Arc::new(ControlledClock(AtomicU64::new(10_000)));
     let options = OpenOptions::cloud_simulated(directory.path(), "bucket", "snapshot-pressure")
         .memory_budget(MemoryBudget::Bytes(16 * 1024 * 1024))
-        .local_storage_budget(2 * 1024 * 1024)
+        .local_storage_budget(LOCAL_STORAGE_BYTES)
         .with_memtable_size_limit(256 * 1024)
         .with_memtable_flush_threshold(256 * 1024)
-        .transaction_memory_pool_size(128 * 1024)
+        .transaction_memory_pool_size(TRANSACTION_POOL_BYTES)
         .ttl_clock(clock.clone())
         .background_compaction(false)
         .storage_io_timeout(Duration::from_secs(2))
@@ -286,13 +443,14 @@ fn should_preserve_snapshot_isolation_when_spill_pressure_is_released() {
 
     // Act: consume real caller-owned spill capacity while the old snapshot lives.
     let mut expected = rewrite_rows_under_snapshot(&engine, &cf, &old, &initial);
-    let hog = exhaust_spill_capacity(&engine, &cf, directory.path());
+    let (hog, spill_charge) = exhaust_spill_capacity(&engine, &cf, directory.path());
     assert_rejects_write_under_pressure(&engine, &cf);
     assert_exact(&old, &initial);
     let current = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
     assert_exact(&current, &expected);
     drop(current);
     drop(hog);
+    assert_spill_capacity_released(&engine, directory.path(), spill_charge);
     let mut resumed = engine
         .begin_tx(cf.id(), TransactionMode::ReadWrite)
         .unwrap();

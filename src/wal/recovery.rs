@@ -35,6 +35,18 @@ struct ReplayFile {
     expect: Expectation,
 }
 
+impl ReplayFile {
+    fn validate_open_end(&self, valid_bytes: u64) -> MidgeResult<()> {
+        let durable_bytes = match &self.expect {
+            Expectation::Member { member, .. } if self.kind == ReplayFileKind::FinalActive => {
+                member.durable_bytes
+            }
+            Expectation::Member { .. } | Expectation::Published(_) => None,
+        };
+        validate_sync_floor(valid_bytes, durable_bytes)
+    }
+}
+
 /// The WAL files one replay reads: sealed segments, oldest first, every
 /// frame of which must be whole and which end in their footer, then at most
 /// one open segment, replayed last, whose incomplete tail is a write the
@@ -134,7 +146,7 @@ impl ReplaySegments {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReplayErrorAction {
+pub(crate) enum ReplayErrorAction {
     TolerateFinalActiveTail,
     SalvageVerifiedPrefix,
     Fail,
@@ -196,6 +208,18 @@ pub(crate) struct VerifiedWalPrefix {
 }
 
 impl VerifiedWalPrefix {
+    /// A complete inspection ending below the persisted sync floor has lost
+    /// acknowledged bytes even when its EOF falls exactly between frames.
+    pub(crate) fn require_sync_floor(
+        self,
+        durable_bytes: Option<u64>,
+    ) -> Result<Self, WalPrefixInspectionFailure> {
+        match validate_sync_floor(self.valid_bytes as u64, durable_bytes) {
+            Ok(()) => Ok(self),
+            Err(error) => Err(wal_prefix_failure(self, error.into())),
+        }
+    }
+
     /// The greatest sequence the verified records hold, or zero.
     pub(crate) fn max_sequence(&self) -> u64 {
         self.scan
@@ -264,14 +288,57 @@ fn replay_error_action(
     replay_file: &ReplayFile,
     replay_policy: ReplayPolicy,
     failure: &ReplayFailure,
+    valid_bytes: u64,
 ) -> ReplayErrorAction {
-    if replay_file.kind == ReplayFileKind::FinalActive && failure.is_incomplete_tail() {
-        ReplayErrorAction::TolerateFinalActiveTail
+    if replay_file.kind == ReplayFileKind::FinalActive {
+        let durable_bytes = match &replay_file.expect {
+            Expectation::Member { member, .. } => member.durable_bytes,
+            Expectation::Published(_) => None,
+        };
+        open_tail_action(
+            durable_bytes,
+            valid_bytes,
+            failure.is_incomplete_tail(),
+            failure.error(),
+            replay_policy,
+        )
     } else if replay_policy == ReplayPolicy::SalvageValidPrefix && failure.error().is_salvageable()
     {
         ReplayErrorAction::SalvageVerifiedPrefix
     } else {
         ReplayErrorAction::Fail
+    }
+}
+
+/// Classify open-segment damage against independent persisted sync evidence.
+/// Both local replay and cloud planning use this rule. Damage below a floor
+/// can only be salvaged; only a verified unsynced tail may be tolerated.
+pub(crate) fn open_tail_action(
+    durable_bytes: Option<u64>,
+    valid_bytes: u64,
+    incomplete_tail: bool,
+    error: &MidgeError,
+    policy: ReplayPolicy,
+) -> ReplayErrorAction {
+    if !error.is_salvageable() {
+        return ReplayErrorAction::Fail;
+    }
+    if durable_bytes.map_or(incomplete_tail, |floor| valid_bytes >= floor) {
+        ReplayErrorAction::TolerateFinalActiveTail
+    } else if policy == ReplayPolicy::SalvageValidPrefix {
+        ReplayErrorAction::SalvageVerifiedPrefix
+    } else {
+        ReplayErrorAction::Fail
+    }
+}
+
+fn validate_sync_floor(valid_bytes: u64, durable_bytes: Option<u64>) -> MidgeResult<()> {
+    if durable_bytes.is_some_and(|floor| valid_bytes < floor) {
+        Err(MidgeError::Corruption(
+            "open WAL ends below its persisted fsync boundary".into(),
+        ))
+    } else {
+        Ok(())
     }
 }
 

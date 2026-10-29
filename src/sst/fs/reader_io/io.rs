@@ -70,13 +70,16 @@ impl SstFileIo {
             }
             Self::validate_block_handle(*handle, self.block_region_end, "data")?;
             let block = self.read_block(handle)?;
-            for entry in self.scan_block_entries_from_bytes(&block)? {
+            let decoded = self.decode_scan_block(&block)?;
+            for index in 0..decoded.len() {
                 if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
                     return Err(MidgeError::Timeout(
                         "SST verification deadline expired".into(),
                     ));
                 }
+                let entry = decoded.entry(index);
                 summary.observe(file_size, &entry.key, entry.sequence, None)?;
+                summary.observe_expiration(entry.expiration);
             }
         }
 
@@ -134,53 +137,35 @@ impl SstFileIo {
         let metadata = self.fs.metadata(&self.path).map_err(FsError::into_midge)?;
         let file_size = metadata.len;
 
-        let footer_size = u64::try_from(SST_FOOTER_SIZE).expect("V4 footer size fits u64");
-        let file = self
-            .fs
-            .open(
-                &self.path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
-            .map_err(FsError::into_midge)?;
-        if file_size < footer_size {
-            if file_size >= 8
-                && file
-                    .read_at(file_size - 8, 8)
-                    .map_err(FsError::into_midge)?
-                    .as_ref()
-                    .eq(&SST_FOOTER_MAGIC.to_le_bytes())
-            {
-                return Err(MidgeError::CompatibilityError(
-                    "legacy SST V1-V3 is unsupported; this build requires V4".into(),
-                ));
-            }
-            return Err(MidgeError::Corruption(format!(
-                "SST is too short for the {SST_FOOTER_SIZE}-byte V4 footer"
-            )));
-        }
-        let footer_offset = file_size - footer_size;
-        let footer_data = file
-            .read_at(footer_offset, footer_size)
-            .map_err(FsError::into_midge)?;
-        let footer = match Footer::decode(&footer_data) {
-            Ok(footer) => footer,
-            Err(error) => {
-                let trailing_magic = file
-                    .read_at(file_size.saturating_sub(8), 8)
-                    .map_err(FsError::into_midge)?;
-                if trailing_magic.as_ref() == SST_FOOTER_MAGIC.to_le_bytes() {
-                    return Err(MidgeError::CompatibilityError(
-                        "legacy SST V1-V3 is unsupported; this build requires V4".into(),
-                    ));
-                }
-                return Err(error);
-            }
+        let footer_size = u64::try_from(SST_FOOTER_SIZE).expect("V5 footer size fits u64");
+        let read_only = crate::io::OpenOptions {
+            mode: crate::io::OpenMode::ReadOnly,
+            create: false,
+            create_new: false,
+            truncate: false,
         };
+        // One owned handle serves this reader for its lifetime (#919); a
+        // backend without owned handles falls back to opening per read.
+        self.handle =
+            match crate::io::open_persistent_handle(self.fs.as_ref(), &self.path, read_only) {
+                Ok(handle) => Some(handle),
+                Err(FsError::Unsupported(_)) => None,
+                Err(error) => return Err(error.into_midge()),
+            };
+        let footer = {
+            let transient;
+            let file: &dyn File = if let Some(handle) = &self.handle {
+                handle.as_ref()
+            } else {
+                transient = self
+                    .fs
+                    .open(&self.path, read_only)
+                    .map_err(FsError::into_midge)?;
+                transient.as_ref()
+            };
+            Self::read_footer(file, file_size, footer_size)?
+        };
+        let footer_offset = file_size - footer_size;
         self.block_region_end = footer_offset;
         Self::validate_block_handle(footer.meta_index_handle, footer_offset, "metadata")?;
         Self::validate_block_handle(footer.index_handle, footer_offset, "index")?;
@@ -190,7 +175,6 @@ impl SstFileIo {
         if let Some(handle) = footer.block_bloom_handle {
             Self::validate_block_handle(handle, footer_offset, "block bloom")?;
         }
-        drop(file);
         self.footer = Some(footer);
         self.load_sst_metadata()?;
         self.load_block_bloom()?;
@@ -207,6 +191,43 @@ impl SstFileIo {
         Ok(())
     }
 
+    /// Decode the V5 footer at the end of `file`, naming legacy formats.
+    fn read_footer(file: &dyn File, file_size: u64, footer_size: u64) -> MidgeResult<Footer> {
+        if file_size < footer_size {
+            if file_size >= 8
+                && file
+                    .read_at(file_size - 8, 8)
+                    .map_err(FsError::into_midge)?
+                    .as_ref()
+                    .eq(&SST_FOOTER_MAGIC.to_le_bytes())
+            {
+                return Err(MidgeError::CompatibilityError(
+                    "legacy SST V1-V4 is unsupported; this build requires V5".into(),
+                ));
+            }
+            return Err(MidgeError::Corruption(format!(
+                "SST is too short for the {SST_FOOTER_SIZE}-byte V5 footer"
+            )));
+        }
+        let footer_data = file
+            .read_at(file_size - footer_size, footer_size)
+            .map_err(FsError::into_midge)?;
+        match Footer::decode(&footer_data) {
+            Ok(footer) => Ok(footer),
+            Err(error) => {
+                let trailing_magic = file
+                    .read_at(file_size.saturating_sub(8), 8)
+                    .map_err(FsError::into_midge)?;
+                if trailing_magic.as_ref() == SST_FOOTER_MAGIC.to_le_bytes() {
+                    return Err(MidgeError::CompatibilityError(
+                        "legacy SST V1-V4 is unsupported; this build requires V5".into(),
+                    ));
+                }
+                Err(error)
+            }
+        }
+    }
+
     fn load_sst_metadata(&mut self) -> MidgeResult<()> {
         let Some(footer) = self.footer.clone() else {
             return Ok(());
@@ -215,7 +236,7 @@ impl SstFileIo {
         let metadata_bytes = self.read_metadata_block(&footer.meta_index_handle, "SST metadata")?;
         if metadata_bytes.is_empty() {
             return Err(MidgeError::Corruption(
-                "SST V4 metadata block is empty".into(),
+                "SST V5 metadata block is empty".into(),
             ));
         }
 
@@ -239,6 +260,10 @@ impl SstFileIo {
             }
             _ => Vec::new(),
         };
+        self.range_tombstone_index =
+            crate::memtable::range_tombstone_index::FragmentedRangeTombstones::build(
+                &self.range_tombstones,
+            );
         self.trie_reader = match (self.index_kind, footer.trie_handle) {
             (IndexKind::Trie, Some(handle)) => {
                 let trie_bytes = self.read_metadata_block(&handle, "SST trie")?;
@@ -316,7 +341,7 @@ impl SstFileIo {
             handle.offset.checked_add(handle.size) != Some(self.block_region_end)
         }) {
             return Err(MidgeError::Corruption(
-                "SST block references do not exactly reach the V4 footer".into(),
+                "SST block references do not exactly reach the V5 footer".into(),
             ));
         }
         Ok(())
@@ -324,6 +349,9 @@ impl SstFileIo {
 
     pub(super) fn read_block(&self, handle: &BlockHandle) -> MidgeResult<bytes::Bytes> {
         Self::validate_block_handle(*handle, self.block_region_end, "referenced")?;
+        if let Some(file) = &self.handle {
+            return self.read_block_from(file.as_ref(), handle);
+        }
         let file = self
             .fs
             .open(
@@ -349,26 +377,29 @@ impl SstFileIo {
             return self.read_block(handle);
         };
 
-        let file = self
-            .fs
-            .open(
-                &self.path,
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadOnly,
-                    create: false,
-                    create_new: false,
-                    truncate: false,
-                },
-            )
-            .map_err(FsError::into_midge)?;
-        let (decoded, retained_reservation) = self.read_framed_block(
-            file.as_ref(),
-            handle,
-            Some((&budget, resource)),
-            |decoded_size| {
+        let (decoded, retained_reservation) = {
+            let transient;
+            let file: &dyn File = if let Some(owned) = &self.handle {
+                owned.as_ref()
+            } else {
+                transient = self
+                    .fs
+                    .open(
+                        &self.path,
+                        crate::io::OpenOptions {
+                            mode: crate::io::OpenMode::ReadOnly,
+                            create: false,
+                            create_new: false,
+                            truncate: false,
+                        },
+                    )
+                    .map_err(FsError::into_midge)?;
+                transient.as_ref()
+            };
+            self.read_framed_block(file, handle, Some((&budget, resource)), |decoded_size| {
                 budget.reserve(decoded_size.saturating_mul(4).saturating_add(256), resource)
-            },
-        )?;
+            })?
+        };
         // The decoded bytes are transient, but their decoded reader structure
         // remains live (index, filter, trie, or range tombstones). Keep this
         // conservative reservation with the reader for that parsed structure.
@@ -415,7 +446,7 @@ impl SstFileIo {
         result
     }
 
-    fn decode_framed_block<R>(
+    pub(super) fn decode_framed_block<R>(
         buffer: &[u8],
         reserve_decoded: impl FnOnce(usize) -> MidgeResult<R>,
     ) -> MidgeResult<(bytes::Bytes, R)> {
@@ -448,7 +479,7 @@ impl SstFileIo {
         let payload = &buffer[4..];
         if payload.len() < crate::codec::BLOCK_TRAILER_SIZE {
             return Err(MidgeError::Corruption(
-                "SST V4 block is too short for its mandatory trailer".into(),
+                "SST V5 block is too short for its mandatory trailer".into(),
             ));
         }
         Ok(payload)

@@ -1050,6 +1050,9 @@ struct S3ListContext {
 }
 
 impl ListPageParser for S3ListContext {
+    fn list_limit_parameter(&self) -> &'static str {
+        "max-keys"
+    }
     fn url(&self, prefix: &str, token: Option<&str>) -> String {
         let mut url = format!("{}?list-type=2&prefix={}", self.base_url, encode(prefix));
         if let Some(token) = token {
@@ -1338,6 +1341,57 @@ impl crate::storage::cloud::CloudReadCapability for S3Backend {
 }
 
 impl crate::storage::cloud::CloudWriteCapability for S3Backend {
+    fn supports_file_upload(&self) -> bool {
+        self.config.checksum_receipts
+    }
+
+    fn write_file_with_receipt(
+        &self,
+        key: &str,
+        source: crate::storage::StorageFileUpload,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        use base64::Engine as _;
+        if !self.config.checksum_receipts {
+            let _ = callback.send(CloudEvent::PutReceipt {
+                key: key.into(),
+                result: Err(CloudError::Protocol(
+                    "multipart checksum receipts are not enabled for this endpoint".into(),
+                )),
+            });
+            return;
+        }
+        if crate::storage::cloud::reject_exhausted_receipt(key, &options, &callback) {
+            return;
+        }
+        self.executor.spawn_file_upload(
+            crate::storage::cloud::multipart::FileUploadRequest {
+                key: key.into(),
+                url: self.object_url(key),
+                kind: crate::storage::cloud::multipart::FileUploadKind::S3,
+                source,
+                options,
+                error_mapper: Arc::new(|response, conditional| {
+                    s3_response_error(response, "S3 multipart", conditional)
+                }),
+                receipt_mapper: Arc::new(|response, size, checksum| {
+                    s3_write_receipt(
+                        response,
+                        size,
+                        checksum,
+                        &base64::engine::general_purpose::STANDARD.encode(checksum.to_be_bytes()),
+                    )
+                }),
+            },
+            callback,
+        );
+    }
+
+    fn set_retry_policy(&self, policy: crate::storage::cloud::CloudRetryPolicy) {
+        self.executor.set_retry_policy(policy);
+    }
+
     fn write_payload_copies(&self) -> usize {
         crate::storage::SHARED_BODY_WRITE_PAYLOAD_COPIES
     }
@@ -1524,6 +1578,25 @@ impl crate::storage::cloud::CloudDeleteCapability for S3Backend {
 }
 
 impl crate::storage::cloud::CloudListCapability for S3Backend {
+    fn list_page(
+        &self,
+        prefix: &str,
+        page: crate::storage::cloud::CloudListPageRequest,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: crate::storage::cloud::CloudListPageCallback,
+    ) {
+        super::rest::submit_list_page(
+            &self.executor,
+            S3ListContext {
+                base_url: self.base_url(),
+            },
+            prefix,
+            page,
+            options,
+            callback,
+        );
+    }
+
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.submit_list_with_headers(prefix, Vec::new(), callback);
     }

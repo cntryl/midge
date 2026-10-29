@@ -32,6 +32,7 @@ mod flush_pipeline;
 mod gc;
 mod groups;
 mod manifest;
+mod memtable_apply;
 mod metadata_mirror;
 mod read_path;
 mod resources;
@@ -39,8 +40,10 @@ mod scheduler;
 mod shutdown;
 mod snapshot;
 mod sst_names;
+mod validation;
 mod verification;
 mod wal;
+mod wal_pipeline;
 mod wal_retention;
 mod wal_transition;
 mod write_batch;
@@ -94,7 +97,7 @@ use super::actors::{CompactionActor, FlushActor, GcActor, ManifestActor, WalActo
 use super::durability::DurabilityCoordinator;
 use super::read_resources::ReadResources;
 use super::read_snapshot::ReadSnapshot;
-use super::snapshot_cache::{CfSnapshotData, PublishedSnapshot, SnapshotCache};
+use super::snapshot_cache::SnapshotCache;
 use super::state::RuntimeState;
 use super::{MetadataPublicationLock, ResponseRouter, RuntimeMsg, RuntimeResponse};
 use crate::runtime::actors::compaction::publication::{
@@ -191,14 +194,21 @@ struct PublicationCoordination {
     verification_barrier: VerificationBarrier,
     publication_gate: ManifestPublicationGate,
     compaction_publish_result_rx: crossbeam::channel::Receiver<CompactionPublishCompletion>,
+    deferred_compaction_result: Option<CompactionPublishCompletion>,
     compaction_publication: compaction::PublicationSlot<compaction::PendingCompactionPublication>,
     flush_barrier_waiters: HashMap<crate::types::ColumnFamilyId, Vec<flush::FlushBarrierWaiter>>,
 }
 
 struct PipelineCoordination {
+    wal_commits: wal_pipeline::WalCommitPipeline,
+    memtable_apply: memtable_apply::MemtableApplyCoordinator,
+    validation: validation::ValidationCoordinator,
     durability: DurabilityCoordinator,
     wal_transition: crate::runtime::wal_transition::WalTransitionProtocol,
+    pending_cloud_seal: Option<cloud_integration::sealing::PendingCloudSeal>,
     flush_worker_result_rx: crossbeam::channel::Receiver<FlushWorkerResult>,
+    deferred_flush_results: std::collections::VecDeque<FlushWorkerResult>,
+    pending_flush_mirrors: std::collections::VecDeque<flush_pipeline::PendingFlushMirror>,
     inline_flush_worker: bool,
     background_compaction_schedule: crate::runtime::retry_schedule::RetrySchedule,
     worker_msg_tx: Option<crossbeam::channel::Sender<RuntimeMsg>>,
@@ -229,6 +239,10 @@ struct EventLoopDiagnostics {
 /// Owns all actors and is responsible for routing inbound messages.
 pub struct EventLoop {
     state: RuntimeState,
+    observed_frontiers: Arc<crate::runtime::frontiers::ObservedDurabilityFrontiers>,
+    observed_pending_cloud_uploads: Arc<crate::runtime::frontiers::ObservedPendingCloudUploads>,
+    published_frontiers: crate::types::DurabilityFrontiersSnapshot,
+    published_pending_cloud_uploads: usize,
     actors: EventLoopActors,
     routing: RequestRouting,
     publication: PublicationCoordination,
@@ -260,16 +274,47 @@ impl EventLoop {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new(
-        mut state: RuntimeState,
+        state: RuntimeState,
         trace_enabled: bool,
         router: Arc<ResponseRouter>,
         config: super::RuntimeConfig,
         flush_worker_mode: FlushWorkerMode,
     ) -> crate::common::MidgeResult<Self> {
-        // Before anything reads the ledger or admits work (#843): the
-        // recovered tail is sealed durably, and sequences an earlier process
-        // reserved are never handed out again.
+        let observed_frontiers =
+            Arc::new(crate::runtime::frontiers::ObservedDurabilityFrontiers::new(
+                crate::types::DurabilityFrontiersSnapshot {
+                    current_sequence: state.sequence,
+                    wal_local_durable_seq: state.wal.frontiers.local_durable(),
+                    wal_cloud_durable_seq: state.wal.frontiers.cloud_durable(),
+                },
+            ));
+        let observed_pending_cloud_uploads =
+            Arc::new(crate::runtime::frontiers::ObservedPendingCloudUploads::new(
+                state.cloud.pending_uploads.len(),
+            ));
+        Self::new_with_observed_frontiers(
+            state,
+            trace_enabled,
+            router,
+            config,
+            flush_worker_mode,
+            observed_frontiers,
+            observed_pending_cloud_uploads,
+        )
+    }
+
+    pub(crate) fn new_with_observed_frontiers(
+        mut state: RuntimeState,
+        trace_enabled: bool,
+        router: Arc<ResponseRouter>,
+        config: super::RuntimeConfig,
+        flush_worker_mode: FlushWorkerMode,
+        observed_frontiers: Arc<crate::runtime::frontiers::ObservedDurabilityFrontiers>,
+        observed_pending_cloud_uploads: Arc<crate::runtime::frontiers::ObservedPendingCloudUploads>,
+    ) -> crate::common::MidgeResult<Self> {
+        // Seal the recovered tail before admission so reserved sequences are never reused (#843).
         let sealed_tail = state.begin_wal_epoch(config.writer_epoch)?;
         let (inline_flush_worker, worker_msg_tx) = (
             flush_worker_mode.is_inline(),
@@ -277,40 +322,40 @@ impl EventLoop {
         );
         let (memory_mode, initial_segment_id) = (state.is_memory_mode(), state.wal.open_segment());
         let recovered_cloud_wal = RecoveredCloudWalConfig::with_sealed_tail(&config, sealed_tail);
-        Self::apply_runtime_state_config(&mut state, &config);
+        Self::apply_runtime_state_config(&mut state, &config)?;
 
         let resources = resources::assemble_sst_resources(&state, memory_mode, &config);
         let sst_factory = resources.factory;
         let read_resources = resources.reads;
         state.writer_epoch = config.writer_epoch;
+        state
+            .sst_names
+            .startup_floor_epoch
+            .get_or_insert(config.writer_epoch);
         let (flush_completion_tx, flush_worker_result_rx) =
             crossbeam::channel::unbounded::<FlushWorkerResult>();
         let (compaction_publish_actor, compaction_publish_result_rx) =
             Self::create_compaction_publish_actor(inline_flush_worker)?;
 
         // Create actors - they handle memory_mode internally
-        let flush_actor = FlushActor::new_with_memory_limit(
-            Arc::clone(&state.fs),
+        let flush_actor = FlushActor::new_with_worker_count(
+            &state.fs,
             memory_mode,
-            config.compression_policy.clone(),
-            flush_completion_tx,
+            &config.compression_policy,
+            &flush_completion_tx,
             config.flush_memory_limit,
+            state.write_pressure.admission.limiter().as_ref(),
+            config.flush_concurrency,
         )?;
-        let mut wal_actor = WalActor::open(
-            &state,
-            config.wal_durability_policy,
-            config.wal_batch_config,
-            config.writer_epoch,
-            config.storage_io_timeout,
-        )?;
-
-        Self::configure_wal_actor(&state, &mut wal_actor, &config, read_resources.as_ref());
+        let wal_actor =
+            Self::open_and_configure_wal_actor(&state, &config, read_resources.as_ref())?;
 
         // CloudAsync waiters are keyed by segment id. Local waiters start at
         // generation zero; the durability coordinator is the sole owner of
         // that logical generation.
         let mut gc_actor = GcActor::with_retry_policy(config.retry_policy);
         gc_actor.set_retry_notifier(worker_msg_tx.clone());
+        gc_actor.set_metadata_publication_lock(config.metadata_publication_lock.clone());
         let durability =
             Self::create_durability_coordinator(&wal_actor, initial_segment_id, &config);
         let mut background_compaction_schedule = crate::runtime::retry_schedule::RetrySchedule::new(
@@ -318,11 +363,20 @@ impl EventLoop {
         );
         background_compaction_schedule.defer();
 
+        let grandparent_overlap_rolls = state.diagnostics.grandparent_overlap_roll_counter();
         let mut event_loop = Self {
             state,
+            observed_frontiers,
+            observed_pending_cloud_uploads,
+            published_frontiers: crate::types::DurabilityFrontiersSnapshot::default(),
+            published_pending_cloud_uploads: 0,
             actors: EventLoopActors {
                 flush_actor,
-                compaction_actor: Self::create_compaction_actor(sst_factory, &config),
+                compaction_actor: Self::create_compaction_actor(
+                    sst_factory,
+                    &config,
+                    grandparent_overlap_rolls,
+                )?,
                 compaction_publish_actor,
                 wal_actor,
                 gc_actor,
@@ -335,13 +389,20 @@ impl EventLoop {
                 verification_barrier: VerificationBarrier::default(),
                 publication_gate: ManifestPublicationGate::default(),
                 compaction_publish_result_rx,
+                deferred_compaction_result: None,
                 compaction_publication: compaction::PublicationSlot::default(),
                 flush_barrier_waiters: HashMap::new(),
             },
             pipeline: PipelineCoordination {
+                wal_commits: wal_pipeline::WalCommitPipeline::default(),
+                memtable_apply: memtable_apply::MemtableApplyCoordinator::default(),
+                validation: validation::ValidationCoordinator::default(),
                 durability,
                 wal_transition: crate::runtime::wal_transition::WalTransitionProtocol::new(),
+                pending_cloud_seal: None,
                 flush_worker_result_rx,
+                deferred_flush_results: std::collections::VecDeque::new(),
+                pending_flush_mirrors: std::collections::VecDeque::new(),
                 inline_flush_worker,
                 background_compaction_schedule,
                 worker_msg_tx,
@@ -361,8 +422,28 @@ impl EventLoop {
             &recovered_cloud_wal,
             config.startup_scope.as_ref(),
         )?;
+        event_loop.publish_progress_snapshots(true);
 
         Ok(event_loop)
+    }
+
+    fn publish_progress_snapshots(&mut self, force_publish: bool) {
+        let frontiers = crate::types::DurabilityFrontiersSnapshot {
+            current_sequence: self.state.sequence,
+            wal_local_durable_seq: self.state.wal.frontiers.local_durable(),
+            wal_cloud_durable_seq: self.state.wal.frontiers.cloud_durable(),
+        };
+        if force_publish || frontiers != self.published_frontiers {
+            self.observed_frontiers.publish(frontiers);
+            self.published_frontiers = frontiers;
+        }
+
+        let pending_cloud_uploads = self.state.cloud.pending_uploads.len();
+        if force_publish || pending_cloud_uploads != self.published_pending_cloud_uploads {
+            self.observed_pending_cloud_uploads
+                .publish(pending_cloud_uploads);
+            self.published_pending_cloud_uploads = pending_cloud_uploads;
+        }
     }
 
     fn finish_initialization(
@@ -423,14 +504,20 @@ impl EventLoop {
     fn create_compaction_actor(
         sst_factory: Arc<dyn crate::sst::SstFactory>,
         config: &super::RuntimeConfig,
-    ) -> CompactionActor {
+        grandparent_overlap_rolls: Arc<std::sync::atomic::AtomicU64>,
+    ) -> crate::common::MidgeResult<CompactionActor> {
         let compaction_config = crate::compaction::LeveledCompactionConfig {
             l0_file_count_threshold: config.l0_compaction_trigger.max(1),
             ..Default::default()
         };
         let mut actor = CompactionActor::new_with_config(sst_factory, compaction_config);
+        actor.set_grandparent_overlap_roll_counter(grandparent_overlap_rolls);
         actor.set_execution_limits(config.target_sst_size, config.compaction_memory_limit);
-        actor
+        actor.configure_concurrency(config.compaction_concurrency)?;
+        actor.configure_work_target(config.hybrid_storage.as_ref().map(|storage| {
+            storage.as_ref() as &dyn crate::runtime::actors::compaction::CompactionStorage
+        }));
+        Ok(actor)
     }
 
     /// Wires the WAL actor to the engine: its counters, the read caches its
@@ -450,12 +537,40 @@ impl EventLoop {
         }
     }
 
-    fn apply_runtime_state_config(state: &mut RuntimeState, config: &super::RuntimeConfig) {
+    fn open_and_configure_wal_actor(
+        state: &RuntimeState,
+        config: &super::RuntimeConfig,
+        read_resources: Option<&Arc<ReadResources>>,
+    ) -> crate::common::MidgeResult<WalActor> {
+        let mut wal_actor = WalActor::open(
+            state,
+            config.wal_durability_policy,
+            config.wal_batch_config,
+            config.writer_epoch,
+            config.storage_io_timeout,
+        )?;
+        Self::configure_wal_actor(state, &mut wal_actor, config, read_resources);
+        Ok(wal_actor)
+    }
+
+    fn apply_runtime_state_config(
+        state: &mut RuntimeState,
+        config: &super::RuntimeConfig,
+    ) -> crate::common::MidgeResult<()> {
         state.install_ttl_clock(Arc::clone(&config.ttl_clock));
         state.limits.eventual_flush_segment_gap =
             config.cloud_runtime_policy.eventual_flush_segment_gap;
         state.set_compaction_enabled(config.background_compaction);
         state.limits.l0_compaction_trigger = config.l0_compaction_trigger.max(1);
+        config.write_backpressure.validate(
+            state.l0_hard_ceiling(),
+            state.limits.memtable_flush_threshold.saturating_mul(2),
+        )?;
+        state
+            .write_pressure
+            .admission
+            .configure(&config.write_backpressure);
+        Ok(())
     }
 
     fn initialize_recovered_cloud_wal(
@@ -551,8 +666,14 @@ impl EventLoop {
     }
 
     pub fn set_hybrid_storage(&mut self, storage: Arc<crate::storage::HybridStorage>) {
-        storage
-            .configure_maintenance_memory(self.actors.compaction_actor.compaction_memory_limit());
+        self.actors
+            .compaction_actor
+            .configure_work_target(Some(storage.as_ref()));
+        let memory =
+            storage.configure_maintenance_memory(self.actors.compaction_actor.total_memory_limit());
+        self.publication
+            .metadata_publication_lock
+            .configure_capture_memory(memory);
         self.actors
             .wal_actor
             .set_storage_budget(Arc::clone(&storage));
@@ -561,6 +682,12 @@ impl EventLoop {
 
     /// Returns an error if the lease has been lost (heartbeat detected failure).
     fn check_lease_health(&self) -> crate::common::MidgeResult<()> {
+        if self.state.partial_apply_prefix || self.pipeline.memtable_apply.terminal_prefix() {
+            return Err(crate::common::MidgeError::Fenced(
+                "a memtable group has an unknown applied prefix; restart before admitting writes"
+                    .into(),
+            ));
+        }
         self.authority.fencing.check_health()
     }
 
@@ -604,36 +731,33 @@ impl EventLoop {
     /// `begin_tx` can capture snapshots without event loop round-trip.
     #[inline]
     pub(super) fn publish_snapshot(&self) {
+        if self.state.write_pressure.admission.tracks_pending_bytes() {
+            self.state.write_pressure.admission.update_manifest(
+                self.actors
+                    .compaction_actor
+                    .estimated_pending_bytes(&self.state.manifest.files),
+            );
+        }
+        if self.state.write_pressure.admission.enabled()
+            || self.state.write_pressure.admission.tracks_background_io()
+        {
+            self.state
+                .write_pressure
+                .admission
+                .retain_families(|cf| self.state.column_families.contains_key(&cf));
+            for &cf_id in self.state.column_families.keys() {
+                self.publish_write_pressure(cf_id);
+            }
+        }
         let Some(cache) = &self.authority.snapshot_cache else {
             return;
         };
 
-        let mut cf_snapshots = std::collections::HashMap::new();
-        for (&cf_id, cf_state) in &self.state.column_families {
-            let sst_view = self.state.manifest.read_view_for(cf_id);
-            let sst_path_prefix = std::path::PathBuf::from(crate::sst::fs::SST_DIR);
-            cf_snapshots.insert(
-                cf_id,
-                CfSnapshotData {
-                    snapshot: Arc::new(ReadSnapshot::new_with_view_resources(
-                        cf_id,
-                        cf_state.memtable.clone(),
-                        cf_state.immutable_memtables.clone(),
-                        sst_view,
-                        Arc::clone(&self.state.fs),
-                        sst_path_prefix,
-                        self.state.is_memory_mode(),
-                        self.state.observed_time_millis(),
-                        self.authority.read_resources.clone(),
-                    )),
-                },
-            );
+        for &cf_id in self.state.column_families.keys() {
+            self.publish_family_snapshot(cache, cf_id);
         }
-
-        cache.publish(PublishedSnapshot {
-            sequence: self.state.sequence,
-            cf_snapshots,
-        });
+        cache.retain_families(|cf_id| self.state.column_families.contains_key(&cf_id));
+        cache.finish_publication(self.state.applied_sequence);
 
         if let Some(read_resources) = &self.authority.read_resources {
             // Live names change only when the manifest is rebuilt into the
@@ -643,6 +767,62 @@ impl EventLoop {
                 read_resources.prune_to_live_ssts(&live_names);
             }
         }
+    }
+
+    /// Ordinary commits update only their families. Lifecycle and manifest
+    /// publication use the full pass above, retaining unchanged source Arcs.
+    pub(super) fn publish_snapshots_for(&self, cf_ids: &[crate::types::ColumnFamilyId]) {
+        for &cf_id in cf_ids {
+            self.publish_write_pressure(cf_id);
+        }
+        let Some(cache) = &self.authority.snapshot_cache else {
+            return;
+        };
+        for &cf_id in cf_ids {
+            self.publish_family_snapshot(cache, cf_id);
+        }
+        cache.finish_publication(self.state.applied_sequence);
+    }
+
+    fn publish_write_pressure(&self, cf_id: u32) {
+        let admission = &self.state.write_pressure.admission;
+        if admission.enabled() {
+            admission.update_family(
+                cf_id,
+                self.state.l0_slot_usage(cf_id),
+                self.state.total_memtable_bytes,
+            );
+        }
+        if admission.tracks_background_io() {
+            admission.update_urgent(cf_id, self.state.should_hard_stall_writes(cf_id));
+        }
+    }
+
+    fn publish_family_snapshot(&self, cache: &SnapshotCache, cf_id: u32) {
+        let Some(cf_state) = self.state.column_families.get(&cf_id) else {
+            return;
+        };
+        let sst_view = self.state.manifest.read_view_for(cf_id);
+        let snapshot = cache
+            .load_family(cf_id)
+            .map(|(_, snapshot)| snapshot)
+            .filter(|snapshot| {
+                snapshot.has_sources(&cf_state.memtable, &cf_state.immutable_memtables, &sst_view)
+            })
+            .unwrap_or_else(|| {
+                Arc::new(ReadSnapshot::new_with_view_resources(
+                    cf_id,
+                    cf_state.memtable.clone(),
+                    cf_state.immutable_memtables.clone(),
+                    sst_view,
+                    Arc::clone(&self.state.fs),
+                    std::path::PathBuf::from(crate::sst::fs::SST_DIR),
+                    self.state.is_memory_mode(),
+                    self.state.observed_time_millis(),
+                    self.authority.read_resources.clone(),
+                ))
+            });
+        cache.publish_family(cf_id, self.state.applied_sequence, snapshot);
     }
 
     #[cfg(test)]
@@ -732,3 +912,6 @@ fn check_startup_scope(
 
 #[cfg(test)]
 pub(super) mod tests;
+
+#[cfg(test)]
+mod cloud_work_target_tests;

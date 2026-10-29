@@ -3,6 +3,12 @@ use serde::Serialize;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+// The binary owns the process allocator; the library installs none. See
+// `docs/operations/performance-tuning.md`.
+#[cfg(feature = "alloc-mimalloc")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const EXIT_HEALTHY: i32 = 0;
 const EXIT_DEGRADED: i32 = 1;
 const EXIT_USAGE: i32 = 2;

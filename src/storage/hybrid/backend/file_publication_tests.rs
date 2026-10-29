@@ -5,7 +5,7 @@ use crate::storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
 use crate::storage::cloud::{CloudHeadCapability, CloudReadCapability, CloudWriteCapability};
-use crate::storage::StorageBackend;
+use crate::storage::{StorageBackend, StorageFileUpload};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -28,6 +28,55 @@ fn publish_source(
         },
         budget,
     )
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_retain_replacement_when_unpublished_output_cleanup_consumes_original_guard(
+) -> MidgeResult<()> {
+    // Arrange: publication returns the actual provider identity for this body.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let _scenario = fail::FailScenario::setup();
+    let directory = tempfile::tempdir()?;
+    let bytes = b"original unpublished output";
+    std::fs::write(directory.path().join("source"), bytes)?;
+    let backend = Arc::new(MockCloudBackend::new());
+    let cloud: Arc<dyn StorageBackend> =
+        Arc::new(CloudStorage::new(backend.clone(), String::new()));
+    let storage = HybridStorage::with_policy(
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    let budget = ResourceBudget::new(2 * 1024 * 1024);
+    let key = "sst/unpublished-output";
+    let proof = publish_source(&storage, key, directory.path(), bytes, &budget)?;
+    let replacement_backend = Arc::clone(&backend);
+    fail::cfg_callback("midge::cloud::before_compaction_orphan_delete", move || {
+        let (tx, rx) = mpsc::channel();
+        replacement_backend.submit_put(key, b"replacement".to_vec(), Vec::new(), tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CloudEvent::Put { result: Ok(()), .. }
+        ));
+    })
+    .unwrap();
+
+    // Act: replacement occurs after the failed task has retained its proof.
+    let result = storage.delete_unpublished_object_within(
+        &proof,
+        &OperationDeadline::from_budget(Duration::from_secs(5)),
+    );
+    let (tx, rx) = mpsc::channel();
+    backend.submit_get(key, tx);
+
+    // Assert: only the old identity was authorized, and the new bytes survive.
+    assert!(result.is_err());
+    assert!(matches!(
+        rx.recv().unwrap(),
+        CloudEvent::Get { result: Ok(body), .. } if body == b"replacement"
+    ));
+    assert_eq!(budget.used(), 0);
+    Ok(())
 }
 
 #[test]
@@ -337,5 +386,297 @@ fn should_preserve_timeout_when_admitted_pinned_range_readback_exhausts_deadline
         "{:?}",
         result.as_ref().err()
     );
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum ReceiptFault {
+    None,
+    WrongChecksum,
+    Missing,
+    TransientBeforeWrite,
+    LostResponseAfterWrite,
+}
+
+struct ReceiptPublication {
+    inner: MockCloudBackend,
+    fault: ReceiptFault,
+    attempts: std::sync::atomic::AtomicUsize,
+}
+
+impl CloudReadCapability for ReceiptPublication {
+    crate::storage::cloud::forward_cloud_backend!(inner;
+        submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
+
+impl CloudWriteCapability for ReceiptPublication {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+
+    fn supports_file_upload(&self) -> bool {
+        matches!(self.fault, ReceiptFault::LostResponseAfterWrite)
+    }
+
+    fn write_file_with_receipt(
+        &self,
+        key: &str,
+        source: StorageFileUpload,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        use crate::storage::cloud::CloudError;
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(source.size).expect("test upload size fits in memory"),
+        );
+        let mut offset = 0;
+        while offset < source.size {
+            let end = offset
+                .saturating_add(source.part_size as u64)
+                .min(source.size);
+            match source.file.read_at(offset, end - offset) {
+                Ok(part) if part.len() as u64 == end - offset => bytes.extend_from_slice(&part),
+                Ok(_) => {
+                    let _ = callback.send(CloudEvent::PutReceipt {
+                        key: key.into(),
+                        result: Err(CloudError::Protocol("short streaming test read".into())),
+                    });
+                    return;
+                }
+                Err(error) => {
+                    let _ = callback.send(CloudEvent::PutReceipt {
+                        key: key.into(),
+                        result: Err(CloudError::Protocol(error.to_string())),
+                    });
+                    return;
+                }
+            }
+            offset = end;
+        }
+        if crc32c::crc32c(&bytes) != source.content_crc32c {
+            let _ = callback.send(CloudEvent::PutReceipt {
+                key: key.into(),
+                result: Err(CloudError::Protocol(
+                    "streaming test checksum mismatch".into(),
+                )),
+            });
+            return;
+        }
+        let first = self.attempts.fetch_add(1, Ordering::AcqRel) == 0;
+        let (tx, rx) = mpsc::channel();
+        self.inner.submit_put(key, bytes, options.headers, tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CloudEvent::Put { result: Ok(()), .. }
+        ));
+        if first {
+            // The object commit succeeded, but the provider response was lost.
+            // Publication must reconcile through the stable immutable key.
+            let _ = callback.send(CloudEvent::PutReceipt {
+                key: key.into(),
+                result: Err(CloudError::Transport(
+                    "injected lost multipart completion".into(),
+                )),
+            });
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.inner.submit_head(key, tx);
+        let CloudEvent::Head {
+            result: Ok(metadata),
+            ..
+        } = rx.recv().unwrap()
+        else {
+            panic!("streamed object must have an identity");
+        };
+        callback
+            .send(CloudEvent::PutReceipt {
+                key: key.into(),
+                result: Ok(Some(crate::storage::StorageWriteReceipt {
+                    metadata,
+                    content_crc32c: source.content_crc32c,
+                })),
+            })
+            .unwrap();
+    }
+
+    fn write_with_receipt(
+        &self,
+        key: &str,
+        bytes: Vec<u8>,
+        options: crate::storage::cloud::CloudRequestOptions,
+        callback: CloudCallback,
+    ) {
+        use crate::storage::cloud::CloudError;
+        let first = self.attempts.fetch_add(1, Ordering::AcqRel) == 0;
+        if first && matches!(self.fault, ReceiptFault::TransientBeforeWrite) {
+            callback
+                .send(CloudEvent::PutReceipt {
+                    key: key.into(),
+                    result: Err(CloudError::ServerError("injected 503".into())),
+                })
+                .unwrap();
+            return;
+        }
+        let checksum = crc32c::crc32c(&bytes);
+        let (tx, rx) = mpsc::channel();
+        self.inner.submit_put(key, bytes, options.headers, tx);
+        assert!(matches!(
+            rx.recv().unwrap(),
+            CloudEvent::Put { result: Ok(()), .. }
+        ));
+        if first && matches!(self.fault, ReceiptFault::LostResponseAfterWrite) {
+            callback
+                .send(CloudEvent::PutReceipt {
+                    key: key.into(),
+                    result: Err(CloudError::Transport("injected lost response".into())),
+                })
+                .unwrap();
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.inner.submit_head(key, tx);
+        let CloudEvent::Head {
+            result: Ok(metadata),
+            ..
+        } = rx.recv().unwrap()
+        else {
+            panic!("written object must have an identity");
+        };
+        let receipt = (!matches!(self.fault, ReceiptFault::Missing)).then_some(
+            crate::storage::StorageWriteReceipt {
+                metadata,
+                content_crc32c: checksum
+                    ^ u32::from(matches!(self.fault, ReceiptFault::WrongChecksum)),
+            },
+        );
+        callback
+            .send(CloudEvent::PutReceipt {
+                key: key.into(),
+                result: Ok(receipt),
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn should_reconcile_lost_streaming_completion_at_the_same_immutable_key() -> MidgeResult<()> {
+    // Arrange: use the production streaming publication path and lose the
+    // callback only after the immutable object has been committed.
+    let directory = tempfile::tempdir()?;
+    let bytes = vec![7; 11 * 1024 * 1024];
+    std::fs::write(directory.path().join("source"), &bytes)?;
+    let backend = Arc::new(ReceiptPublication {
+        inner: MockCloudBackend::new(),
+        fault: ReceiptFault::LostResponseAfterWrite,
+        attempts: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let storage = HybridStorage::with_policy(
+        Arc::new(CloudStorage::new(backend.clone(), String::new())),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    let budget = ResourceBudget::new(32 * 1024 * 1024);
+
+    // Act: the first publication has an unknown completion; a second call
+    // exercises the same key again and must find the already committed object.
+    let first = publish_source(
+        &storage,
+        "sst/lost-stream-completion",
+        directory.path(),
+        &bytes,
+        &budget,
+    );
+    let second = publish_source(
+        &storage,
+        "sst/lost-stream-completion",
+        directory.path(),
+        &bytes,
+        &budget,
+    );
+
+    // Assert: neither attempt creates a different key or re-uploads the body.
+    assert!(
+        first.is_ok(),
+        "first reconciliation failed: {:?}",
+        first.err()
+    );
+    assert!(
+        second.is_ok(),
+        "repeat publication failed: {:?}",
+        second.err()
+    );
+    assert_eq!(backend.attempts.load(Ordering::Acquire), 1);
+    assert_eq!(
+        backend.inner.get_uploads(),
+        [("sst/lost-stream-completion".into(), bytes.len() as u64)]
+    );
+    assert!(backend
+        .inner
+        .get_range_downloads()
+        .contains(&"sst/lost-stream-completion".into()));
+    assert_eq!(budget.used(), 0);
+    Ok(())
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for ReceiptPublication {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for ReceiptPublication {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl CloudHeadCapability for ReceiptPublication {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl CloudBackend for ReceiptPublication {}
+
+#[test]
+fn should_reconcile_immutable_publication_when_receipts_cover_the_exact_source_identity(
+) -> MidgeResult<()> {
+    for fault in [
+        ReceiptFault::None,
+        ReceiptFault::WrongChecksum,
+        ReceiptFault::Missing,
+        ReceiptFault::TransientBeforeWrite,
+        ReceiptFault::LostResponseAfterWrite,
+    ] {
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let bytes = vec![7; 256 * 1024];
+        std::fs::write(directory.path().join("source"), &bytes)?;
+        let backend = Arc::new(ReceiptPublication {
+            inner: MockCloudBackend::new(),
+            fault,
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut storage = HybridStorage::with_policy(
+            Arc::new(CloudStorage::new(backend.clone(), String::new())),
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        );
+        storage.set_immutable_retry_policy(crate::storage::cloud::CloudRetryPolicy {
+            max_retries: 2,
+            base_delay: Duration::ZERO,
+        });
+        let budget = ResourceBudget::new(4 * 1024 * 1024);
+
+        // Act
+        let result = publish_source(&storage, "sst/receipt", directory.path(), &bytes, &budget);
+
+        // Assert
+        if matches!(fault, ReceiptFault::WrongChecksum) {
+            assert!(matches!(result, Err(MidgeError::Corruption(_))));
+        } else {
+            assert!(result.is_ok(), "{:?}", result.err());
+        }
+        assert_eq!(backend.inner.get_uploads().len(), 1);
+        let readback = matches!(
+            fault,
+            ReceiptFault::Missing | ReceiptFault::LostResponseAfterWrite
+        );
+        assert_eq!(!backend.inner.get_range_downloads().is_empty(), readback);
+        let attempts = 1 + usize::from(matches!(fault, ReceiptFault::TransientBeforeWrite));
+        assert_eq!(backend.attempts.load(Ordering::Acquire), attempts);
+        assert_eq!(budget.used(), 0);
+    }
     Ok(())
 }

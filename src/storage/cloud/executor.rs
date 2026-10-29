@@ -1,5 +1,5 @@
 use crate::common::{MidgeError, MidgeResult};
-use crate::storage::cloud::{CloudCallback, CloudEvent};
+use crate::storage::cloud::{CloudCallback, CloudEvent, CloudRetryPolicy};
 use reqwest::{Client, Method};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -9,8 +9,6 @@ use std::time::Duration;
 
 mod observation;
 
-const MAX_TRANSIENT_RETRIES: u32 = 3;
-const TRANSIENT_BACKOFF_BASE_MS: u64 = 50;
 pub(crate) const MAX_CLOUD_RESPONSE_BYTES: usize = 1024 * 1024 * 1024;
 /// Room for a provider's error document when a request's response limit is
 /// smaller. A range read's limit is the requested length, but an error answer
@@ -27,6 +25,8 @@ pub struct CloudRequest {
     pub timeout: Option<Duration>,
     response_limit: usize,
     retry_conditional_conflicts: bool,
+    staged_part_retry: bool,
+    retry_policy: Option<CloudRetryPolicy>,
     reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
 }
 
@@ -40,6 +40,8 @@ impl CloudRequest {
             timeout: None,
             response_limit: MAX_CLOUD_RESPONSE_BYTES,
             retry_conditional_conflicts: false,
+            staged_part_retry: false,
+            retry_policy: None,
             reservation: None,
         }
     }
@@ -79,6 +81,12 @@ impl CloudRequest {
         self
     }
 
+    #[must_use]
+    pub fn with_retry_policy(mut self, policy: CloudRetryPolicy) -> Self {
+        self.retry_policy = Some(policy);
+        self
+    }
+
     /// Bound successful range responses and even servers that ignore Range.
     pub(crate) fn with_response_limit(mut self, limit: usize) -> Self {
         self.response_limit = limit.min(MAX_CLOUD_RESPONSE_BYTES);
@@ -90,6 +98,14 @@ impl CloudRequest {
     /// conditional PUT race; other providers do not share that contract.
     pub fn with_conditional_conflict_retries(mut self) -> Self {
         self.retry_conditional_conflicts = true;
+        self
+    }
+
+    /// Isolated upload parts can be repeated with the same operation/part id
+    /// and body. This never authorizes replay of a shared object commit.
+    #[cfg(any(feature = "cloud-aws", feature = "cloud-oci", feature = "cloud-azure"))]
+    pub(super) fn with_staged_part_retries(mut self) -> Self {
+        self.staged_part_retry = true;
         self
     }
 
@@ -187,9 +203,43 @@ pub struct CloudExecutor {
     signer: Option<Arc<dyn CloudSigner>>,
     rt: Option<Arc<tokio::runtime::Runtime>>,
     default_timeout_ms: AtomicU64,
+    retry_policy: std::sync::RwLock<CloudRetryPolicy>,
 }
 
 impl CloudExecutor {
+    pub(crate) fn spawn_file_upload(
+        &self,
+        upload: super::multipart::FileUploadRequest,
+        callback: CloudCallback,
+    ) {
+        let key = upload.key.clone();
+        let timeout = upload
+            .options
+            .timeout()
+            .unwrap_or_else(|| self.default_timeout())
+            .min(self.default_timeout());
+        let http = super::multipart::UploadHttp::new(
+            self.client.clone(),
+            self.signer.clone(),
+            self.retry_policy(),
+            timeout,
+            &upload,
+        );
+        let Some(runtime) = self.rt.as_ref() else {
+            let _ = callback.send(CloudEvent::PutReceipt {
+                key,
+                result: Err(super::CloudError::Transport(
+                    "cloud executor is shut down".into(),
+                )),
+            });
+            return;
+        };
+        runtime.spawn(async move {
+            let result = super::multipart::run(upload, http).await;
+            let _ = callback.send(CloudEvent::PutReceipt { key, result });
+        });
+    }
+
     pub fn new(signer: Option<Arc<dyn CloudSigner>>) -> MidgeResult<Self> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
@@ -233,7 +283,27 @@ impl CloudExecutor {
             default_timeout_ms: AtomicU64::new(Self::duration_millis(
                 crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
             )),
+            retry_policy: std::sync::RwLock::new(CloudRetryPolicy::default()),
         })
+    }
+
+    pub(crate) fn set_retry_policy(&self, policy: CloudRetryPolicy) {
+        *self
+            .retry_policy
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = policy;
+    }
+
+    fn retry_policy(&self) -> CloudRetryPolicy {
+        *self
+            .retry_policy
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn apply_retry_policy(request: CloudRequest, default: CloudRetryPolicy) -> CloudRequest {
+        let policy = request.retry_policy.unwrap_or(default);
+        request.with_retry_policy(policy)
     }
 
     pub(crate) fn set_default_timeout(&self, timeout: Duration) {
@@ -273,9 +343,23 @@ impl CloudExecutor {
     ) where
         F: FnOnce(String, MidgeResult<CloudResponse>) -> CloudEvent + Send + 'static,
     {
+        self.spawn_typed_request(request, context, callback, mapper);
+    }
+
+    pub(crate) fn spawn_typed_request<T, F>(
+        &self,
+        request: CloudRequest,
+        context: String,
+        callback: std::sync::mpsc::Sender<T>,
+        mapper: F,
+    ) where
+        T: Send + 'static,
+        F: FnOnce(String, MidgeResult<CloudResponse>) -> T + Send + 'static,
+    {
         let client = self.client.clone();
         let signer = self.signer.clone();
         let request = Self::apply_default_timeout(request, self.default_timeout());
+        let request = Self::apply_retry_policy(request, self.retry_policy());
         let deadline = Self::deadline_from_timeout(request.timeout);
 
         let Some(rt) = self.rt.as_ref() else {
@@ -346,6 +430,7 @@ impl CloudExecutor {
         let client = self.client.clone();
         let signer = self.signer.clone();
         let default_timeout = self.default_timeout();
+        let retry_policy = self.retry_policy();
         let operation_timeout =
             timeout.map_or(default_timeout, |timeout| timeout.min(default_timeout));
         let operation_deadline = Self::deadline_from_timeout(Some(operation_timeout));
@@ -367,7 +452,10 @@ impl CloudExecutor {
                 loop {
                     Self::ensure_deadline_active(Some(operation_timeout), operation_deadline)?;
                     let request = match make_request(&state) {
-                        Ok(request) => Self::apply_default_timeout(request, default_timeout),
+                        Ok(request) => Self::apply_retry_policy(
+                            Self::apply_default_timeout(request, default_timeout),
+                            retry_policy,
+                        ),
                         Err(error) => break Err(error),
                     };
                     let request_deadline = Self::earliest_deadline(
@@ -443,7 +531,7 @@ impl CloudExecutor {
         Self::execute_request_with_signer_at(client, signer, request, deadline).await
     }
 
-    async fn execute_request_with_signer_at(
+    pub(super) async fn execute_request_with_signer_at(
         client: Client,
         signer: Option<Arc<dyn CloudSigner>>,
         request: CloudRequest,
@@ -510,15 +598,16 @@ impl CloudExecutor {
         deadline: Option<tokio::time::Instant>,
     ) -> MidgeResult<CloudResponse> {
         let mut attempt = 0u32;
+        let retry_policy = request.retry_policy.unwrap_or_default();
         loop {
             Self::ensure_deadline_active(request.timeout, deadline)?;
             let attempt_request = Self::constrain_request_to_deadline(request.clone(), deadline);
             match Self::execute_request_once(client.clone(), attempt_request).await {
                 Ok(response) if Self::is_retryable_conditional_conflict(&request, &response) => {
-                    if attempt >= MAX_TRANSIENT_RETRIES {
+                    if attempt >= retry_policy.max_retries {
                         return Ok(response);
                     }
-                    tokio::time::sleep(Self::retry_delay(attempt)).await;
+                    tokio::time::sleep(retry_policy.delay(attempt)).await;
                     attempt += 1;
                 }
                 Ok(response) if Self::is_transient_status(response.status) => {
@@ -528,19 +617,21 @@ impl CloudExecutor {
                     // generic transient retries. Provider-specific conflict
                     // responses are handled above when their contract explicitly
                     // guarantees that replay is safe.
-                    if request.is_mutation() || attempt >= MAX_TRANSIENT_RETRIES {
+                    if (request.is_mutation() && !request.staged_part_retry)
+                        || attempt >= retry_policy.max_retries
+                    {
                         return Ok(response);
                     }
-                    tokio::time::sleep(Self::retry_delay(attempt)).await;
+                    tokio::time::sleep(retry_policy.delay(attempt)).await;
                     attempt += 1;
                 }
                 Ok(response) => return Ok(response),
                 Err(error)
                     if error.transient
-                        && !request.is_mutation()
-                        && attempt < MAX_TRANSIENT_RETRIES =>
+                        && (!request.is_mutation() || request.staged_part_retry)
+                        && attempt < retry_policy.max_retries =>
                 {
-                    tokio::time::sleep(Self::retry_delay(attempt)).await;
+                    tokio::time::sleep(retry_policy.delay(attempt)).await;
                     attempt += 1;
                 }
                 Err(error) if error.timed_out => {
@@ -564,10 +655,6 @@ impl CloudExecutor {
             );
         }
         request
-    }
-
-    fn retry_delay(attempt: u32) -> Duration {
-        Duration::from_millis(TRANSIENT_BACKOFF_BASE_MS.saturating_mul(1u64 << attempt.min(4)))
     }
 
     fn is_transient_status(status: u16) -> bool {
@@ -772,7 +859,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Barrier,
+        Arc, Barrier, Mutex,
     };
     use std::time::{Duration, Instant};
 
@@ -886,7 +973,7 @@ mod tests {
         release
     }
 
-    fn read_complete_http_request(stream: &mut TcpStream) {
+    fn read_complete_http_request(stream: &mut TcpStream) -> Vec<u8> {
         stream
             .set_nonblocking(false)
             .expect("configure blocking HTTP request stream");
@@ -924,6 +1011,7 @@ mod tests {
             }
             bytes.extend_from_slice(&chunk[..read]);
         }
+        bytes
     }
 
     #[test]
@@ -1382,6 +1470,256 @@ mod tests {
             request_count, 1,
             "an ambiguous conditional mutation requires caller reconciliation before replay"
         );
+    }
+
+    #[test]
+    fn should_not_replay_conditional_create_put_given_lost_successful_response() {
+        // Arrange: the provider commits the immutable object but drops the
+        // success response. The caller must keep the outcome ambiguous.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure nonblocking test server");
+        let endpoint = format!(
+            "http://{}/sst",
+            listener.local_addr().expect("server address")
+        );
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let server_request_finished = Arc::clone(&request_finished);
+        let stored = Arc::new(Mutex::new(None::<Vec<u8>>));
+        let server_stored = Arc::clone(&stored);
+        let server = std::thread::spawn(move || {
+            let mut served = 0;
+            let mut last_request: Option<Instant> = None;
+            let mut conditional_create_seen = true;
+            while !server_request_finished.load(Ordering::Acquire)
+                || last_request.is_some_and(|last| last.elapsed() < Duration::from_millis(250))
+            {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_complete_http_request(&mut stream);
+                        let split = request
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .expect("request headers");
+                        let headers =
+                            String::from_utf8_lossy(&request[..split]).to_ascii_lowercase();
+                        let body = request[split + 4..].to_vec();
+                        conditional_create_seen &= headers.starts_with("put ")
+                            && headers.contains("if-none-match: *")
+                            && body == b"immutable-sst";
+                        let already_exists = {
+                            let mut object = server_stored.lock().expect("lock test object");
+                            if object.is_some() {
+                                true
+                            } else {
+                                *object = Some(body);
+                                false
+                            }
+                        };
+                        served += 1;
+                        last_request = Some(Instant::now());
+                        if already_exists {
+                            write!(
+                                stream,
+                                "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            )
+                            .expect("write duplicate-create response");
+                        }
+                        // First request has already committed; dropping its
+                        // response models a transport loss after success.
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept test request: {error}"),
+                }
+            }
+            (served, conditional_create_seen)
+        });
+        let request = CloudRequest::new(Method::PUT, endpoint)
+            .with_header("If-None-Match", "*")
+            .with_body(b"immutable-sst".to_vec())
+            .with_retry_policy(crate::storage::cloud::CloudRetryPolicy {
+                max_retries: 2,
+                base_delay: Duration::ZERO,
+            });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let result = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        request_finished.store(true, Ordering::Release);
+        let (request_count, conditional_create_seen) = server.join().expect("join test server");
+
+        // Assert: do not replay an ambiguous create. Higher-level immutable
+        // publication owns pinned readback reconciliation.
+        assert!(result.is_err(), "lost response must remain ambiguous");
+        assert!(
+            conditional_create_seen,
+            "the request must retain If-None-Match"
+        );
+        assert_eq!(request_count, 1, "ambiguous PUT must not be replayed");
+        assert_eq!(
+            *stored.lock().expect("lock final test object"),
+            Some(b"immutable-sst".to_vec())
+        );
+    }
+
+    #[test]
+    fn should_preserve_replacement_when_conditional_mutation_has_stale_identity() {
+        // Arrange: the object is replaced after the writer chose its identity
+        // fence but before the provider evaluates the mutation.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure nonblocking test server");
+        let endpoint = format!(
+            "http://{}/object",
+            listener.local_addr().expect("server address")
+        );
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let server_request_finished = Arc::clone(&request_finished);
+        let object = Arc::new(Mutex::new(("old-etag".to_string(), b"old-value".to_vec())));
+        let server_object = Arc::clone(&object);
+        let server = std::thread::spawn(move || {
+            let mut served = 0;
+            let mut last_request: Option<Instant> = None;
+            while !server_request_finished.load(Ordering::Acquire)
+                || last_request.is_some_and(|last| last.elapsed() < Duration::from_millis(250))
+            {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_complete_http_request(&mut stream);
+                        let split = request
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .expect("request headers");
+                        let headers =
+                            String::from_utf8_lossy(&request[..split]).to_ascii_lowercase();
+                        let body = request[split + 4..].to_vec();
+                        let status = {
+                            let mut object = server_object.lock().expect("lock test object");
+                            *object = ("replacement-etag".into(), b"replacement".to_vec());
+                            if headers.starts_with("put ")
+                                && headers.contains("if-match: \"old-etag\"")
+                            {
+                                412
+                            } else {
+                                *object = ("new-etag".into(), body);
+                                200
+                            }
+                        };
+                        write!(stream, "HTTP/1.1 {status} Response\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            .expect("write test response");
+                        served += 1;
+                        last_request = Some(Instant::now());
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept test request: {error}"),
+                }
+            }
+            served
+        });
+        let request = CloudRequest::new(Method::PUT, endpoint)
+            .with_header("If-Match", "\"old-etag\"")
+            .with_body(b"new-value".to_vec())
+            .with_retry_policy(crate::storage::cloud::CloudRetryPolicy {
+                max_retries: 2,
+                base_delay: Duration::ZERO,
+            });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let response = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        request_finished.store(true, Ordering::Release);
+        let request_count = server.join().expect("join test server");
+
+        // Assert: the stale If-Match rejects the write and preserves v2.
+        assert_eq!(response.expect("precondition response").status, 412);
+        assert_eq!(request_count, 1, "stale identity must not be replayed");
+        assert_eq!(
+            *object.lock().expect("lock final test object"),
+            ("replacement-etag".into(), b"replacement".to_vec())
+        );
+    }
+
+    #[test]
+    fn should_not_replay_conditional_delete_given_lost_successful_response() {
+        // Arrange: the server applies the conditional delete, then drops the
+        // connection before acknowledging it. The caller cannot infer whether
+        // the object remains from the transport failure.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        listener
+            .set_nonblocking(true)
+            .expect("configure nonblocking test server");
+        let endpoint = format!(
+            "http://{}/object",
+            listener.local_addr().expect("server address")
+        );
+        let request_finished = Arc::new(AtomicBool::new(false));
+        let server_request_finished = Arc::clone(&request_finished);
+        let deleted = Arc::new(AtomicBool::new(false));
+        let server_deleted = Arc::clone(&deleted);
+        let server = std::thread::spawn(move || {
+            let mut served = 0;
+            let mut last_request: Option<Instant> = None;
+            let mut conditional_request = false;
+            while !server_request_finished.load(Ordering::Acquire)
+                || last_request.is_some_and(|last| last.elapsed() < Duration::from_millis(250))
+            {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let request = read_complete_http_request(&mut stream);
+                        let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                        conditional_request |= request.starts_with("delete ")
+                            && request.contains("if-match: \"object-v1\"");
+                        server_deleted.store(true, Ordering::Release);
+                        served += 1;
+                        last_request = Some(Instant::now());
+                        // Dropping the socket simulates a successful provider
+                        // effect whose response was lost in transit.
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept test request: {error}"),
+                }
+            }
+            (served, conditional_request)
+        });
+        let request = CloudRequest::new(Method::DELETE, endpoint)
+            .with_header("If-Match", "\"object-v1\"")
+            .with_retry_policy(crate::storage::cloud::CloudRetryPolicy {
+                max_retries: 2,
+                base_delay: Duration::ZERO,
+            });
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // Act
+        let result = runtime.block_on(CloudExecutor::execute_request(Client::new(), request));
+        request_finished.store(true, Ordering::Release);
+        let (request_count, conditional_request) = server.join().expect("join test server");
+
+        // Assert: a repeated DELETE could observe a precondition failure after
+        // the first operation already succeeded, so the mutation is never replayed.
+        assert!(result.is_err(), "the lost response must remain ambiguous");
+        assert!(
+            conditional_request,
+            "the request must carry its identity fence"
+        );
+        assert!(deleted.load(Ordering::Acquire));
+        assert_eq!(request_count, 1, "ambiguous DELETE must not be replayed");
     }
 
     #[test]

@@ -9,6 +9,7 @@ use crate::wal::cloud_catalog::CatalogEntry;
 use crate::wal::publish::OwedSegment;
 
 impl EventLoop {
+    #[tracing::instrument(level = "debug", skip_all, fields(segment_id, max_sequence))]
     pub(super) fn handle_storage_event_cloud_ack(
         &mut self,
         segment_id: u64,
@@ -22,6 +23,10 @@ impl EventLoop {
         let deadline = attempt_deadline
             .copied()
             .unwrap_or_else(|| self.cloud_ack_deadline(segment_id));
+        if !self.pipeline.inline_flush_worker {
+            self.queue_cloud_wal_ack(acknowledged, deadline);
+            return;
+        }
         if let Err(error) = self.validate_runtime_writer_lease_within(&deadline) {
             self.requeue_failed_cloud_upload(
                 segment_id,
@@ -47,6 +52,19 @@ impl EventLoop {
             }
         };
 
+        self.accept_verified_cloud_wal_upload(acknowledged, upload, deadline);
+    }
+
+    pub(in crate::runtime::event_loop) fn accept_verified_cloud_wal_upload(
+        &mut self,
+        acknowledged: OwedSegment,
+        upload: CatalogEntry,
+        deadline: OperationDeadline,
+    ) {
+        let OwedSegment {
+            segment_id,
+            max_sequence,
+        } = acknowledged;
         self.state.cloud.forget_pending_upload(segment_id);
         if let Err(error) = self.pipeline.wal_transition.note_acknowledged(segment_id) {
             if self.state.wal.frontiers.cloud_durable() >= max_sequence {
@@ -85,6 +103,11 @@ impl EventLoop {
             );
             return;
         };
+
+        if !self.pipeline.inline_flush_worker {
+            self.start_cloud_catalog_publication(acknowledged, ready_segments, deadline);
+            return;
+        }
 
         if !self.publish_contiguous_cloud_uploads(acknowledged, &ready_segments, &deadline) {
             return;
@@ -149,7 +172,7 @@ impl EventLoop {
     /// and hands it to the runtime backlog, its one retry owner, to upload
     /// again after the retry delay. Waiting out shared memory pressure fails
     /// no waiter.
-    fn route_cloud_publication_error(
+    pub(in crate::runtime::event_loop) fn route_cloud_publication_error(
         &mut self,
         segment: OwedSegment,
         error: PublicationError,
@@ -200,7 +223,9 @@ impl EventLoop {
         tracing::error!(segment_id, %error, "cloud WAL upload cannot be published; writer fenced");
     }
 
-    fn cloud_persistence(&self) -> Result<CloudPersistence, PublicationError> {
+    pub(in crate::runtime::event_loop) fn cloud_persistence(
+        &self,
+    ) -> Result<CloudPersistence, PublicationError> {
         self.actors
             .cloud_coordinator
             .hybrid_storage

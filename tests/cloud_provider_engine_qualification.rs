@@ -1,6 +1,14 @@
 #![cfg(all(feature = "cloud-all", feature = "sqrzl-tests"))]
 
 #[cfg(feature = "failpoints")]
+#[path = "common/crash.rs"]
+pub mod crash;
+
+#[cfg(feature = "failpoints")]
+#[path = "cloud_provider_engine_qualification/streamed_compaction_crash.rs"]
+mod streamed_cloud_compaction_crash;
+
+#[cfg(feature = "failpoints")]
 use cntryl_midge::MidgeError;
 use cntryl_midge::{
     Bytes, CloudProviderConfig, CloudStorageLocation, CloudStorageTopology, ColumnFamilyHandle,
@@ -47,6 +55,98 @@ fn should_recover_engine_from_sqrzl_azure_after_local_cache_loss() {
 
     // Assert
     // The helper performs first acquisition and cache-loss recovery assertions.
+}
+
+#[test]
+fn should_replay_published_azure_wal_after_complete_local_cache_loss() {
+    use cntryl_midge::__internal::wal::catalog::{CatalogEntry, WalPublicationCatalog};
+    use cntryl_midge::__internal::wal::segment::SegmentBuilder;
+    use cntryl_midge::__internal::wal::{WalOpKind, WalRecord};
+    use cntryl_midge::CloudObjectLayout;
+
+    // Arrange: initialize real provider metadata and an SST, then use the
+    // existing native segment fixture to publish a WAL-only recovery record.
+    require_sqrzl("azure-wal-recovery");
+    let container = "midge-sqrzl-engine-azure-wal";
+    let provider = CloudProviderConfig::sqrzl_azure(container);
+    ensure_sqrzl_namespace(&provider).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let prefix = format!("engine/azure-wal/{}/", uuid::Uuid::new_v4());
+    let options = || real_cloud_engine_options(cache.clone(), provider.clone(), prefix.clone());
+    let mut engine = Engine::open(options()).unwrap();
+    let cf = default_cf(&engine);
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"sst-key".to_vec(), b"sst-value".to_vec(), None)
+        .unwrap();
+    tx.commit(WriteOptions::cloud_strict()).unwrap();
+    engine.flush_cf(&cf).unwrap();
+    let metrics = engine.metrics().get_runtime_metrics().unwrap();
+    let sequence = metrics.current_sequence + 1;
+    let next_segment = metrics.wal_current_segment_id + 1;
+    engine.shutdown(Duration::from_secs(10)).unwrap();
+    drop(engine);
+    let request = |method, key: &str, body: &[u8]| {
+        signed_azure_request(
+            method,
+            &format!("/admin/{container}/{prefix}{key}"),
+            "",
+            body,
+            vec![("x-ms-blob-type", "BlockBlob")],
+        )
+        .unwrap()
+    };
+    let mut catalog = WalPublicationCatalog::decode(&request(
+        "GET",
+        CloudObjectLayout::WAL_CATALOG_OBJECT_KEY,
+        &[],
+    ))
+    .unwrap();
+    let epoch = catalog.fencing_epoch();
+    let sequence = sequence.max(catalog.head().last_seq + 1);
+    let (wal, _) = SegmentBuilder::new(
+        catalog.next_segment_id().max(next_segment),
+        epoch,
+        catalog.head(),
+    )
+    .record(&WalRecord::new(
+        WalOpKind::Put,
+        b"wal-key".as_slice().into(),
+        Some(b"wal-value".as_slice().into()),
+        sequence,
+    ))
+    .seal();
+    let entry = CatalogEntry::from_sealed_bytes(&wal).unwrap();
+    request("PUT", &entry.object_key(), &wal);
+    assert!(catalog.append(epoch, &[entry]).unwrap());
+    let bytes = catalog.encode().unwrap();
+    request("PUT", CloudObjectLayout::WAL_CATALOG_OBJECT_KEY, &bytes);
+    request(
+        "PUT",
+        CloudObjectLayout::WAL_CATALOG_MIRROR_OBJECT_KEY,
+        &bytes,
+    );
+
+    // Act: neither the SST cache nor a local WAL can supply the values.
+    std::fs::remove_dir_all(&cache).unwrap();
+    let mut reopened = Engine::open(options()).unwrap();
+    let read = reopened
+        .begin_tx(default_cf(&reopened).id(), TransactionMode::ReadOnly)
+        .unwrap();
+
+    // Assert: remote SST recovery and native published-WAL replay both ran.
+    assert_eq!(
+        read.get(b"sst-key").unwrap().as_deref(),
+        Some(b"sst-value".as_slice())
+    );
+    assert_eq!(
+        read.get(b"wal-key").unwrap().as_deref(),
+        Some(b"wal-value".as_slice())
+    );
+    drop(read);
+    reopened.shutdown(Duration::from_secs(10)).unwrap();
 }
 
 #[test]
@@ -184,7 +284,7 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
                 cache_path.clone(),
                 CloudStorageLocation::new(provider.clone(), database_prefix.clone()),
             )
-            .memory_budget(MemoryBudget::Bytes(8 * 1024 * 1024))
+            .memory_budget(MemoryBudget::Bytes(16 * 1024 * 1024))
             .background_compaction(false)
             .target_sst_size_for_testing(4 * 1024)
             .build()
@@ -194,20 +294,10 @@ fn should_rollback_partition_set_after_partial_sqrzl_compaction_upload() {
     };
     let mut engine = open_engine();
     let cf = default_cf(&engine);
-    for batch in 0..4u8 {
-        let mut tx = engine
-            .begin_tx(cf.id(), TransactionMode::ReadWrite)
-            .expect("begin compaction seed");
-        tx.put(
-            format!("sqrzl-partial-mirror-{batch}").into_bytes(),
-            vec![batch; 512],
-            None,
-        )
-        .expect("put compaction seed");
-        tx.commit(WriteOptions::cloud_strict())
-            .expect("commit compaction seed");
-        engine.flush_cf(&cf).expect("force SST upload");
-    }
+    // Use the real partition fixture: tiny disjoint SSTs can be promoted
+    // without uploads, which would never reach the injected second part.
+    seed_sqrzl_partitioned_compaction_data(label, &mut engine, &cf)
+        .expect("seed multiple physical output partitions");
     let pre_failure_layout = engine
         .metrics()
         .get_storage_layout()
@@ -258,16 +348,8 @@ fn verify_recovered_partition_set(
     expected_compacted_files: usize,
 ) {
     let reopened_cf = default_cf(&reopened);
-    for batch in 0..4u8 {
-        let key = format!("sqrzl-partial-mirror-{batch}");
-        let read_tx = reopened
-            .begin_tx(reopened_cf.id(), TransactionMode::ReadOnly)
-            .expect("begin read tx");
-        assert_eq!(
-            read_tx.get(key.as_bytes()).expect("read value"),
-            Some(Bytes::from(vec![batch; 512]))
-        );
-    }
+    assert_sqrzl_partitioned_reads("partial-upload recovery", &reopened, &reopened_cf)
+        .expect("every acknowledged partition fixture value survives");
     let reopened_layout = reopened
         .metrics()
         .get_storage_layout()
@@ -391,6 +473,14 @@ fn seed_sqrzl_partitioned_compaction_data(
             )
             .map_err(|error| format!("{label}: put: {error}"))?;
         }
+        // The shared upper key makes every source range overlap, requiring a
+        // physical merge instead of promoting existing disjoint SST names.
+        tx.put(
+            b"sqrzl-partitioned/overlap".to_vec(),
+            b"shared".to_vec(),
+            None,
+        )
+        .map_err(|error| format!("{label}: put overlapping source key: {error}"))?;
         tx.commit(WriteOptions::cloud_strict())
             .map_err(|error| format!("{label}: cloud-strict commit: {error}"))?;
         engine
@@ -419,6 +509,16 @@ fn assert_sqrzl_partitioned_reads(
                 "{label}: unexpected value for {key} after recovery"
             ));
         }
+    }
+    if read
+        .get(b"sqrzl-partitioned/overlap")
+        .map_err(|error| format!("{label}: read overlapping source key: {error}"))?
+        .as_deref()
+        != Some(b"shared".as_slice())
+    {
+        return Err(format!(
+            "{label}: lost overlapping source key after recovery"
+        ));
     }
     Ok(())
 }

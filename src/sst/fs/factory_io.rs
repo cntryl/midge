@@ -20,6 +20,7 @@ use crate::types::{EntryType, RangeTombstone};
 /// that publish an SST. Writers map their target onto `fs` and refuse a target
 /// outside its root rather than publishing somewhere the caller did not name.
 pub struct FsSstFactoryIo {
+    write_limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
     fs: Arc<dyn Fs>,
     block_size: usize,
     compression_policy: CompressionPolicy,
@@ -44,17 +45,27 @@ impl FsSstFactoryIo {
             Arc::clone(&self.scratch_outstanding),
             self.compaction_scratch_directory.as_deref(),
         )?);
+        writer.set_write_limiter(self.write_limiter.clone());
         Ok(Box::new(writer))
     }
     /// Create a new factory with a custom filesystem implementation
     pub fn new(fs: Arc<dyn Fs>, block_size: usize) -> Self {
         Self {
+            write_limiter: None,
             fs,
             block_size,
             compression_policy: CompressionPolicy::default(),
             scratch_outstanding: Arc::default(),
             compaction_scratch_directory: None,
         }
+    }
+
+    pub(crate) fn with_write_limiter(
+        mut self,
+        limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+    ) -> Self {
+        self.write_limiter = limiter;
+        self
     }
 
     /// Keep build scratch in `directory`, a location in the output filesystem.
@@ -145,14 +156,46 @@ pub(crate) fn write_legacy_oversized_uncompressed_sst(
     super::finish_writer_to_path(Box::new(legacy), path)
 }
 
+/// Range metadata and the exact sizing bound for the retained entries.
+#[derive(Default)]
+struct RetainedRanges {
+    entries: Vec<RangeTombstone>,
+    encoded_bound: usize,
+}
+
+impl RetainedRanges {
+    fn push(&mut self, range: RangeTombstone) {
+        let growth = crate::memtable::size_bound::range_bytes(range.start.len(), range.end.len());
+        self.entries.push(range);
+        self.encoded_bound = self.encoded_bound.saturating_add(growth);
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = &RangeTombstone> {
+        self.entries.iter().inspect(|_| {
+            #[cfg(test)]
+            size_preflight_tests::record_visit();
+        })
+    }
+}
+
+impl std::ops::Deref for RetainedRanges {
+    type Target = [RangeTombstone];
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
 /// Simple in-memory SST writer that applies block-level compression.
 struct FsSstWriter {
+    write_limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
     /// Filesystem this writer publishes through, injected by the factory so
     /// staging writes, fsyncs, the rename, and the directory sync all reach
     /// the same backend the factory reads from.
     fs: Arc<dyn Fs>,
     entries: Vec<PendingEntry>,
-    range_tombstones: Vec<RangeTombstone>,
+    range_tombstones: RetainedRanges,
     block_size: usize,
     compression_policy: CompressionPolicy,
     /// Activated only by `add_sorted_with_meta`, which is the compaction
@@ -236,13 +279,10 @@ impl DynSstWriter for FsSstWriter {
         // uses fewer than 64 bytes of integer framing. Key payloads also
         // appear in the block index and the two metadata bounds. The factors
         // below allow their copies plus worst-case fixed-compressor growth.
-        let ranges = self.range_tombstones.iter().fold(0usize, |total, range| {
-            total.saturating_add(
-                self.additional_range_tombstone_size_upper_bound(&range.start, &range.end)
-                    .unwrap_or(usize::MAX),
-            )
-        });
-        let fixed = ranges.saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES);
+        let fixed = self
+            .range_tombstones
+            .encoded_bound
+            .saturating_add(crate::memtable::size_bound::FIXED_SST_BYTES);
         let Some(streaming) = &self.streaming else {
             return Some(self.entries.iter().fold(fixed, |total, entry| {
                 total.saturating_add(crate::memtable::size_bound::point_bytes(
@@ -252,14 +292,7 @@ impl DynSstWriter for FsSstWriter {
             }));
         };
         let pipeline = &streaming.pipeline;
-        let index = pipeline
-            .block_index_entries
-            .iter()
-            .fold(0usize, |total, (key, _)| {
-                total
-                    .saturating_add(256)
-                    .saturating_add(key.len().saturating_mul(8))
-            });
+        let index = pipeline.block_index_entries.encoded_bound();
         let current_index = pipeline.current_first_key.as_ref().map_or(0, |key| {
             256usize.saturating_add(key.len().saturating_mul(8))
         });
@@ -278,7 +311,19 @@ impl DynSstWriter for FsSstWriter {
                     usize::try_from(streaming.sink.offset().unwrap_or(u64::MAX))
                         .unwrap_or(usize::MAX),
                 )
-                .saturating_add(pipeline.current_block.len().saturating_mul(2))
+                .saturating_add(
+                    pipeline
+                        .current_block
+                        .len()
+                        .saturating_add(
+                            pipeline
+                                .restart_offsets
+                                .len()
+                                .saturating_add(1)
+                                .saturating_mul(4),
+                        )
+                        .saturating_mul(2),
+                )
                 .saturating_add(index)
                 .saturating_add(current_index)
                 .saturating_add(key_bounds)
@@ -297,15 +342,7 @@ impl DynSstWriter for FsSstWriter {
             let pipeline = &streaming.pipeline;
             let persisted =
                 usize::try_from(streaming.sink.offset().unwrap_or(u64::MAX)).unwrap_or(usize::MAX);
-            let index = pipeline.block_index_entries.iter().fold(
-                pipeline
-                    .block_index_entries
-                    .len()
-                    .saturating_mul(
-                        std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>(),
-                    ),
-                |total, (key, _)| total.saturating_add(key.len()),
-            );
+            let index = pipeline.block_index_entries.retained_bytes();
             let current_bloom = if pipeline.current_block_keys.is_empty() {
                 0
             } else {
@@ -424,7 +461,12 @@ impl DynSstWriter for FsSstWriter {
         }
         let retained_bytes = std::mem::size_of::<RangeTombstone>()
             .saturating_add(start.len())
-            .saturating_add(end.len());
+            .saturating_add(end.len())
+            .saturating_add(if self.range_tombstones.is_empty() {
+                std::mem::size_of::<usize>()
+            } else {
+                0
+            });
         let reservation = self
             .budget
             .as_ref()
@@ -439,32 +481,14 @@ impl DynSstWriter for FsSstWriter {
     }
 
     fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
-        if self.streaming.is_none() {
-            let fs = Arc::clone(&self.fs);
-            let bytes = self.finish_bytes()?;
-            return crate::sst::fs::persist_sst_bytes_to_path(&fs, &bytes, path);
-        }
+        self.finalize_to_path(path).map(|_| ())
+    }
 
-        let FsSstWriter {
-            fs,
-            entries,
-            range_tombstones,
-            block_size: _,
-            compression_policy,
-            streaming,
-            budget: _,
-            range_tombstone_reservations: _range_tombstone_reservations,
-            preserve_legacy_entries: _,
-        } = *self;
-        debug_assert!(entries.is_empty());
-        let scratch = Self::finish_streaming(
-            streaming.expect("streaming writer checked above"),
-            &range_tombstones,
-            &compression_policy,
-        )?;
-        let result = crate::sst::fs::persist_sst_stream_to_path(&fs, &mut scratch.reader(), path);
-        let cleanup = scratch.close();
-        result.and(cleanup)
+    fn finish_to_path_with_summary(
+        self: Box<Self>,
+        path: &Path,
+    ) -> MidgeResult<Option<crate::sst::traits::FinalizedSst>> {
+        self.finalize_to_path(path).map(Some)
     }
 
     fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
@@ -493,7 +517,132 @@ impl DynSstWriter for FsSstWriter {
     }
 }
 
+impl FsSstWriter {
+    fn set_write_limiter(
+        &mut self,
+        limiter: Option<Arc<crate::common::write_rate::BackgroundWriteLimiter>>,
+    ) {
+        self.write_limiter.clone_from(&limiter);
+        if let Some(streaming) = &mut self.streaming {
+            streaming.sink.set_write_limiter(limiter);
+        }
+    }
+
+    fn logical_summary(&self) -> crate::sst::traits::FinalizedSst {
+        let mut smallest_key = None;
+        let mut largest_key = None;
+        let mut smallest_seq = None;
+        let mut largest_seq = 0;
+        let mut earliest_expiration_millis = None;
+        let point_count = if let Some(streaming) = &self.streaming {
+            smallest_key.clone_from(&streaming.pipeline.smallest_key);
+            largest_key.clone_from(&streaming.pipeline.largest_key);
+            smallest_seq = streaming.pipeline.smallest_sequence;
+            largest_seq = streaming.pipeline.largest_sequence;
+            earliest_expiration_millis = streaming.pipeline.earliest_expiration_millis;
+            streaming.pipeline.point_count
+        } else {
+            for entry in &self.entries {
+                if let Some(expiration) = entry.expiration {
+                    earliest_expiration_millis = Some(
+                        earliest_expiration_millis
+                            .map_or(expiration, |previous: u64| previous.min(expiration)),
+                    );
+                }
+                Self::update_key_bounds(&mut smallest_key, &mut largest_key, &entry.key);
+                smallest_seq =
+                    Some(smallest_seq.map_or(entry.sequence, |seq: u64| seq.min(entry.sequence)));
+                largest_seq = largest_seq.max(entry.sequence);
+            }
+            self.entries.len() as u64
+        };
+        for tombstone in self.range_tombstones.iter() {
+            Self::update_key_bounds(&mut smallest_key, &mut largest_key, &tombstone.start);
+            Self::update_key_bounds(&mut smallest_key, &mut largest_key, &tombstone.end);
+            smallest_seq = Some(smallest_seq.map_or(tombstone.seq, |seq| seq.min(tombstone.seq)));
+            largest_seq = largest_seq.max(tombstone.seq);
+        }
+        crate::sst::traits::FinalizedSst {
+            summary: smallest_key
+                .zip(largest_key)
+                .map(|(smallest_key, largest_key)| super::SstFileSummary {
+                    earliest_expiration_millis,
+                    size_bytes: 0,
+                    smallest_key,
+                    largest_key,
+                    smallest_seq: smallest_seq.expect("nonempty SST has a sequence"),
+                    largest_seq,
+                }),
+            size_bytes: 0,
+            content_crc32c: 0,
+            point_count,
+            range_count: self.range_tombstones.len() as u64,
+        }
+    }
+
+    fn finalize_to_path(
+        self: Box<Self>,
+        path: &Path,
+    ) -> MidgeResult<crate::sst::traits::FinalizedSst> {
+        let mut finalized = self.logical_summary();
+        if self.streaming.is_none() {
+            let fs = Arc::clone(&self.fs);
+            let bytes = self.finish_bytes()?;
+            crate::sst::fs::persist_sst_bytes_to_path(&fs, &bytes, path)?;
+            finalized.size_bytes = bytes.len() as u64;
+            finalized.content_crc32c = crc32c::crc32c(&bytes);
+            if let Some(summary) = &mut finalized.summary {
+                summary.size_bytes = finalized.size_bytes;
+            }
+            return Ok(finalized);
+        }
+
+        let FsSstWriter {
+            write_limiter,
+            fs,
+            entries,
+            range_tombstones,
+            block_size: _,
+            compression_policy,
+            streaming,
+            budget: _,
+            range_tombstone_reservations: _range_tombstone_reservations,
+            preserve_legacy_entries: _,
+        } = *self;
+        debug_assert!(entries.is_empty());
+        let scratch = Self::finish_streaming(
+            streaming.expect("streaming writer checked above"),
+            &range_tombstones,
+            &compression_policy,
+        )?;
+        let mut reader = crate::common::write_rate::RateLimitedReader {
+            inner: scratch.reader(),
+            limiter: write_limiter,
+        };
+        let result = crate::sst::fs::persist_sst_stream_with_identity(&fs, &mut reader, path);
+        let cleanup = scratch.close();
+        let (size, crc) = result?;
+        cleanup?;
+        finalized.size_bytes = size;
+        finalized.content_crc32c = crc;
+        if let Some(summary) = &mut finalized.summary {
+            summary.size_bytes = size;
+        }
+        Ok(finalized)
+    }
+}
+
 impl SstFactory for FsSstFactoryIo {
+    fn fork_for_worker(&self) -> Option<Arc<dyn SstFactory>> {
+        Some(Arc::new(Self {
+            fs: Arc::clone(&self.fs),
+            block_size: self.block_size,
+            compression_policy: self.compression_policy.clone(),
+            scratch_outstanding: Arc::default(),
+            compaction_scratch_directory: self.compaction_scratch_directory.clone(),
+            write_limiter: self.write_limiter.clone(),
+        }))
+    }
     fn output_fs(&self) -> Arc<dyn Fs> {
         self.fs
             .local_output_view()
@@ -532,6 +681,7 @@ impl SstFactory for FsSstFactoryIo {
             self.compaction_scratch_directory.as_deref(),
         )?);
         writer.preserve_legacy_entries = true;
+        writer.set_write_limiter(self.write_limiter.clone());
         Ok(Box::new(writer))
     }
 
@@ -555,3 +705,7 @@ mod sink;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "factory_io/tests/size_preflights.rs"]
+mod size_preflight_tests;

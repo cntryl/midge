@@ -35,6 +35,7 @@ impl SstFileIo {
         let mut best_state = KeyState::Absent;
         let index = self.index_entries()?;
         let mut blocks_read = 1u64;
+        let mut entries_decoded = 0_u64;
 
         let candidate_blocks = self.candidate_data_blocks(index.as_ref(), key);
         self.diagnostics
@@ -48,7 +49,9 @@ impl SstFileIo {
 
             blocks_read = blocks_read.saturating_add(1);
             let block_data = self.read_cached_data_block(&handle)?;
-            let candidate = self.key_state_from_encoded_block(&block_data, key, snapshot_seq)?;
+            let (candidate, decoded) =
+                self.key_state_from_encoded_block_with_stats(&block_data, key, snapshot_seq)?;
+            entries_decoded += decoded;
             Self::merge_newer_state(&mut best_state, candidate)?;
         }
 
@@ -57,6 +60,7 @@ impl SstFileIo {
             SstPointReadStats {
                 sst_touched: true,
                 blocks_read,
+                entries_decoded,
             },
         ))
     }
@@ -91,19 +95,16 @@ impl crate::sst::SstStateReader for SstFileIo {
         };
         for (_first_key, handle) in &index[span] {
             let block_data = self.read_cached_data_block(handle)?;
-            for entry in self.scan_block_entries_from_bytes(&block_data)? {
-                if start.is_some_and(|bound| entry.key.as_slice() < bound)
-                    || end.is_some_and(|bound| entry.key.as_slice() >= bound)
+            let decoded = self.decode_scan_block(&block_data)?;
+            for index in 0..decoded.len() {
+                let entry = decoded.entry(index);
+                if start.is_some_and(|bound| entry.key.as_ref() < bound)
+                    || end.is_some_and(|bound| entry.key.as_ref() >= bound)
                 {
                     continue;
                 }
-                let key = Bytes::from(entry.key.clone());
-                let state = if entry.is_tombstone() {
-                    KeyState::Tombstone(entry.sequence)
-                } else {
-                    Self::state_from_entry(entry)
-                };
-                result.push((key, state));
+                let key = entry.key.clone();
+                result.push((key, Self::state_from_scan_entry(entry)));
             }
         }
         Ok(result)
@@ -182,23 +183,19 @@ impl crate::sst::SstStateReader for SstFileIo {
 
         for (_first_key, handle) in handles {
             let block_data = self.read_cached_data_block(handle)?;
-            for entry in self.scan_block_entries_from_bytes(&block_data)? {
-                if let Some(s) = start {
-                    if entry.key.as_slice() < s {
-                        continue;
-                    }
+            let decoded = self.decode_scan_block(&block_data)?;
+            for index in 0..decoded.len() {
+                let entry = decoded.entry(index);
+                if start.is_some_and(|bound| entry.key.as_ref() < bound)
+                    || end.is_some_and(|bound| entry.key.as_ref() >= bound)
+                {
+                    continue;
                 }
-                if let Some(e) = end {
-                    if entry.key.as_slice() >= e {
-                        continue;
-                    }
-                }
-
-                let key = Bytes::from(entry.key.clone());
-                let state = if entry.is_tombstone() || entry.is_expired(now_millis) {
+                let key = entry.key.clone();
+                let state = if crate::common::time::is_expired_at(entry.expiration, now_millis) {
                     KeyState::Tombstone(entry.sequence)
                 } else {
-                    Self::state_from_entry(entry)
+                    Self::state_from_scan_entry(entry)
                 };
                 result.push((key, state));
             }
@@ -222,14 +219,22 @@ impl crate::sst::SstStateReader for SstFileIo {
     }
 
     fn max_covering_tombstone_seq(&self, key: &[u8], snapshot_seq: u64) -> Option<u64> {
-        crate::memtable::max_covering_seq(&self.range_tombstones, key, snapshot_seq)
+        match &self.range_tombstone_index {
+            Some(index) => index.max_covering_seq(key, snapshot_seq),
+            None => crate::memtable::max_covering_seq(&self.range_tombstones, key, snapshot_seq),
+        }
     }
 
     fn range_tombstone_memory_usage(&self) -> usize {
+        let index_bytes = self.range_tombstone_index.as_ref().map_or(
+            0,
+            crate::memtable::range_tombstone_index::FragmentedRangeTombstones::memory_usage,
+        );
         self.range_tombstones.iter().fold(
             self.range_tombstones
                 .len()
-                .saturating_mul(std::mem::size_of::<crate::types::RangeTombstone>()),
+                .saturating_mul(std::mem::size_of::<crate::types::RangeTombstone>())
+                .saturating_add(index_bytes),
             |total, tombstone| {
                 total
                     .saturating_add(tombstone.start.capacity())

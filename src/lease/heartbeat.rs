@@ -47,6 +47,7 @@ fn mark_unhealthy(
     }
 }
 
+#[tracing::instrument(level = "debug", skip_all, fields(ttl_secs = ttl.as_secs()))]
 fn run_renewal_worker(
     lease: &dyn PrimaryLease,
     validity: Option<&super::traits::LeaseValidity>,

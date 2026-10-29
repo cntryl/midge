@@ -150,6 +150,8 @@ fn assert_native_acknowledgement_budget(request: TimedRequest) -> MidgeResult<()
         ..SyncCountingFs::default()
     });
     let (writer, store) = native_writer(fs.clone(), budget)?;
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    *writer.acknowledgement_budget_observer.lock() = Some(observed_tx);
     let worker_gate = ReleaseGate(Some(release_tx));
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     let (unpin, pin) = pin_closed_grant(&store);
@@ -163,25 +165,27 @@ fn assert_native_acknowledgement_budget(request: TimedRequest) -> MidgeResult<()
     let caller = {
         let writer = writer.clone();
         std::thread::spawn(move || {
+            let mut unchanged = None;
             let result = match request {
                 TimedRequest::Append => writer
                     .append_record_accounted(&record(1))
                     .map(|_| ())
-                    .map_err(|failure| failure.error),
+                    .map_err(|failure| {
+                        unchanged = Some(failure.unchanged);
+                        failure.error
+                    }),
                 TimedRequest::Sync => writer.sync_with_timeout(budget),
             };
-            let _ = result_tx.send(result);
+            let _ = result_tx.send((result, unchanged));
         })
     };
-    let started = started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    std::thread::sleep(Duration::from_millis(250));
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
     let waiting_for_admission =
         writer.queue.lock().is_empty() && writer.sync_state.lock().requests.is_empty();
     unpin.release();
     pin.join().unwrap();
-    let limit = budget + Duration::from_millis(100);
-    let response = result_rx.recv_timeout(limit.saturating_sub(started.elapsed()));
-    let elapsed = started.elapsed();
+    let observation = observed_rx.recv_timeout(Duration::from_secs(5));
+    let response = result_rx.recv_timeout(Duration::from_secs(5));
     worker_gate.release();
     caller.join().unwrap();
     drop(writer);
@@ -189,13 +193,26 @@ fn assert_native_acknowledgement_budget(request: TimedRequest) -> MidgeResult<()
         waiting_for_admission,
         "request bypassed the closed native grant"
     );
+    let (result, unchanged) = response.expect("operation returns while physical writer is blocked");
     assert!(
-        matches!(response, Ok(Err(crate::common::MidgeError::Timeout(_)))),
-        "{response:?}"
+        matches!(result, Err(crate::common::MidgeError::Timeout(_))),
+        "{result:?}"
     );
-    assert!(
-        elapsed < limit,
-        "native admission restarted the acknowledgement window: {elapsed:?}"
+    if matches!(request, TimedRequest::Append) {
+        assert_eq!(
+            unchanged,
+            Some(false),
+            "submitted append has an unknown outcome"
+        );
+    }
+    let observation = observation.expect("operation reaches acknowledgement waiting");
+    assert!(observation.admission_elapsed > Duration::ZERO);
+    assert!(observation.admission_elapsed < budget);
+    assert_eq!(
+        observation.remaining,
+        budget
+            .checked_sub(observation.admission_elapsed)
+            .expect("admission leaves acknowledgement allowance")
     );
     assert_eq!(
         fs.metadata(&FsPath::new("wal.log")).unwrap().len,
@@ -314,6 +331,8 @@ fn assert_expired_native_submission(request: TimedRequest) -> MidgeResult<()> {
         ..SyncCountingFs::default()
     });
     let (writer, store) = native_writer(fs.clone(), Duration::from_millis(10))?;
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    *writer.acknowledgement_budget_observer.lock() = Some(observed_tx);
     let worker_gate = ReleaseGate(Some(release_tx));
     entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     writer.set_write_authority(Some(Arc::new(DelayedAdmissionAuthority::new(
@@ -349,6 +368,13 @@ fn assert_expired_native_submission(request: TimedRequest) -> MidgeResult<()> {
     assert_eq!(queued, 0);
     assert_eq!(sync_requests, 0);
     assert!(sticky.is_none());
+    assert!(
+        matches!(
+            observed_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ),
+        "expired submission must never reach acknowledgement waiting"
+    );
     assert_eq!(
         fs.metadata(&FsPath::new("wal.log")).unwrap().len,
         HEADER_LEN as u64
@@ -489,7 +515,7 @@ fn should_keep_successful_prefix_when_later_queued_authority_rejects_its_partiti
     wait_until(|| writer.queue.lock().len() == 2);
     let sync = {
         let writer = writer.clone();
-        std::thread::spawn(move || writer.sync())
+        std::thread::spawn(move || writer.sync_with_timeout(writer.io_timeout))
     };
     wait_until(|| writer.sync_state.lock().pending_fsyncs != 0);
     let syncs_before = fs.durable_sync_count.load(Ordering::SeqCst);
@@ -571,7 +597,7 @@ fn assert_terminal_ticket_drain(panic: bool) -> MidgeResult<()> {
     wait_until(|| !writer.queue.lock().is_empty());
     let sync = {
         let writer = writer.clone();
-        std::thread::spawn(move || writer.sync())
+        std::thread::spawn(move || writer.sync_with_timeout(writer.io_timeout))
     };
     wait_until(|| !writer.sync_state.lock().requests.is_empty());
 
@@ -662,5 +688,95 @@ fn should_report_unchanged_batch_when_a_child_validation_fails_after_its_noop_ca
         HEADER_LEN as u64
     );
     assert!(store.acquire_leadership("successor").unwrap().epoch > 1);
+    Ok(())
+}
+
+#[test]
+fn should_return_pending_sync_before_physical_worker_is_released() -> MidgeResult<()> {
+    // Arrange
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let fs = Arc::new(SyncCountingFs {
+        open_gate: Some(Arc::new((entered_tx, std::sync::Mutex::new(release_rx)))),
+        ..SyncCountingFs::default()
+    });
+    let (writer, store) = native_writer(fs, Duration::from_secs(5))?;
+    let release = ReleaseGate(Some(release_tx));
+    entered_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("writer reached physical open");
+    let prefix = crate::wal::traits::WalSyncPrefix {
+        barrier_id: 940,
+        writer_epoch: writer.header.epoch,
+        segment_id: writer.header.id,
+        first_sequence: 0,
+        last_sequence: 0,
+        end_offset: writer.current_pos(),
+    };
+
+    // Act
+    let pending = writer
+        .submit_sync_prefix(prefix, Duration::from_secs(5), None)
+        .expect("nonblocking capability")?;
+
+    // Assert: the caller already owns a pending handle while the physical
+    // worker has not even opened its file, and no completion is fabricated.
+    assert!(pending.try_complete().is_none());
+    assert_eq!(writer.sync_state.lock().requests.len(), 1);
+    release.release();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let receipt = loop {
+        if let Some(result) = pending.try_complete() {
+            break result?;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "physical sync did not settle"
+        );
+        std::thread::yield_now();
+    };
+    assert_eq!(receipt.prefix, prefix);
+    assert!(pending.try_complete().is_none());
+    drop(pending);
+    assert!(store.acquire_leadership("successor").unwrap().epoch > 1);
+    Ok(())
+}
+
+#[test]
+fn should_reject_nonmatching_prefix_without_enqueuing_physical_sync() -> MidgeResult<()> {
+    for mismatch in 0..4 {
+        // Arrange
+        let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+        let writer = FsWalWriterIo::new("prefix.log", fs)?;
+        writer
+            .append_record_accounted(&record(1))
+            .map_err(|failure| failure.error)?;
+        let mut prefix = crate::wal::traits::WalSyncPrefix {
+            barrier_id: 978,
+            writer_epoch: writer.header.epoch,
+            segment_id: writer.header.id,
+            first_sequence: 1,
+            last_sequence: 1,
+            end_offset: writer.current_pos(),
+        };
+        match mismatch {
+            0 => prefix.writer_epoch += 1,
+            1 => prefix.segment_id += 1,
+            2 => prefix.last_sequence += 1,
+            _ => prefix.end_offset += 1,
+        }
+
+        // Act
+        let result = writer
+            .submit_sync_prefix(prefix, Duration::from_secs(1), None)
+            .expect("nonblocking capability");
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(crate::common::MidgeError::InvalidArgument(_))
+        ));
+        assert_eq!(writer.sync_state.lock().pending_fsyncs, 0);
+    }
     Ok(())
 }

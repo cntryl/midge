@@ -60,7 +60,6 @@ impl EventLoop {
                 .deferred_messages_is_empty()
             || self.publication.publication_gate.is_active()
             || self.publication.verification_barrier.is_active()
-            || self.actors.flush_actor.is_inflight()
             || self
                 .actors
                 .cloud_coordinator
@@ -76,34 +75,26 @@ impl EventLoop {
             || !self.state.compaction.compacting_ssts.is_empty()
     }
 
-    pub(super) fn has_manual_flush_obligation(&self) -> bool {
-        self.publication
-            .flush_barrier_waiters
-            .values()
-            .any(|waiters| !waiters.is_empty())
-    }
-
     /// Dispatch at most one ready worker. A missing or retry-delayed task does
     /// not hold the turn; a successful launch advances the preferred task.
     pub(super) fn schedule_cloud_maintenance(&mut self) -> Option<MaintenanceTask> {
         super::compaction::CompactionCoordinator::expire_manual_compaction_waiters(self);
         let compute_owned = self.compaction_compute_owned();
+        let compute_full = compute_owned && !self.actors.compaction_actor.has_capacity();
         let blocked = self.cloud_maintenance_control_blocked()
-            || (compute_owned
-                && (!self.has_manual_flush_obligation() || !self.state.has_due_immutable_flush()));
+            || (compute_full && !self.state.has_due_immutable_flush());
         let mut task = self
             .actors
             .cloud_coordinator
             .begin_maintenance_turn(blocked)?;
-        if compute_owned {
-            // A manual durability barrier may drain older immutable work while
-            // compute retains its inputs and reservations. Only Flush can use
-            // this turn; compaction and retirement still wait for that owner.
+        if compute_full {
+            // Accepted immutable data must be able to release memory while
+            // remote compute retains its inputs and separate reservation.
+            // Flush admission and manifest publication keep their normal gates;
+            // another compaction and retirement still wait for the compute owner.
+            let before = self.actors.flush_actor.submitted_work();
             self.schedule_next_flush_worker();
-            let started = self
-                .actors
-                .flush_actor
-                .is_inflight()
+            let started = (self.actors.flush_actor.submitted_work() != before)
                 .then_some(MaintenanceTask::Flush);
             self.actors
                 .cloud_coordinator
@@ -114,8 +105,9 @@ impl EventLoop {
         for _ in 0..3 {
             let launched = match task {
                 MaintenanceTask::Flush => {
+                    let before = self.actors.flush_actor.submitted_work();
                     self.schedule_next_flush_worker();
-                    self.actors.flush_actor.is_inflight()
+                    self.actors.flush_actor.submitted_work() != before
                 }
                 MaintenanceTask::Compaction => {
                     if self.shutdown.shutting_down {

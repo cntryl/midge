@@ -27,13 +27,24 @@ use crate::wal::traits::{GroupedWalWriter, WalAppendError, WalWriter};
 use crate::wal::types::{WalPos, WalRecord};
 use crate::wal::writer_authority::PendingWriterEffect;
 use parking_lot::{Condvar, Mutex};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::writer_runner::{SyncState, WriterConfig, WriterRunner};
 
+mod sequenced;
+
 const MAX_BACKOFF_MS: u64 = 100;
 const MAX_WAIT_ATTEMPTS: u32 = 50;
+const MAX_PENDING_SYNC_REQUESTS: usize = 128;
+
+#[cfg(test)]
+#[derive(Debug)]
+struct AcknowledgementBudget {
+    admission_elapsed: Duration,
+    remaining: Duration,
+}
 
 /// Filesystem-backed WAL writer using `io::Fs`.
 ///
@@ -69,11 +80,15 @@ pub struct FsWalWriterIo {
 
     // Maximum wait for append, flush, sync, and close acknowledgements.
     io_timeout: Duration,
+    #[cfg(test)]
+    acknowledgement_budget_observer: Mutex<Option<std::sync::mpsc::Sender<AcknowledgementBudget>>>,
 
     /// The header of the segment this writer appends to.
     header: SegmentHeader,
     /// The records acknowledged into the segment.
-    tail: Mutex<SegmentTail>,
+    tail: Arc<Mutex<SegmentTail>>,
+    raw_submission_pending: Arc<std::sync::atomic::AtomicBool>,
+    raw_submission_memory: crate::common::resource_budget::ResourceBudget,
     /// The digest of every byte written, shared with the runner.
     digest: Arc<Mutex<SegmentDigest>>,
     /// The footer was written: nothing more may be appended.
@@ -190,8 +205,14 @@ impl FsWalWriterIo {
             writer_thread: Mutex::new(None),
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             io_timeout,
+            #[cfg(test)]
+            acknowledgement_budget_observer: Mutex::new(None),
             header,
-            tail: Mutex::new(SegmentTail::default()),
+            tail: Arc::new(Mutex::new(SegmentTail::default())),
+            raw_submission_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            raw_submission_memory: crate::common::resource_budget::ResourceBudget::new(
+                64 * 1024 * 1024,
+            ),
             digest: Arc::new(Mutex::new(SegmentDigest::of(&header_bytes))),
             sealed: std::sync::atomic::AtomicBool::new(false),
         };
@@ -213,9 +234,10 @@ impl FsWalWriterIo {
             digest: Arc::clone(&writer.digest),
         };
         let runner = WriterRunner::new(config);
+        let failpoint_gate = crate::failpoints::worker_gate();
         let handle = std::thread::Builder::new()
             .name("midge-wal-writer".to_string())
-            .spawn(move || runner.run())?;
+            .spawn(move || failpoint_gate.run(|| runner.run()))?;
 
         *writer.writer_thread.lock() = Some(handle);
 
@@ -241,6 +263,14 @@ impl FsWalWriterIo {
         &self,
         records: impl IntoIterator<Item = &'a WalRecord>,
     ) -> Result<(), WalAppendError> {
+        if self
+            .raw_submission_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(WalAppendError::unchanged(MidgeError::WriteStall(
+                "a sequenced WAL append is still awaiting its completion".into(),
+            )));
+        }
         if self.sealed.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(WalAppendError::unchanged(MidgeError::Internal(format!(
                 "WAL segment {} is sealed; nothing more may be appended to it",
@@ -303,6 +333,92 @@ impl FsWalWriterIo {
         Ok(Footer::sealing(&self.header, &self.tail.lock(), &digest))
     }
 
+    fn submit_footer_operation(
+        &self,
+        operation_id: u64,
+        facts: &SealedFacts,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<crate::wal::footer_completion::WalPendingFooter> {
+        let started = Instant::now();
+        if let Some(error) = self.writer_failure() {
+            return Err(error);
+        }
+        let footer = self.sealing(timeout)?;
+        if footer.sealed_facts() != *facts {
+            return Err(MidgeError::Internal(format!(
+                "WAL segment {} changed after its seal facts were taken",
+                self.header.id
+            )));
+        }
+        let data = footer.encode_frame()?;
+        let start_offset = self.current_pos();
+        let end_offset = start_offset
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| MidgeError::ResourceLimit("WAL footer offset overflow".into()))?;
+        let expected = crate::wal::footer_completion::WalFooterPrefix {
+            operation_id,
+            writer_epoch: self.header.epoch,
+            segment_id: self.header.id,
+            start_offset,
+            end_offset,
+        };
+        if data.is_empty() {
+            return Err(MidgeError::Internal("encoded WAL footer is empty".into()));
+        }
+        crate::failpoints::fail_point!("midge::wal::timeout_before_enqueue", |_| Err(
+            MidgeError::Timeout("injected timeout before WAL footer enqueue".into())
+        ));
+        let (effect, root) =
+            PendingWriterEffect::admit(self.write_authority.read().clone(), group, timeout)?;
+        let reservation = self
+            .raw_submission_memory
+            .reserve(data.len(), "asynchronous WAL footer")?;
+        let (sender, response) = std::sync::mpsc::sync_channel(1);
+        {
+            let mut queue = self.queue.lock();
+            let mut state = self.sync_state.lock();
+            if let Some(error) = state.failure() {
+                return Err(error);
+            }
+            if self.sealed.load(Ordering::Acquire) {
+                return Err(MidgeError::Internal(format!(
+                    "WAL segment {} is already sealed",
+                    self.header.id
+                )));
+            }
+            if queue.len() >= super::writer_runner::MAX_QUEUE_DEPTH
+                || state.submitted_writes != state.completed_writes
+                || started.elapsed() >= timeout
+            {
+                return Err(MidgeError::WriteStall(
+                    "WAL footer admission is not at a drained segment boundary".into(),
+                ));
+            }
+            let id = state.submitted_writes.checked_add(1).ok_or_else(|| {
+                MidgeError::ResourceLimit("WAL writer request identity exhausted".into())
+            })?;
+            self.sealed.store(true, Ordering::Release);
+            state.submitted_writes = id;
+            queue.push(super::writer_runner::QueuedWrite::footer(
+                data,
+                expected,
+                sender,
+                effect,
+                id,
+                reservation,
+            ));
+        }
+        self.queue_cond.notify_one();
+        let failure_state = Arc::clone(&self.sync_state);
+        Ok(crate::wal::footer_completion::WalPendingFooter::new(
+            response,
+            expected,
+            Arc::new(move || failure_state.lock().failure()),
+            root,
+        ))
+    }
+
     fn take_buffer(&self) -> Vec<u8> {
         let mut pool = self.buf_pool.lock();
         pool.pop().unwrap_or_else(|| Vec::with_capacity(1024))
@@ -339,6 +455,11 @@ impl FsWalWriterIo {
         if let Some(error) = self.writer_failure() {
             return Err(WalAppendError::unchanged(error));
         }
+        crate::failpoints::fail_point!("midge::wal::timeout_before_enqueue", |_| Err(
+            WalAppendError::unchanged(MidgeError::Timeout(
+                "injected timeout before WAL enqueue".into()
+            ))
+        ));
         let admission_start = std::time::Instant::now();
         let authority = self.write_authority.read().clone();
         let (effect, root) = PendingWriterEffect::admit(authority, group, acknowledgement_timeout)
@@ -380,11 +501,14 @@ impl FsWalWriterIo {
                     });
                 }
 
+                let admission_elapsed = admission_start.elapsed();
                 let wait_timeout = if native {
-                    acknowledgement_timeout.saturating_sub(admission_start.elapsed())
+                    acknowledgement_timeout.saturating_sub(admission_elapsed)
                 } else {
                     acknowledgement_timeout
                 };
+                #[cfg(test)]
+                self.observe_acknowledgement_budget(admission_elapsed, wait_timeout);
                 return match ack_rx.recv_timeout(wait_timeout) {
                     Ok(result) => result,
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -455,6 +579,43 @@ impl FsWalWriterIo {
 }
 
 impl WalWriter for FsWalWriterIo {
+    fn supports_sequenced_submission(&self) -> bool {
+        true
+    }
+
+    fn submit_sequenced_batch(
+        &self,
+        prefix: crate::wal::append_completion::WalAppendPrefix,
+        units: Vec<crate::wal::sequenced::SequencedWalUnit>,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<Result<crate::wal::append_completion::WalPendingAppend, WalAppendError>> {
+        Some(self.submit_owned_units(prefix, units, timeout, group))
+    }
+
+    fn supports_sync_submission(&self) -> bool {
+        true
+    }
+
+    fn submit_sync_prefix(
+        &self,
+        prefix: crate::wal::traits::WalSyncPrefix,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<MidgeResult<crate::wal::traits::WalPendingSync>> {
+        Some(self.enqueue_sync_prefix(prefix, timeout, group))
+    }
+
+    fn submit_footer(
+        &self,
+        operation_id: u64,
+        facts: &SealedFacts,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<MidgeResult<crate::wal::footer_completion::WalPendingFooter>> {
+        Some(self.submit_footer_operation(operation_id, facts, timeout, group))
+    }
+
     fn set_write_authority(&self, authority: Option<crate::wal::traits::WriteAuthority>) {
         *self.write_authority.write() = authority;
     }
@@ -465,11 +626,6 @@ impl WalWriter for FsWalWriterIo {
             .as_ref()
             .and_then(|authority| authority.groups())
             .map(|_| self as &dyn GroupedWalWriter)
-    }
-
-    fn append_record(&self, record: &WalRecord) -> MidgeResult<WalPos> {
-        self.append_record_accounted(record)
-            .map_err(|failure| failure.error)
     }
 
     fn append_record_accounted(&self, record: &WalRecord) -> Result<WalPos, WalAppendError> {
@@ -483,17 +639,8 @@ impl WalWriter for FsWalWriterIo {
         Ok(position)
     }
 
-    fn append_batch(&self, records: &[WalRecord]) -> MidgeResult<WalPos> {
-        self.append_batch_accounted(records)
-            .map_err(|failure| failure.error)
-    }
-
     fn append_batch_accounted(&self, records: &[WalRecord]) -> Result<WalPos, WalAppendError> {
         self.append_batch_with_group(records, None)
-    }
-
-    fn sync(&self) -> MidgeResult<()> {
-        self.sync_with_timeout(self.io_timeout)
     }
 
     fn sync_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
@@ -554,6 +701,77 @@ impl GroupedWalWriter for FsWalWriterIo {
 }
 
 impl FsWalWriterIo {
+    fn enqueue_sync_prefix(
+        &self,
+        prefix: crate::wal::traits::WalSyncPrefix,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> MidgeResult<crate::wal::traits::WalPendingSync> {
+        let started = std::time::Instant::now();
+        if let Some(error) = self.writer_failure() {
+            return Err(error);
+        }
+        if prefix.writer_epoch != self.header.epoch
+            || prefix.segment_id != self.header.id
+            || prefix.first_sequence > prefix.last_sequence
+            || prefix.end_offset < HEADER_LEN as u64
+            || prefix.end_offset != self.current_pos()
+            || prefix.last_sequence
+                != self
+                    .tail
+                    .lock()
+                    .last_seq
+                    .unwrap_or(self.header.prev.last_seq)
+        {
+            return Err(MidgeError::InvalidArgument(
+                "WAL sync prefix does not match the acknowledged segment tail".into(),
+            ));
+        }
+        let authority = self.write_authority.read().clone();
+        let (effect, root) = PendingWriterEffect::admit(authority, group, timeout)?;
+        let (sender, response) = std::sync::mpsc::sync_channel(1);
+        {
+            let _queue = self.queue.lock();
+            let mut state = self.sync_state.lock();
+            if let Some(error) = state.failure() {
+                return Err(error);
+            }
+            if started.elapsed() >= timeout {
+                return Err(MidgeError::Timeout(
+                    "WAL sync deadline expired before submission".into(),
+                ));
+            }
+            if state.requests.len() >= MAX_PENDING_SYNC_REQUESTS {
+                return Err(MidgeError::WriteStall(
+                    "WAL sync request queue is full".into(),
+                ));
+            }
+            if state.submitted_writes != state.completed_writes {
+                return Err(MidgeError::WriteStall(
+                    "WAL sync prefix awaits an append acknowledgement".into(),
+                ));
+            }
+            let id = state.pending_fsyncs.checked_add(1).ok_or_else(|| {
+                MidgeError::ResourceLimit("WAL sync barrier identity space exhausted".into())
+            })?;
+            state.pending_fsyncs = id;
+            let writes_through = state.submitted_writes;
+            state.requests.push_back(super::writer_runner::PendingSync {
+                id,
+                writes_through,
+                effect,
+                completion: Some(super::writer_runner::PendingSyncCompletion { prefix, sender }),
+            });
+        }
+        self.queue_cond.notify_one();
+        let failure_state = Arc::clone(&self.sync_state);
+        Ok(crate::wal::traits::WalPendingSync::new(
+            response,
+            Arc::new(move || failure_state.lock().failure()),
+            root,
+        ))
+    }
+
     fn append_batch_with_group(
         &self,
         records: &[WalRecord],
@@ -583,6 +801,9 @@ impl FsWalWriterIo {
         timeout: Duration,
         group: Option<&crate::lease::WriterEffectGroup>,
     ) -> MidgeResult<()> {
+        if let Some(result) = self.sync_acknowledged_prefix(timeout, group) {
+            return result;
+        }
         if let Some(error) = self.writer_failure() {
             return Err(error);
         }
@@ -594,28 +815,8 @@ impl FsWalWriterIo {
         // Note: we MUST request fsync even if queue is empty, because data may have
         // been written to the file but not yet fsynced (the writer thread writes
         // asynchronously).
-        let my_sync_id = {
-            let _queue = self.queue.lock();
-            let mut s = self.sync_state.lock();
-            if let Some(error) = s.failure() {
-                return Err(error);
-            }
-            if native && sync_start.elapsed() >= timeout {
-                return Err(MidgeError::Timeout(format!(
-                    "WAL sync deadline expired before queue submission after {timeout:?}"
-                )));
-            }
-            s.pending_fsyncs = s.pending_fsyncs.saturating_add(1);
-            let request = super::writer_runner::PendingSync {
-                id: s.pending_fsyncs,
-                writes_through: s.submitted_writes,
-                effect,
-            };
-            s.requests.push_back(request);
-            s.pending_fsyncs
-        };
-        // Wake writer so it can perform fsync
-        self.queue_cond.notify_one();
+        let (my_sync_id, pending) =
+            self.enqueue_legacy_sync(effect, sync_start, timeout, native)?;
 
         let mut s = self.sync_state.lock();
         while s.completed_fsyncs < my_sync_id {
@@ -645,7 +846,128 @@ impl FsWalWriterIo {
                 return Err(crate::common::MidgeError::Timeout(message));
             }
         }
-        Ok(())
+        drop(s);
+        pending
+            .wait_with_timeout(timeout.saturating_sub(sync_start.elapsed()))
+            .map(|_| ())
+    }
+
+    fn enqueue_legacy_sync(
+        &self,
+        effect: PendingWriterEffect,
+        started: std::time::Instant,
+        timeout: Duration,
+        native: bool,
+    ) -> MidgeResult<(u64, crate::wal::traits::WalPendingSync)> {
+        let (first_sequence, last_sequence) = {
+            let tail = self.tail.lock();
+            (
+                tail.first_seq.unwrap_or(0),
+                tail.last_seq.unwrap_or(self.header.prev.last_seq),
+            )
+        };
+        let (sender, response) = std::sync::mpsc::sync_channel(1);
+        let my_sync_id = {
+            let _queue = self.queue.lock();
+            let mut s = self.sync_state.lock();
+            if let Some(error) = s.failure() {
+                return Err(error);
+            }
+            if native && started.elapsed() >= timeout {
+                return Err(MidgeError::Timeout(format!(
+                    "WAL sync deadline expired before queue submission after {timeout:?}"
+                )));
+            }
+            s.pending_fsyncs = s.pending_fsyncs.saturating_add(1);
+            let request = super::writer_runner::PendingSync {
+                id: s.pending_fsyncs,
+                writes_through: s.submitted_writes,
+                effect,
+                completion: Some(super::writer_runner::PendingSyncCompletion {
+                    prefix: crate::wal::traits::WalSyncPrefix {
+                        barrier_id: s.pending_fsyncs,
+                        writer_epoch: self.header.epoch,
+                        segment_id: self.header.id,
+                        first_sequence,
+                        last_sequence,
+                        end_offset: self.current_pos(),
+                    },
+                    sender,
+                }),
+            };
+            s.requests.push_back(request);
+            s.pending_fsyncs
+        };
+        // Wake writer so it can perform fsync
+        self.queue_cond.notify_one();
+
+        let failure_state = Arc::clone(&self.sync_state);
+        let pending = crate::wal::traits::WalPendingSync::new(
+            response,
+            Arc::new(move || failure_state.lock().failure()),
+            None,
+        );
+
+        Ok((my_sync_id, pending))
+    }
+
+    /// Existing callers wait on the same typed operation that the event loop
+    /// can park later. Concurrent raw appends retain the queued legacy path.
+    fn sync_acknowledged_prefix(
+        &self,
+        timeout: Duration,
+        group: Option<&crate::lease::WriterEffectGroup>,
+    ) -> Option<MidgeResult<()>> {
+        let started = std::time::Instant::now();
+        {
+            let state = self.sync_state.lock();
+            if state.submitted_writes != state.completed_writes {
+                return None;
+            }
+        }
+        let (first_sequence, last_sequence) = {
+            let tail = self.tail.lock();
+            (
+                tail.first_seq.unwrap_or(0),
+                tail.last_seq.unwrap_or(self.header.prev.last_seq),
+            )
+        };
+        let prefix = crate::wal::traits::WalSyncPrefix {
+            barrier_id: self.sync_state.lock().pending_fsyncs.saturating_add(1),
+            writer_epoch: self.header.epoch,
+            segment_id: self.header.id,
+            first_sequence,
+            last_sequence,
+            end_offset: self.current_pos(),
+        };
+        let pending = match self.submit_sync_prefix(prefix, timeout, group)? {
+            Ok(pending) => pending,
+            Err(MidgeError::WriteStall(_) | MidgeError::InvalidArgument(_)) => return None,
+            Err(error) => return Some(Err(error)),
+        };
+        let admission_elapsed = started.elapsed();
+        let wait_timeout = timeout.saturating_sub(admission_elapsed);
+        #[cfg(test)]
+        self.observe_acknowledgement_budget(admission_elapsed, wait_timeout);
+        let result = pending.wait_with_timeout(wait_timeout);
+        if let Err(error @ MidgeError::Timeout(_)) = &result {
+            let mut state = self.sync_state.lock();
+            state.sync_failed = true;
+            state.last_sync_error = Some(error.replay());
+            self.sync_cond.notify_all();
+            self.queue_cond.notify_all();
+        }
+        Some(result.map(|_| ()))
+    }
+
+    #[cfg(test)]
+    fn observe_acknowledgement_budget(&self, admission_elapsed: Duration, remaining: Duration) {
+        if let Some(observer) = self.acknowledgement_budget_observer.lock().as_ref() {
+            let _ = observer.send(AcknowledgementBudget {
+                admission_elapsed,
+                remaining,
+            });
+        }
     }
 }
 
@@ -720,6 +1042,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Barrier;
 
+    mod sequenced_submissions;
     mod writer_groups;
 
     fn writer_without_background_worker() -> FsWalWriterIo {
@@ -736,6 +1059,7 @@ mod tests {
             shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             current_pos: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             io_timeout: Duration::from_millis(10),
+            acknowledgement_budget_observer: Mutex::new(None),
             header: SegmentHeader {
                 id: 1,
                 epoch: 0,
@@ -743,7 +1067,11 @@ mod tests {
                 first_seq: 1,
                 prev: crate::wal::format::ChainLink::GENESIS,
             },
-            tail: Mutex::new(SegmentTail::default()),
+            tail: Arc::new(Mutex::new(SegmentTail::default())),
+            raw_submission_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            raw_submission_memory: crate::common::resource_budget::ResourceBudget::new(
+                64 * 1024 * 1024,
+            ),
             digest: Arc::new(Mutex::new(SegmentDigest::of(&[]))),
             sealed: std::sync::atomic::AtomicBool::new(false),
         }
@@ -1032,7 +1360,9 @@ mod tests {
             Some(Bytes::from_static(b"value")),
             1,
         );
-        writer.append_record(&record)?;
+        writer
+            .append_record_accounted(&record)
+            .map_err(|failure| failure.error)?;
         drop(writer);
         let written_len = fs.get_file("wal.log").expect("wal file should exist").len() as u64;
         assert!(written_len > HEADER_LEN as u64);
@@ -1100,14 +1430,38 @@ mod tests {
 
         // Act
         let started = std::time::Instant::now();
-        let result = writer.append_record(&record);
+        let failure = writer.append_record_accounted(&record).unwrap_err();
 
         // Assert
-        assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
+        assert!(matches!(
+            failure.error,
+            crate::common::MidgeError::Timeout(_)
+        ));
+        assert!(
+            !failure.unchanged,
+            "the queued append can still take effect"
+        );
         assert!(
             started.elapsed() < Duration::from_millis(250),
             "append ignored configured storage I/O timeout"
         );
+    }
+
+    #[test]
+    fn should_report_timeout_when_submitted_sync_cannot_complete_within_budget() {
+        // Arrange: no worker can acknowledge the admitted fsync request.
+        let writer = writer_without_background_worker();
+
+        // Act
+        let result = writer.sync_with_timeout(Duration::from_millis(5));
+
+        // Assert: expiry follows submission, and cannot claim durable success.
+        assert!(matches!(result, Err(crate::common::MidgeError::Timeout(_))));
+        assert_eq!(writer.sync_state.lock().pending_fsyncs, 1);
+        assert!(matches!(
+            writer.sync_with_timeout(Duration::from_secs(1)),
+            Err(crate::common::MidgeError::Timeout(_))
+        ));
     }
 
     #[test]
@@ -1119,7 +1473,7 @@ mod tests {
         let writer = FsWalWriterIo::new("wal.log", fs)?;
 
         // Act
-        writer.sync()?;
+        writer.sync_with_timeout(writer.io_timeout)?;
 
         // Assert
         assert_eq!(sync_count.load(Ordering::SeqCst), 1);
@@ -1137,7 +1491,9 @@ mod tests {
             Some(Bytes::from_static(b"close-value")),
             1,
         );
-        writer.append_record(&record)?;
+        writer
+            .append_record_accounted(&record)
+            .map_err(|failure| failure.error)?;
         let appended_pos = writer.current_pos();
 
         // Act
@@ -1167,7 +1523,9 @@ mod tests {
         );
 
         // Act
-        let pos = writer.append_record(&record)?;
+        let pos = writer
+            .append_record_accounted(&record)
+            .map_err(|failure| failure.error)?;
 
         // Assert: the first record follows the segment header.
         assert_eq!(pos, HEADER_LEN as u64);
@@ -1199,6 +1557,49 @@ mod tests {
     }
 
     #[test]
+    fn should_match_sealed_identity_to_independent_written_segment_bytes() -> MidgeResult<()> {
+        // Arrange: use a raw 4 KiB value so the production writer exercises
+        // the borrowed WAL value path before final framing.
+        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+        let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs))?;
+        let value: Vec<_> = (0_usize..4096)
+            .map(|index| {
+                let value = index.wrapping_mul(73).wrapping_add(index / 3);
+                u8::try_from(value % 251).expect("fixture byte fits in u8")
+            })
+            .collect();
+        assert_eq!(crate::codec::compress_wal_value(&value).1, None);
+        let record = WalRecord::new(
+            WalOpKind::Put,
+            Bytes::from_static(b"raw-value"),
+            Some(Bytes::from(value)),
+            7,
+        );
+
+        // Act: append and obtain the real writer's seal facts, then compute
+        // the segment digest independently from the persisted prefix bytes.
+        writer
+            .append_record_accounted(&record)
+            .map_err(|failure| failure.error)?;
+        writer.sync_with_timeout(Duration::from_secs(5))?;
+        let facts = writer.seal_facts(Duration::from_secs(5))?;
+        let bytes = crate::io::read_all(fs.as_ref(), &FsPath::new("wal.log"))
+            .map_err(crate::io::FsError::into_midge)?;
+        let data_len =
+            usize::try_from(facts.data_len).expect("segment prefix length fits in address space");
+        let expected_digest = SegmentDigest::of(&bytes[..data_len]);
+
+        // Assert: segment identity and length bind the exact independently
+        // read header and frame bytes written through the production path.
+        assert_eq!(data_len, bytes.len());
+        assert_eq!(facts.link.id, writer.header.id);
+        assert_eq!(facts.link.last_seq, record.seq);
+        assert_eq!(facts.link.digest, expected_digest.value());
+        assert_eq!(expected_digest.data_len(), facts.data_len);
+        Ok(())
+    }
+
+    #[test]
     fn should_reject_physical_fsync_when_validity_expires_without_watchdog() -> MidgeResult<()> {
         // Arrange
         let fs = Arc::new(SyncCountingFs::default());
@@ -1224,7 +1625,7 @@ mod tests {
         )?;
         validity.expire_for_test();
         // Act
-        let result = writer.sync();
+        let result = writer.sync_with_timeout(writer.io_timeout);
         // Assert
         assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
         assert_eq!(fs.durable_sync_count.load(Ordering::SeqCst), 0);
@@ -1278,7 +1679,7 @@ mod tests {
         // Act: pause inside the actual background write while its epoch guard
         // is held, then try takeover from a second store handle.
         let append = std::thread::spawn(move || {
-            append_writer.append_record(&WalRecord::new(
+            append_writer.append_record_accounted(&WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"fenced-key"),
                 Some(Bytes::from_static(b"value")),
@@ -1291,7 +1692,10 @@ mod tests {
             std::thread::spawn(move || store.acquire_leadership("successor"))
         };
         resume.wait();
-        append.join().expect("append thread completed")?;
+        append
+            .join()
+            .expect("append thread completed")
+            .map_err(|failure| failure.error)?;
         let successor = successor_attempt
             .join()
             .expect("successor attempt completed")
@@ -1358,7 +1762,7 @@ mod tests {
         let writer = Arc::new(writer);
         let append_writer = Arc::clone(&writer);
         let append = std::thread::spawn(move || {
-            append_writer.append_record(&WalRecord::new(
+            append_writer.append_record_accounted(&WalRecord::new(
                 WalOpKind::Put,
                 Bytes::from_static(b"concurrent-key"),
                 Some(Bytes::from_static(b"value")),
@@ -1383,7 +1787,10 @@ mod tests {
         // Reservation finishes before the background append is resumed.
         let early_result = result_rx.recv_timeout(Duration::from_secs(1));
         resume.wait();
-        append.join().expect("background append thread completed")?;
+        append
+            .join()
+            .expect("background append thread completed")
+            .map_err(|failure| failure.error)?;
         reserve.join().expect("reservation thread completed");
 
         // Assert
@@ -1477,7 +1884,7 @@ mod tests {
         let appender = {
             let writer = Arc::clone(&writer);
             std::thread::spawn(move || {
-                writer.append_record(&WalRecord::new(
+                writer.append_record_accounted(&WalRecord::new(
                     WalOpKind::Put,
                     Bytes::from_static(b"key"),
                     Some(Bytes::from_static(b"value")),

@@ -424,18 +424,43 @@ impl CloudStartupRecovery {
         state: &mut RuntimeState,
         store: &dyn crate::storage::inventory::ObjectInventory,
     ) -> MidgeResult<()> {
+        const INVENTORY_CONCURRENCY: usize = 32;
+        let files = state.manifest.files.clone();
         let scope = state.startup_scope.clone();
-        Self::reconcile_manifest_ssts(state, |file| {
-            let key = crate::cloud_layout::object_key(&file.name);
-            store
-                .object_size(&key, scope.as_ref())
-                .map_err(SstLoss::Indeterminate)?
-                .ok_or_else(|| {
-                    SstLoss::Definitive(MidgeError::RecoveryFailed(format!(
-                        "authoritative cloud SST '{}' is missing",
-                        file.name
-                    )))
-                })
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let (completed, results) = std::sync::mpsc::sync_channel(INVENTORY_CONCURRENCY);
+        std::thread::scope(|workers| {
+            for _ in 0..files.len().min(INVENTORY_CONCURRENCY) {
+                let completed = completed.clone();
+                let files = &files;
+                let scope = scope.as_ref();
+                let next = &next;
+                workers.spawn(move || loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(file) = files.get(index) else {
+                        break;
+                    };
+                    let key = crate::cloud_layout::object_key(&file.name);
+                    let result = store
+                        .object_size(&key, scope)
+                        .map_err(SstLoss::Indeterminate)
+                        .and_then(|size| {
+                            size.ok_or_else(|| {
+                                SstLoss::Definitive(MidgeError::RecoveryFailed(format!(
+                                    "authoritative cloud SST '{}' is missing",
+                                    file.name
+                                )))
+                            })
+                        });
+                    if completed.send((file.clone(), result)).is_err() {
+                        break;
+                    }
+                });
+            }
+            drop(completed);
+            // Process completions as they arrive: a slow first object must
+            // not hide successful progress on the remaining bounded probes.
+            Self::reconcile_manifest_ssts(state, results.into_iter())
         })
     }
 
@@ -447,16 +472,25 @@ impl CloudStartupRecovery {
     /// one place that decides which manifest SSTs survive startup.
     fn reconcile_manifest_ssts(
         state: &mut RuntimeState,
-        mut object_size: impl FnMut(&crate::metadata::FileMeta) -> Result<u64, SstLoss>,
+        results: impl Iterator<Item = (crate::metadata::FileMeta, Result<u64, SstLoss>)>,
     ) -> MidgeResult<()> {
         let mut retained_files = Vec::with_capacity(state.manifest.files.len());
+        let original_order = state
+            .manifest
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| (file.name.clone(), index))
+            .collect::<std::collections::HashMap<_, _>>();
         let mut manifest_changed = false;
         let mut definitively_lost: Vec<String> = Vec::new();
         let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("sst_inventory");
 
-        for file in state.manifest.files.clone() {
+        let expected_files = state.manifest.files.len();
+        let mut completed_files = 0;
+        for (file, result) in results {
             state.check_startup_scope("cloud SST inventory")?;
-            let validation = object_size(&file).and_then(|size| {
+            let validation = result.and_then(|size| {
                 Self::validate_manifest_sst_size(&file, size).map_err(SstLoss::Definitive)
             });
             state.check_startup_scope("cloud SST inventory completion")?;
@@ -475,10 +509,17 @@ impl CloudStartupRecovery {
             if validated {
                 progress.completed_operation();
             }
+            completed_files += 1;
+        }
+        if completed_files != expected_files {
+            return Err(MidgeError::RecoveryFailed(
+                "cloud SST inventory ended before every manifest object was checked".into(),
+            ));
         }
 
         state.check_startup_scope("cloud SST inventory commit")?;
         if manifest_changed {
+            retained_files.sort_by_key(|file| original_order.get(&file.name).copied());
             Self::commit_manifest_removals(state, retained_files, &definitively_lost)?;
             state.restore_sequence_floor_from_manifest();
         }

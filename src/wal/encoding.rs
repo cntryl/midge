@@ -246,20 +246,6 @@ fn add_capacity(capacity: usize, delta: usize) -> MidgeResult<usize> {
         .ok_or_else(|| MidgeError::InvalidArgument("record size overflow".into()))
 }
 
-enum EncodedValue<'a> {
-    Borrowed(&'a [u8]),
-    Owned(Bytes),
-}
-
-impl EncodedValue<'_> {
-    fn as_slice(&self) -> &[u8] {
-        match self {
-            Self::Borrowed(bytes) => bytes,
-            Self::Owned(bytes) => bytes.as_ref(),
-        }
-    }
-}
-
 /// Encode a WAL record to bytes (v2 payload).
 ///
 /// # Errors
@@ -307,13 +293,8 @@ fn encode_into_inner(record: &WalRecord, buf: &mut Vec<u8>) -> MidgeResult<()> {
             )));
         }
         // Preserve Some(empty) distinctly from None by always emitting VALUE when present.
-        let (write_val, comp_byte) = if v.len() < crate::codec::MIN_COMPRESSION_INPUT_BYTES {
-            (EncodedValue::Borrowed(v.as_ref()), None)
-        } else {
-            let (value, comp_byte) = crate::codec::compress_wal_value(v);
-            (EncodedValue::Owned(value), comp_byte)
-        };
-        put_tlv(buf, tags::VALUE, write_val.as_slice())?;
+        let (write_val, comp_byte) = crate::codec::compress_wal_value_borrowed(v);
+        put_tlv(buf, tags::VALUE, write_val.as_ref())?;
         // COMPRESSION only ever describes what the compressor actually did to
         // this VALUE. It is never taken from the caller, so the tag cannot
         // claim a raw value is compressed and make the frame unreplayable.
@@ -367,15 +348,6 @@ fn reject_op_specific_corruption(
     if op.role() == WalOpRole::PointDelete && has_value {
         return Err(corruption("Delete record carries a VALUE tag"));
     }
-
-    // NOTE: a TxnBatch outer record carrying COMPRESSION is *not* rejected
-    // here, despite lsm-spec format/wal.md §5.4 describing it as corrupt.
-    // `runtime/actors/wal/transaction.rs` legitimately compresses a large
-    // batch payload through the same value-compression path any other
-    // record uses, so a real writer does produce this shape — rejecting it
-    // would break ordinary large-transaction WAL replay. Flagged back to
-    // the spec rather than enforced; see lsm-spec `notes/
-    // implementation-findings.md` for this kind of prose/code correction.
 
     Ok(())
 }
@@ -467,6 +439,10 @@ pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
         Ok(())
     })?;
 
+    if compression.is_some() && value.is_none() {
+        return Err(corruption("COMPRESSION tag is present without VALUE"));
+    }
+
     let op = op.ok_or_else(|| corruption("missing OP"))?;
     reject_op_specific_corruption(op, value.is_some(), range_end.is_some())?;
 
@@ -540,7 +516,7 @@ fn txn_batch_len_prefixed_field_len(value: &[u8]) -> MidgeResult<usize> {
     add_capacity(4, value.len())
 }
 
-fn txn_batch_payload_records_encoded_len(
+pub(crate) fn txn_batch_payload_records_encoded_len(
     records: &[TxnBatchEncodeRecord<'_>],
 ) -> MidgeResult<usize> {
     let _ = u32::try_from(records.len()).map_err(|_| {
@@ -931,6 +907,74 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn legacy_value_payload(record: &WalRecord) -> MidgeResult<Vec<u8>> {
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(&MAGIC);
+        encoded.push(VERSION);
+        put_u8(&mut encoded, tags::OP, record.op.to_wire_format())?;
+        put_u32(&mut encoded, tags::CF_ID, record.cf_id)?;
+        put_u64(&mut encoded, tags::SEQ, record.seq)?;
+        put_tlv(&mut encoded, tags::KEY, &record.key)?;
+        let (value, marker) = crate::codec::compress_wal_value(record.value.as_ref().unwrap());
+        put_tlv(&mut encoded, tags::VALUE, &value)?;
+        if let Some(marker) = marker {
+            put_u8(&mut encoded, tags::COMPRESSION, marker)?;
+        }
+        put_u64(&mut encoded, tags::EXPIRATION, record.expiration.unwrap())?;
+        put_u64(&mut encoded, tags::TXN_ID, record.txn_id.unwrap())?;
+        Ok(encoded)
+    }
+
+    #[test]
+    fn should_match_owned_value_frames_when_encoding_borrowed_raw_and_compressed_values(
+    ) -> MidgeResult<()> {
+        // Arrange: include both sides of the compression threshold and a
+        // deterministic high-entropy input whose VALUE stays raw.
+        for length in [0, 255, 256, 4096] {
+            for repetitive in [false, true] {
+                let value = (0..length)
+                    .map(|index| {
+                        if repetitive {
+                            b'x'
+                        } else {
+                            u8::try_from(index % 251).expect("byte alphabet")
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let mut record = WalRecord::new_cf(
+                    7,
+                    WalOpKind::Put,
+                    Bytes::from_static(b"key"),
+                    Some(Bytes::from(value)),
+                    19,
+                );
+                record.expiration = Some(123_456);
+                record.txn_id = Some(42);
+                let reference = legacy_value_payload(&record)?;
+                let mut expected_frame = Vec::new();
+                crate::wal::frame::append_frame_encoded(&mut expected_frame, |payload| {
+                    payload.extend_from_slice(&reference);
+                    Ok(())
+                })?;
+
+                // Act
+                let mut frame = Vec::new();
+                crate::wal::frame::append_frame_encoded(&mut frame, |payload| {
+                    encode_into(&record, payload)
+                })?;
+
+                // Assert: payload, compression marker, CRC and framing stay
+                // identical to the previous owned-value construction.
+                assert_eq!(
+                    frame, expected_frame,
+                    "length={length}, repetitive={repetitive}"
+                );
+                assert_eq!(decode(reference.as_slice())?, record);
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn should_reject_value_whose_uncompressed_size_exceeds_wal_decode_limit() {
         // Arrange: highly compressible, so the compressed frame would pass the
@@ -1184,6 +1228,30 @@ mod tests {
         assert!(
             matches!(&result, Err(MidgeError::Corruption(message)) if message.contains("version")),
             "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_reject_compression_tag_without_value_when_decoding() {
+        // Arrange: transaction markers have no VALUE, so COMPRESSION cannot
+        // describe any bytes even though the TLV itself is well formed.
+        let mut record = WalRecord::new(WalOpKind::TxnBegin, Bytes::from_static(b"txn"), None, 1);
+        record.txn_id = Some(7);
+        let mut encoded = encode(&record).unwrap().to_vec();
+        put_u8(&mut encoded, tags::COMPRESSION, 1).unwrap();
+
+        // Act
+        let view_result = decode_view(&encoded);
+        let owned_result = decode(&encoded[..]);
+
+        // Assert
+        assert!(
+            matches!(&view_result, Err(MidgeError::Corruption(message)) if message.contains("COMPRESSION")),
+            "{view_result:?}"
+        );
+        assert!(
+            matches!(&owned_result, Err(MidgeError::Corruption(message)) if message.contains("COMPRESSION")),
+            "{owned_result:?}"
         );
     }
 
@@ -1480,13 +1548,8 @@ mod tests {
 
     #[test]
     fn should_roundtrip_txn_batch_outer_record_carrying_compression_tag() {
-        // Arrange: lsm-spec format/wal.md §5.4 describes a TxnBatch outer
-        // record carrying COMPRESSION as corrupt, but
-        // `runtime/actors/wal/transaction.rs` legitimately compresses a
-        // large batch payload through the same value-compression path any
-        // other record uses (see `encode()`'s size-threshold compression).
-        // Rejecting this shape would break ordinary large-transaction WAL
-        // replay, so it is intentionally accepted, not enforced as corrupt.
+        // Arrange: the outer TxnBatch VALUE is compressed by the same writer
+        // path as any other value; nested operation values remain raw.
         let large_value = Bytes::from(vec![b'v'; 4096]); // large enough to trigger auto-compression
         let mut inner = WalRecord::new_cf(
             0,

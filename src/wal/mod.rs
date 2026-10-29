@@ -33,9 +33,11 @@
 //! format, ledger, sequence, publication and catalog modules are pure; the
 //! runtime adapters do their I/O.
 
+pub(crate) mod append_completion;
 pub(crate) mod cloud_catalog;
 pub(crate) mod cloud_segment;
 mod config;
+pub(crate) mod footer_completion;
 // `encoding`, `frame` and `policy` stay `pub` inside this private module so the
 // crate's own tests and benches can reach them through `crate::__internal`;
 // `wal` itself is private, so nothing downstream can name them.
@@ -51,6 +53,7 @@ pub(crate) mod publish;
 pub(crate) mod recovery;
 pub(crate) mod replay;
 pub(crate) mod sequence;
+pub(crate) mod sequenced;
 pub(crate) mod traits;
 pub mod types;
 pub(crate) mod writer_authority;

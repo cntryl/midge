@@ -133,6 +133,7 @@ fn seed_manifest(files: usize) -> Manifest {
             smallest_seq: Some(1),
             largest_seq: Some(1),
             key_bounds_complete: true,
+            earliest_expiration_millis: None,
             sublevel: 0,
             read_count: Arc::new(AtomicU64::new(0)),
         });

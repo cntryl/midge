@@ -21,6 +21,7 @@ mod cloud_eventual_flush {
             wal_seal_min_segment_bytes: usize::MAX,
             wal_seal_max_flush_delay: Duration::from_hours(1),
             wal_seal_max_pending_writes: 1,
+            ..CloudWritePolicy::default()
         }
     }
 
@@ -168,10 +169,12 @@ mod cloud_eventual_flush {
             .expect("runtime metrics");
         // Act
         // Assert
-        assert_eq!(
+        assert!(
+            pre_flush_metrics.max_memtable_wal_segment_gap > 0
+                && pre_flush_metrics.max_memtable_wal_segment_gap < BUFFERED_TEST_GAP,
+            "buffered cloud writes should grow the memtable segment gap without reaching the automatic flush threshold: gap={} threshold={}",
             pre_flush_metrics.max_memtable_wal_segment_gap,
-            BUFFERED_TEST_GAP - 1,
-            "buffered cloud writes should grow the memtable segment gap before the first automatic flush"
+            BUFFERED_TEST_GAP
         );
 
         for i in (BUFFERED_TEST_GAP - 1)..16 {
@@ -284,6 +287,7 @@ mod cloud_eventual_flush {
             wal_seal_min_segment_bytes: usize::MAX,
             wal_seal_max_flush_delay: Duration::from_hours(1),
             wal_seal_max_pending_writes: 1,
+            ..CloudWritePolicy::default()
         });
 
         {

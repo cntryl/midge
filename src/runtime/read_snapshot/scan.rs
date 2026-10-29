@@ -2,6 +2,8 @@ use super::{
     Arc, FileMeta, KeyState, LevelRangeCandidates, MidgeError, MidgeResult, RangeCandidates,
     RangeCoverSweep, RangeTombstone, ReadSnapshot, SstFileIo, SstStateReader, SstStateScan,
 };
+use crate::memtable::SkipListMemtable;
+use crate::sst::cache::CacheFill;
 use crate::sst::read_path_metrics::SstReadObserver as _;
 
 #[cfg(test)]
@@ -12,7 +14,8 @@ mod l0_scan_tests;
 mod tests;
 
 enum SnapshotStateIterator {
-    Memory(std::vec::IntoIter<(bytes::Bytes, KeyState)>),
+    /// A lazy memtable cursor; its cost follows the rows taken (#920).
+    Memory(Box<dyn Iterator<Item = (bytes::Bytes, KeyState)> + Send>),
     Sst(Box<SstStateScan>),
     SstLevel(Box<SstLevelStateIterator>),
 }
@@ -35,6 +38,7 @@ struct SstLevelStateIterator {
     end: Option<Vec<u8>>,
     reverse: bool,
     sequence: u64,
+    cache_fill: CacheFill,
     pending: Option<MidgeResult<(bytes::Bytes, KeyState)>>,
     /// Range tombstones of files opened since the scan last collected them.
     /// A file's tombstones join the scan when the cursor opens it, not up
@@ -55,6 +59,7 @@ impl SstLevelStateIterator {
         end: Option<Vec<u8>>,
         reverse: bool,
         sequence: u64,
+        cache_fill: CacheFill,
     ) -> Self {
         if reverse {
             files.reverse();
@@ -67,6 +72,7 @@ impl SstLevelStateIterator {
             end,
             reverse,
             sequence,
+            cache_fill,
             pending: None,
             opened_tombstones: Vec::new(),
             collect_tombstones: true,
@@ -123,6 +129,7 @@ impl SstLevelStateIterator {
                 self.end.clone(),
                 self.reverse,
                 self.sequence,
+                self.cache_fill,
             ));
         }
     }
@@ -208,6 +215,7 @@ pub(crate) struct SnapshotScan {
     end: Option<Vec<u8>>,
     reverse: bool,
     sequence: u64,
+    cache_fill: CacheFill,
     initialized: bool,
     lifecycle: SnapshotScanLifecycle,
     sources: Vec<SnapshotStateSource>,
@@ -227,6 +235,7 @@ impl SnapshotScan {
         end: Option<Vec<u8>>,
         reverse: bool,
         sequence: u64,
+        cache_fill: CacheFill,
     ) -> Self {
         Self {
             snapshot,
@@ -234,6 +243,7 @@ impl SnapshotScan {
             end,
             reverse,
             sequence,
+            cache_fill,
             initialized: false,
             lifecycle: SnapshotScanLifecycle::Active,
             sources: Vec::new(),
@@ -247,20 +257,16 @@ impl SnapshotScan {
         self.range_cover.work()
     }
 
-    fn memory_iterator(
-        mut states: Vec<(Vec<u8>, KeyState)>,
+    fn memory_source(
+        memtable: &SkipListMemtable,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        sequence: u64,
         reverse: bool,
-    ) -> SnapshotStateIterator {
-        if reverse {
-            states.reverse();
-        }
-        SnapshotStateIterator::Memory(
-            states
-                .into_iter()
-                .map(|(key, state)| (bytes::Bytes::from(key), state))
-                .collect::<Vec<_>>()
-                .into_iter(),
-        )
+    ) -> SnapshotStateSource {
+        SnapshotStateSource::new(SnapshotStateIterator::Memory(Box::new(
+            memtable.range_state_cursor(start, end, sequence, reverse),
+        )))
     }
 
     fn append_reader_tombstones(
@@ -319,6 +325,7 @@ impl SnapshotScan {
                         self.end.clone(),
                         self.reverse,
                         self.sequence,
+                        self.cache_fill,
                     )),
                 )));
         }
@@ -344,6 +351,7 @@ impl SnapshotScan {
                         self.end.clone(),
                         self.reverse,
                         self.sequence,
+                        self.cache_fill,
                     )),
                 )));
         }
@@ -376,6 +384,7 @@ impl SnapshotScan {
                             self.end.clone(),
                             self.reverse,
                             self.sequence,
+                            self.cache_fill,
                         )
                         .without_tombstone_collection(),
                     ),
@@ -396,13 +405,13 @@ impl SnapshotScan {
         let end = end_bound.as_deref();
         let snapshot = Arc::clone(&self.snapshot);
 
-        self.sources
-            .push(SnapshotStateSource::new(Self::memory_iterator(
-                snapshot
-                    .memtable
-                    .range_raw_state_at(start, end, self.sequence),
-                self.reverse,
-            )));
+        self.sources.push(Self::memory_source(
+            &snapshot.memtable,
+            start,
+            end,
+            self.sequence,
+            self.reverse,
+        ));
         for tombstone in snapshot.memtable.range_tombstones_at(self.sequence) {
             if ReadSnapshot::range_tombstone_overlaps_query(&tombstone, start, end) {
                 self.range_cover
@@ -411,11 +420,13 @@ impl SnapshotScan {
         }
 
         for immutable in &snapshot.immutable_memtables {
-            self.sources
-                .push(SnapshotStateSource::new(Self::memory_iterator(
-                    immutable.range_raw_state_at(start, end, self.sequence),
-                    self.reverse,
-                )));
+            self.sources.push(Self::memory_source(
+                immutable,
+                start,
+                end,
+                self.sequence,
+                self.reverse,
+            ));
             for tombstone in immutable.range_tombstones_at(self.sequence) {
                 if ReadSnapshot::range_tombstone_overlaps_query(&tombstone, start, end) {
                     self.range_cover
@@ -444,23 +455,27 @@ impl SnapshotScan {
         })
     }
 
+    /// The next key in scan order across every source head. Heads are compared
+    /// by reference and only the winner is cloned, which for a key sliced from
+    /// its block's arena is a reference count (#945).
     fn next_key(&self) -> Option<bytes::Bytes> {
-        self.sources
-            .iter()
-            .filter_map(|source| source.head.as_ref()?.as_ref().ok().map(|(key, _)| key))
-            .cloned()
-            .reduce(|selected, candidate| {
-                let candidate_wins = if self.reverse {
-                    candidate > selected
+        let mut selected: Option<&bytes::Bytes> = None;
+        for source in &self.sources {
+            let Some(Ok((candidate, _))) = source.head.as_ref() else {
+                continue;
+            };
+            let candidate_wins = selected.is_none_or(|current| {
+                if self.reverse {
+                    candidate > current
                 } else {
-                    candidate < selected
-                };
-                if candidate_wins {
-                    candidate
-                } else {
-                    selected
+                    candidate < current
                 }
-            })
+            });
+            if candidate_wins {
+                selected = Some(candidate);
+            }
+        }
+        selected.cloned()
     }
 
     fn next_visible(&mut self) -> MidgeResult<Option<(bytes::Bytes, bytes::Bytes)>> {

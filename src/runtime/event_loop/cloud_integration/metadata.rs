@@ -10,6 +10,7 @@ impl CloudCoordinator {
         leader_store: Option<std::sync::Arc<dyn crate::lease::LeaderStore>>,
         holder_id: &str,
         writer_epoch: u64,
+        publication_lock: crate::runtime::MetadataPublicationLock,
     ) -> MidgeResult<SharedMetadataSnapshot> {
         let cloud = self.cloud_metadata_storage.clone().ok_or_else(|| {
             MidgeError::Fenced("cloud WAL retirement has no shared metadata store".into())
@@ -32,6 +33,7 @@ impl CloudCoordinator {
             store,
             holder_id.to_string(),
             writer_epoch,
+            publication_lock,
         ))
     }
 }
@@ -50,6 +52,7 @@ impl EventLoop {
                     .as_deref()
                     .unwrap_or_default(),
                 self.authority.fencing.writer_epoch,
+                self.publication.metadata_publication_lock.clone(),
             )
     }
 }

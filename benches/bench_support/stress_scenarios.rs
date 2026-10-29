@@ -2417,7 +2417,7 @@ fn workload_value(key: &str) -> Vec<u8> {
     value
 }
 
-fn unique_namespace(scenario: &str) -> String {
+pub(super) fn unique_namespace(scenario: &str) -> String {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time after Unix epoch")
@@ -2425,12 +2425,14 @@ fn unique_namespace(scenario: &str) -> String {
     let simple = scenario
         .chars()
         .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .take(24)
         .collect::<String>()
+        .trim_matches('-')
         .to_ascii_lowercase();
     format!("midge-{simple}-{}-{timestamp}", std::process::id())
 }
 
-fn ensure_namespace(protocol: &str, namespace: &str) -> Result<(), String> {
+pub(super) fn ensure_namespace(protocol: &str, namespace: &str) -> Result<(), String> {
     match protocol {
         "s3" => signed_s3_namespace(namespace),
         "azure" => signed_azure_namespace(namespace),
@@ -2535,7 +2537,7 @@ fn signed_azure_namespace(container: &str) -> Result<(), String> {
         .format("%a, %d %b %Y %H:%M:%S GMT")
         .to_string();
     let path = format!("/admin/{container}");
-    let canonical_headers = format!("x-ms-date:{date}\nx-ms-version:2024-11-04\n");
+    let canonical_headers = format!("x-ms-date:{date}\nx-ms-version:2025-01-05\n");
     let canonical_resource = format!("/admin{path}\nrestype:container");
     let string_to_sign =
         format!("PUT\n\n\n\n\n\n\n\n\n\n\n\n{canonical_headers}{canonical_resource}");
@@ -2548,7 +2550,7 @@ fn signed_azure_namespace(container: &str) -> Result<(), String> {
         .put(format!("{endpoint}{path}?restype=container"))
         .header("authorization", format!("SharedKey admin:{signature}"))
         .header("x-ms-date", date)
-        .header("x-ms-version", "2024-11-04")
+        .header("x-ms-version", "2025-01-05")
         .body(Vec::new())
         .send()
         .map_err(|error| error.to_string())?;
@@ -2584,7 +2586,7 @@ fn signed_gcs_xml_namespace(bucket: &str) -> Result<(), String> {
 fn signed_gcs_json_namespace(bucket: &str) -> Result<(), String> {
     let response = sqrzl_client()?
         .post(format!("{}/storage/v1/b?project=sqrzl", sqrzl_endpoint()))
-        .header("authorization", "Bearer admin")
+        .bearer_auth(sqrzl_secret()?)
         .header("content-type", "application/json")
         .body(format!("{{\"name\":\"{bucket}\"}}"))
         .send()
@@ -2889,21 +2891,6 @@ pub(super) fn run_journal_recovery_watchdog_fixture(ctx: &mut StressContext) {
     artifacts.enter_phase("complete", "actual-manifest-journal-replay", &progress);
     artifacts.complete = true;
     artifacts.persist("passed");
-}
-
-#[cfg(test)]
-#[allow(
-    dead_code,
-    reason = "Only the watchdog integration target calls this fixture"
-)]
-pub(super) fn run_recovery_listener_fixture(ctx: &mut StressContext) {
-    let progress = ctx.progress_handle();
-    let listener_units = ctx.measure("recovery listener isolation", || {
-        let before = progress.completed_units();
-        recovery_progress::assert_listener_isolation(&progress);
-        progress.completed_units() - before
-    });
-    ctx.metadata("fixture_listener_progress_units", listener_units);
 }
 
 #[cfg(test)]

@@ -373,6 +373,8 @@ mod sst_regressions {
         assert!(rewritten_bytes > 0);
     }
 
+    const L0_PRESSURE_ANCHOR: &[u8] = b"l0-pressure/anchor";
+
     fn exercise_l0_pressure_recovery(recover_before_commit: bool) -> (u64, u64, u64) {
         use cntryl_midge::{Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions};
         use std::time::Duration;
@@ -387,8 +389,8 @@ mod sst_regressions {
         .unwrap();
         let cf = engine.create_column_family("l0-pressure").unwrap();
         let mut rejected = 0_u64;
-        // Act: 32 separate flushes exceed the default hard L0 ceiling. Only the
-        // production pressure-recovery path can restore admission in this process.
+        // Act: the common anchor makes every flushed SST overlap. Pressure
+        // recovery must physically merge this history instead of moving files.
         for index in 0_u32..32 {
             if recover_before_commit {
                 assert!(engine
@@ -399,6 +401,11 @@ mod sst_regressions {
             let commit = || {
                 let mut tx = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
                 tx.put(index.to_be_bytes().to_vec(), b"value".to_vec(), None)?;
+                tx.put(
+                    L0_PRESSURE_ANCHOR.to_vec(),
+                    index.to_be_bytes().to_vec(),
+                    None,
+                )?;
                 tx.commit(WriteOptions::sync())
             };
             match commit() {
@@ -410,6 +417,11 @@ mod sst_regressions {
                     assert_eq!(after.wal_append_count, before.wal_append_count);
                     let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
                     assert_eq!(read.get(&index.to_be_bytes()).unwrap(), None);
+                    let previous_anchor = index.checked_sub(1).map(u32::to_be_bytes);
+                    assert_eq!(
+                        read.get(L0_PRESSURE_ANCHOR).unwrap().as_deref(),
+                        previous_anchor.as_ref().map(<[u8; 4]>::as_slice)
+                    );
                     drop(read);
                     assert!(engine
                         .wait_for_write_stall_clear(cf.id(), Duration::from_secs(10))
@@ -438,17 +450,7 @@ mod sst_regressions {
                 .unwrap(),
         )
         .unwrap();
-        let cf = reopened.get_column_family("l0-pressure").unwrap();
-        let tx = reopened
-            .begin_tx(cf.id(), TransactionMode::ReadOnly)
-            .unwrap();
-        // Assert
-        for index in 0_u32..32 {
-            assert_eq!(
-                tx.get(&index.to_be_bytes()).unwrap().as_deref(),
-                Some(b"value".as_slice())
-            );
-        }
+        assert_l0_history_after_reopen(&reopened);
         eprintln!(
             "L0 recovery: wait_before_commit={recover_before_commit} rejected={rejected} published_compactions={} rewritten_bytes={}",
             recovered.compactions_run, recovered.compaction_bytes_rewritten,
@@ -458,6 +460,30 @@ mod sst_regressions {
             recovered.compactions_run,
             recovered.compaction_bytes_rewritten,
         )
+    }
+
+    fn assert_l0_history_after_reopen(reopened: &cntryl_midge::Engine) {
+        let cf = reopened.get_column_family("l0-pressure").unwrap();
+        let tx = reopened
+            .begin_tx(cf.id(), cntryl_midge::TransactionMode::ReadOnly)
+            .unwrap();
+        // Assert: every original row and the last atomic anchor survive restart.
+        for index in 0_u32..32 {
+            assert_eq!(
+                tx.get(&index.to_be_bytes()).unwrap().as_deref(),
+                Some(b"value".as_slice())
+            );
+        }
+        assert_eq!(
+            tx.get(L0_PRESSURE_ANCHOR).unwrap().as_deref(),
+            Some(31_u32.to_be_bytes().as_slice())
+        );
+        let index_rows = tx
+            .scan(&cntryl_midge::Query::new().prefix(vec![0_u8].into()))
+            .unwrap()
+            .try_collect()
+            .unwrap();
+        assert_eq!(index_rows.len(), 32);
     }
 }
 
@@ -938,7 +964,7 @@ mod compression_compatibility {
         let footer_start = bytes
             .len()
             .checked_sub(84)
-            .expect("V4 SST has fixed footer");
+            .expect("V5 SST has fixed footer");
         let mut cursor = 0usize;
         let mut algorithms = Vec::new();
         while cursor < footer_start {
@@ -952,11 +978,11 @@ mod compression_compatibility {
             let block_end = length_end
                 .checked_add(payload_len)
                 .expect("block extent fits usize");
-            assert!(block_end <= footer_start, "block extends into V4 footer");
+            assert!(block_end <= footer_start, "block extends into V5 footer");
             algorithms.push(bytes[block_end - BLOCK_TRAILER_SIZE]);
             cursor = block_end;
         }
-        assert_eq!(cursor, footer_start, "blocks exactly precede V4 footer");
+        assert_eq!(cursor, footer_start, "blocks exactly precede V5 footer");
         algorithms
     }
 
@@ -1574,23 +1600,50 @@ mod compatibility_fixtures {
         }
     }
 
+    fn alter_binary_manifest_fixture(path: &Path, field: &str, scalar: Option<u8>) {
+        let mut bytes = fs::read(path).expect("read binary fixture manifest");
+        assert_eq!(&bytes[..8], b"MDGEMD09");
+        let payload_end = bytes.len() - 4;
+        let value = bytes[13..payload_end]
+            .windows(field.len())
+            .position(|candidate| candidate == field.as_bytes())
+            .expect("fixture field")
+            + 13
+            + field.len();
+        if let Some(scalar) = scalar {
+            // This fixture uses positive fixints and booleans for these fields.
+            assert!(bytes[value] < 128 || matches!(bytes[value], 0xc2 | 0xc3));
+            bytes[value] = scalar;
+        } else {
+            assert_eq!(
+                bytes[value], 0xc4,
+                "fixture bound must be a short byte string"
+            );
+            let length = usize::from(bytes[value + 1]);
+            bytes[value + 2..value + 2 + length].fill(b'z');
+        }
+        let checksum = crc32c::crc32c(&bytes[..payload_end]);
+        bytes[payload_end..].copy_from_slice(&checksum.to_be_bytes());
+        fs::write(path, bytes).expect("write independently checksummed fixture mutation");
+    }
+
     #[test]
-    fn should_preserve_populated_v8_fixture_given_strict_recovery_when_reopening() {
+    fn should_preserve_populated_v9_fixture_given_strict_recovery_when_reopening() {
         // Arrange
-        let temp = copy_fixture_dir("v8_populated_v4_sst_db");
+        let temp = copy_fixture_dir("v9_populated_v5_sst_db");
         let before = fs::read(temp.path().join("FORMAT")).expect("read fixture marker");
 
         for _ in 0..2 {
             // Act
             let report = cntryl_midge::StorageVerifier::verify_path(temp.path())
-                .expect("verify format 8 fixture");
+                .expect("verify format 9 fixture");
             let mut engine = Engine::open(
                 OpenOptions::local(temp.path())
                     .recovery_policy(RecoveryPolicy::Strict)
                     .build()
                     .expect("build fixture options"),
             )
-            .expect("open format 8 fixture");
+            .expect("open format 9 fixture");
             let cf = engine
                 .get_column_family("default")
                 .expect("fixture column family");
@@ -1648,9 +1701,79 @@ mod compatibility_fixtures {
     }
 
     #[test]
+    fn should_reject_populated_v8_fixture_when_format_nine_has_no_migration() {
+        for policy in [RecoveryPolicy::Strict, RecoveryPolicy::Salvage] {
+            // Arrange
+            let temp = copy_fixture_dir("v8_populated_v4_sst_db");
+            let before = fs::read(temp.path().join("FORMAT")).expect("read old marker");
+
+            // Act
+            let result = Engine::open(
+                OpenOptions::local(temp.path())
+                    .recovery_policy(policy)
+                    .build()
+                    .expect("build options"),
+            );
+
+            // Assert
+            match result {
+                Err(error) => assert_compatibility_error(error),
+                Ok(_) => panic!("format 8 must be rejected under {policy:?}"),
+            }
+            assert_eq!(
+                fs::read(temp.path().join("FORMAT")).expect("read retained marker"),
+                before
+            );
+        }
+    }
+
+    #[test]
+    fn should_reject_format_nine_sst_v4_data_under_every_recovery_policy() {
+        for policy in [RecoveryPolicy::Strict, RecoveryPolicy::Salvage] {
+            // Arrange: its database marker and metadata codec are current;
+            // only the checksummed SST footer names the unsupported layout.
+            let temp = copy_fixture_dir("v9_populated_v4_sst_db");
+            let marker = fs::read(temp.path().join("FORMAT")).unwrap();
+            let sst = temp.path().join("sst/000000_00_00000000000000000001.sst");
+            let before = fs::read(&sst).unwrap();
+            // Act
+            let verification = cntryl_midge::StorageVerifier::verify_path(temp.path());
+            let opened = Engine::open(
+                OpenOptions::local(temp.path())
+                    .recovery_policy(policy)
+                    .build()
+                    .unwrap(),
+            );
+            // Assert
+            assert!(
+                matches!(verification, Err(MidgeError::CompatibilityError(ref message)) if message.contains("SST format version 4") && message.contains("V5")),
+                "{verification:?}"
+            );
+            let error = match opened {
+                Err(error) => error,
+                Ok(mut engine) => {
+                    let cf = engine.get_column_family("default").unwrap();
+                    let read = engine.begin_tx(cf.id(), TransactionMode::ReadOnly).unwrap();
+                    let error = read
+                        .get(b"fixture/alpha")
+                        .expect_err("V4 reader must fail explicitly");
+                    drop(read);
+                    engine.shutdown(Duration::from_secs(5)).unwrap();
+                    error
+                }
+            };
+            assert!(
+                matches!(error, MidgeError::CompatibilityError(ref message) if message.contains("SST format version 4") && message.contains("V5"))
+            );
+            assert_eq!(fs::read(temp.path().join("FORMAT")).unwrap(), marker);
+            assert_eq!(fs::read(sst).unwrap(), before);
+        }
+    }
+
+    #[test]
     fn should_reject_manifest_bounds_when_valid_sst_summary_disagrees() {
         // Arrange: the release fixture has a valid SST and a readable point value.
-        let baseline = copy_fixture_dir("v8_populated_v4_sst_db");
+        let baseline = copy_fixture_dir("v9_populated_v5_sst_db");
         let baseline_report = cntryl_midge::StorageVerifier::verify_path(baseline.path())
             .expect("verify unmodified fixture");
         assert_eq!(baseline_report.health, EngineHealth::Healthy);
@@ -1679,31 +1802,18 @@ mod compatibility_fixtures {
             .expect("shutdown baseline engine");
 
         for wrong_key_bounds in [true, false] {
-            let temp = copy_fixture_dir("v8_populated_v4_sst_db");
-            for name in ["manifest.json", "manifest.snapshot.json"] {
+            let temp = copy_fixture_dir("v9_populated_v5_sst_db");
+            {
+                let name = "manifest.snapshot.json";
                 let path = temp.path().join(name);
-                let mut manifest: serde_json::Value =
-                    serde_json::from_slice(&fs::read(&path).expect("read fixture manifest"))
-                        .expect("decode fixture manifest");
-                let file = manifest["files"][0]
-                    .as_object_mut()
-                    .expect("fixture SST metadata");
                 if wrong_key_bounds {
-                    file.insert(
-                        "smallest_key".into(),
-                        serde_json::json!(hex::encode(b"zzz")),
-                    );
-                    file.insert("largest_key".into(), serde_json::json!(hex::encode(b"zzz")));
-                    file.insert("key_bounds_complete".into(), serde_json::json!(true));
+                    alter_binary_manifest_fixture(&path, "smallest_key", None);
+                    alter_binary_manifest_fixture(&path, "largest_key", None);
+                    alter_binary_manifest_fixture(&path, "key_bounds_complete", Some(0xc3));
                 } else {
-                    file.insert("smallest_seq".into(), serde_json::json!(99));
-                    file.insert("largest_seq".into(), serde_json::json!(99));
+                    alter_binary_manifest_fixture(&path, "smallest_seq", Some(99));
+                    alter_binary_manifest_fixture(&path, "largest_seq", Some(99));
                 }
-                fs::write(
-                    &path,
-                    serde_json::to_vec(&manifest).expect("encode manifest"),
-                )
-                .expect("write modified fixture manifest");
             }
 
             // Act: SST bytes and their recorded size and CRC are unchanged.
@@ -1722,28 +1832,19 @@ mod compatibility_fixtures {
         for complete in [true, false] {
             // Arrange: complete bounds agree with the SST; older advisory bounds
             // may disagree without hiding a point key from readers.
-            let temp = copy_fixture_dir("v8_populated_v4_sst_db");
-            for name in ["manifest.json", "manifest.snapshot.json"] {
+            let temp = copy_fixture_dir("v9_populated_v5_sst_db");
+            {
+                let name = "manifest.snapshot.json";
                 let path = temp.path().join(name);
-                let mut manifest: serde_json::Value =
-                    serde_json::from_slice(&fs::read(&path).expect("read fixture manifest"))
-                        .expect("decode fixture manifest");
-                let file = manifest["files"][0]
-                    .as_object_mut()
-                    .expect("fixture SST metadata");
-                file.insert("key_bounds_complete".into(), serde_json::json!(complete));
-                if !complete {
-                    file.insert(
-                        "smallest_key".into(),
-                        serde_json::json!(hex::encode(b"zzz")),
-                    );
-                    file.insert("largest_key".into(), serde_json::json!(hex::encode(b"zzz")));
-                }
-                fs::write(
+                alter_binary_manifest_fixture(
                     &path,
-                    serde_json::to_vec(&manifest).expect("encode manifest"),
-                )
-                .expect("write fixture manifest");
+                    "key_bounds_complete",
+                    Some(if complete { 0xc3 } else { 0xc2 }),
+                );
+                if !complete {
+                    alter_binary_manifest_fixture(&path, "smallest_key", None);
+                    alter_binary_manifest_fixture(&path, "largest_key", None);
+                }
             }
 
             // Act
@@ -1780,7 +1881,7 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_v2_empty_fixture_given_breaking_v4_sst_format() {
+    fn should_reject_v2_empty_fixture_given_breaking_v5_sst_format() {
         // Arrange
         let temp = copy_fixture_dir("v2_empty_db");
 
@@ -1802,9 +1903,9 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_future_v9_fixture_given_unsupported_version_when_reopening() {
+    fn should_reject_future_v10_fixture_given_unsupported_version_when_reopening() {
         // Arrange
-        let temp = copy_fixture_dir("future_v9");
+        let temp = copy_fixture_dir("future_v10");
 
         // Act
         let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())

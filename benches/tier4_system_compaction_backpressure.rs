@@ -1,13 +1,16 @@
 //! Tier 4 - Compaction write backpressure
 //!
-//! Measures sustained local write throughput while background compaction is enabled.
+//! Measures sustained local and simulated-cloud write throughput with compaction enabled.
 //! The reported throughput is write throughput under compaction pressure, not raw bytes compacted.
 
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::{Engine, MidgeError, WriteOptions};
-use cntryl_stress::{stress, stress_main, LogicalUnit, OperationOutcome, StressContext};
+use cntryl_midge::{Engine, MidgeError, TransactionMode, WriteOptions};
+use cntryl_stress::{
+    stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
+    StressContext,
+};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
@@ -20,11 +23,13 @@ const VALUE_SIZE: usize = 512;
 const WRITE_BATCH_SIZE: usize = 64;
 const COMPACTION_MEMTABLE_SIZE_BYTES: usize = 512 * 1024;
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default)]
 struct PhaseResult {
     elapsed: Duration,
     writes: u64,
     transactions: u64,
+    hard_stalls: u64,
+    commit_latencies: Vec<Duration>,
 }
 
 fn make_value(fill: u8) -> [u8; VALUE_SIZE] {
@@ -34,11 +39,29 @@ fn make_value(fill: u8) -> [u8; VALUE_SIZE] {
 const WRITERS: usize = 1;
 const WARMUP: Duration = Duration::from_secs(1);
 const MEASURED: Duration = Duration::from_secs(8);
+const TIME_ORDERED_INGEST_WRITES: u64 = 16_384;
+const COMPACTION_CONCURRENCY_ENV: &str = "MIDGE_COMPACTION_CONCURRENCY";
 
-fn open_compaction_engine(mut opts: MidgeOptions) -> Engine {
+fn compaction_concurrency() -> usize {
+    match std::env::var(COMPACTION_CONCURRENCY_ENV) {
+        Ok(value) => value.parse().unwrap_or_else(|error| {
+            panic!("{COMPACTION_CONCURRENCY_ENV} must be an integer: {error}")
+        }),
+        Err(_) => 1,
+    }
+}
+
+fn counter_as_f64(value: u64) -> f64 {
+    let high = u32::try_from(value >> 32).expect("upper counter bits fit u32");
+    let low = u32::try_from(value & u64::from(u32::MAX)).expect("lower counter bits fit u32");
+    f64::from(high) * 4_294_967_296.0 + f64::from(low)
+}
+
+fn open_compaction_engine(mut opts: MidgeOptions, compaction_concurrency: usize) -> Engine {
     opts.enable_compaction = true;
     opts.memtable_size = COMPACTION_MEMTABLE_SIZE_BYTES;
-    Engine::open(opts.to_open_options()).expect("open compaction backpressure engine")
+    Engine::open(opts.to_open_options_with_compaction_concurrency(compaction_concurrency))
+        .expect("open compaction backpressure engine")
 }
 
 fn run_write_phase(
@@ -65,39 +88,51 @@ fn run_write_phase(
 
             let mut local_writes = 0u64;
             let mut local_transactions = 0u64;
+            let mut hard_stalls = 0u64;
+            let mut commit_latencies = Vec::new();
 
             while !stop.load(Ordering::Acquire) {
-                let mut tx = engine
-                    .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
-                    .expect("begin compaction pressure transaction");
+                let transaction_started_at = Instant::now();
+                loop {
+                    let mut tx = engine
+                        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+                        .expect("begin compaction pressure transaction");
 
-                for _ in 0..WRITE_BATCH_SIZE {
-                    let seq = next_key.fetch_add(1, Ordering::Relaxed);
-                    let key = ycsb::make_key(seq);
-                    let value = make_value((seq & 0xFF) as u8);
-                    tx.put(key.to_vec(), value.to_vec(), None)
-                        .expect("put compaction pressure value");
-                }
+                    for _ in 0..WRITE_BATCH_SIZE {
+                        let seq = next_key.fetch_add(1, Ordering::Relaxed);
+                        let key = ycsb::make_key(seq);
+                        let value = make_value((seq & 0xFF) as u8);
+                        tx.put(key.to_vec(), value.to_vec(), None)
+                            .expect("put compaction pressure value");
+                    }
 
-                match tx.commit(write_options()) {
-                    Ok(()) => {
-                        if count {
-                            local_writes = local_writes.wrapping_add(WRITE_BATCH_SIZE as u64);
-                            local_transactions = local_transactions.wrapping_add(1);
+                    match tx.commit(write_options()) {
+                        Ok(()) => {
+                            if count {
+                                local_writes = local_writes.wrapping_add(WRITE_BATCH_SIZE as u64);
+                                local_transactions = local_transactions.wrapping_add(1);
+                                commit_latencies.push(transaction_started_at.elapsed());
+                            }
+                            break;
                         }
+                        Err(MidgeError::WriteStall(_)) => {
+                            if count {
+                                hard_stalls = hard_stalls.saturating_add(1);
+                            }
+                            let _ = engine
+                                .wait_for_write_stall_clear(cf_id, Duration::from_millis(500))
+                                .expect("wait for compaction pressure stall");
+                        }
+                        Err(error) => panic!("commit compaction pressure transaction: {error}"),
                     }
-                    Err(MidgeError::WriteStall(_)) => {
-                        let _ = engine
-                            .wait_for_write_stall_clear(cf_id, Duration::from_millis(500))
-                            .expect("wait for compaction pressure stall");
-                    }
-                    Err(error) => panic!("commit compaction pressure transaction: {error}"),
                 }
             }
 
             PhaseResult {
                 writes: local_writes,
                 transactions: local_transactions,
+                hard_stalls,
+                commit_latencies,
                 ..PhaseResult::default()
             }
         }));
@@ -119,6 +154,8 @@ fn run_write_phase(
             .expect("compaction pressure worker should finish");
         out.writes = out.writes.wrapping_add(result.writes);
         out.transactions = out.transactions.wrapping_add(result.transactions);
+        out.hard_stalls = out.hard_stalls.saturating_add(result.hard_stalls);
+        out.commit_latencies.extend(result.commit_latencies);
     }
 
     out
@@ -133,8 +170,23 @@ fn run_compaction_backpressure_case(
     stress_config::init_benchmark_telemetry().expect("initialize benchmark telemetry");
 
     let measured_duration = stress_config::tier4_measured_duration(MEASURED);
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    let opts = {
+        let opts = stress_config::opts_for_mode(mode);
+        if mode == "local" {
+            opts.with_write_backpressure(cntryl_midge::WriteBackpressureConfig {
+                l0_soft_limit: Some(2),
+                max_admission_delay: Duration::from_micros(100),
+                ..Default::default()
+            })
+        } else {
+            opts
+        }
+    };
+    #[cfg(not(feature = "candidate-write-backpressure-bench"))]
     let opts = stress_config::opts_for_mode(mode);
-    let engine = Arc::new(open_compaction_engine(opts));
+    let compaction_concurrency = compaction_concurrency();
+    let engine = Arc::new(open_compaction_engine(opts, compaction_concurrency));
     let cf = engine
         .create_column_family("cf1")
         .expect("create compaction pressure column family");
@@ -151,6 +203,15 @@ fn run_compaction_backpressure_case(
     );
 
     let start = ycsb::capture_runtime_perf_snapshot(&engine);
+    let metrics_before = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("capture backpressure metrics before measurement");
+    let gate_before = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("capture publication deferrals before measurement")
+        .flush_publication_deferred_by_gate;
     let measured = run_write_phase(
         &engine,
         cf_id,
@@ -161,16 +222,17 @@ fn run_compaction_backpressure_case(
         true,
     );
     let perf = ycsb::runtime_perf_report(&engine, start);
+    let metrics_after = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("capture backpressure metrics after measurement");
+    let gate_after = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("capture publication deferrals after measurement")
+        .flush_publication_deferred_by_gate;
 
-    ctx.parameter("storage_profile", mode);
-    ctx.parameter("measurement_window_shape", "continuous_same_owner");
-    ctx.parameter("writers", WRITERS);
-    ctx.parameter("write_batch_size", WRITE_BATCH_SIZE);
-    ctx.parameter("value_size_bytes", VALUE_SIZE);
-    ctx.parameter("memtable_size_bytes", COMPACTION_MEMTABLE_SIZE_BYTES);
-    ctx.parameter("logical_bytes_per_operation", ycsb::KEY_SIZE + VALUE_SIZE);
-    ctx.parameter("warmup_secs", WARMUP.as_secs_f64());
-    ctx.parameter("measured_secs", measured_duration.as_secs_f64());
+    record_backpressure_parameters(ctx, mode, compaction_concurrency, measured_duration);
     assert_eq!(
         measured.writes,
         measured
@@ -186,6 +248,276 @@ fn run_compaction_backpressure_case(
         OperationOutcome::success(measured.writes),
     );
     ycsb::record_runtime_correctness(ctx, &perf);
+    for latency in measured.commit_latencies.iter().copied() {
+        ctx.record_latency(latency);
+    }
+    ctx.parameter(
+        "end_to_end_commit_latency_sample_count",
+        measured.transactions,
+    );
+    let slowdown_ns = metrics_after
+        .write_slowdown_ns_total
+        .saturating_sub(metrics_before.write_slowdown_ns_total);
+    let slowdown_count = metrics_after
+        .write_slowdown_count
+        .saturating_sub(metrics_before.write_slowdown_count);
+    let deferrals = gate_after.saturating_sub(gate_before);
+    record_backpressure_observations(
+        ctx,
+        slowdown_ns,
+        slowdown_count,
+        measured.hard_stalls,
+        deferrals,
+    );
+}
+
+fn record_backpressure_parameters(
+    ctx: &mut StressContext,
+    mode: &'static str,
+    compaction_concurrency: usize,
+    measured_duration: Duration,
+) {
+    ctx.parameter("storage_profile", mode);
+    ctx.parameter(
+        "provider_evidence",
+        if mode == "cloud" {
+            "simulated_cloud_no_live_provider"
+        } else {
+            "local_filesystem"
+        },
+    );
+    ctx.parameter("measurement_window_shape", "continuous_same_owner");
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    ctx.parameter("candidate_soft_limits_enabled", mode == "local");
+    #[cfg(not(feature = "candidate-write-backpressure-bench"))]
+    ctx.parameter("candidate_soft_limits_enabled", false);
+    #[cfg(feature = "candidate-write-backpressure-bench")]
+    if mode == "local" {
+        ctx.parameter("l0_soft_limit", 2);
+        ctx.parameter("max_admission_delay_us", 100);
+    }
+    ctx.parameter("writers", WRITERS);
+    ctx.parameter("compaction_concurrency", compaction_concurrency);
+    ctx.parameter("write_batch_size", WRITE_BATCH_SIZE);
+    ctx.parameter("value_size_bytes", VALUE_SIZE);
+    ctx.parameter("memtable_size_bytes", COMPACTION_MEMTABLE_SIZE_BYTES);
+    ctx.parameter("logical_bytes_per_operation", ycsb::KEY_SIZE + VALUE_SIZE);
+    ctx.parameter("warmup_secs", WARMUP.as_secs_f64());
+    ctx.parameter("measured_secs", measured_duration.as_secs_f64());
+}
+
+fn record_backpressure_observations(
+    ctx: &mut StressContext,
+    slowdown_ns: u64,
+    slowdown_count: u64,
+    hard_stalls: u64,
+    deferrals: u64,
+) {
+    ctx.record_observation(
+        "admission_delay_total_ns",
+        counter_as_f64(slowdown_ns),
+        ObservationUnit::Nanoseconds,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "admission_delay_submission_count",
+        counter_as_f64(slowdown_count),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    if slowdown_count > 0 {
+        ctx.record_observation(
+            "admission_delay_mean_ns_per_submission",
+            counter_as_f64(slowdown_ns) / counter_as_f64(slowdown_count),
+            ObservationUnit::Nanoseconds,
+            ObservationDirection::Informational,
+        );
+    }
+    ctx.record_observation(
+        "hard_stall_count",
+        counter_as_f64(hard_stalls),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "flush_publication_deferred_by_gate",
+        counter_as_f64(deferrals),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+}
+
+fn write_time_ordered_ingest(engine: &Engine, cf_id: u32) {
+    for batch_start in (0..TIME_ORDERED_INGEST_WRITES).step_by(WRITE_BATCH_SIZE) {
+        let batch_end = batch_start
+            .saturating_add(u64::try_from(WRITE_BATCH_SIZE).expect("batch size fits u64"))
+            .min(TIME_ORDERED_INGEST_WRITES);
+        loop {
+            let mut transaction = engine
+                .begin_tx(cf_id, TransactionMode::ReadWrite)
+                .expect("begin time-ordered ingest transaction");
+            for sequence in batch_start..batch_end {
+                transaction
+                    .put(
+                        ycsb::make_key(sequence).to_vec(),
+                        make_value(u8::try_from(sequence % 251).expect("value byte fits u8"))
+                            .to_vec(),
+                        None,
+                    )
+                    .expect("stage time-ordered ingest value");
+            }
+            match transaction.commit(WriteOptions::buffered()) {
+                Ok(()) => break,
+                Err(MidgeError::WriteStall(_)) => {
+                    engine
+                        .wait_for_write_stall_clear(cf_id, Duration::from_secs(30))
+                        .expect("wait for time-ordered ingest stall");
+                }
+                Err(error) => panic!("commit time-ordered ingest batch: {error}"),
+            }
+        }
+    }
+}
+
+fn logical_move_from_layouts(
+    files_before: &[cntryl_midge::StorageFileLayout],
+    files_after: &[cntryl_midge::StorageFileLayout],
+    output_bytes: u64,
+    compactions_run: u64,
+) -> bool {
+    assert!(!files_before.is_empty(), "fixture must produce L0 SSTs");
+    assert!(files_before.iter().all(|file| file.level == 0));
+    assert!(!files_after.is_empty(), "compaction must preserve SSTs");
+    assert!(files_after.iter().all(|file| file.level != 0));
+    let mut before_names: Vec<_> = files_before.iter().map(|file| file.name.as_str()).collect();
+    let mut after_names: Vec<_> = files_after.iter().map(|file| file.name.as_str()).collect();
+    before_names.sort_unstable();
+    after_names.sort_unstable();
+    let logical_move = before_names == after_names;
+    assert_eq!(logical_move, output_bytes == 0);
+    assert!(logical_move || compactions_run > 0);
+    logical_move
+}
+
+fn record_time_ordered_ingest_result(
+    ctx: &mut StressContext,
+    elapsed: Duration,
+    logical_move: bool,
+    compactions_run: u64,
+    output_bytes: u64,
+) {
+    let logical_ingest_bytes = TIME_ORDERED_INGEST_WRITES
+        .saturating_mul(u64::try_from(ycsb::KEY_SIZE + VALUE_SIZE).expect("write bytes fit u64"));
+    ctx.parameter("storage_profile", "local_filesystem");
+    ctx.parameter("measurement_window_shape", "fixed_workload");
+    ctx.parameter("logical_writes", TIME_ORDERED_INGEST_WRITES);
+    ctx.parameter("writers", 1);
+    ctx.parameter("write_batch_size", WRITE_BATCH_SIZE);
+    ctx.parameter("value_size_bytes", VALUE_SIZE);
+    ctx.parameter("memtable_size_bytes", 64 * 1024 * 1024);
+    ctx.parameter(
+        "compaction_output_metric",
+        "published compaction output SST bytes",
+    );
+    ctx.parameter("flush_bytes_in_compaction_output_metric", false);
+    ctx.record_observation(
+        "logical_move_completed",
+        if logical_move { 1.0 } else { 0.0 },
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "compactions_run",
+        counter_as_f64(compactions_run),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
+    );
+    ctx.record_external_outcome(
+        "tier4_time_ordered_ingest_write_amplification",
+        elapsed,
+        LogicalUnit::new("write"),
+        OperationOutcome::success(TIME_ORDERED_INGEST_WRITES),
+    );
+    ctx.record_observation(
+        "compaction_output_bytes",
+        counter_as_f64(output_bytes),
+        ObservationUnit::Bytes,
+        ObservationDirection::Informational,
+    );
+    ctx.record_observation(
+        "compaction_output_bytes_per_logical_ingest_byte",
+        counter_as_f64(output_bytes) / counter_as_f64(logical_ingest_bytes.max(1)),
+        ObservationUnit::Ratio,
+        ObservationDirection::LowerIsBetter,
+    );
+}
+
+fn tier4_time_ordered_ingest_write_amplification(ctx: &mut StressContext) {
+    stress_config::init_benchmark_telemetry().expect("initialize benchmark telemetry");
+    let mut opts = stress_config::opts_for_mode("local");
+    opts.enable_compaction = false;
+    opts.memtable_size = 64 * 1024 * 1024;
+    let mut engine = Engine::open(opts.to_open_options()).expect("open time-ordered ingest engine");
+    let cf = engine
+        .create_column_family("time-ordered-ingest")
+        .expect("create time-ordered ingest column family");
+    let before = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("read compaction metrics before ingest");
+    let started = Instant::now();
+    write_time_ordered_ingest(&engine, cf.id());
+    engine.flush_cf(&cf).expect("flush time-ordered ingest");
+    let files_before = engine
+        .metrics()
+        .get_storage_layout()
+        .expect("read layout before compaction");
+    let files_before: Vec<_> = files_before
+        .levels
+        .into_iter()
+        .flat_map(|level| level.files)
+        .filter(|file| file.cf_id == cf.id())
+        .collect();
+    engine
+        .compact_all()
+        .expect("compact time-ordered ingest files");
+    let elapsed = started.elapsed();
+    let after = engine
+        .metrics()
+        .get_runtime_metrics()
+        .expect("read compaction metrics after ingest");
+    let files_after = engine
+        .metrics()
+        .get_storage_layout()
+        .expect("read layout after compaction");
+    let files_after: Vec<_> = files_after
+        .levels
+        .into_iter()
+        .flat_map(|level| level.files)
+        .filter(|file| file.cf_id == cf.id())
+        .collect();
+    let output_bytes = after
+        .compaction_bytes_rewritten
+        .saturating_sub(before.compaction_bytes_rewritten);
+    let compactions_run = after.compactions_run.saturating_sub(before.compactions_run);
+    let logical_move =
+        logical_move_from_layouts(&files_before, &files_after, output_bytes, compactions_run);
+    record_time_ordered_ingest_result(ctx, elapsed, logical_move, compactions_run, output_bytes);
+    engine
+        .shutdown(Duration::from_secs(30))
+        .expect("shutdown time-ordered ingest engine");
+}
+
+#[stress(
+    tier = 4,
+    metadata(
+        component = "logical_sst_moves",
+        scenario = "fixed_ingest",
+        measurement_shape = "fixed_workload"
+    )
+)]
+fn tier4_compaction_time_ordered_ingest_write_amplification(ctx: &mut StressContext) {
+    tier4_time_ordered_ingest_write_amplification(ctx);
 }
 
 #[stress(tier = 4)]
@@ -195,6 +527,16 @@ fn tier4_compaction_write_backpressure_local(ctx: &mut StressContext) {
         "tier4_compaction_write_backpressure_local",
         "local",
         WriteOptions::buffered,
+    );
+}
+
+#[stress(tier = 4)]
+fn tier4_compaction_write_backpressure_cloud_simulated(ctx: &mut StressContext) {
+    run_compaction_backpressure_case(
+        ctx,
+        "tier4_compaction_write_backpressure_cloud_simulated",
+        "cloud",
+        WriteOptions::cloud_async,
     );
 }
 

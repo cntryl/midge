@@ -8,18 +8,50 @@ on:
         type: choice
         options: [smoke, standard, extended]
         default: standard
+      run_mode:
+        description: Run the full Tier 4 matrix or one named benchmark workload
+        type: choice
+        options: [full, targeted]
+        default: full
+      bench:
+        description: Cargo benchmark target for targeted mode
+        type: string
+        default: ""
+      workload:
+        description: cntryl-stress workload name for targeted mode
+        type: string
+        default: ""
+      source_ref:
+        description: Source branch or commit SHA to benchmark (blank uses the selected workflow ref)
+        type: string
+        default: ""
+      benchmark_ref:
+        description: Optional ref supplying the same benchmark source when it is absent from source_ref
+        type: string
+        default: ""
+      samples:
+        description: Measured samples per workload
+        type: choice
+        options: [5, 10]
+        default: "5"
+      warmup_samples:
+        description: Warmup samples per workload
+        type: choice
+        options: [1, 2]
+        default: "1"
 
 permissions:
   contents: read
 
 concurrency:
-  group: bench-tier4-${{ github.ref }}
+  group: bench-tier4-${{ github.ref }}-${{ inputs.run_mode == 'targeted' && github.run_id || 'matrix' }}
   cancel-in-progress: false
 
 jobs:
   bench:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     timeout-minutes: 90
+    if: inputs.run_mode == 'full'
 
     strategy:
       fail-fast: false
@@ -31,6 +63,8 @@ jobs:
             workload: tier4_streaming_cloud
           - bench: tier4_system_compaction_backpressure
             workload: tier4_compaction_write_backpressure_local
+          - bench: tier4_system_compaction_backpressure
+            workload: tier4_compaction_time_ordered_ingest_write_amplification
           - bench: tier4_system_compression_policy
             workload: latency_policy_repeated
           - bench: tier4_system_compression_policy
@@ -183,18 +217,74 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Update Rust to stable
         run: rustup update stable
 
       - name: Run benchmarks
-        run: cargo bench --locked --bench '${{ matrix.bench }}' -- --workload '${{ matrix.bench }}::${{ matrix.workload }}'
+        run: cargo bench --locked --bench '${{ matrix.bench }}' -- --workload '${{ matrix.bench }}::${{ matrix.workload }}' --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress --require-quiet-env
 
       - name: Upload benchmark reports
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: bench-tier4-${{ matrix.workload }}-${{ github.sha }}
+          path: |
+            target/stress/**
+            target/midge-stress/**
+          if-no-files-found: ignore
+
+  targeted:
+    if: inputs.run_mode == 'targeted'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: "0"
+      BENCH_NAME: ${{ inputs.bench }}
+      WORKLOAD_NAME: ${{ inputs.workload }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Install benchmark source overlay
+        if: inputs.benchmark_ref != ''
+        env:
+          BENCH_NAME: ${{ inputs.bench }}
+          BENCHMARK_SOURCE_REF: ${{ inputs.benchmark_ref }}
+        run: |
+          set -euo pipefail
+          [[ "$BENCH_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]
+          [[ "$BENCHMARK_SOURCE_REF" =~ ^[0-9a-fA-F]{40}$ ]]
+          git fetch origin "$BENCHMARK_SOURCE_REF"
+          git show "${BENCHMARK_SOURCE_REF}:benches/${BENCH_NAME}.rs" > "$RUNNER_TEMP/${BENCH_NAME}.rs"
+          cp "$RUNNER_TEMP/${BENCH_NAME}.rs" "benches/${BENCH_NAME}.rs"
+          if ! grep -Fq "name = \"${BENCH_NAME}\"" Cargo.toml; then
+            printf '\n[[bench]]\nname = "%s"\npath = "benches/%s.rs"\nharness = false\n' \
+              "$BENCH_NAME" "$BENCH_NAME" >> Cargo.toml
+          fi
+
+      - name: Update Rust to stable
+        run: rustup update stable
+
+      - name: Capture benchmark environment
+        run: |
+          rustc --version --verbose
+          uname -a
+          uptime
+
+      - name: Run targeted benchmark
+        run: cargo bench --locked --bench "$BENCH_NAME" -- --workload "${BENCH_NAME}::${WORKLOAD_NAME}" --samples '${{ inputs.samples }}' --warmup-samples '${{ inputs.warmup_samples }}' --no-progress --require-quiet-env
+
+      - name: Upload benchmark reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-tier4-${{ inputs.workload }}-${{ inputs.source_ref || github.sha }}
           path: |
             target/stress/**
             target/midge-stress/**

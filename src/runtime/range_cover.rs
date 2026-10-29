@@ -75,7 +75,11 @@ pub(crate) struct RangeCoverSweep {
     reverse: bool,
     pending: BinaryHeap<Pending>,
     active: BinaryHeap<Active>,
-    position: Option<Vec<u8>>,
+    /// The last queried key, kept in one reused buffer: a scan queries once
+    /// per row, and copying the key into a fresh allocation each time was the
+    /// largest per-row allocation of a long scan (#945).
+    position: Vec<u8>,
+    positioned: bool,
     work: u64,
 }
 
@@ -85,7 +89,8 @@ impl RangeCoverSweep {
             reverse,
             pending: BinaryHeap::new(),
             active: BinaryHeap::new(),
-            position: None,
+            position: Vec::new(),
+            positioned: false,
             work: 0,
         }
     }
@@ -126,7 +131,8 @@ impl RangeCoverSweep {
         } else {
             (start, end)
         };
-        if let Some(position) = &self.position {
+        if self.positioned {
+            let position = self.position.as_slice();
             if self.reached(&activation, position) {
                 if !self.retired(&retirement, position) {
                     self.work += 1;
@@ -171,7 +177,9 @@ impl RangeCoverSweep {
             self.work += 1;
             self.active.pop();
         }
-        self.position = Some(key.to_vec());
+        self.position.clear();
+        self.position.extend_from_slice(key);
+        self.positioned = true;
         self.active.peek().map(|head| head.seq)
     }
 }

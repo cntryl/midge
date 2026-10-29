@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+mod moves;
 mod transitions;
+pub(crate) use moves::validate_sst_move;
 pub use transitions::PreparedManifestEdit;
 pub(crate) use transitions::{apply_column_family_lifecycle, FamilyLifecycleEdit};
 use transitions::{invalid_transition, EditValidator};
@@ -24,6 +26,10 @@ pub struct Manifest {
     /// SST file metadata
     #[serde(default)]
     pub files: Vec<FileMeta>,
+    /// Removed immutable identities whose physical deletion is not yet
+    /// durably confirmed. The removing publication carries this obligation.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub retired_ssts: HashMap<String, FileMeta>,
     /// Column families
     #[serde(default)]
     pub column_families: Vec<ColumnFamilyMeta>,
@@ -87,6 +93,13 @@ impl Manifest {
             if !file_names.insert(&file.name) {
                 return Err(invalid_transition("duplicate SST name"));
             }
+            self.flushed_through.get(file.cf_id)?;
+        }
+        for (name, file) in &self.retired_ssts {
+            if name != &file.name || file_names.contains(name) {
+                return Err(invalid_transition("retired SST overlaps active authority"));
+            }
+            crate::cloud_layout::PersistedSstName::parse(name)?;
             self.flushed_through.get(file.cf_id)?;
         }
         for id in self.next_sst_seqs.keys() {
@@ -205,6 +218,9 @@ pub struct FileMeta {
     /// bounds.
     #[serde(default)]
     pub key_bounds_complete: bool,
+    /// Advisory earliest persisted TTL deadline; never deletion authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_expiration_millis: Option<u64>,
     #[serde(default)]
     pub sublevel: u32,
     /// Read counter for compaction prioritization (not persisted)
@@ -278,6 +294,9 @@ impl Manifest {
 
     /// Remove a file from the manifest
     pub fn remove_file(&mut self, name: &str) {
+        if let Some(file) = self.files.iter().find(|file| file.name == name) {
+            self.retired_ssts.insert(name.to_owned(), file.clone());
+        }
         self.files.retain(|f| f.name != name);
     }
 
@@ -419,5 +438,7 @@ impl Manifest {
     }
 }
 
+#[cfg(test)]
+mod delete_tests;
 #[cfg(test)]
 mod tests;

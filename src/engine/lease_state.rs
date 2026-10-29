@@ -57,9 +57,10 @@ where
 }
 
 fn spawn_thread(name: &str, task: ReaperTask) -> std::io::Result<JoinHandle<()>> {
+    let gate = crate::failpoints::worker_gate();
     std::thread::Builder::new()
         .name(name.to_string())
-        .spawn(task)
+        .spawn(move || gate.run(task))
 }
 
 pub(super) struct FencingResources {
@@ -303,7 +304,7 @@ impl LeaseState {
         }
     }
 
-    pub(super) fn detach_reaper(&mut self, runtime: Option<Runtime>) {
+    pub(super) fn detach_reaper(&mut self, runtime: Option<Runtime>, transaction_wait: Duration) {
         let resources = self.take_resources();
         if runtime.is_none()
             && resources.heartbeat.is_none()
@@ -336,7 +337,7 @@ impl LeaseState {
                     storage,
                 },
             )| {
-                drop(runtime);
+                Self::finish_reaped_runtime(runtime, transaction_wait);
                 if let Err(error) = Self::release_fencing_parts(heartbeat, lease, guard, storage) {
                     tracing::debug!(%error, "Engine reaper finished without releasing the lease");
                 }
@@ -345,9 +346,16 @@ impl LeaseState {
             spawn_thread,
         ) {
             tracing::error!(%error, "failed to spawn engine cleanup reaper");
-            drop(runtime);
+            Self::finish_reaped_runtime(runtime, transaction_wait);
             let _ = Self::release_fencing_parts(heartbeat, lease, guard, storage);
         }
+    }
+
+    fn finish_reaped_runtime(mut runtime: Option<Runtime>, transaction_wait: Duration) {
+        if let Some(runtime) = &mut runtime {
+            runtime.shutdown_for_reaper(transaction_wait);
+        }
+        drop(runtime);
     }
     pub(super) fn wait_for_cleanup(&mut self, timeout: Duration) -> MidgeResult<()> {
         enum CleanupWait {

@@ -3,13 +3,16 @@
 //! These tests intentionally assume Sqrzl is already running. Start it with:
 //! `docker compose up -d sqrzl`
 //! then run with the feature enabled, for example:
-//! `cargo test --lib --features sqrzl-tests storage::providers::qualification -- --ignored --test-threads=1`
+//! `cargo test --lib --features sqrzl-tests storage::providers::qualification -- --test-threads=1`
 
 use super::build_cloud_storage;
 use crate::config::{CloudPreflightOptions, CloudStorageLocation};
 use crate::config::{CloudProviderConfig, OciCredentialSource};
 use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::time::Duration;
+
+mod mutation_faults;
+mod receipt_faults;
 
 #[test]
 fn should_run_s3_compatible_contract_against_sqrzl() {
@@ -21,6 +24,208 @@ fn should_run_s3_compatible_contract_against_sqrzl() {
 fn should_run_azure_blob_contract_against_sqrzl() {
     let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-azure");
     run_provider_contract("azure", &provider);
+}
+
+#[test]
+fn should_reject_incorrect_azure_shared_key_for_conditional_write_against_sqrzl() {
+    // Arrange: create the namespace with the emulator's actual credential.
+    require_sqrzl("azure-wrong-key");
+    ensure_sqrzl_azure_container("midge-sqrzl-azure").unwrap();
+    let provider = CloudProviderConfig::azure_blob_shared_key(
+        "admin",
+        "midge-sqrzl-azure",
+        "bm90LXRoZS1lbXVsYXRvci1rZXk=",
+    )
+    .with_endpoint("http://127.0.0.1:9000")
+    .unwrap();
+    let backend = build_cloud_storage(&provider, "").unwrap();
+    let key = format!(
+        "qualification/azure-wrong-key/{}/object",
+        uuid::Uuid::new_v4()
+    );
+
+    // Act
+    let result = put(
+        &backend,
+        &key,
+        b"must not be written".to_vec(),
+        vec![("If-None-Match".into(), "*".into())],
+    );
+
+    // Assert: authentication failure must not masquerade as a CAS conflict.
+    assert!(
+        matches!(result, Err(CloudError::Unauthorized(_))),
+        "{result:?}"
+    );
+    let valid =
+        build_cloud_storage(&CloudProviderConfig::sqrzl_azure("midge-sqrzl-azure"), "").unwrap();
+    assert!(matches!(get(&valid, &key), Err(CloudError::NotFound(_))));
+}
+
+#[test]
+fn should_validate_streamed_multipart_receipt_from_sqrzl_s3() {
+    // Arrange: explicitly opt into the S3-compatible checksum contract.
+    let mut provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-receipt-s3");
+    let CloudProviderConfig::S3Compatible(config) = &mut provider else {
+        unreachable!("Sqrzl S3 must use the S3-compatible provider");
+    };
+    *config = config.clone().with_checksum_receipts(true);
+    // Act
+    assert_sqrzl_streamed_receipt("sqrzl-s3-receipt", &provider);
+    // Assert: the helper verifies receipt identity and independently read bytes.
+}
+
+#[test]
+fn should_validate_streamed_multipart_receipt_from_sqrzl_gcs_xml() {
+    // Arrange
+    let provider = CloudProviderConfig::sqrzl_gcs("midge-sqrzl-receipt-gcs");
+    // Act
+    assert_sqrzl_streamed_receipt("sqrzl-gcs-receipt", &provider);
+    // Assert: the helper verifies receipt identity and independently read bytes.
+}
+
+#[test]
+fn should_validate_streamed_multipart_receipt_from_sqrzl_gcs_json() {
+    // Arrange
+    let provider = CloudProviderConfig::sqrzl_gcs_json("midge-sqrzl-receipt-gcs-json");
+    // Act
+    assert_sqrzl_streamed_receipt("sqrzl-gcs-json-receipt", &provider);
+    // Assert: the helper verifies receipt identity and independently read bytes.
+}
+
+#[test]
+fn should_validate_streamed_multipart_receipt_from_sqrzl_azure() {
+    // Arrange
+    let provider = CloudProviderConfig::sqrzl_azure("midge-sqrzl-receipt-azure");
+    // Act
+    assert_sqrzl_streamed_receipt("sqrzl-azure-receipt", &provider);
+    // Assert: the helper verifies exact receipt identity and size.
+}
+
+#[test]
+fn should_publish_s3_file_when_sqrzl_checksum_receipts_are_disabled() {
+    use crate::common::resource_budget::ResourceBudget;
+    use crate::io::{FsPath, RealFs};
+    use crate::storage::hybrid::backend::{HybridStorage, ImmutableFileSource};
+    use crate::storage::StorageBackend;
+    use std::sync::Arc;
+
+    // Arrange: explicitly exercise the receipt-disabled compatibility path.
+    let provider = CloudProviderConfig::sqrzl_s3("midge-sqrzl-s3-readback");
+    let CloudProviderConfig::S3Compatible(config) = &provider else {
+        unreachable!("Sqrzl S3 must use the S3-compatible provider");
+    };
+    assert!(!config.checksum_receipts());
+    require_sqrzl("s3-readback-fallback");
+    ensure_sqrzl_namespace(&provider).expect("prepare Sqrzl S3 bucket");
+    let cloud = build_cloud_storage(&provider, "").expect("build Sqrzl S3 backend");
+    assert!(!cloud.supports_file_upload());
+    let cloud_store: Arc<dyn StorageBackend> = cloud.clone();
+    let (event_tx, _event_rx) = crossbeam::channel::unbounded();
+    let storage = HybridStorage::new_with_class_stores_and_event_sender(
+        Arc::clone(&cloud_store),
+        Arc::clone(&cloud_store),
+        cloud_store,
+        event_tx,
+        Duration::from_secs(60),
+    );
+    let key = format!(
+        "qualification/s3-readback/{}/object.sst",
+        uuid::Uuid::new_v4()
+    );
+    let bytes: Vec<u8> = (0_usize..(256 * 1024))
+        .map(|index| u8::try_from(index.wrapping_mul(131).wrapping_add(17) & 0xff).unwrap())
+        .collect();
+    let directory = tempfile::tempdir().expect("create SST source");
+    std::fs::write(directory.path().join("source"), &bytes).expect("write SST source");
+    let fs = RealFs::new(directory.path()).expect("open SST source directory");
+    let path = FsPath::new("source");
+    let budget = ResourceBudget::new(2 * 1024 * 1024);
+
+    // Act: publish through the production immutable-file path without a receipt.
+    let proof = storage
+        .publish_immutable_file(
+            ImmutableFileSource {
+                key: &key,
+                fs: &fs,
+                path: &path,
+                size: bytes.len() as u64,
+                checksum: crc32c::crc32c(&bytes),
+            },
+            &budget,
+        )
+        .expect("publish via pinned-readback fallback");
+    let remote = get(&cloud, &key).expect("read published object");
+
+    // Assert: fallback publication preserves exact bytes and releases its budget.
+    assert_eq!(remote, bytes);
+    assert_eq!(budget.used(), 0);
+    drop(proof);
+}
+
+fn assert_sqrzl_streamed_receipt(label: &str, provider: &CloudProviderConfig) {
+    use crate::io::{File, FsPath, OpenOptions as FsOpenOptions, RealFs};
+    use crate::storage::{
+        StorageBackend, StorageFileUpload, StoragePrecondition, StorageRequest,
+        FILE_UPLOAD_PART_BYTES,
+    };
+    use std::sync::Arc;
+
+    // Arrange: prepare an authenticated namespace and a payload spanning two parts.
+    require_sqrzl(label);
+    ensure_sqrzl_namespace(provider).unwrap_or_else(|error| {
+        panic!("{label}: failed to prepare Sqrzl namespace: {error}");
+    });
+    let backend = build_cloud_storage(provider, "").expect("build Sqrzl storage backend");
+    let prefix = format!("qualification/{label}/{}/", uuid::Uuid::new_v4());
+    let size = FILE_UPLOAD_PART_BYTES + 1;
+    let bytes: Vec<u8> = (0..size)
+        .map(|index| {
+            u8::try_from(index.wrapping_mul(131).wrapping_add(17) & 0xff)
+                .expect("masked byte fits in u8")
+        })
+        .collect();
+    let directory = tempfile::tempdir().expect("create streamed receipt source");
+    std::fs::write(directory.path().join("source"), &bytes).expect("write streamed receipt source");
+    let fs = RealFs::new(directory.path()).expect("open streamed receipt source directory");
+    let file =
+        crate::io::open_persistent_handle(&fs, &FsPath::new("source"), FsOpenOptions::READ_ONLY)
+            .expect("open streamed receipt source");
+    let file: Arc<dyn File> = Arc::from(file);
+    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(60));
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Act: stream the file through the provider receipt API.
+    backend.submit_file_write_receipt_request(
+        StorageRequest::new(
+            format!("{prefix}object.sst"),
+            deadline,
+            Duration::from_secs(60),
+        )
+        .with_precondition(StoragePrecondition::IfAbsent),
+        StorageFileUpload {
+            file,
+            size: size as u64,
+            content_crc32c: crc32c::crc32c(&bytes),
+            part_size: FILE_UPLOAD_PART_BYTES,
+        },
+        tx,
+    );
+    let receipt = rx
+        .recv_timeout(Duration::from_secs(60))
+        .expect("wait for Sqrzl streamed upload receipt")
+        .unwrap_or_else(|error| panic!("{label}: streamed upload failed: {error}"))
+        .unwrap_or_else(|| panic!("{label}: provider omitted its checksum receipt"));
+    // Assert: the receipt covers the exact multipart payload and byte length.
+    assert_eq!(receipt.metadata.size, size as u64, "{label}: receipt size");
+    assert!(
+        receipt.matches(&bytes),
+        "{label}: provider receipt must match the exact uploaded bytes and identity"
+    );
+    assert_eq!(
+        get(&backend, &format!("{prefix}object.sst")).expect("read completed multipart object"),
+        bytes,
+        "{label}: independently read bytes must match the upload"
+    );
 }
 
 #[test]
@@ -304,15 +509,15 @@ fn should_join_azure_canonical_headers_directly_to_resource() {
             "x-ms-date".to_string(),
             "Tue, 11 Aug 2026 12:00:00 GMT".to_string(),
         ),
-        ("x-ms-version".to_string(), "2024-11-04".to_string()),
+        ("x-ms-version".to_string(), "2026-10-06".to_string()),
     ];
 
     // Act
     let string_to_sign = azure_string_to_sign("GET", &headers, "/admin/container/blob", "", b"");
 
     // Assert
-    assert!(string_to_sign.contains("x-ms-version:2024-11-04\n/admin/admin/container/blob"));
-    assert!(!string_to_sign.contains("x-ms-version:2024-11-04\n\n/"));
+    assert!(string_to_sign.contains("x-ms-version:2026-10-06\n/admin/admin/container/blob"));
+    assert!(!string_to_sign.contains("x-ms-version:2026-10-06\n\n/"));
 }
 
 /// Precondition headers naming the current version of `key`.

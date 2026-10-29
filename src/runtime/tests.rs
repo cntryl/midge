@@ -4,9 +4,790 @@ use crate::runtime::TestRuntimeMsg;
 use crate::wal::DurabilityPolicy;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod compaction_deadline_tests;
+
+#[test]
+fn should_slow_commit_inside_l0_soft_band_without_hard_stall() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let state = RuntimeState::new(directory.path().to_path_buf(), false);
+    let (runtime, _) = Runtime::new();
+    let delay = Duration::from_millis(30);
+    let config = RuntimeConfig {
+        runtime_response_timeout: Duration::from_secs(2),
+        write_backpressure: crate::config::WriteBackpressureConfig {
+            l0_soft_limit: Some(1),
+            max_admission_delay: delay,
+            ..Default::default()
+        },
+        ..RuntimeConfig::default()
+    };
+    let (mut runtime, handle) = runtime.start_with_config(state, config)?;
+    let submission = |key: &'static [u8]| TransactionSubmission {
+        ops: vec![TransactionOp::Put {
+            cf_id: 0,
+            key: bytes::Bytes::from_static(key),
+            value: bytes::Bytes::from_static(b"value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: Some(DurabilityPolicy::Strict),
+        start_sequence: None,
+        conflict_policy: crate::types::ConflictPolicy::LastWriteWins,
+    };
+    assert!(matches!(
+        handle.send_apply_transaction_and_wait(730_001, submission(b"seed"))?,
+        RuntimeResponse::TransactionApplied { .. }
+    ));
+
+    // Act: the first write leaves one active L0 generation, inside the soft
+    // band and below the configured hard ceiling.
+    let started = Instant::now();
+    let response = handle.send_apply_transaction_and_wait(730_002, submission(b"slow"));
+    let elapsed = started.elapsed();
+
+    // Assert: caller-side slowdown is observed, but the real event loop still
+    // commits the write instead of returning WriteStall.
+    assert!(matches!(
+        response?,
+        RuntimeResponse::TransactionApplied { .. }
+    ));
+    assert!(elapsed >= delay);
+    assert_eq!(
+        handle
+            .write_admission
+            .slowdown_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert!(
+        handle
+            .write_admission
+            .slowdown_ns
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX)
+    );
+    handle.shutdown(Duration::from_secs(2))?;
+    assert!(runtime.wait_for_exit(Duration::from_secs(2)));
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+struct HeldSync {
+    reached: crossbeam::channel::Receiver<()>,
+    release: crossbeam::channel::Sender<()>,
+}
+
+#[cfg(feature = "failpoints")]
+impl HeldSync {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (entered, reached) = crossbeam::channel::bounded(1);
+        let (release, released) = crossbeam::channel::unbounded();
+        let calls = Arc::new(AtomicUsize::new(0));
+        fail::cfg_callback("midge::wal::before_physical_sync", move || {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                entered.send(()).expect("signal held fsync");
+                released
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("release held fsync");
+            }
+        })
+        .expect("configure held fsync");
+        Self { reached, release }
+    }
+}
+
+#[cfg(feature = "failpoints")]
+struct HeldTwoSyncs {
+    reached: crossbeam::channel::Receiver<()>,
+    release: crossbeam::channel::Sender<()>,
+}
+
+#[cfg(feature = "failpoints")]
+impl HeldTwoSyncs {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (entered, reached) = crossbeam::channel::bounded(2);
+        let (release, released) = crossbeam::channel::unbounded();
+        let calls = Arc::new(AtomicUsize::new(0));
+        fail::cfg_callback("midge::wal::before_physical_sync", move || {
+            if calls.fetch_add(1, Ordering::SeqCst) < 2 {
+                entered.send(()).expect("signal held WAL sync");
+                released
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("release held WAL sync");
+            }
+        })
+        .expect("configure held WAL sync");
+        Self { reached, release }
+    }
+}
+
+#[cfg(feature = "failpoints")]
+impl Drop for HeldTwoSyncs {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+        let _ = self.release.send(());
+        fail::remove("midge::wal::before_physical_sync");
+    }
+}
+
+#[cfg(feature = "failpoints")]
+impl Drop for HeldSync {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+        fail::remove("midge::wal::before_physical_sync");
+    }
+}
+
+#[cfg(feature = "failpoints")]
+struct SpilledRuntime {
+    runtime: Runtime,
+    handle: RuntimeHandle,
+    db_path: std::path::PathBuf,
+    _directory: tempfile::TempDir,
+}
+
+#[cfg(feature = "failpoints")]
+impl SpilledRuntime {
+    fn new() -> crate::common::MidgeResult<Self> {
+        let directory = tempfile::tempdir().expect("runtime directory");
+        let db_path = directory.path().join("db");
+        std::fs::create_dir_all(&db_path).expect("create db directory");
+        let state = RuntimeState::new(db_path.clone(), false);
+        let (runtime, _) = Runtime::new();
+        let (runtime, handle) = runtime.start_with_config(state, RuntimeConfig::default())?;
+        Ok(Self {
+            runtime,
+            handle,
+            db_path,
+            _directory: directory,
+        })
+    }
+
+    fn source(
+        &self,
+        request_id: u64,
+        key: &'static [u8],
+        value: &'static [u8],
+    ) -> crate::common::MidgeResult<crate::runtime::transaction_spill::TransactionOpSource> {
+        use crate::runtime::transaction_spill::{TransactionMemoryPool, TransactionWriteSet};
+        use bytes::Bytes;
+
+        let mut writes = TransactionWriteSet::new(
+            Arc::new(TransactionMemoryPool::new(0)),
+            &crate::io::real::test_root(&self.db_path),
+            false,
+            request_id,
+        );
+        writes.push(TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::from_static(key),
+            value: Bytes::from_static(value),
+            ttl_seconds: None,
+            insert_only: false,
+        })?;
+        Ok(writes.take_source())
+    }
+}
+
+#[cfg(feature = "failpoints")]
+struct CloudAsyncRuntime {
+    runtime: Option<Runtime>,
+    handle: RuntimeHandle,
+    db_path: std::path::PathBuf,
+    store: Arc<crate::lease::fs_leader_store::FsLeaderStore>,
+    _directory: tempfile::TempDir,
+}
+
+#[cfg(feature = "failpoints")]
+impl CloudAsyncRuntime {
+    fn new() -> crate::common::MidgeResult<Self> {
+        use crate::lease::LeaderStore as _;
+
+        let directory = tempfile::tempdir().expect("CloudAsync runtime directory");
+        let db_path = directory.path().join("db");
+        std::fs::create_dir_all(&db_path).expect("create CloudAsync database");
+        let state = RuntimeState::new_in_epoch(&db_path, false, 1);
+        let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
+            db_path.join("cloud-store"),
+        )?);
+        let shared_metadata = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+            cloud.clone(),
+            Duration::from_secs(5),
+        ));
+        let inventory: Arc<dyn crate::storage::inventory::ObjectInventory> = cloud.clone();
+        let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+            cloud,
+            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        ));
+        hybrid.configure_object_inventories(Arc::clone(&inventory), inventory)?;
+        let store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+            crate::io::real::test_root(db_path.join("cloud-store")),
+            crate::lease::LeaseClock::default(),
+        ));
+        let leader_store: Arc<dyn crate::lease::LeaderStore> = store.clone();
+        store.acquire_leadership("test-writer")?;
+        crate::metadata::ensure_or_create_format_marker(&state.fs, &db_path)?;
+        crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
+            .map_err(crate::common::MidgeError::Internal)?;
+        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        crate::runtime::ddl::fence_remote_registry_on_startup(
+            &hybrid,
+            &crate::runtime::ddl::DdlLeaseAuthority {
+                store: Arc::clone(&leader_store),
+                holder_id: "test-writer".into(),
+                writer_epoch: 1,
+            },
+            &deadline,
+        )?;
+        crate::runtime::hybrid_persistence::mirror_control_metadata_within(
+            crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
+                cloud: &shared_metadata,
+                fs: state.fs.as_ref(),
+                publication_lock: &crate::runtime::MetadataPublicationLock::default(),
+                lock_wait_budget: Duration::from_secs(5),
+                deadline: &deadline,
+                authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
+                    store: store.as_ref(),
+                    holder_id: "test-writer",
+                    writer_epoch: 1,
+                },
+            },
+            |_| Ok(()),
+        )?;
+        crate::runtime::hybrid_persistence::CloudPersistence::new(Arc::clone(&hybrid))
+            .fence_cloud_wal_catalog(1)?;
+        let policy = crate::runtime::CloudRuntimePolicy {
+            wal_seal: crate::runtime::CloudWalSealPolicy {
+                min_segment_bytes: 0,
+                max_pending_writes: usize::MAX,
+                max_flush_delay: Duration::from_secs(60),
+            },
+            ..crate::runtime::CloudRuntimePolicy::default()
+        };
+        let config = RuntimeConfig {
+            wal_durability_policy: DurabilityPolicy::CloudAsync,
+            hybrid_storage: Some(hybrid),
+            cloud_metadata_storage: Some(shared_metadata),
+            cloud_runtime_policy: policy,
+            provider_ddl_fencing: true,
+            leader_store: Some(Arc::clone(&leader_store)),
+            leader_holder_id: Some("test-writer".into()),
+            writer_epoch: 1,
+            retry_policy: RuntimeRetryPolicy::fast_for_testing(),
+            ..RuntimeConfig::default()
+        };
+        let (runtime, _) = Runtime::new();
+        let (runtime, handle) = runtime.start_with_config(state, config)?;
+        Ok(Self {
+            runtime: Some(runtime),
+            handle,
+            db_path,
+            store,
+            _directory: directory,
+        })
+    }
+
+    fn shutdown(mut self) -> crate::common::MidgeResult<()> {
+        let result = self.handle.shutdown(Duration::from_secs(10));
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown();
+        }
+        result
+    }
+}
+
+#[cfg(feature = "failpoints")]
+fn apply_cloud_async_put(
+    fixture: &CloudAsyncRuntime,
+    request_id: u64,
+    key: &'static [u8],
+) -> crate::common::MidgeResult<u64> {
+    use bytes::Bytes;
+
+    let write = fixture
+        .handle
+        .router
+        .register(request_id, "CloudAsync test write");
+    fixture.handle.send(RuntimeMsg::ApplyTransaction {
+        request_id,
+        ops: vec![TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::from_static(key),
+            value: Bytes::from_static(b"value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: None,
+        start_sequence: None,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+        response_tx: None,
+    })?;
+    Ok(match write.recv_timeout(Duration::from_secs(5)) {
+        Ok(RuntimeResponse::TransactionApplied { last_sequence, .. }) => last_sequence,
+        response => panic!("CloudAsync write did not apply: {response:?}"),
+    })
+}
+
+#[cfg(feature = "failpoints")]
+fn request_cloud_async_seal(
+    fixture: &CloudAsyncRuntime,
+    request_id: u64,
+    sequence: u64,
+) -> crate::common::MidgeResult<crossbeam::channel::Receiver<RuntimeResponse>> {
+    let response = fixture
+        .handle
+        .router
+        .register(request_id, "explicit CloudAsync seal");
+    fixture.handle.send(RuntimeMsg::SealWalForCloud {
+        request_id,
+        sequence,
+        wait_for_ack: false,
+    })?;
+    Ok(response)
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_progress_control_while_cloud_seal_fsync_is_held() -> crate::common::MidgeResult<()> {
+    // Arrange: start a real CloudAsync runtime before holding its physical WAL sync.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = CloudAsyncRuntime::new()?;
+    let held = HeldTwoSyncs::new();
+    let last_sequence = apply_cloud_async_put(&fixture, 96_200, b"cloud-seal-prefix")?;
+    let seal = request_cloud_async_seal(&fixture, 96_202, last_sequence)?;
+    if held
+        .reached
+        .recv_timeout(Duration::from_millis(500))
+        .is_err()
+    {
+        let pending = seal.try_recv();
+        let _ = held.release.send(());
+        let _ = fixture.shutdown();
+        panic!("CloudAsync seal did not reach held physical fsync; response={pending:?}");
+    }
+
+    // Act: control and local read requests enter while the prefix fsync is held.
+    let prefix_progress = cloud_seal_control_and_read(&fixture, 96_201, 96_204);
+    held.release
+        .send(())
+        .expect("release held cloud prefix fsync");
+    if held.reached.recv_timeout(Duration::from_secs(1)).is_err() {
+        let pending = seal.try_recv();
+        let _ = held.release.send(());
+        let shutdown = fixture.shutdown();
+        panic!(
+            "CloudAsync footer sync was not held; seal response={pending:?}; shutdown={shutdown:?}"
+        );
+    }
+
+    // Act: both request classes must progress during the footer barrier too.
+    let footer_progress = cloud_seal_control_and_read(&fixture, 96_203, 96_205);
+    held.release
+        .send(())
+        .expect("release held cloud footer fsync");
+    let seal_result = seal.recv_timeout(Duration::from_secs(5));
+    let shutdown = fixture.shutdown();
+
+    // Assert: both control responses arrive under their respective holds; the later
+    // seal request also proves the ticket returned to Ready after completion.
+    assert_cloud_seal_control_and_read_progress(&prefix_progress, 96_201, 96_204, "prefix fsync");
+    assert_cloud_seal_control_and_read_progress(&footer_progress, 96_203, 96_205, "footer fsync");
+    assert!(matches!(
+        seal_result,
+        Ok(RuntimeResponse::Ok { request_id: 96_202 })
+    ));
+    shutdown?;
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn assert_cloud_seal_control_and_read_progress(
+    progress: &(
+        Result<RuntimeResponse, crossbeam::channel::RecvTimeoutError>,
+        Result<RuntimeResponse, crossbeam::channel::RecvTimeoutError>,
+    ),
+    control_id: u64,
+    read_id: u64,
+    phase: &str,
+) {
+    assert!(
+        matches!(
+            progress.0,
+            Ok(RuntimeResponse::Ok { request_id }) if request_id == control_id
+        ),
+        "control request stalled behind CloudAsync {phase}: {progress:?}"
+    );
+    assert!(
+        matches!(
+            progress.1,
+            Ok(RuntimeResponse::ReadValue {
+                request_id,
+                value: None,
+                ..
+            }) if request_id == read_id
+        ),
+        "local read stalled behind CloudAsync {phase}: {progress:?}"
+    );
+}
+
+#[cfg(feature = "failpoints")]
+fn cloud_seal_control_and_read(
+    fixture: &CloudAsyncRuntime,
+    control_id: u64,
+    read_id: u64,
+) -> (
+    Result<RuntimeResponse, crossbeam::channel::RecvTimeoutError>,
+    Result<RuntimeResponse, crossbeam::channel::RecvTimeoutError>,
+) {
+    let control = fixture
+        .handle
+        .router
+        .register(control_id, "control during CloudAsync seal");
+    let read = fixture
+        .handle
+        .router
+        .register(read_id, "local read during CloudAsync seal");
+    fixture
+        .handle
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+            request_id: control_id,
+        }))
+        .expect("send control request during seal");
+    fixture
+        .handle
+        .send(RuntimeMsg::Test(TestRuntimeMsg::Read {
+            request_id: read_id,
+            cf_id: 0,
+            key: b"cloud-seal-prefix".to_vec(),
+            sequence: 0,
+            requested_durability: crate::types::ReadDurability::Strict,
+        }))
+        .expect("send local read during seal");
+    (
+        control.recv_timeout(Duration::from_millis(250)),
+        read.recv_timeout(Duration::from_millis(250)),
+    )
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_cancel_cloud_footer_when_lease_is_lost_after_prefix_sync(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: append a CloudAsync record and release its lease after the
+    // accepted prefix sync, before the event loop admits the footer.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = CloudAsyncRuntime::new()?;
+    let sequence = apply_cloud_async_put(&fixture, 96_300, b"stale-footer-lease")?;
+    let wal_path = fixture
+        .db_path
+        .join(crate::wal::WAL_DIR)
+        .join(crate::wal::segment_file_name(1));
+    let before = std::fs::metadata(&wal_path)?.len();
+    let store = Arc::clone(&fixture.store);
+    let (released, release_observed) = crossbeam::channel::bounded(1);
+    fail::cfg_callback(
+        "midge::cloud::inject_fail_after_wal_flush_before_rotate",
+        move || {
+            let result = store.release_if_owner("test-writer", 1);
+            let _ = released.send(result.is_ok_and(|released| released));
+        },
+    )
+    .expect("release leadership between prefix sync and footer admission");
+
+    // Act: request cloud durability. The callback releases the lease only
+    // after the accepted prefix sync reaches the reversible cancellation edge.
+    let seal = request_cloud_async_seal(&fixture, 96_301, sequence)?;
+    let response = seal.recv_timeout(Duration::from_secs(5));
+    let was_released = release_observed.recv_timeout(Duration::from_secs(5));
+    fail::remove("midge::cloud::inject_fail_after_wal_flush_before_rotate");
+    let after = std::fs::metadata(&wal_path)?.len();
+    let _ = fixture.shutdown();
+
+    // Assert: lease loss cancels the reversible CloudFlush and no footer bytes
+    // or successful seal receipt escape.
+    assert_eq!(
+        was_released,
+        Ok(true),
+        "test takeover did not release the lease"
+    );
+    assert!(matches!(
+        response,
+        Ok(RuntimeResponse::Error {
+            request_id: 96_301,
+            ..
+        })
+    ));
+    assert_eq!(after, before, "stale authority appended WAL footer bytes");
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_fence_cloud_seal_when_footer_transition_fails_after_async_sync(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: fail after the accepted footer append and its durability barrier.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = CloudAsyncRuntime::new()?;
+    let sequence = apply_cloud_async_put(&fixture, 96_310, b"footer-accepted-failure")?;
+    fail::cfg("midge::wal_transition::after_footer", "return")
+        .expect("configure post-footer failure");
+
+    // Act
+    let seal = request_cloud_async_seal(&fixture, 96_311, sequence)?;
+    let response = seal.recv_timeout(Duration::from_secs(5));
+    fail::remove("midge::wal_transition::after_footer");
+    let shutdown = fixture.shutdown();
+
+    // Assert: the accepted footer is retained as a recovery obligation and no
+    // successful seal acknowledgement escapes the failed rotation transition.
+    assert!(matches!(
+        response,
+        Ok(RuntimeResponse::Error {
+            request_id: 96_311,
+            ..
+        })
+    ));
+    assert!(
+        shutdown.is_err(),
+        "fenced footer failure reported clean shutdown"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn spilled_strict_message(
+    request_id: u64,
+    source: crate::runtime::transaction_spill::TransactionOpSource,
+) -> RuntimeMsg {
+    RuntimeMsg::ApplySpilledTransaction {
+        request_id,
+        source,
+        assertions: Vec::new(),
+        durability_policy: Some(DurabilityPolicy::Strict),
+        start_sequence: 0,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+        response_tx: None,
+    }
+}
+
+#[cfg(feature = "failpoints")]
+fn begin_runtime_snapshot(
+    handle: &RuntimeHandle,
+    request_id: u64,
+) -> crate::common::MidgeResult<(u64, Arc<crate::runtime::read_snapshot::ReadSnapshot>)> {
+    let response = handle
+        .router
+        .register(request_id, "test transaction snapshot");
+    handle.send(RuntimeMsg::BeginTransaction {
+        request_id,
+        cf_id: 0,
+    })?;
+    match response.recv_timeout(Duration::from_secs(1)) {
+        Ok(RuntimeResponse::BeginTransactionResult {
+            start_sequence,
+            snapshot: Some(snapshot),
+            ..
+        }) => Ok((start_sequence, snapshot)),
+        result => panic!("transaction snapshot did not complete: {result:?}"),
+    }
+}
+
+#[cfg(feature = "failpoints")]
+fn await_transaction_applied(
+    response: &crossbeam::channel::Receiver<RuntimeResponse>,
+    request_id: u64,
+) -> u64 {
+    match response.recv_timeout(Duration::from_secs(10)) {
+        Ok(RuntimeResponse::TransactionApplied {
+            request_id: completed_id,
+            last_sequence,
+            ..
+        }) if completed_id == request_id => last_sequence,
+        result => panic!("transaction {request_id} did not apply: {result:?}"),
+    }
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_progress_control_while_spilled_strict_sync_is_held() -> crate::common::MidgeResult<()> {
+    use bytes::Bytes;
+
+    // Arrange: start the runtime before holding its physical sync worker.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = SpilledRuntime::new()?;
+    let held = HeldSync::new();
+    let strict = fixture
+        .handle
+        .router
+        .register(96_100, "spilled strict commit");
+
+    // Act: park the actual physical fsync, then submit control, read and write work.
+    fixture.handle.send(spilled_strict_message(
+        96_100,
+        fixture.source(96_100, b"spilled-strict", b"durable-value")?,
+    ))?;
+    held.reached
+        .recv_timeout(Duration::from_secs(10))
+        .expect("spilled transaction reached physical fsync");
+    let control = fixture
+        .handle
+        .router
+        .register(96_101, "control during spilled fsync");
+    fixture.handle.send(RuntimeMsg::Test(TestRuntimeMsg::Noop {
+        request_id: 96_101,
+    }))?;
+
+    // Assert: the event loop stays available while the spill's fsync is held.
+    assert!(matches!(
+        control.recv_timeout(Duration::from_millis(250)),
+        Ok(RuntimeResponse::Ok { request_id: 96_101 })
+    ));
+    let (old_cut, old_snapshot) = begin_runtime_snapshot(&fixture.handle, 96_102)?;
+    assert_eq!(old_cut, 0);
+    assert_eq!(old_snapshot.get(b"spilled-strict", 0)?, None);
+
+    let later = fixture
+        .handle
+        .router
+        .register(96_103, "later BestEffort commit");
+    fixture.handle.send(RuntimeMsg::ApplyTransaction {
+        request_id: 96_103,
+        ops: vec![TransactionOp::Put {
+            cf_id: 0,
+            key: Bytes::from_static(b"later-best-effort"),
+            value: Bytes::from_static(b"later-value"),
+            ttl_seconds: None,
+            insert_only: false,
+        }],
+        assertions: Vec::new(),
+        durability_policy: Some(DurabilityPolicy::BestEffort),
+        start_sequence: None,
+        conflict_policy: ConflictPolicy::LastWriteWins,
+        response_tx: None,
+    })?;
+    assert!(strict.try_recv().is_err(), "strict write waits for fsync");
+    assert!(
+        later.try_recv().is_err(),
+        "later write waits for ordered apply"
+    );
+
+    // Cleanup: let the worker finish before dropping its runtime owner.
+    held.release.send(()).expect("release held fsync");
+    let strict_sequence = await_transaction_applied(&strict, 96_100);
+    let later_sequence = await_transaction_applied(&later, 96_103);
+    assert!(later_sequence > strict_sequence);
+    let (current_cut, current_snapshot) = begin_runtime_snapshot(&fixture.handle, 96_104)?;
+    assert_eq!(current_cut, later_sequence);
+    assert_eq!(
+        current_snapshot.get(b"spilled-strict", later_sequence)?,
+        Some(b"durable-value".to_vec())
+    );
+    assert_eq!(
+        current_snapshot.get(b"later-best-effort", later_sequence)?,
+        Some(b"later-value".to_vec())
+    );
+    drop(held);
+    fixture.runtime.shutdown();
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_recover_spilled_strict_commit_after_post_sync_apply_failure(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = SpilledRuntime::new()?;
+    fail::cfg("midge::wal::spilled_apply_op", "return")
+        .expect("fail streamed apply after WAL sync");
+    let response = fixture
+        .handle
+        .router
+        .register(96_110, "spilled Strict post-sync apply");
+
+    // Act: the pipeline completes the durable sync, then the injected apply
+    // failure fences the writer before the transaction response is settled.
+    fixture.handle.send(spilled_strict_message(
+        96_110,
+        fixture.source(96_110, b"spill-recovered", b"durable-before-apply")?,
+    ))?;
+    let outcome = response.recv_timeout(Duration::from_secs(10));
+    fail::remove("midge::wal::spilled_apply_op");
+    assert!(matches!(
+        outcome,
+        Ok(RuntimeResponse::Error {
+            request_id: 96_110,
+            ..
+        })
+    ));
+
+    // Assert: cold recovery replays the complete synced spill as one unit.
+    fixture.runtime.shutdown();
+    let recovered = RuntimeState::try_new(
+        fixture.db_path.clone(),
+        false,
+        crate::config::RecoveryPolicy::Strict,
+    )?;
+    assert_eq!(recovered.applied_sequence, 3);
+    let family = recovered.get_cf(0).expect("recovered column family");
+    let snapshot = crate::runtime::read_snapshot::ReadSnapshot::new(
+        Arc::clone(&family.memtable),
+        family.immutable_memtables.clone(),
+        recovered.manifest.files.clone(),
+        Arc::clone(&recovered.fs),
+        std::path::PathBuf::from(crate::sst::fs::SST_DIR),
+        false,
+        u64::MAX,
+    );
+    assert_eq!(
+        snapshot.get(b"spill-recovered", recovered.applied_sequence)?,
+        Some(b"durable-before-apply".to_vec())
+    );
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_return_unknown_outcome_when_spilled_strict_sync_fails() -> crate::common::MidgeResult<()>
+{
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let fixture = SpilledRuntime::new()?;
+    fail::cfg("midge::wal::inject_no_space_on_sync", "return")
+        .expect("inject Strict spill sync failure");
+    let response = fixture
+        .handle
+        .router
+        .register(96_120, "spilled Strict failed sync");
+
+    // Act
+    fixture.handle.send(spilled_strict_message(
+        96_120,
+        fixture.source(96_120, b"spill-unknown", b"sync-may-have-failed")?,
+    ))?;
+    let outcome = response.recv_timeout(Duration::from_secs(10));
+    fail::remove("midge::wal::inject_no_space_on_sync");
+
+    // Assert: appended records are never acknowledged as applied or durable.
+    assert!(matches!(
+        outcome,
+        Ok(RuntimeResponse::Error {
+            request_id: 96_120,
+            error: MidgeError::OutcomeUnknown(_),
+        })
+    ));
+    fixture.runtime.shutdown();
+    Ok(())
+}
 
 #[cfg(feature = "failpoints")]
 const RUNTIME_PANIC_CHILD: &str = "MIDGE_RUNTIME_PANIC_CHILD";
@@ -384,6 +1165,10 @@ fn create_column_family_during_write_flood(
 
 #[test]
 fn should_process_shutdown_promptly_given_continuous_write_flood_when_shutdown_requested() {
+    crate::failpoints::with_read_gate(verify_shutdown_during_continuous_write_flood);
+}
+
+fn verify_shutdown_during_continuous_write_flood() {
     // Arrange
     let temp_dir = tempfile::TempDir::new().expect("create runtime directory");
     let (runtime, _) = Runtime::new();
@@ -671,7 +1456,7 @@ fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_r
     // and memtable mutation, then exposes its unmatched completion as late.
     assert!(matches!(
         caller_result,
-        Ok(Err(MidgeError::Timeout(message)))
+        Ok(Err(MidgeError::OutcomeUnknown(message)))
             if message.contains("ApplyTransaction")
                 && message.contains(&format!("request_id={request_id}"))
     ));
@@ -687,6 +1472,17 @@ fn should_finish_accepted_transaction_given_caller_times_out_before_event_loop_r
 
 #[cfg(feature = "failpoints")]
 fn assert_strict_runtime_value(handle: &RuntimeHandle, key: &[u8], expected: &[u8]) {
+    // Control queries remain available at the old applied cut while strict
+    // I/O runs. Wait for the genuine unmatched transaction completion before
+    // selecting the snapshot whose committed value this assertion protects.
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while handle.router.late_responses_total() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "accepted transaction did not finish after its caller stopped waiting"
+        );
+        thread::yield_now();
+    }
     let sequence = match handle
         .send_and_wait_timeout(
             RuntimeMsg::Test(TestRuntimeMsg::GetCurrentSequence {
@@ -900,6 +1696,7 @@ fn write_side_request_response_messages() -> Vec<RuntimeMsg> {
         smallest_seq: None,
         largest_seq: None,
         key_bounds_complete: false,
+        earliest_expiration_millis: None,
     };
     let compaction_plan = CompactionPlan {
         input_files: vec!["input.sst".to_string()],
@@ -1359,10 +2156,10 @@ fn should_bound_routed_transaction_response_when_runtime_accepts_without_respond
     // Assert
     assert!(matches!(
         result,
-        Err(MidgeError::Timeout(message))
+        Err(MidgeError::OutcomeUnknown(message))
             if message.contains("ApplyTransaction")
                 && message.contains(&format!("request_id={request_id}"))
-                && message.contains("20ms")
+                && message.contains("exceeded response timeout")
     ));
 
     handle.lifecycle.mark_closed();
@@ -1437,6 +2234,7 @@ fn should_clone_file_meta_preserving_all_fields() {
         smallest_seq: Some(1),
         largest_seq: Some(100),
         key_bounds_complete: true,
+        earliest_expiration_millis: None,
     };
 
     // Act
@@ -1524,7 +2322,7 @@ fn should_count_abandoned_request_given_routed_transaction_when_caller_times_out
     let result = handle.send_apply_transaction_and_wait(request_id, submission);
 
     // Assert
-    assert!(matches!(result, Err(MidgeError::Timeout(_))));
+    assert!(matches!(result, Err(MidgeError::OutcomeUnknown(_))));
     assert_eq!(
         handle.router.abandoned_requests_total(),
         1,
@@ -1625,6 +2423,7 @@ fn should_classify_test_hooks_through_the_test_table_when_publication_gate_class
             smallest_seq: None,
             largest_seq: None,
             key_bounds_complete: false,
+            earliest_expiration_millis: None,
         },
     });
     let inert_hook = RuntimeMsg::Test(TestRuntimeMsg::Noop { request_id: 2 });

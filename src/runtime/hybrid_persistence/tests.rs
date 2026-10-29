@@ -591,6 +591,13 @@ struct PausingCatalogCasBackend {
     release_catalog_compare_exchange: Barrier,
 }
 
+struct CommitThenPauseMirrorResponseBackend {
+    inner: Arc<MockCloudBackend>,
+    pause_next_mirror_response: AtomicBool,
+    mirror_committed: Barrier,
+    release_mirror_response: Barrier,
+}
+
 struct WinningInitialCatalogCasBackend {
     inner: Arc<MockCloudBackend>,
     winning_catalog: Vec<u8>,
@@ -704,6 +711,157 @@ impl crate::storage::cloud::CloudHeadCapability for PausingCatalogCasBackend {
 }
 
 impl CloudBackend for PausingCatalogCasBackend {}
+
+impl CommitThenPauseMirrorResponseBackend {
+    fn new(inner: Arc<MockCloudBackend>) -> Self {
+        Self {
+            inner,
+            pause_next_mirror_response: AtomicBool::new(false),
+            mirror_committed: Barrier::new(2),
+            release_mirror_response: Barrier::new(2),
+        }
+    }
+
+    fn pause_next_mirror_response(&self) {
+        self.pause_next_mirror_response
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn wait_until_mirror_committed(&self) {
+        self.mirror_committed.wait();
+    }
+
+    fn release_mirror_response(&self) {
+        self.release_mirror_response.wait();
+    }
+}
+
+impl crate::storage::cloud::CloudReadCapability for CommitThenPauseMirrorResponseBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+}
+
+impl crate::storage::cloud::CloudWriteCapability for CommitThenPauseMirrorResponseBackend {
+    fn submit_put(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+        headers: Vec<(String, String)>,
+        callback: crate::storage::cloud::CloudCallback,
+    ) {
+        if key == crate::wal::cloud_catalog::MIRROR_OBJECT_KEY
+            && self
+                .pause_next_mirror_response
+                .swap(false, Ordering::SeqCst)
+        {
+            let (committed_tx, committed_rx) = std::sync::mpsc::channel();
+            self.inner.submit_put(key, data, headers, committed_tx);
+            let event = committed_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("mirror CAS fixture completion");
+            self.mirror_committed.wait();
+            self.release_mirror_response.wait();
+            let _ = callback.send(event);
+            return;
+        }
+        self.inner.submit_put(key, data, headers, callback);
+    }
+}
+
+impl crate::storage::cloud::CloudDeleteCapability for CommitThenPauseMirrorResponseBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+}
+
+impl crate::storage::cloud::CloudListCapability for CommitThenPauseMirrorResponseBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+}
+
+impl crate::storage::cloud::CloudHeadCapability for CommitThenPauseMirrorResponseBackend {
+    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+}
+
+impl CloudBackend for CommitThenPauseMirrorResponseBackend {}
+
+#[test]
+fn should_preserve_committed_publication_when_takeover_occurs_during_mirror_completion() {
+    // Arrange: the old publisher has committed both copies, but has not yet
+    // received its mirror response when its lease expires.
+    let tmp = tempfile::tempdir().expect("create mirror completion takeover dir");
+    let mock_cloud = Arc::new(MockCloudBackend::new());
+    let pausing_cloud = Arc::new(CommitThenPauseMirrorResponseBackend::new(Arc::clone(
+        &mock_cloud,
+    )));
+    let cloud = Arc::new(CloudStorage::new(pausing_cloud.clone(), String::new()));
+    let old_lease = Arc::new(crate::lease::LeaseValidity::new());
+    old_lease
+        .activate(2, std::time::Instant::now() + Duration::from_secs(60))
+        .expect("activate old writer lease");
+    let authority = Arc::clone(&old_lease);
+    let hybrid = Arc::new(HybridStorage::with_policy(
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    hybrid
+        .configure_write_authority(Arc::new(move || {
+            authority
+                .remaining(2)
+                .map(|_| ())
+                .map_err(|error| MidgeError::Fenced(error.to_string()))
+        }))
+        .expect("configure old writer lease authority");
+    let storage = Arc::new(CloudPersistence::new(hybrid));
+    storage
+        .fence_cloud_wal_catalog(2)
+        .expect("initialize publication catalog");
+    let segment_id = 1;
+    let max_sequence = 11;
+    let bytes = valid_wal_bytes(segment_id, max_sequence);
+    let local_path = tmp.path().join(crate::wal::segment_file_name(segment_id));
+    std::fs::write(&local_path, &bytes).expect("write publication WAL");
+    let object_key = crate::wal::segment_object_key(segment_id, 1);
+    write_cloud_object(&storage, &object_key, bytes);
+
+    pausing_cloud.pause_next_mirror_response();
+    let publisher_storage = Arc::clone(&storage);
+    let publisher = std::thread::spawn(move || {
+        publisher_storage.publish_remote_wal_segment(
+            segment_id,
+            max_sequence,
+            &crate::io::FsLocation::host_file(&local_path),
+            2,
+            &crate::common::OperationDeadline::unbounded(),
+        )
+    });
+    pausing_cloud.wait_until_mirror_committed();
+
+    let successor_cloud = Arc::new(CloudStorage::new(pausing_cloud.clone(), String::new()));
+    let successor = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
+        successor_cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )));
+
+    // Act: expire the old writer lease, fence through a separate successor,
+    // then let the old committed mirror response finish.
+    old_lease.expire_for_test();
+    let successor_catalog = successor
+        .fence_cloud_wal_catalog(3)
+        .expect("successor takes over during old completion");
+    pausing_cloud.release_mirror_response();
+    let old_result = publisher.join().expect("publisher thread must not panic");
+
+    // Assert: takeover preserves the committed WAL member and both copies
+    // agree on the new fencing epoch.
+    assert_eq!(successor_catalog.fencing_epoch(), 3);
+    assert!(
+        matches!(old_result, Err(MidgeError::Fenced(_))),
+        "{old_result:?}"
+    );
+    let catalog = assert_wal_catalog_copies_match(&HybridStorage::with_policy(
+        Arc::new(CloudStorage::new(pausing_cloud, String::new())),
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    ));
+    assert_eq!(catalog.fencing_epoch(), 3);
+    assert!(catalog.entry(segment_id).is_some());
+}
 
 #[test]
 fn should_route_each_object_class_to_its_separate_cloud_store() {
@@ -1350,8 +1508,9 @@ impl StorageBackend for NeverCompletesBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        let _ = (request, callback);
-        panic!("test backend received undeclared range HEAD capability");
+        crate::storage::dispatch_head_request(request, callback, |_key, _, callback| {
+            self.retain_callback(callback);
+        });
     }
 
     fn submit_metadata_read_request(
@@ -2165,10 +2324,10 @@ fn should_readback_remote_wal_before_upload_worker_emits_ack() {
     );
     assert!(
         mock_cloud
-            .get_downloads()
+            .get_range_downloads()
             .iter()
             .any(|key| key.ends_with("wal/epochs/00000000000000000001/00000000000000000009.wal")),
-        "upload worker must read back the remote WAL before ack"
+        "upload worker must read back identity-pinned remote WAL ranges before ack"
     );
 }
 
@@ -2614,6 +2773,24 @@ pub(crate) struct SharedRetirementFixture {
 }
 
 impl SharedRetirementFixture {
+    pub(crate) fn orphan_context<'a>(
+        &'a self,
+        storage: &'a HybridStorage,
+        deadline: &'a crate::common::OperationDeadline,
+    ) -> OrphanSweepContext<'a> {
+        OrphanSweepContext {
+            storage,
+            metadata: &self.cloud,
+            authority: CloudMetadataMirrorAuthority {
+                store: self.store.as_ref(),
+                holder_id: "writer",
+                writer_epoch: 2,
+            },
+            publication_lock: &self.lock,
+            deadline,
+        }
+    }
+
     pub(crate) fn new(manifest: &Manifest) -> Self {
         use crate::lease::LeaderStore;
         let directory = tempfile::tempdir().unwrap();
@@ -2663,6 +2840,7 @@ impl SharedRetirementFixture {
             self.store.clone(),
             "writer".into(),
             2,
+            self.lock.clone(),
         )
         .committed_retirement_authority_within(&crate::common::OperationDeadline::unbounded())
         .unwrap()

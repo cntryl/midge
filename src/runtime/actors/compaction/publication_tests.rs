@@ -6,6 +6,100 @@ use crate::io::FsError;
 use crate::sst::SstStateReader;
 use crate::types::EntryType;
 
+struct ReadCountingFs {
+    inner: crate::io::MockFs,
+    read_opens: std::sync::atomic::AtomicUsize,
+}
+
+impl crate::io::ReadFs for ReadCountingFs {
+    fn open_read(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
+        self.read_opens
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.open_read(path)
+    }
+
+    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+        self.inner.exists(path)
+    }
+
+    fn metadata(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        self.inner.metadata(path)
+    }
+
+    fn list_dir(
+        &self,
+        path: &crate::io::FsPath,
+    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        self.inner.list_dir(path)
+    }
+}
+
+impl crate::io::Fs for ReadCountingFs {
+    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+        Some(self)
+    }
+
+    fn open(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        if options.mode == crate::io::OpenMode::ReadOnly {
+            self.read_opens
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.open(path, options)
+    }
+
+    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+        self.inner.remove_dir_all(path)
+    }
+
+    fn sync_dir(
+        &self,
+        path: &crate::io::FsPath,
+        durability: crate::io::Durability,
+    ) -> crate::io::FsResult<()> {
+        self.inner.sync_dir(path, durability)
+    }
+
+    fn rename_atomic(
+        &self,
+        from: &crate::io::FsPath,
+        to: &crate::io::FsPath,
+    ) -> crate::io::FsResult<()> {
+        self.inner.rename_atomic(from, to)
+    }
+}
+
+impl crate::io::PersistentHandleFs for ReadCountingFs {
+    fn open_persistent(
+        &self,
+        path: &crate::io::FsPath,
+        options: crate::io::OpenOptions,
+    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+        if options.mode == crate::io::OpenMode::ReadOnly {
+            self.read_opens
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        crate::io::PersistentHandleFs::open_persistent(&self.inner, path, options)
+    }
+}
+
 struct DeadlineInputFactory {
     delegate: Arc<dyn SstFactory>,
     deadline: parking_lot::Mutex<Option<OperationDeadline>>,
@@ -240,6 +334,7 @@ fn should_summarize_compaction_output_through_injected_mock_fs() -> MidgeResult<
         name,
         path,
         CompactionOutputAdmission {
+            finalized: None,
             budget: &ResourceBudget::new(1024 * 1024),
             manual_deadline: None,
         },
@@ -253,6 +348,85 @@ fn should_summarize_compaction_output_through_injected_mock_fs() -> MidgeResult<
         mock.get_file(name).unwrap().len()
     );
     assert!(prepared.metadata.content_crc32c.is_some());
+    Ok(())
+}
+
+#[test]
+fn should_open_finalized_compaction_output_only_for_cloud_upload() -> MidgeResult<()> {
+    // Arrange
+    let counting_fs = Arc::new(ReadCountingFs {
+        inner: crate::io::MockFs::new(),
+        read_opens: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mock_cloud = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+    let cloud: Arc<dyn crate::storage::StorageBackend> = Arc::new(
+        crate::storage::cloud::CloudStorage::new(mock_cloud.clone(), "compaction-test".into()),
+    );
+    let hybrid = crate::storage::HybridStorage::with_policy(
+        cloud,
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    );
+    let factory = crate::sst::FsSstFactoryIo::new(counting_fs.clone(), 4096);
+    let mut writer = factory.create()?;
+    writer.add_with_meta(b"source", Some(b"value"), 7, EntryType::Put, None)?;
+    writer.finish_to_path(std::path::Path::new("input.sst"))?;
+    counting_fs
+        .read_opens
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+    let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1).with_output_seq(949);
+    plan.add_test_source("input.sst");
+    let output_fs = factory.output_fs();
+    let prepared: PreparedCompactionOutputs =
+        Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+    let sink = |name: &str,
+                path: &std::path::Path,
+                budget: &ResourceBudget,
+                finalized: Option<&crate::sst::traits::FinalizedSst>| {
+        // The writer has finalized the output at this callback boundary.
+        counting_fs
+            .read_opens
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        record_staged_output_partition(
+            Some(&hybrid),
+            &output_fs,
+            &prepared,
+            0,
+            1,
+            name,
+            path,
+            CompactionOutputAdmission {
+                budget,
+                manual_deadline: None,
+                finalized,
+            },
+        )?;
+        assert_eq!(
+            counting_fs
+                .read_opens
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the finalized output must be opened once for cloud upload, without a prior metadata reread"
+        );
+        Ok(())
+    };
+
+    // Act
+    let outputs = crate::compaction::execute_compaction_with_output_sink(
+        &plan,
+        &factory,
+        std::path::Path::new("output"),
+        None,
+        Some(&sink),
+        None,
+    )?;
+
+    // Assert
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(mock_cloud.get_uploads().len(), 1);
+    let published = prepared.lock();
+    let metadata = &published.values().next().expect("staged output").metadata;
+    assert_eq!(metadata.smallest_key.as_deref(), Some(b"source".as_slice()));
+    assert!(metadata.content_crc32c.is_some());
     Ok(())
 }
 
@@ -303,6 +477,7 @@ fn should_retain_compaction_partition_when_upload_workspace_cannot_be_admitted()
         name,
         &path,
         CompactionOutputAdmission {
+            finalized: None,
             budget: &budget,
             manual_deadline: None,
         },
@@ -430,6 +605,7 @@ fn upload_charge_case(manual: bool) -> MidgeResult<()> {
         "000000_01_00000000000000000002.sst",
         &path,
         CompactionOutputAdmission {
+            finalized: None,
             budget: &budget,
             manual_deadline,
         },
@@ -500,9 +676,10 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
         plan.target_sst_size = 1024 * 1024;
         let prepared = PreparedCompactionOutputs::default();
         let compaction_storage: Arc<dyn CompactionStorage> = hybrid.clone();
+        let grandparent_overlap_rolls = Arc::new(std::sync::atomic::AtomicU64::default());
 
         // Act
-        let outputs = CompactionActor::execute_with_storage(
+        let outputs = CompactionJobActor::execute_with_storage(
             &plan,
             crate::compaction::LeveledCompactionConfig::default().max_compaction_input_files,
             &factory,
@@ -512,6 +689,8 @@ fn should_roll_over_remote_compaction_outputs_to_leave_room_for_upload_workspace
             CompactionOutputWork {
                 prepared: &prepared,
                 manual_deadline: None,
+                budget: None,
+                grandparent_overlap_rolls: &grandparent_overlap_rolls,
             },
         )?;
 
@@ -680,6 +859,7 @@ fn should_summarize_compaction_output_on_the_worker_when_there_is_no_cloud_stora
         name,
         &path,
         CompactionOutputAdmission {
+            finalized: None,
             budget: &budget,
             manual_deadline: None,
         },

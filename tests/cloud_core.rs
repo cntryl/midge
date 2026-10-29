@@ -4,6 +4,12 @@
 
 mod common;
 
+#[path = "cloud_core/cloud_durable_wait.rs"]
+mod cloud_durable_wait;
+
+#[path = "cloud_core/remote_block_cache.rs"]
+mod remote_block_cache;
+
 mod cloud_recovery {
     //! Reopen Consistency After Flush And Background Upload Activity
     //!
@@ -308,7 +314,36 @@ mod cloud_remote_sst {
 
     use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
     use std::path::Path;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    fn wait_for_flushed_wal_retirement(engine: &Engine, root: &Path, initial_charge: u64) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("WAL retirement metrics");
+            let local = metrics.local_storage.expect("bounded cloud storage");
+            assert!(local.total_committed_bytes <= local.max_local_bytes);
+            let active =
+                cntryl_midge::__internal::wal::segment_file_name(metrics.wal_current_segment_id);
+            let sealed_remains = std::fs::read_dir(root.join("wal"))
+                .expect("local WAL directory")
+                .map(|entry| entry.expect("local WAL entry"))
+                .any(|entry| {
+                    entry.path().extension().is_some_and(|ext| ext == "wal")
+                        && entry.file_name().to_str() != Some(active.as_str())
+                });
+            if !sealed_remains && local.usage.wal_bytes <= initial_charge {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "flushed WAL must retire before the next independent row: sealed={sealed_remains}, local={local:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     fn sst_bytes(path: &Path) -> u64 {
         let entries = match std::fs::read_dir(path) {
@@ -416,6 +451,14 @@ mod cloud_remote_sst {
             .expect("options");
         let mut engine = Engine::open(options.clone()).expect("open");
         let cf = engine.create_column_family("data").expect("create CF");
+        let initial_wal_charge = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("initial storage metrics")
+            .local_storage
+            .expect("bounded cloud storage")
+            .usage
+            .wal_bytes;
         // Distinct values prevent repeated-value compression from hiding the
         // relationship between cloud inventory and the ephemeral disk budget.
         let mut random = 0x9e37_79b9_u32;
@@ -447,6 +490,10 @@ mod cloud_remote_sst {
                 0,
                 "published SSTs must be evicted"
             );
+            // Flush acknowledgement publishes this row's SST. Optional WAL
+            // retirement owns a separate completion and disk charge; observe
+            // it before seeding the next row in this SST-inventory fixture.
+            wait_for_flushed_wal_retirement(&engine, dir.path(), initial_wal_charge);
         }
         engine.shutdown(Duration::from_secs(30)).expect("shutdown");
         drop(engine);
@@ -1093,6 +1140,322 @@ mod engine_cloud {
             tx.get(b"lww_key").expect("read lww key"),
             Some(Bytes::from_static(b"v2"))
         );
+    }
+}
+
+mod cloud_snapshot_orphan_sweep {
+    use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+    use std::path::Path;
+    use std::time::{Duration, Instant};
+
+    fn remote_sst_names(root: &Path) -> Vec<String> {
+        let directory = root.join("cloud_store/sst");
+        let mut names = std::fs::read_dir(directory)
+            .expect("remote SST inventory")
+            .map(|entry| {
+                entry
+                    .expect("remote SST entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| {
+                Path::new(name)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    fn wait_for_sweep(engine: &Engine, previous_attempts: u64) -> u64 {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("read sweep metrics");
+            if metrics.cloud_orphan_list_attempts > previous_attempts {
+                return metrics.cloud_orphan_list_attempts;
+            }
+            assert!(Instant::now() < deadline, "idle sweeper did not run");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn wait_for_remote_reclaim(engine: &Engine, root: &Path, sst_name: &str) {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            if !root.join("cloud_store/sst").join(sst_name).exists() {
+                return;
+            }
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("read reclaim metrics");
+            assert!(
+                Instant::now() < deadline,
+                "sweeper did not reclaim {sst_name}; metrics={metrics:?}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn wait_for_retained_sweep(engine: &Engine, previous_retained: u64) {
+        let deadline = Instant::now() + Duration::from_secs(45);
+        loop {
+            let metrics = engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("read retained sweep metrics");
+            if metrics.cloud_orphan_retained > previous_retained {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "idle sweeper did not observe the remaining snapshot SST protection"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn assert_cold_reopen_after_reclaim(options: OpenOptions, root: &Path, old_sst: &str) {
+        let mut reopened = Engine::open(options).expect("reopen after scheduled sweep");
+        let cf = reopened
+            .get_column_family("default")
+            .expect("default CF after reopen");
+        let read = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin recovery read");
+        assert_eq!(
+            read.get(b"snapshot-key").expect("read recovered value"),
+            Some(bytes::Bytes::from_static(b"after"))
+        );
+        drop(read);
+        assert!(
+            !root.join("cloud_store/sst").join(old_sst).exists(),
+            "cold reopen must not restore the reclaimed predecessor SST"
+        );
+        reopened
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown reopened engine");
+    }
+
+    fn seed_predecessor_sst(options: &OpenOptions, root: &Path) -> String {
+        let mut predecessor = Engine::open(options.clone()).expect("open predecessor");
+        let cf = predecessor
+            .get_column_family("default")
+            .expect("default CF");
+        let mut seed = predecessor
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin seed transaction");
+        seed.put(b"snapshot-key".to_vec(), b"before".to_vec(), None)
+            .expect("seed value");
+        seed.commit(WriteOptions::cloud_strict())
+            .expect("strict seed commit");
+        predecessor.flush_cf(&cf).expect("publish predecessor SST");
+        let old_sst = remote_sst_names(root)
+            .into_iter()
+            .next()
+            .expect("predecessor SST");
+        predecessor
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown predecessor");
+        drop(predecessor);
+        old_sst
+    }
+
+    fn publish_compacted_successor(
+        options: &OpenOptions,
+        old_sst: &str,
+        root: &Path,
+    ) -> (
+        Engine,
+        cntryl_midge::Transaction,
+        cntryl_midge::Transaction,
+        (u64, u64, u64),
+    ) {
+        let successor = Engine::open(options.clone()).expect("open successor");
+        let cf = successor.get_column_family("default").expect("default CF");
+        let snapshot = successor
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin public snapshot");
+        assert_eq!(
+            snapshot.get(b"snapshot-key").expect("read old value"),
+            Some(bytes::Bytes::from_static(b"before"))
+        );
+        let mut overwrite = successor
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin overwrite transaction");
+        overwrite
+            .put(b"snapshot-key".to_vec(), b"after".to_vec(), None)
+            .expect("overwrite value");
+        overwrite
+            .commit(WriteOptions::cloud_strict())
+            .expect("strict overwrite commit");
+        successor.flush_cf(&cf).expect("publish successor SST");
+        let later_snapshot = successor
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin later snapshot generation");
+        assert_eq!(
+            later_snapshot
+                .get(b"snapshot-key")
+                .expect("read later snapshot value"),
+            Some(bytes::Bytes::from_static(b"after"))
+        );
+        let later_layout = successor
+            .metrics()
+            .get_storage_layout()
+            .expect("read later generation layout");
+        assert!(
+            later_layout
+                .levels
+                .iter()
+                .flat_map(|level| &level.files)
+                .any(|file| file.name == old_sst),
+            "later snapshot generation must still include the shared predecessor SST"
+        );
+        successor.compact_all().expect("compact successor SSTs");
+        let layout = successor
+            .metrics()
+            .get_storage_layout()
+            .expect("read successor layout");
+        assert!(
+            layout
+                .levels
+                .iter()
+                .flat_map(|level| &level.files)
+                .all(|file| file.name != old_sst),
+            "compaction must retire the predecessor SST"
+        );
+        assert!(root.join("cloud_store/sst").join(old_sst).exists());
+        let before_sweep = successor
+            .metrics()
+            .get_runtime_metrics()
+            .expect("read initial sweep metrics");
+        (
+            successor,
+            snapshot,
+            later_snapshot,
+            (
+                before_sweep.cloud_orphan_list_attempts,
+                before_sweep.cloud_orphan_delete_attempts,
+                before_sweep.cloud_orphan_retained,
+            ),
+        )
+    }
+
+    fn assert_pinned_snapshots_survive_sweep(
+        successor: &Engine,
+        root: &Path,
+        old_sst: &str,
+        before_sweep: (u64, u64, u64),
+        current_lists: u64,
+        snapshot: &cntryl_midge::Transaction,
+        later_snapshot: &cntryl_midge::Transaction,
+    ) {
+        let while_pinned = successor
+            .metrics()
+            .get_runtime_metrics()
+            .expect("read pinned sweep metrics");
+        assert!(while_pinned.cloud_orphan_retained > before_sweep.2);
+        assert_eq!(
+            while_pinned.cloud_orphan_delete_attempts, before_sweep.1,
+            "a sweep must not attempt to delete the pinned predecessor SST"
+        );
+        assert!(root.join("cloud_store/sst").join(old_sst).exists());
+        assert_eq!(
+            snapshot.get(b"snapshot-key").expect("read pinned value"),
+            Some(bytes::Bytes::from_static(b"before"))
+        );
+        assert_eq!(
+            later_snapshot
+                .get(b"snapshot-key")
+                .expect("read later pinned value"),
+            Some(bytes::Bytes::from_static(b"after"))
+        );
+        assert!(
+            current_lists > before_sweep.0,
+            "the idle sweeper must run at least once"
+        );
+    }
+
+    fn release_snapshot_generations_and_reclaim(
+        successor: &Engine,
+        root: &Path,
+        old_sst: &str,
+        current_lists: u64,
+        snapshot: cntryl_midge::Transaction,
+        later_snapshot: cntryl_midge::Transaction,
+    ) {
+        drop(snapshot);
+        let after_first_release = successor
+            .metrics()
+            .get_runtime_metrics()
+            .expect("read partial-release metrics");
+        wait_for_retained_sweep(successor, after_first_release.cloud_orphan_retained);
+        assert!(
+            root.join("cloud_store/sst").join(old_sst).exists(),
+            "shared SST must remain while the later source generation is pinned"
+        );
+
+        drop(later_snapshot);
+        let metrics = successor
+            .metrics()
+            .get_runtime_metrics()
+            .expect("read post-release sweep metrics");
+        wait_for_sweep(
+            successor,
+            metrics.cloud_orphan_list_attempts.max(current_lists),
+        );
+        wait_for_remote_reclaim(successor, root, old_sst);
+    }
+
+    #[test]
+    fn should_keep_shared_sst_pinned_across_snapshot_generations_until_final_release() {
+        // Arrange: predecessor epoch publishes an SST that the successor may sweep.
+        let directory = tempfile::tempdir().expect("database directory");
+        let root = directory.path();
+        let options = OpenOptions::cloud_simulated(root, "bucket", "snapshot-sweep")
+            .background_compaction(false)
+            .build()
+            .expect("options");
+        let old_sst = seed_predecessor_sst(&options, root);
+
+        // Act: successor compacts while both snapshot generations are pinned.
+        let (mut successor, snapshot, later_snapshot, (prior_lists, prior_deletes, prior_retained)) =
+            publish_compacted_successor(&options, &old_sst, root);
+        let current_lists = wait_for_sweep(&successor, prior_lists);
+
+        // Assert: the idle sweep retains both the SST and each public read.
+        assert_pinned_snapshots_survive_sweep(
+            &successor,
+            root,
+            &old_sst,
+            (prior_lists, prior_deletes, prior_retained),
+            current_lists,
+            &snapshot,
+            &later_snapshot,
+        );
+
+        // Release generations in order; reclaim only after the last pin drops.
+        release_snapshot_generations_and_reclaim(
+            &successor,
+            root,
+            &old_sst,
+            current_lists,
+            snapshot,
+            later_snapshot,
+        );
+        successor
+            .shutdown(Duration::from_secs(30))
+            .expect("shutdown successor");
+        drop(successor);
+
+        // Reopen from the selected cloud metadata after both collectors have
+        // run; the reclaimed predecessor must not be needed for current data.
+        assert_cold_reopen_after_reclaim(options, root, &old_sst);
     }
 }
 
