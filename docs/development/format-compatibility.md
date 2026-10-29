@@ -8,8 +8,9 @@ The FORMAT 8 baseline is the normative profile in
 [`cntryl/lsm-spec`](https://github.com/cntryl/lsm-spec) at commit
 `111bccdd5fa6c9ea2d13d1131b17807016c770c` (`1.0.0-dev`). Keep this reference
 aligned with the commit recorded in Pants's Midge test-parity inventory.
-The local 0.5.0 candidate extends that baseline with FORMAT 9 below; shared
-specification parity and release qualification for that extension are pending.
+Release 0.5.0 extends that baseline with FORMAT 9 below. Shared specification
+parity for that extension is not claimed. Release qualification follows the
+[release checklist](../operations/release-checklist.md).
 
 ## Covered Formats
 
@@ -24,8 +25,8 @@ The compatibility policy applies to:
 
 ## Current Local Format
 
-Database `FORMAT` version 9 is the current local candidate. Version 5 named the WAL's history
-with a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records
+Database `FORMAT` version 9 is the 0.5.0 local format. Version 5 named the WAL's
+history with a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records
 which `wal/{id:020}.wal` files are history, their order, the next segment id and
 the retirement point. Segments carry their final name from creation; there is
 no active `wal.log` and no rename on rotation, and recovery never lists `wal/`

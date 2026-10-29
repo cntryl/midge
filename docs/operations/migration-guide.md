@@ -1,6 +1,6 @@
 # Migration guide
 
-Midge is a 0.x crate. The `0.5.0` candidate writes database FORMAT 9,
+Midge is a 0.x crate. Release `0.5.0` writes database FORMAT 9,
 requires SST V5, and uses cloud WAL publication catalog v3. Older database
 formats are rejected without migration. Treat upgrades as application
 migrations: read the release notes, inspect

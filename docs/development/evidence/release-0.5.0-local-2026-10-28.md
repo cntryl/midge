@@ -1,5 +1,25 @@
 # 0.5.0 local qualification evidence, through 2026-10-29
 
+## Current release disposition — 2026-10-29
+
+The owner deferred performance evidence to 0.5.1, including #929's baseline
+matrix, #937's hybrid provider measurements and #914's cold-start/performance
+acceptance. The historical rows and failed/noisy attempts below retain their
+sources and validity classifications; they do not block 0.5.0 or establish
+performance parity. The current release checklist requires bounded fuzzing;
+the historical fixed four-hour requirement below has been superseded.
+
+Candidate `8d044d24c7a6b8aa83211be902b39ec53678d70c` passed all mandatory
+[Release Qualification checks](https://github.com/cntryl/midge/actions/runs/40913576746)
+on tested merge source `67bc6ffe54817b81b64fc45336a74f87254446fd`.
+Linux, macOS, clean Docker/Sqrzl, package/compatibility and bounded fuzzing
+passed. The summary and source-specific artifacts were reviewed; the optional
+extended campaign was not requested and was correctly skipped. This supports
+integration and promotion. The resulting `main` candidate still requires its
+own qualification before publication.
+
+## Historical checkpoint
+
 This is a source-specific checkpoint, not a release-ready declaration. The
 owning gates remain #914, #929, #937 and the #935 release checklist. The owner
 accepted local evidence; the two qualification workflow changes in PR #1017

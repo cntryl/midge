@@ -9,7 +9,7 @@ Compatibility expectations for pre-1.0 releases are defined in [docs/development
 
 ## [Unreleased]
 
-## [0.5.0] - Unreleased candidate
+## [0.5.0] - 2026-10-29
 
 ### Added
 
@@ -83,8 +83,10 @@ Compatibility expectations for pre-1.0 releases are defined in [docs/development
   redesign belongs to 0.5.1, whose in-place upgrade is a future requirement,
   not a capability delivered here.
 - Qualification and measured performance are recorded per source and topology.
-  Sqrzl evidence is not a live-cloud or RocksDB/Pebble parity claim. Final
-  release qualification remains pending until the release checklist is complete.
+  Sqrzl evidence is not a live-cloud or RocksDB/Pebble parity claim. Performance
+  baselines, hybrid latency/lag/cost evidence and cold-start measurements are
+  deferred to 0.5.1; existing noisy or incomplete rows remain inconclusive.
+  Release publication requires the final candidate to pass the release checklist.
 
 ## [0.4.1] - 2026-10-16
 

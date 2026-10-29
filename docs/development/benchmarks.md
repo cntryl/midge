@@ -80,14 +80,15 @@ the lag in time; provider requests and uploaded WAL bytes come from the
 simulator. A row refuses to report when the sampler managed fewer than half
 the expected ticks. The local `sync()` row is the floor.
 
-The Tier 2 baseline matrix target supplies the 0.5.0 absolute reference rows:
+The Tier 2 baseline matrix target supplies the absolute reference rows for
+performance evidence deferred to 0.5.1:
 fillseq, fillrandom (buffered and sync), readrandom against a
 memtable-resident set and after a cold reopen, and seekrandom, each one
 operation per transaction with 16-byte keys and 100-byte values on a fresh
 local directory with production defaults. Its rows are named after the
 `db_bench` workloads they are shaped like; a `db_bench` run is context, not a
 parity claim. Performance evidence records absolute results for an exact source
-SHA; the absolute matrix remains release evidence. See
+SHA; the absolute matrix does not block 0.5.0 publication. See
 [the baseline procedure](baseline-procedure.md).
 
 Each tier has one workflow, `bench-tier1.yml` through `bench-tier6.yml`,

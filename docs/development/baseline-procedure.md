@@ -1,7 +1,8 @@
 # Performance baseline procedure
 
-The 0.5.0 milestone records absolute performance results for an exact source
-SHA. For each run, record the named row, metric, workload, configuration,
+Performance evidence is deferred from 0.5.0 to 0.5.1 and does not block the
+0.5.0 release. Record absolute results for an exact source SHA. For each run,
+record the named row, metric, workload, configuration,
 machine and source SHA. Repeat measurements to characterize noise and retain
 all raw results; mark unstable rows inconclusive. Acceptance does not require
 base/candidate comparisons, relative deltas, or before/after measurements.
@@ -12,7 +13,7 @@ check; assurance work specifies detection power and compute budget.
 
 - One machine, recorded in the issue summary: CPU model, core count, memory,
   storage device and filesystem, OS version, `rustc --version`, and the
-  source SHA. The first 0.5.0 baseline is an Apple Silicon macOS machine on
+  source SHA. The historical 0.5.0 baseline uses an Apple Silicon macOS machine on
   APFS; its results describe that hardware and configuration.
 - Prefer a quiet machine without interactive calls, builds or other benchmark
   runs. On Linux `--require-quiet-env` rejects adverse load/governor
@@ -107,7 +108,7 @@ commit raw reports, per-run uptime logs or copied benchmark artifacts.
 Performance issues name the row, metric and any applicable absolute limit.
 Record current-source results against that definition; if no absolute limit is
 specified, measurements are diagnostic and do not imply a pass/fail
-performance comparison. The baseline summary remains a release obligation;
+performance comparison. The baseline summary is a 0.5.1 evidence obligation;
 workflow artifacts carry the raw runs. External comparison is deferred until a
 matched run exists; the Midge-only matrix does not establish RocksDB or Pebble
 parity.

@@ -50,6 +50,12 @@ environment/sampler guards. An incomplete or noisy performance row cannot be
 reported as accepted evidence from a green qualification run. The workflow
 does not decide issue acceptance, supported topologies, promotion, or publication.
 
+For 0.5.0, the owner deferred performance evidence to 0.5.1: the #929 baseline
+matrix, #937 hybrid latency/lag/cost rows and #914 cold-start/performance
+measurements. Keep their source attribution and inconclusive status; they do
+not block this release. Correctness, recovery, fencing, compatibility and all
+mandatory qualification jobs remain required.
+
 ## Review promotion and release evidence
 
 - [ ] **Release Qualification** passed on the candidate SHA; run link and artifacts reviewed
