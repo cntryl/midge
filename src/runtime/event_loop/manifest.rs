@@ -7,6 +7,24 @@ use crossbeam::channel::Receiver;
 pub(super) struct ManifestCoordinator;
 
 impl ManifestCoordinator {
+    fn reject_uncertain_local_ddl(event_loop: &EventLoop, request_id: u64) -> bool {
+        if event_loop.local_ddl_requires_restart() {
+            event_loop.respond(
+                request_id,
+                RuntimeResponse::Error {
+                    request_id,
+                    error: crate::common::MidgeError::Fenced(
+                        "local DDL journal outcome is unknown; reopen before further changes"
+                            .into(),
+                    ),
+                },
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     fn ddl_authority(
         event_loop: &EventLoop,
     ) -> crate::common::MidgeResult<Option<crate::runtime::ddl::DdlLeaseAuthority>> {
@@ -83,6 +101,9 @@ impl ManifestCoordinator {
         request_id: u64,
         origin: crate::metadata::accounting::Origin,
     ) -> HandleOutcome {
+        if Self::reject_uncertain_local_ddl(event_loop, request_id) {
+            return HandleOutcome::Continue;
+        }
         let deadline = event_loop.registered_request_deadline(request_id);
         let result =
             crate::runtime::actors::ManifestActor::persist_for(&mut event_loop.state, origin)
@@ -114,6 +135,9 @@ impl ManifestCoordinator {
         name: &str,
     ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
+        if Self::reject_uncertain_local_ddl(event_loop, request_id) {
+            return HandleOutcome::Continue;
+        }
         let authority = match Self::ddl_authority(event_loop) {
             Ok(authority) => authority,
             Err(error) => {
@@ -138,8 +162,14 @@ impl ManifestCoordinator {
                 authority.as_ref(),
                 &deadline,
             ) {
-                Ok(()) => event_loop.authority.fencing.ddl_authority_ambiguous = false,
+                Ok(()) => {
+                    event_loop.authority.fencing.ddl_authority_ambiguous = false;
+                    event_loop.publish_snapshot();
+                    event_loop.publish_family_catalog();
+                }
                 Err(error) => {
+                    event_loop.publish_snapshot();
+                    event_loop.publish_family_catalog();
                     event_loop.respond(
                         request_id,
                         RuntimeResponse::Error {
@@ -182,6 +212,8 @@ impl ManifestCoordinator {
             // the authority switch. A later auxiliary metadata mirror error
             // must not report the create as rejected and strand Engine's
             // public handle registry behind the runtime state.
+            event_loop.publish_snapshot();
+            event_loop.publish_family_catalog();
             if let Err(error) = Self::mirror_committed_create(event_loop, &deadline) {
                 event_loop.state.mark_persistence_anomaly();
                 tracing::warn!(%error, cf_id, "column-family create committed but metadata mirror remains degraded");
@@ -191,14 +223,12 @@ impl ManifestCoordinator {
         if result.is_err() {
             Self::record_ddl_authority_ambiguity(event_loop);
         }
-        let should_publish = result.is_ok();
         let resp = result.map_or_else(
             |error| RuntimeResponse::Error { request_id, error },
             |cf_id| RuntimeResponse::ColumnFamilyCreated { request_id, cf_id },
         );
-        if should_publish {
-            event_loop.publish_snapshot();
-        }
+        event_loop.publish_snapshot();
+        event_loop.publish_family_catalog();
         event_loop.respond(request_id, resp);
         HandleOutcome::Continue
     }
@@ -224,6 +254,9 @@ impl ManifestCoordinator {
         discard_unflushed: bool,
     ) -> HandleOutcome {
         let deadline = event_loop.registered_request_deadline(request_id);
+        if Self::reject_uncertain_local_ddl(event_loop, request_id) {
+            return HandleOutcome::Continue;
+        }
         let authority = match Self::ddl_authority(event_loop) {
             Ok(authority) => authority,
             Err(error) => {
@@ -246,6 +279,8 @@ impl ManifestCoordinator {
             ) {
                 Ok(()) => {
                     event_loop.authority.fencing.ddl_authority_ambiguous = false;
+                    event_loop.publish_snapshot();
+                    event_loop.publish_family_catalog();
                     let drop_committed = event_loop
                         .state
                         .manifest
@@ -258,6 +293,8 @@ impl ManifestCoordinator {
                     }
                 }
                 Err(error) => {
+                    event_loop.publish_snapshot();
+                    event_loop.publish_family_catalog();
                     event_loop.respond(
                         request_id,
                         RuntimeResponse::Error {
@@ -290,6 +327,8 @@ impl ManifestCoordinator {
             });
         if let Err(error) = result {
             Self::record_ddl_authority_ambiguity(event_loop);
+            event_loop.publish_snapshot();
+            event_loop.publish_family_catalog();
             Self::respond_result(event_loop, request_id, Err(error));
         } else {
             Self::finish_committed_drop(event_loop, request_id, cf_id, &deadline);
@@ -305,6 +344,8 @@ impl ManifestCoordinator {
     ) {
         Self::cancel_column_family_pending_work(event_loop, cf_id);
         event_loop.publish_snapshot();
+        event_loop.publish_family_catalog();
+        event_loop.wake_write_stall_waiters();
         let _ = event_loop.retry_gc_within(deadline);
 
         // The DDL registry/local journal authority switch has already

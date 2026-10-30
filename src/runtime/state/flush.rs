@@ -378,7 +378,7 @@ impl RuntimeState {
         self.recovery.persistence_anomaly_detected = true;
     }
 
-    /// Record that a remote DDL authority switch could not be resolved.
+    /// Record that a DDL authority switch could not be resolved.
     pub(crate) fn mark_ddl_authority_ambiguous(&mut self) {
         self.recovery.ddl_authority_ambiguous = true;
     }

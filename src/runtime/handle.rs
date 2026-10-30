@@ -307,6 +307,26 @@ impl RuntimeHandle {
             })
     }
 
+    /// A submitted DDL request can commit after its caller stops waiting.
+    /// Queue-admission errors and runtime-reported rejections stay definite.
+    pub(crate) fn send_ddl_and_wait(&self, msg: RuntimeMsg) -> MidgeResult<RuntimeResponse> {
+        debug_assert!(matches!(
+            msg,
+            RuntimeMsg::ManifestCreateColumnFamily { .. }
+                | RuntimeMsg::ManifestDropColumnFamily { .. }
+        ));
+        let request_id = msg.request_id().ok_or_else(|| {
+            MidgeError::Internal("DDL request submitted without a request_id".to_string())
+        })?;
+        let kind = msg.kind_name();
+        self.send_and_wait_with_timeout(msg, self.runtime_response_timeout, true)?
+            .ok_or_else(|| {
+                MidgeError::OutcomeUnknown(format!(
+                    "{kind} request_id={request_id} may have committed after its response deadline; reconcile the column-family catalog before retrying"
+                ))
+            })
+    }
+
     /// Submit a message and wait up to `timeout` for its response.
     ///
     /// Returns `Ok(None)` on timeout. In that case, the pending response slot
@@ -385,28 +405,6 @@ impl RuntimeHandle {
                     return Err(MidgeError::Internal("Response channel closed".to_string()));
                 }
             }
-        }
-    }
-
-    /// Submit a message and wait for a response that matches a predicate.
-    ///
-    /// Since each `request_id` yields exactly one response, this is mainly
-    /// useful for callers that want to validate the response shape.
-    pub fn send_and_wait_filtered<F>(
-        &self,
-        msg: RuntimeMsg,
-        mut predicate: F,
-    ) -> MidgeResult<RuntimeResponse>
-    where
-        F: FnMut(&RuntimeResponse) -> bool,
-    {
-        let resp = self.send_and_wait(msg)?;
-        if predicate(&resp) {
-            Ok(resp)
-        } else {
-            Err(MidgeError::Internal(
-                "Response did not satisfy predicate".to_string(),
-            ))
         }
     }
 

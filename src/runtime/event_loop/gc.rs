@@ -9,6 +9,13 @@ impl GcCoordinator {
         event_loop: &mut EventLoop,
         deadline: &crate::common::OperationDeadline,
     ) -> HandleOutcome {
+        if event_loop.local_ddl_requires_restart() {
+            event_loop
+                .actors
+                .gc_actor
+                .defer_manifest_reclamation_retry();
+            return HandleOutcome::Continue;
+        }
         if event_loop.publication.publication_gate.is_active() {
             event_loop
                 .actors

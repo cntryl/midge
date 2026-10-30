@@ -542,6 +542,28 @@ fn local_edit_matches(state: &RuntimeState, edit: &ManifestEdit) -> bool {
     FamilyLifecycleEdit::of(edit).is_some_and(|edit| edit.is_reflected_in(&state.manifest))
 }
 
+fn apply_family_visibility(state: &mut RuntimeState, edit: &ManifestEdit) {
+    match edit {
+        ManifestEdit::CreateColumnFamily { id, name, .. } => {
+            state.column_families.entry(*id).or_insert_with(|| {
+                crate::runtime::state::ColumnFamilyState::new(*id, name.clone())
+            });
+        }
+        ManifestEdit::DropColumnFamilyAt { id, .. } => {
+            if let Some(family) = state.column_families.remove(id) {
+                let bytes = family
+                    .immutable_memtables
+                    .iter()
+                    .fold(family.memtable.size_bytes(), |total, memtable| {
+                        total.saturating_add(memtable.size_bytes())
+                    });
+                state.total_memtable_bytes = state.total_memtable_bytes.saturating_sub(bytes);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn apply_remote_committed_visibility(
     state: &mut RuntimeState,
     edit: &ManifestEdit,
@@ -550,17 +572,7 @@ fn apply_remote_committed_visibility(
         return Ok(());
     }
     state.manifest.apply_edit(edit)?;
-    match edit {
-        ManifestEdit::CreateColumnFamily { id, name, .. } => {
-            state.column_families.entry(*id).or_insert_with(|| {
-                crate::runtime::state::ColumnFamilyState::new(*id, name.clone())
-            });
-        }
-        ManifestEdit::DropColumnFamilyAt { id, .. } => {
-            state.column_families.remove(id);
-        }
-        _ => {}
-    }
+    apply_family_visibility(state, edit);
     Ok(())
 }
 
@@ -587,26 +599,45 @@ fn apply_local_edit_for(
     let journaled_id = if memory_mode {
         None
     } else {
-        Some(state.manifest_store.append_for(origin, edit)?)
+        Some(
+            state
+                .manifest_store
+                .append_ddl_for(origin, edit)
+                .map_err(|failure| {
+                    if failure.may_have_written {
+                        MidgeError::OutcomeUnknown(format!(
+                            "column-family journal append may have committed; restart and reconcile before retrying: {}",
+                            failure.error
+                        ))
+                    } else {
+                        failure.error
+                    }
+                })?,
+        )
     };
-    crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
-        MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
-    ));
+    #[cfg(feature = "failpoints")]
+    if let Err(error) = fail_after_local_journal_before_memory() {
+        return if journaled_id.is_some() {
+            Err(MidgeError::OutcomeUnknown(format!(
+                "column-family journal committed before visibility failed; restart and reconcile: {error}"
+            )))
+        } else {
+            Err(error)
+        };
+    }
     prepared.commit();
     if let Some(edit_id) = journaled_id {
         state.manifest.note_applied_journal_edit(edit_id);
     }
-    match edit {
-        ManifestEdit::CreateColumnFamily { id, name, .. } => {
-            state.column_families.entry(*id).or_insert_with(|| {
-                crate::runtime::state::ColumnFamilyState::new(*id, name.clone())
-            });
-        }
-        ManifestEdit::DropColumnFamilyAt { id, .. } => {
-            state.column_families.remove(id);
-        }
-        _ => {}
-    }
+    apply_family_visibility(state, edit);
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+fn fail_after_local_journal_before_memory() -> MidgeResult<()> {
+    crate::failpoints::fail_point!("midge::ddl::after_local_journal_before_memory", |_| Err(
+        MidgeError::Internal("failpoint: DDL local visibility failed".to_string(),)
+    ));
     Ok(())
 }
 
@@ -896,7 +927,12 @@ pub(crate) fn execute_within(
         return Ok(());
     }
     let Some(storage) = storage else {
-        return apply_local_edit(state, edit);
+        let result = apply_local_edit(state, edit);
+        if matches!(result, Err(MidgeError::OutcomeUnknown(_))) {
+            state.mark_ddl_authority_ambiguous();
+            state.mark_persistence_anomaly();
+        }
+        return result;
     };
 
     let (remote, proof) = read_remote_registry_within(storage, deadline)?;
@@ -1001,6 +1037,10 @@ fn remote_cas_definitely_not_committed(
 ) -> bool {
     !failure.may_have_committed
 }
+
+#[cfg(test)]
+#[path = "ddl_drop_pressure_tests.rs"]
+mod drop_pressure_tests;
 
 #[cfg(test)]
 mod tests {

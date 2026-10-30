@@ -356,8 +356,6 @@ fn fixture_engine(
     #[cfg(feature = "internal-testing")]
     metadata_accounting: crate::metadata::accounting::MetricsHandle,
 ) -> Engine {
-    let column_families = dashmap::DashMap::new();
-    column_families.insert(0, ColumnFamilyHandle::new(0, "default".into()));
     let ingest_coordinators = dashmap::DashMap::new();
     ingest_coordinators.insert(0, Arc::new(ingest::IngestCoordinator::new(0)));
     Engine {
@@ -373,7 +371,6 @@ fn fixture_engine(
         backup_source: Some(directory.to_path_buf()),
         sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         next_snapshot_id: std::sync::atomic::AtomicU64::new(1),
-        column_families,
         lease_state,
         ingest_coordinators,
         transaction_memory_pool: Arc::new(

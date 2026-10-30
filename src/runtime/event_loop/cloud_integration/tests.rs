@@ -782,11 +782,10 @@ struct CommitThenBlockCatalogCasCallbackBackend {
     retained_callbacks: Mutex<Vec<crate::storage::StorageCallback>>,
 }
 
-struct BudgetConsumingDdlBackend {
+struct DeadlineRecordingDdlBackend {
     inner: Arc<crate::storage::filesystem::FileSystem>,
-    registry_head_delay: Duration,
-    registry_head_calls: AtomicUsize,
-    registry_cas_timeouts: Mutex<Vec<Duration>>,
+    registry_head_deadlines: Mutex<Vec<crate::common::OperationDeadline>>,
+    registry_cas_deadlines: Mutex<Vec<crate::common::OperationDeadline>>,
 }
 
 struct DelayedCommitDdlBackend {
@@ -824,24 +823,13 @@ impl Drop for DelayedCommitDdlBackend {
     }
 }
 
-impl BudgetConsumingDdlBackend {
-    fn new(
-        inner: Arc<crate::storage::filesystem::FileSystem>,
-        registry_head_delay: Duration,
-    ) -> Self {
+impl DeadlineRecordingDdlBackend {
+    fn new(inner: Arc<crate::storage::filesystem::FileSystem>) -> Self {
         Self {
             inner,
-            registry_head_delay,
-            registry_head_calls: AtomicUsize::new(0),
-            registry_cas_timeouts: Mutex::new(Vec::new()),
+            registry_head_deadlines: Mutex::new(Vec::new()),
+            registry_cas_deadlines: Mutex::new(Vec::new()),
         }
-    }
-
-    fn registry_cas_timeouts(&self) -> Vec<Duration> {
-        self.registry_cas_timeouts
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
     }
 }
 
@@ -1013,7 +1001,7 @@ impl crate::storage::StorageBackend for CommitThenBlockCatalogCasCallbackBackend
     }
 }
 
-impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
+impl crate::storage::StorageBackend for DeadlineRecordingDdlBackend {
     fn submit_range_read_request(
         &self,
         request: crate::storage::StorageRequest,
@@ -1045,18 +1033,13 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         request: crate::storage::StorageRequest,
         callback: crate::storage::StorageCallback,
     ) {
-        if request.key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY
-            && self.registry_head_calls.fetch_add(1, Ordering::SeqCst) == 0
-        {
-            let inner = Arc::clone(&self.inner);
-            let delay = self.registry_head_delay;
-            std::thread::spawn(move || {
-                std::thread::sleep(delay);
-                inner.submit_head_request(request, callback);
-            });
-        } else {
-            self.inner.submit_head_request(request, callback);
+        if request.key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY {
+            self.registry_head_deadlines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.deadline);
         }
+        self.inner.submit_head_request(request, callback);
     }
 
     fn submit_delete_request(
@@ -1074,10 +1057,10 @@ impl crate::storage::StorageBackend for BudgetConsumingDdlBackend {
         callback: crate::storage::StorageCallback,
     ) {
         if request.key == crate::runtime::ddl::REMOTE_DDL_REGISTRY_KEY {
-            self.registry_cas_timeouts
+            self.registry_cas_deadlines
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(request.remaining_timeout());
+                .push(request.deadline);
             let _ = callback.send(crate::storage::StorageEvent::WriteComplete {
                 key: request.key,
                 result: crate::storage::StorageOutcome::Err(crate::storage::storage_timeout_error(
@@ -2486,35 +2469,38 @@ fn should_bound_create_metadata_mirror_by_runtime_response_deadline(
 
 #[test]
 fn should_share_create_deadline_with_remote_ddl_registry_cas() -> crate::common::MidgeResult<()> {
-    // Arrange: the registry existence check consumes most of the request
-    // budget. The following CAS must receive only the remaining allowance,
-    // rather than a fresh storage timeout.
+    // Arrange: record the provider-facing deadline for the registry read and
+    // CAS. Both must use the caller's original budget, including time spent
+    // on earlier storage operations.
     let mut el = create_test_cloud_event_loop(
         crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
-    el.routing.runtime_response_timeout = Duration::from_secs(5);
+    el.routing.runtime_response_timeout = Duration::from_secs(30);
     let cloud_fs = Arc::new(
         crate::storage::filesystem::FileSystem::new(el.state.db_path.join("cloud_store"))
             .expect("open deadline-bounded DDL cloud backend"),
     );
-    let ddl_cloud = Arc::new(BudgetConsumingDdlBackend::new(
-        cloud_fs,
-        Duration::from_millis(2_500),
-    ));
+    let ddl_cloud = Arc::new(DeadlineRecordingDdlBackend::new(cloud_fs));
     el.actors.cloud_coordinator.hybrid_storage =
         Some(Arc::new(crate::storage::HybridStorage::with_policy(
             ddl_cloud.clone(),
             crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
         )));
     let request_id = 9_603;
-    let response_rx = el
-        .routing
-        .router
-        .register(request_id, "ManifestCreateColumnFamily");
+    let caller_started = Instant::now()
+        .checked_sub(Duration::from_secs(5))
+        .expect("test clock supports a queued request");
+    let caller_deadline =
+        crate::common::OperationDeadline::from_start(caller_started, Duration::from_secs(30));
+    let response_rx = el.routing.router.register_with_deadline(
+        request_id,
+        "ManifestCreateColumnFamily",
+        caller_started,
+        caller_deadline,
+    );
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
 
     // Act
-    let started = Instant::now();
     el.handle_runtime_msg(
         RuntimeMsg::ManifestCreateColumnFamily {
             request_id,
@@ -2522,15 +2508,7 @@ fn should_share_create_deadline_with_remote_ddl_registry_cas() -> crate::common:
         },
         &msg_rx,
     );
-    let elapsed = started.elapsed();
-
-    // Assert: the recorded CAS budget below proves the request deadline was
-    // shared. Leave host scheduling slack around the outer wall-clock check;
-    // a fresh five-second CAS after the 2.5-second read would exceed six seconds.
-    assert!(
-        elapsed < Duration::from_secs(6),
-        "remote DDL registry work materially exceeded the shared deadline: {elapsed:?}"
-    );
+    // Assert
     let response = response_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("DDL deadline response");
@@ -2547,16 +2525,29 @@ fn should_share_create_deadline_with_remote_ddl_registry_cas() -> crate::common:
         // a plain Timeout.
         "unexpected DDL deadline response: {response:?}"
     );
-    let cas_timeouts = ddl_cloud.registry_cas_timeouts();
+    let head_deadlines = ddl_cloud
+        .registry_head_deadlines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cas_deadlines = ddl_cloud
+        .registry_cas_deadlines
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(
-        cas_timeouts.len(),
+        cas_deadlines.len(),
         1,
         "the DDL registry CAS must be attempted once"
     );
-    assert!(
-        cas_timeouts[0] < Duration::from_secs(4),
-        "DDL CAS received a fresh timeout instead of the remaining request budget: {:?}",
-        cas_timeouts[0]
+    let first_read_deadline = head_deadlines
+        .first()
+        .expect("the DDL registry must be read before the CAS");
+    assert_eq!(
+        *first_read_deadline, caller_deadline,
+        "the registry read must retain the caller's original deadline"
+    );
+    assert_eq!(
+        cas_deadlines[0], *first_read_deadline,
+        "the DDL CAS must use the original deadline rather than a fresh timeout"
     );
     assert!(
         el.state
