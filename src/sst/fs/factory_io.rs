@@ -297,7 +297,7 @@ impl DynSstWriter for FsSstWriter {
             256usize.saturating_add(key.len().saturating_mul(8))
         });
         let current_bloom =
-            crate::sst::bloom::BloomWriter::with_defaults(pipeline.current_block_keys.len())
+            crate::sst::bloom::BloomWriter::for_data_block(pipeline.current_block_keys.len())
                 .size_bytes();
         let key_bounds = pipeline
             .smallest_key
@@ -346,7 +346,7 @@ impl DynSstWriter for FsSstWriter {
             let current_bloom = if pipeline.current_block_keys.is_empty() {
                 0
             } else {
-                crate::sst::bloom::BloomWriter::with_defaults(pipeline.current_block_keys.len())
+                crate::sst::bloom::BloomWriter::for_data_block(pipeline.current_block_keys.len())
                     .size_bytes()
                     .saturating_add(13)
             };

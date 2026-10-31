@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn should_borrow_the_filter_bits_when_parsing_a_view() {
         // Arrange
-        let mut writer = crate::sst::bloom::writer::BloomWriter::with_defaults(64);
+        let mut writer = crate::sst::bloom::writer::BloomWriter::for_data_block(64);
         writer.insert(b"present");
         let serialized = writer.serialize();
 
@@ -766,7 +766,7 @@ mod tests {
     #[test]
     fn should_reach_the_same_verdict_as_the_owned_reader_when_probing() {
         // Arrange
-        let mut writer = crate::sst::bloom::writer::BloomWriter::with_defaults(64);
+        let mut writer = crate::sst::bloom::writer::BloomWriter::for_data_block(64);
         for index in 0..64u32 {
             writer.insert(&index.to_le_bytes());
         }
