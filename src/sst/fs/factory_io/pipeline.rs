@@ -182,6 +182,14 @@ impl BlockPipeline {
             &self.restart_offsets,
         )?;
 
+        // Build from a borrow: a rejected reservation below must leave the
+        // pending block, including its keys, unchanged.
+        let mut bloom = BloomWriter::for_data_block(self.current_block_keys.len().max(1));
+        for key in &self.current_block_keys {
+            bloom.insert(key);
+        }
+        // The serialized bloom joins one growing buffer whose amortized
+        // capacity can reach twice its length, plus a four-byte offset.
         let retained_metadata_bytes = self
             .current_first_key
             .as_ref()
@@ -189,7 +197,13 @@ impl BlockPipeline {
                 key.len()
                     .saturating_add(std::mem::size_of::<(Vec<u8>, BlockHandle)>())
             })
-            .saturating_add(self.current_block_keys.len().saturating_mul(16))
+            .saturating_add(
+                bloom
+                    .size_bytes()
+                    .saturating_add(9)
+                    .saturating_mul(2)
+                    .saturating_add(4),
+            )
             .saturating_add(if self.block_index_entries.is_empty() {
                 std::mem::size_of::<usize>()
             } else {
@@ -200,11 +214,8 @@ impl BlockPipeline {
         if let Some(first_key) = self.current_first_key.take() {
             self.block_index_entries.push((first_key, handle));
         }
-        let mut bloom = BloomWriter::with_defaults(self.current_block_keys.len().max(1));
-        for key in self.current_block_keys.drain(..) {
-            bloom.insert(&key);
-        }
         self.block_bloom.add_block_bloom(&bloom);
+        self.current_block_keys.clear();
         self.current_block.clear();
         self.restart_offsets.clear();
         sink.finish_block(reservation);

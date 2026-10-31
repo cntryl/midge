@@ -8,6 +8,13 @@ use xxhash_rust::xxh3::xxh3_64_with_seed;
 const SEED1: u64 = 0x9E37_79B1_85EB_CA87;
 const SEED2: u64 = 0xC2B2_AE3D_27D4_EB4F;
 
+/// Target false-positive rate for per-data-block blooms (#1032).
+///
+/// Each false positive costs a data-block read, which dominates cold and
+/// cloud miss traffic at 1%; 0.1% spends about 14.4 bits per key instead
+/// of 9.6 to read roughly a tenth as many blocks.
+pub const DATA_BLOCK_FALSE_POSITIVE_RATE: f64 = 0.001;
+
 /// Bloom filter membership test result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BloomTestResult {
@@ -80,10 +87,13 @@ impl BloomWriter {
         }
     }
 
-    /// Create a bloom filter with default parameters (1% FPR)
+    /// Create a data-block bloom at [`DATA_BLOCK_FALSE_POSITIVE_RATE`].
+    ///
+    /// At this rate the optimal hash count exceeds the persisted maximum of
+    /// eight, so `k` clamps to 8 and every released reader can decode it.
     #[must_use]
-    pub fn with_defaults(estimated_keys: usize) -> Self {
-        Self::new(estimated_keys, 0.01)
+    pub fn for_data_block(estimated_keys: usize) -> Self {
+        Self::new(estimated_keys, DATA_BLOCK_FALSE_POSITIVE_RATE)
     }
 
     /// Calculate optimal k: `k_opt` = round((m/n) * ln(2)), clamped to [1, 8]
@@ -231,7 +241,7 @@ mod tests {
     #[test]
     fn should_support_insert_lookup_when_zero_items_are_estimated() {
         // Arrange
-        let mut bloom = BloomWriter::with_defaults(0);
+        let mut bloom = BloomWriter::for_data_block(0);
 
         // Act
         let absent_before_insert = bloom.contains(b"key");

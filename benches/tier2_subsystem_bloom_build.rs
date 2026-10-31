@@ -17,7 +17,7 @@ fn run_bloom_build(ctx: &mut StressContext, scenario: &'static str, count: usize
     ctx.parameter("logical_unit", "bloom_key_insert");
 
     let _completed = ctx.measure_batch(scenario, count as u64, || {
-        let mut builder = BloomWriter::with_defaults(count);
+        let mut builder = BloomWriter::for_data_block(count);
         for key in &keys {
             builder.insert(key);
         }

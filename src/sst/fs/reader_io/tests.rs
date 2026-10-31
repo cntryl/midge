@@ -7,6 +7,7 @@ use crate::types::EntryType;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
+mod block_bloom_fpr;
 mod decoder_corpus;
 mod duplicate_successor;
 mod metadata_charge;

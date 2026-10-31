@@ -220,7 +220,7 @@ mod tests {
     fn should_add_single_block_bloom() {
         // Arrange
         let mut filter = BlockBloomFilter::new();
-        let mut bloom = BloomWriter::with_defaults(100);
+        let mut bloom = BloomWriter::for_data_block(100);
         bloom.insert(b"key1");
         bloom.insert(b"key2");
 
@@ -238,7 +238,7 @@ mod tests {
 
         // Act
         for i in 0..5 {
-            let mut bloom = BloomWriter::with_defaults(50);
+            let mut bloom = BloomWriter::for_data_block(50);
             bloom.insert(format!("block{i}_key1").as_bytes());
             bloom.insert(format!("block{i}_key2").as_bytes());
             filter.add_block_bloom(&bloom);
@@ -253,7 +253,7 @@ mod tests {
         // Arrange
         let mut filter = BlockBloomFilter::new();
         for i in 0..3 {
-            let mut bloom = BloomWriter::with_defaults(100);
+            let mut bloom = BloomWriter::for_data_block(100);
             bloom.insert(format!("key{i}").as_bytes());
             filter.add_block_bloom(&bloom);
         }
@@ -273,12 +273,12 @@ mod tests {
         let mut filter = BlockBloomFilter::new();
 
         // Block 0: contains "key0"
-        let mut bloom0 = BloomWriter::with_defaults(100);
+        let mut bloom0 = BloomWriter::for_data_block(100);
         bloom0.insert(b"key0");
         filter.add_block_bloom(&bloom0);
 
         // Block 1: contains "key1"
-        let mut bloom1 = BloomWriter::with_defaults(100);
+        let mut bloom1 = BloomWriter::for_data_block(100);
         bloom1.insert(b"key1");
         filter.add_block_bloom(&bloom1);
 
@@ -297,12 +297,12 @@ mod tests {
         let mut filter = BlockBloomFilter::new();
 
         // Block 0: contains "key0"
-        let mut bloom0 = BloomWriter::with_defaults(100);
+        let mut bloom0 = BloomWriter::for_data_block(100);
         bloom0.insert(b"key0");
         filter.add_block_bloom(&bloom0);
 
         // Block 1: contains "key1"
-        let mut bloom1 = BloomWriter::with_defaults(100);
+        let mut bloom1 = BloomWriter::for_data_block(100);
         bloom1.insert(b"key1");
         filter.add_block_bloom(&bloom1);
 
@@ -319,7 +319,7 @@ mod tests {
     fn should_return_definitely_not_present_for_absent_keys() {
         // Arrange
         let mut filter = BlockBloomFilter::new();
-        let mut bloom = BloomWriter::with_defaults(100);
+        let mut bloom = BloomWriter::for_data_block(100);
         bloom.insert(b"present_key");
         filter.add_block_bloom(&bloom);
 
@@ -334,7 +334,7 @@ mod tests {
     fn should_handle_invalid_block_index_gracefully() {
         // Arrange
         let mut filter = BlockBloomFilter::new();
-        let mut bloom = BloomWriter::with_defaults(100);
+        let mut bloom = BloomWriter::for_data_block(100);
         bloom.insert(b"key");
         filter.add_block_bloom(&bloom);
 
@@ -376,7 +376,7 @@ mod tests {
         // Arrange
         let mut filter = BlockBloomFilter::new();
         for _ in 0..3 {
-            let mut bloom = BloomWriter::with_defaults(100);
+            let mut bloom = BloomWriter::for_data_block(100);
             bloom.insert(b"test_key");
             filter.add_block_bloom(&bloom);
         }
@@ -393,7 +393,7 @@ mod tests {
     fn should_preserve_bloom_accuracy_after_serialization() -> MidgeResult<()> {
         // Arrange
         let mut filter = BlockBloomFilter::new();
-        let mut bloom = BloomWriter::with_defaults(1000);
+        let mut bloom = BloomWriter::for_data_block(1000);
 
         // Insert 100 keys
         for i in 0..100 {
@@ -429,7 +429,7 @@ mod tests {
     fn should_reject_corrupt_bloom_block_given_invalid_length_or_crc_when_opening() {
         // Arrange - Create valid structure then corrupt internal bloom
         let mut filter = BlockBloomFilter::new();
-        let mut bloom = BloomWriter::with_defaults(100);
+        let mut bloom = BloomWriter::for_data_block(100);
         bloom.insert(b"test_key");
         filter.add_block_bloom(&bloom);
 
@@ -457,7 +457,7 @@ mod tests {
     fn should_reject_corrupt_block_bloom_offset_when_opening() {
         // Arrange - Create structure then corrupt offset metadata
         let mut filter = BlockBloomFilter::new();
-        let mut bloom = BloomWriter::with_defaults(100);
+        let mut bloom = BloomWriter::for_data_block(100);
         bloom.insert(b"test_key");
         filter.add_block_bloom(&bloom);
 
