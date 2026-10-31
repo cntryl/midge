@@ -34,6 +34,27 @@ impl TrieReader {
         })
     }
 
+    /// Bytes this trie keeps allocated while a reader retains it.
+    #[must_use]
+    pub(crate) fn memory_usage(&self) -> usize {
+        self.nodes.iter().fold(
+            std::mem::size_of::<Self>().saturating_add(
+                self.nodes
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<TrieNode>()),
+            ),
+            |total, node| {
+                total
+                    .saturating_add(node.key_delta.capacity())
+                    .saturating_add(
+                    node.children
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<crate::sst::trie::node::TrieEdge>()),
+                )
+            },
+        )
+    }
+
     fn validate_graph(nodes: &[TrieNode]) -> MidgeResult<()> {
         let mut inbound_edges = vec![0usize; nodes.len()];
         for (node_index, node) in nodes.iter().enumerate() {

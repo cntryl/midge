@@ -136,6 +136,14 @@ impl BlockBloomFilter {
         })
     }
 
+    /// Bytes this filter keeps allocated while a reader retains it.
+    #[must_use]
+    pub(crate) fn memory_usage(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(self.offsets.capacity().saturating_mul(4))
+            .saturating_add(self.bloom_data.capacity())
+    }
+
     /// Check if a key might be in the specified block (fail-safe on corruption)
     #[must_use]
     pub fn might_contain_in_block(&self, block_idx: usize, key: &[u8]) -> BloomTestResult {
