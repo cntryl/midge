@@ -3,7 +3,8 @@
 //! The index block already stores every entry as `[key_len: u32][key]
 //! [offset: u64][size: u64]`. Readers keep one exact copy of that block plus
 //! one `u32` entry offset, borrowing keys and decoding handles on access,
-//! instead of a heap allocation per block key.
+//! instead of a heap allocation per block key. Each entry records its key's
+//! start and length so a binary-search probe is one slice of that copy.
 
 use super::{BlockHandle, SstFileIo};
 use crate::common::{MidgeError, MidgeResult};
@@ -16,7 +17,8 @@ const HANDLE_BYTES: usize = 16;
 #[derive(Debug)]
 pub(crate) struct BlockIndex {
     bytes: Bytes,
-    entries: Vec<u32>,
+    /// Key start and key length per entry; the handle follows the key.
+    entries: Vec<(u32, u32)>,
 }
 
 impl BlockIndex {
@@ -79,7 +81,10 @@ impl BlockIndex {
                 ));
             }
             previous = Some((key, handle));
-            entries.push(u32::try_from(start).expect("bounded by the index length"));
+            entries.push((
+                u32::try_from(start + KEY_LEN_BYTES).expect("bounded by the index length"),
+                u32::try_from(key_len).expect("bounded by the index length"),
+            ));
         }
         entries.shrink_to_fit();
         Ok(Self {
@@ -100,19 +105,14 @@ impl BlockIndex {
 
     /// The first key of block `index`. Panics when `index` is out of range.
     pub(crate) fn key(&self, index: usize) -> &[u8] {
-        let start = self.entries[index] as usize;
-        let len = u32::from_le_bytes(
-            self.bytes[start..start + KEY_LEN_BYTES]
-                .try_into()
-                .expect("validated key length"),
-        ) as usize;
-        &self.bytes[start + KEY_LEN_BYTES..start + KEY_LEN_BYTES + len]
+        let (start, len) = self.entries[index];
+        &self.bytes[start as usize..(start + len) as usize]
     }
 
     /// The handle of block `index`. Panics when `index` is out of range.
     pub(crate) fn handle(&self, index: usize) -> BlockHandle {
-        let key = self.key(index);
-        let start = self.entries[index] as usize + KEY_LEN_BYTES + key.len();
+        let (start, len) = self.entries[index];
+        let start = (start + len) as usize;
         decode_handle(&self.bytes[start..start + HANDLE_BYTES])
     }
 
@@ -128,7 +128,11 @@ impl BlockIndex {
     pub(crate) fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             .saturating_add(self.bytes.len())
-            .saturating_add(self.entries.capacity().saturating_mul(4))
+            .saturating_add(
+                self.entries
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(u32, u32)>()),
+            )
     }
 }
 
