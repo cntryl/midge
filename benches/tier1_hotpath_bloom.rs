@@ -26,7 +26,7 @@ fn usize_to_u64(value: usize) -> u64 {
 cntryl_stress::stress_allocator!();
 
 fn build_filter(expected_keys: usize) -> (BloomReader, Vec<Bytes>) {
-    let mut builder = BloomWriter::with_defaults(expected_keys);
+    let mut builder = BloomWriter::for_data_block(expected_keys);
     let keys: Vec<Bytes> = (0..expected_keys)
         .map(|i| Bytes::from(format!("key_{i:010}")))
         .collect();

@@ -101,7 +101,7 @@ fn reference_estimate(writer: &FsSstWriter) -> usize {
     let current_bloom = if pipeline.current_block_keys.is_empty() {
         0
     } else {
-        crate::sst::bloom::BloomWriter::with_defaults(pipeline.current_block_keys.len())
+        crate::sst::bloom::BloomWriter::for_data_block(pipeline.current_block_keys.len())
             .size_bytes()
             .saturating_add(13)
     };
@@ -139,7 +139,7 @@ fn reference_bound(writer: &FsSstWriter) -> usize {
         256usize.saturating_add(key.len().saturating_mul(8))
     });
     let current_bloom =
-        crate::sst::bloom::BloomWriter::with_defaults(pipeline.current_block_keys.len())
+        crate::sst::bloom::BloomWriter::for_data_block(pipeline.current_block_keys.len())
             .size_bytes();
     let key_bounds = pipeline
         .smallest_key
@@ -334,8 +334,13 @@ fn should_charge_size_totals_only_when_index_and_range_metadata_are_retained() -
     // Assert: each scalar is charged once alongside the metadata it summarizes.
     let range_bytes = std::mem::size_of::<RangeTombstone>() + 2;
     let current_entry_bytes = std::mem::size_of::<PendingEntry>() + 4 + 3000 + 64;
-    let index_and_bloom_bytes =
-        std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>() + 1 + 16;
+    // One retained index entry plus a one-key bloom, sized at the data-block
+    // false-positive rate, held both per block and in the assembled filter.
+    let one_key_bloom = crate::sst::bloom::BloomWriter::for_data_block(1).size_bytes();
+    let index_and_bloom_bytes = std::mem::size_of::<(Vec<u8>, crate::sst::types::BlockHandle)>()
+        + 1
+        + (one_key_bloom + 9) * 2
+        + 4;
     assert_eq!(
         budget.used(),
         range_bytes

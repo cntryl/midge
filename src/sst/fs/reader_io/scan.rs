@@ -49,10 +49,13 @@ impl SstFileIo {
 
             blocks_read = blocks_read.saturating_add(1);
             let block_data = self.read_cached_data_block(&handle)?;
-            let (candidate, decoded) =
-                self.key_state_from_encoded_block_with_stats(&block_data, key, snapshot_seq)?;
+            let (decoded, complete) =
+                self.merge_key_run_from_block(&block_data, key, snapshot_seq, &mut best_state)?;
             entries_decoded += decoded;
-            Self::merge_newer_state(&mut best_state, candidate)?;
+            // Later candidate blocks hold only older versions or other keys.
+            if complete {
+                break;
+            }
         }
 
         Ok((
@@ -93,8 +96,8 @@ impl crate::sst::SstStateReader for SstFileIo {
         let Some(span) = self.block_span(index.as_ref(), start, end) else {
             return Ok(result);
         };
-        for (_first_key, handle) in &index[span] {
-            let block_data = self.read_cached_data_block(handle)?;
+        for handle in span.map(|block| index.handle(block)) {
+            let block_data = self.read_cached_data_block(&handle)?;
             let decoded = self.decode_scan_block(&block_data)?;
             for index in 0..decoded.len() {
                 let entry = decoded.entry(index);
@@ -176,13 +179,12 @@ impl crate::sst::SstStateReader for SstFileIo {
             return Ok(Vec::new());
         };
 
-        let handles = &index[span];
         self.diagnostics
             .sst_metrics()
-            .record_candidate_blocks_checked(handles.len());
+            .record_candidate_blocks_checked(span.clone().count());
 
-        for (_first_key, handle) in handles {
-            let block_data = self.read_cached_data_block(handle)?;
+        for handle in span.map(|block| index.handle(block)) {
+            let block_data = self.read_cached_data_block(&handle)?;
             let decoded = self.decode_scan_block(&block_data)?;
             for index in 0..decoded.len() {
                 let entry = decoded.entry(index);

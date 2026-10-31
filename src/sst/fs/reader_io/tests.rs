@@ -7,9 +7,12 @@ use crate::types::EntryType;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
+mod block_bloom_fpr;
 mod decoder_corpus;
 mod duplicate_successor;
+mod metadata_charge;
 mod restart_v5;
+mod version_run;
 
 struct CountingFs {
     inner: crate::io::RealFs,
@@ -246,7 +249,10 @@ fn open_counting_reader(
     Ok((counting_fs, reader))
 }
 
-fn data_block_reads(reads: &[(u64, u64)], index: &[(Vec<u8>, BlockHandle)]) -> Vec<(u64, u64)> {
+fn data_block_reads(
+    reads: &[(u64, u64)],
+    index: &super::block_index::BlockIndex,
+) -> Vec<(u64, u64)> {
     let data_offsets = index
         .iter()
         .map(|(_key, handle)| handle.offset)
@@ -520,7 +526,7 @@ fn should_get_state_at_read_only_candidate_block_when_key_present() -> MidgeResu
     );
 
     let target_block_idx = 1;
-    let target_handle = index[target_block_idx].1;
+    let target_handle = index.handle(target_block_idx);
     let target_block = reader.read_block(&target_handle)?;
     let entries = reader.decode_scan_block(&target_block)?;
     assert!(
@@ -554,7 +560,7 @@ fn should_get_state_at_read_only_candidate_block_when_key_missing() -> MidgeResu
     );
 
     let target_block_idx = 1;
-    let target_handle = index[target_block_idx].1;
+    let target_handle = index.handle(target_block_idx);
     let target_block = reader.read_block(&target_handle)?;
     let entries = reader.decode_scan_block(&target_block)?;
     assert!(
@@ -774,7 +780,7 @@ fn should_reject_corrupt_sparse_index_given_nonmonotonic_offsets_when_opening() 
     let index = reader.index_entries()?;
     assert!(index.len() >= 2, "test SST must contain multiple blocks");
     let index_handle = reader.footer.as_ref().expect("V5 footer").index_handle;
-    let first_data_offset = index[0].1.offset;
+    let first_data_offset = index.handle(0).offset;
 
     let mut bytes = std::fs::read(&path)?;
     let block_start = usize::try_from(index_handle.offset).expect("index offset fits usize");
@@ -830,7 +836,7 @@ fn should_use_trie_accelerator_when_structured_key_is_present() -> MidgeResult<(
     assert_eq!(reader.index_kind, IndexKind::Trie);
     let index = reader.index_entries()?;
     let target_block_idx = 1;
-    let target_handle = index[target_block_idx].1;
+    let target_handle = index.handle(target_block_idx);
     let target_block = reader.read_block(&target_handle)?;
     let entries = reader.decode_scan_block(&target_block)?;
     let target_key = entries.entry(1).key;
@@ -921,7 +927,7 @@ fn should_get_state_at_return_newest_visible_version_across_duplicate_blocks() -
     let index = reader.index_entries()?;
     let duplicate_blocks = index
         .iter()
-        .filter(|(first_key, _handle)| first_key.as_slice() == b"dup")
+        .filter(|(first_key, _handle)| *first_key == b"dup")
         .count();
     assert!(
         duplicate_blocks >= 2,
@@ -1079,7 +1085,7 @@ fn should_get_state_at_return_newest_visible_version_across_many_trie_blocks() -
     let index = reader.index_entries()?;
     let duplicate_blocks = index
         .iter()
-        .filter(|(first_key, _handle)| first_key.as_slice() == target_key)
+        .filter(|(first_key, _handle)| *first_key == target_key)
         .count();
     assert_eq!(reader.index_kind, IndexKind::Trie);
     assert!(
@@ -1218,10 +1224,10 @@ fn should_report_corruption_given_shipping_codec_payload_when_reading_through_fu
         let path = temp_dir.path().join("codec.sst");
         crate::sst::fs::finish_writer_to_path(writer, &path)?;
         let reader = SstFileIo::open("codec.sst", Arc::clone(&fs))?;
-        let (_, handle) = reader
+        let handle = reader
             .index_entries()?
-            .first()
-            .cloned()
+            .get(0)
+            .map(|(_, handle)| handle)
             .expect("persisted SST has one data handle");
         let mut bytes = std::fs::read(&path)?;
         let data_start = usize::try_from(handle.offset).expect("data offset fits usize");
@@ -1297,7 +1303,9 @@ fn should_reject_unreferenced_gap_between_v5_sst_blocks() {
     ));
 
     // Act
-    let result = reader.validate_nonoverlapping_references(&[]);
+    let result = reader.validate_nonoverlapping_references(
+        &super::block_index::BlockIndex::decode(&[], 0).unwrap(),
+    );
 
     // Assert
     assert!(matches!(result, Err(MidgeError::Corruption(_))));
@@ -1310,8 +1318,11 @@ fn should_charge_summary_key_bounds_while_raw_cursor_advances() -> MidgeResult<(
     let fs = Arc::new(crate::io::RealFs::new(temp_dir.path()).map_err(FsError::into_midge)?);
     let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
     let mut writer = factory.create()?;
-    for prefix in *b"amz" {
-        writer.add_with_meta(&vec![prefix; 8192], Some(b"value"), 1, EntryType::Put, None)?;
+    // Large values make the raw cursor's peak exceed the open's transient
+    // metadata peak, so only the extra bound charge can exhaust the budget.
+    let value = vec![b'v'; 256 * 1024];
+    for prefix in *b"az" {
+        writer.add_with_meta(&vec![prefix; 8192], Some(&value), 1, EntryType::Put, None)?;
     }
     crate::sst::fs::finish_writer_to_path(writer, &temp_dir.path().join("summary-bounds.sst"))?;
     let raw_budget = crate::common::resource_budget::ResourceBudget::new(16 * 1024 * 1024);
@@ -1442,7 +1453,8 @@ fn should_reject_corrupt_block_trailer_identically_on_every_block_read_path() ->
     let (first_key, handle) = {
         let reader = SstFileIo::open("corrupt-trailer.sst", Arc::clone(&fs))?;
         let index = reader.index_entries()?;
-        index[0].clone()
+        let (key, handle) = index.get(0).expect("one data block");
+        (key.to_vec(), handle)
     };
     let path = temp_dir.path().join("corrupt-trailer.sst");
     let mut bytes = std::fs::read(&path)?;
@@ -1483,7 +1495,7 @@ fn should_select_clamped_block_span_when_range_bounds_vary() -> MidgeResult<()> 
     // Act
     let unbounded = reader.block_span(index.as_ref(), None, None);
     let inverted = reader.block_span(index.as_ref(), Some(b"key_0090"), Some(b"key_0005"));
-    let empty = reader.block_span(&[], None, None);
+    let empty = reader.block_span(&super::block_index::BlockIndex::decode(&[], 0)?, None, None);
 
     // Assert
     assert!(last >= 1, "fixture spans several blocks");

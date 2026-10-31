@@ -9,6 +9,24 @@ compatibility and recovery tests, and keep a verified application-level
 backup before changing binaries. Use the applicable release transition below
 before upgrading an existing database.
 
+## 0.5.1 to 0.5.2
+
+The 0.5.2 candidate keeps the 0.5.0 and 0.5.1 persisted formats and needs no
+logical migration. SSTs written by either version are readable by the other,
+so a database can move between the two binaries without a conversion step.
+Upgrade the same way as 0.5.0 to 0.5.1. Stop writers, complete
+`engine.shutdown(timeout)`, preserve the database and cloud prefix, and replace
+the binary or dependency.
+
+SST readers now charge the engine memory budget (`memory_budget`) what they
+actually retain, and blooms are about 1.5× larger. Deployments that sized
+their budget from 0.5.1 reader charges will see different admission counts:
+usually more open readers for large SSTs, and slightly more bloom memory per
+SST. Re-check budget sizing against the deployment's own SSTs.
+
+Rolling back to 0.5.1 restores the slower version-run lookups, larger index
+charges and higher cloud cold-miss reads. It needs no data change.
+
 ## 0.5.0 to 0.5.1
 
 The 0.5.1 candidate preserves the 0.5.0 persisted formats; it does not require

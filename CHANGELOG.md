@@ -9,6 +9,32 @@ Compatibility expectations for pre-1.0 releases are defined in [docs/development
 
 ## [Unreleased]
 
+## [0.5.2] - Unreleased
+
+### Changed
+
+- SST point lookups stop at the first version visible to the snapshot instead
+  of decoding every version of the key. Reading the latest of 8,192 versions
+  went from about 220 µs to about 0.4 µs (#1030).
+- SST readers keep the block index as the decoded block plus fixed-width
+  offsets, borrowing keys instead of copying each one, and charge their memory
+  pool exactly what they retain instead of an estimate. A 10M-key reader
+  retains 12 MB instead of 48 MB. A 4 GiB pool admits 374 readers of a 4 GiB
+  SST, up from 129 (#1031).
+- Data-block blooms target 0.1% false positives instead of 1%. A cold cloud
+  miss pass over a 100K-key SST fetches 0.49 MB in 8 ranges instead of 2.07 MB
+  in 43. Blooms are about 1.5× larger. The writer charges the bloom bytes it
+  retains, and a 10M-key flush peaks at 37 MB of construction budget instead
+  of 161 MB (#1032).
+
+### Compatibility and rollback
+
+- This candidate keeps the 0.5.0 and 0.5.1 persisted formats and public API.
+  The bloom header records its own size and probe count, so 0.5.1 reads SSTs
+  written by 0.5.2 and 0.5.2 reads SSTs written by 0.5.1.
+- Rolling back to 0.5.1 restores the old read costs and memory charges. It needs
+  no data conversion.
+
 ## [0.5.1] - Unreleased
 
 ### Fixed
