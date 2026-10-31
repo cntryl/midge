@@ -10,6 +10,7 @@ use std::sync::Mutex;
 mod decoder_corpus;
 mod duplicate_successor;
 mod restart_v5;
+mod version_run;
 
 struct CountingFs {
     inner: crate::io::RealFs,

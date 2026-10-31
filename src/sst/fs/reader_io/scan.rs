@@ -49,10 +49,13 @@ impl SstFileIo {
 
             blocks_read = blocks_read.saturating_add(1);
             let block_data = self.read_cached_data_block(&handle)?;
-            let (candidate, decoded) =
-                self.key_state_from_encoded_block_with_stats(&block_data, key, snapshot_seq)?;
+            let (decoded, complete) =
+                self.merge_key_run_from_block(&block_data, key, snapshot_seq, &mut best_state)?;
             entries_decoded += decoded;
-            Self::merge_newer_state(&mut best_state, candidate)?;
+            // Later candidate blocks hold only older versions or other keys.
+            if complete {
+                break;
+            }
         }
 
         Ok((

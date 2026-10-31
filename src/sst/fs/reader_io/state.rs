@@ -190,48 +190,72 @@ impl SstFileIo {
             .map(|(state, _)| state)
     }
 
+    #[cfg(test)]
     pub(super) fn key_state_from_encoded_block_with_stats(
         &self,
         block_data: &Bytes,
         key: &[u8],
         snapshot_seq: u64,
     ) -> MidgeResult<(KeyState, u64)> {
+        let mut best_state = KeyState::Absent;
+        let (entries_decoded, _) =
+            self.merge_key_run_from_block(block_data, key, snapshot_seq, &mut best_state)?;
+        Ok((best_state, entries_decoded))
+    }
+
+    /// Merge `key`'s visible versions in one block into `best_state`.
+    ///
+    /// Versions of a key are written newest first, so once a visible version
+    /// is known only equal-sequence duplicates can still matter: they must
+    /// agree, or the SST is corrupt. Returns the entries decoded and whether
+    /// the key's run is complete, meaning later blocks cannot change the
+    /// result: a lower sequence or a different key followed the winner.
+    pub(super) fn merge_key_run_from_block(
+        &self,
+        block_data: &Bytes,
+        key: &[u8],
+        snapshot_seq: u64,
+        best_state: &mut KeyState,
+    ) -> MidgeResult<(u64, bool)> {
         let layout = crate::sst::data_block::DataBlockLayout::read(block_data)?;
         let (restart, probes) = layout.seek_interval(key)?;
         let mut decoder = BlockEntryDecoder::at_restart(block_data, restart)?;
         let mut interval = restart;
         let mut entries_decoded = probes as u64;
-        let mut best_state = KeyState::Absent;
         loop {
             if decoder.offset == layout.interval_end(interval)? {
                 let next_interval = interval + 1;
                 if next_interval == layout.restart_count {
-                    break;
+                    return Ok((entries_decoded, false));
                 }
                 let next_key = layout.validate_restart_link(next_interval, decoder.key())?;
                 if next_key != key {
-                    break;
+                    return Ok((entries_decoded, true));
                 }
                 interval = next_interval;
             }
             let Some(entry) =
                 decoder.next(block_data, self.format_version, None, "point decoder key")?
             else {
-                break;
+                return Ok((entries_decoded, false));
             };
             entries_decoded += 1;
             match decoder.key().cmp(key) {
                 std::cmp::Ordering::Less => {}
-                std::cmp::Ordering::Greater => break,
+                std::cmp::Ordering::Greater => return Ok((entries_decoded, true)),
                 std::cmp::Ordering::Equal => {
+                    if !matches!(best_state, KeyState::Absent)
+                        && entry.sequence < Self::state_sequence(best_state)
+                    {
+                        return Ok((entries_decoded, true));
+                    }
                     if snapshot_seq == u64::MAX || entry.sequence <= snapshot_seq {
                         let candidate = Self::state_from_entry_view(block_data, entry);
-                        Self::merge_newer_state(&mut best_state, candidate)?;
+                        Self::merge_newer_state(best_state, candidate)?;
                     }
                 }
             }
         }
-        Ok((best_state, entries_decoded))
     }
 
     /// Check block bloom filter with proper metrics and failure-safe semantics

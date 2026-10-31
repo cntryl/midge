@@ -111,6 +111,94 @@ fn run_read_old_version_case(
     drop(engine);
 }
 
+/// Versions retained for the single hot key in the version-run case.
+const HOT_KEY_VERSIONS: u64 = 8_192;
+
+/// Latest-version reads of one key whose retained versions span many SST
+/// blocks. A snapshot taken before the writes pins every version through the
+/// flush, so the lookup must not decode the whole version run (#1030).
+fn run_read_latest_of_many_versions_case(
+    ctx: &mut StressContext,
+    scenario: &'static str,
+    mut opts: MidgeOptions,
+) {
+    // Benchmark-safe: the whole version run must reach one SST through one
+    // flush; the local profile's 64 KiB memtable would stall on L0 instead.
+    opts.memtable_size = 16 * 1024 * 1024;
+    ctx.parameter("logical_batch_size", OLD_VERSION_READ_BATCH_SIZE);
+    ctx.parameter("logical_unit", "snapshot_read");
+    ctx.parameter("operation_surface", "mvcc_latest_of_many_versions_read");
+    ctx.parameter("begin_tx_included", "false");
+    ctx.parameter("retained_versions", HOT_KEY_VERSIONS);
+    ctx.metadata("diagnostic_reason", "pending_three_clean_baselines");
+    ctx.parameter("local_gate_rsd_limit_pct", 5);
+
+    let write_opts = stress_config::measured_write_options(&opts);
+    let engine = setup_engine(opts);
+    let cf = engine.create_column_family("cf1").unwrap();
+    let cf_id = cf.id();
+    let key = stress_config::bench_stress::key16_u64_be(7);
+
+    // Setup (not measured): one snapshot per version pins the whole run.
+    let mut snapshots = Vec::new();
+    for version in 1..=HOT_KEY_VERSIONS {
+        snapshots.push(
+            engine
+                .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+                .expect("begin"),
+        );
+        let mut tx = engine
+            .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadWrite)
+            .expect("begin");
+        tx.put(key.to_vec(), version.to_be_bytes().repeat(8), None)
+            .unwrap();
+        tx.commit(write_opts).unwrap();
+    }
+    engine.flush_cf(&cf).unwrap();
+
+    let reader = engine
+        .begin_tx(cf_id, cntryl_midge::TransactionMode::ReadOnly)
+        .expect("begin");
+    let expected = HOT_KEY_VERSIONS.to_be_bytes().repeat(8);
+    let read_path_before = engine.read_path_diagnostics_snapshot_for_benchmarks();
+    let mut validation_failures = 0_u64;
+
+    let _ = ctx.measure_batch(scenario, OLD_VERSION_READ_BATCH_SIZE as u64, || {
+        for _ in 0..OLD_VERSION_READ_BATCH_SIZE {
+            if reader.get(&key[..]).unwrap().as_deref() != Some(expected.as_slice()) {
+                validation_failures += 1;
+            }
+        }
+    });
+
+    let read_path_after = engine.read_path_diagnostics_snapshot_for_benchmarks();
+    assert_eq!(
+        validation_failures, 0,
+        "measured latest reads must validate"
+    );
+    let reads =
+        read_path_after.candidate_sst_files_checked - read_path_before.candidate_sst_files_checked;
+    assert!(
+        read_path_after.candidate_blocks_checked - read_path_before.candidate_blocks_checked
+            > reads.saturating_mul(8),
+        "the hot key's retained versions must span many candidate blocks"
+    );
+
+    drop(reader);
+    drop(snapshots);
+    drop(engine);
+}
+
+#[stress(tier = 3, role = "diagnostic")]
+fn tier3_mvcc_read_latest_of_many_versions_local(ctx: &mut StressContext) {
+    let opts = stress_config::opts_for_mode("local");
+    run_read_latest_of_many_versions_case(
+        ctx,
+        "tier3_mvcc_read_latest_of_many_versions_local",
+        opts,
+    );
+}
+
 #[stress(tier = 3, role = "diagnostic")]
 fn tier3_mvcc_read_old_version_local(ctx: &mut StressContext) {
     let opts = stress_config::opts_for_mode("local");
