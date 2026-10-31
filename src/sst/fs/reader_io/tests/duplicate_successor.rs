@@ -41,7 +41,7 @@ fn reader_with_duplicate_successor(directory: &tempfile::TempDir) -> MidgeResult
         reader
             .index_entries()?
             .iter()
-            .filter(|(key, _)| key.as_slice() == successor)
+            .filter(|(key, _)| *key == successor)
             .count()
             >= 3
     );

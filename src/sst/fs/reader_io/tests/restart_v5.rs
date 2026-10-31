@@ -121,7 +121,7 @@ fn should_reject_point_lookup_when_repeated_key_restart_loses_its_continuation_b
     }
     crate::sst::fs::finish_writer_to_path(writer, &directory.path().join("versions.sst"))?;
     let reader = SstFileIo::open("versions.sst", fs)?;
-    let handle = reader.index_entries()?[0].1;
+    let handle = reader.index_entries()?.handle(0);
     let block = reader.read_block(&handle)?;
     let layout = DataBlockLayout::read(&block)?;
     assert!(layout.restart_count > 1);
@@ -152,7 +152,7 @@ fn should_reject_invalid_restart_directories_before_entry_decoding() -> MidgeRes
     // Arrange
     let directory = tempfile::tempdir()?;
     let reader = unique_reader(&directory)?;
-    let handle = reader.index_entries()?[0].1;
+    let handle = reader.index_entries()?.handle(0);
     let block = reader.read_block(&handle)?;
     let layout = DataBlockLayout::parse(&block)?;
     let mut malformed = Vec::new();

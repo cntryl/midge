@@ -16,7 +16,7 @@ use crate::sst::trie::TrieReader;
 use crate::sst::types::{BlockHandle, Footer, SST_FORMAT_V5};
 use crate::types::{EntryType, KeyState, RangeTombstone};
 
-type IndexEntries = Arc<Vec<(Vec<u8>, BlockHandle)>>;
+type IndexEntries = Arc<block_index::BlockIndex>;
 
 /// Exercise the same restart/entry decoder used by point and streaming reads.
 ///
@@ -107,7 +107,7 @@ pub struct SstFileIo {
     diagnostics: Arc<dyn crate::sst::read_path_metrics::SstReadObserver>,
     /// Immutable index publication. The common lookup path loads this
     /// atomically without taking a reader-wide mutex.
-    index_entries: ArcSwapOption<Vec<(Vec<u8>, BlockHandle)>>,
+    index_entries: ArcSwapOption<block_index::BlockIndex>,
     format_version: u32,
     index_kind: IndexKind,
     smallest_key: Option<Vec<u8>>,
@@ -444,7 +444,7 @@ impl SstRawVersionScan {
             .index
             .as_ref()
             .and_then(|index| index.get(block_index))
-            .map(|(_, handle)| *handle)
+            .map(|(_, handle)| handle)
             .ok_or_else(|| {
                 MidgeError::Corruption("SST raw cursor block index is invalid".into())
             })?;
@@ -681,7 +681,7 @@ impl SstStateScan {
             .index
             .as_ref()
             .and_then(|index| index.get(block_index))
-            .map(|(_, handle)| *handle)
+            .map(|(_, handle)| handle)
             .ok_or_else(|| MidgeError::Corruption("SST scan block index is invalid".into()))?;
 
         if self.reverse {
@@ -842,6 +842,7 @@ impl std::iter::Iterator for SstStateScan {
 mod progress;
 pub(crate) use progress::SstSummaryProgress;
 
+mod block_index;
 mod index;
 mod io;
 mod scan;
@@ -944,8 +945,9 @@ impl SstFileIo {
             .as_ref()
             .and_then(|footer| footer.block_bloom_handle)
         {
-            let bloom_data = self.read_metadata_block(&block_bloom_handle, "SST block bloom")?;
-            let block_bloom = BlockBloomFilter::deserialize(&bloom_data)?;
+            let bloom_block = self.read_metadata_block(&block_bloom_handle, "SST block bloom")?;
+            let block_bloom = BlockBloomFilter::deserialize(&bloom_block.bytes)?;
+            self.retain_metadata(bloom_block, block_bloom.memory_usage(), "SST block bloom")?;
             self.block_bloom_filter = Some(block_bloom);
         }
         Ok(())

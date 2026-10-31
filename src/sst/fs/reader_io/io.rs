@@ -62,14 +62,14 @@ impl SstFileIo {
             summary.observe(file_size, &tombstone.start, tombstone.seq, None)?;
             summary.observe(file_size, &tombstone.end, tombstone.seq, None)?;
         }
-        for (_, handle) in &index {
+        for (_, handle) in index.iter() {
             if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
                 return Err(MidgeError::Timeout(
                     "SST verification deadline expired".into(),
                 ));
             }
-            Self::validate_block_handle(*handle, self.block_region_end, "data")?;
-            let block = self.read_block(handle)?;
+            Self::validate_block_handle(handle, self.block_region_end, "data")?;
+            let block = self.read_block(&handle)?;
             let decoded = self.decode_scan_block(&block)?;
             for index in 0..decoded.len() {
                 if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
@@ -184,8 +184,9 @@ impl SstFileIo {
             .ok_or_else(|| MidgeError::Corruption("SST footer is missing".into()))?
             .index_handle;
         let index_data = self.read_metadata_block(&index_handle, "SST index")?;
-        let index = self.decode_index_entries(&index_data)?;
+        let index = self.decode_index_entries(&index_data.bytes)?;
         self.validate_nonoverlapping_references(&index)?;
+        self.retain_metadata(index_data, index.retained_bytes(), "SST index")?;
         self.index_entries.store(Some(Arc::new(index)));
 
         Ok(())
@@ -233,14 +234,14 @@ impl SstFileIo {
             return Ok(());
         };
 
-        let metadata_bytes = self.read_metadata_block(&footer.meta_index_handle, "SST metadata")?;
-        if metadata_bytes.is_empty() {
+        let metadata_block = self.read_metadata_block(&footer.meta_index_handle, "SST metadata")?;
+        if metadata_block.bytes.is_empty() {
             return Err(MidgeError::Corruption(
                 "SST V5 metadata block is empty".into(),
             ));
         }
 
-        let metadata = SstMetadata::decode(&metadata_bytes)?;
+        let metadata = SstMetadata::decode(&metadata_block.bytes)?;
         self.format_version = metadata.format_version;
         self.index_kind = metadata.index_kind;
         self.smallest_key = metadata
@@ -252,22 +253,19 @@ impl SstFileIo {
             .as_ref()
             .map(|range| range.largest_key.clone());
         self.range_tombstone_handle = metadata.range_tombstone_handle;
-        self.range_tombstones = match metadata.range_tombstone_handle {
-            Some(handle) => {
-                Self::validate_block_handle(handle, self.block_region_end, "range tombstone")?;
-                let tombstone_bytes = self.read_metadata_block(&handle, "SST range tombstones")?;
-                decode_range_tombstones(&tombstone_bytes)?
-            }
-            _ => Vec::new(),
-        };
-        self.range_tombstone_index =
-            crate::memtable::range_tombstone_index::FragmentedRangeTombstones::build(
-                &self.range_tombstones,
-            );
+        let key_bytes = [&self.smallest_key, &self.largest_key]
+            .into_iter()
+            .flatten()
+            .map(Vec::capacity)
+            .sum();
+        self.retain_metadata(metadata_block, key_bytes, "SST metadata")?;
+        self.load_range_tombstones(metadata.range_tombstone_handle)?;
         self.trie_reader = match (self.index_kind, footer.trie_handle) {
             (IndexKind::Trie, Some(handle)) => {
-                let trie_bytes = self.read_metadata_block(&handle, "SST trie")?;
-                Some(Arc::new(TrieReader::new(&trie_bytes)?))
+                let trie_block = self.read_metadata_block(&handle, "SST trie")?;
+                let trie = TrieReader::new(&trie_block.bytes)?;
+                self.retain_metadata(trie_block, trie.memory_usage(), "SST trie")?;
+                Some(Arc::new(trie))
             }
             (IndexKind::Trie, None) => {
                 return Err(MidgeError::Corruption(
@@ -285,9 +283,43 @@ impl SstFileIo {
         Ok(())
     }
 
+    fn load_range_tombstones(&mut self, handle: Option<BlockHandle>) -> MidgeResult<()> {
+        self.range_tombstones = Vec::new();
+        let block = if let Some(handle) = handle {
+            Self::validate_block_handle(handle, self.block_region_end, "range tombstone")?;
+            let block = self.read_metadata_block(&handle, "SST range tombstones")?;
+            self.range_tombstones = decode_range_tombstones(&block.bytes)?;
+            Some(block)
+        } else {
+            None
+        };
+        self.range_tombstone_index =
+            crate::memtable::range_tombstone_index::FragmentedRangeTombstones::build(
+                &self.range_tombstones,
+            );
+        if let Some(block) = block {
+            let retained = self.range_tombstones.iter().fold(
+                self.range_tombstones
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<crate::types::RangeTombstone>()),
+                |total, range| {
+                    total
+                        .saturating_add(range.start.capacity())
+                        .saturating_add(range.end.capacity())
+                },
+            );
+            let retained = retained.saturating_add(self.range_tombstone_index.as_ref().map_or(
+                0,
+                crate::memtable::range_tombstone_index::FragmentedRangeTombstones::memory_usage,
+            ));
+            self.retain_metadata(block, retained, "SST range tombstones")?;
+        }
+        Ok(())
+    }
+
     pub(super) fn validate_nonoverlapping_references(
         &self,
-        index: &[(Vec<u8>, BlockHandle)],
+        index: &super::block_index::BlockIndex,
     ) -> MidgeResult<()> {
         let footer = self
             .footer
@@ -306,7 +338,7 @@ impl SstFileIo {
         if let Some(handle) = self.range_tombstone_handle {
             handles.push(("range tombstone", handle));
         }
-        handles.extend(index.iter().map(|(_, handle)| ("data", *handle)));
+        handles.extend(index.iter().map(|(_, handle)| ("data", handle)));
         handles.sort_unstable_by_key(|(_, handle)| handle.offset);
 
         if handles
@@ -372,9 +404,12 @@ impl SstFileIo {
         &mut self,
         handle: &BlockHandle,
         resource: &'static str,
-    ) -> MidgeResult<bytes::Bytes> {
+    ) -> MidgeResult<MetadataBlock> {
         let Some(budget) = self.metadata_budget.clone() else {
-            return self.read_block(handle);
+            return Ok(MetadataBlock {
+                bytes: self.read_block(handle)?,
+                charge: None,
+            });
         };
 
         let (decoded, retained_reservation) = {
@@ -400,11 +435,30 @@ impl SstFileIo {
                 budget.reserve(decoded_size.saturating_mul(4).saturating_add(256), resource)
             })?
         };
-        // The decoded bytes are transient, but their decoded reader structure
-        // remains live (index, filter, trie, or range tombstones). Keep this
-        // conservative reservation with the reader for that parsed structure.
-        self.metadata_reservations.push(retained_reservation);
-        Ok(decoded)
+        // The decoded bytes are transient, but the reader structure parsed
+        // from them stays live. This conservative charge bounds the parse;
+        // `retain_metadata` then holds exactly what the structure keeps.
+        Ok(MetadataBlock {
+            bytes: decoded,
+            charge: Some(retained_reservation),
+        })
+    }
+
+    /// Keep `retained` bytes of `block`'s charge with the reader for the
+    /// structure parsed from it, releasing the rest of its parse charge.
+    pub(super) fn retain_metadata(
+        &mut self,
+        block: MetadataBlock,
+        retained: usize,
+        resource: &'static str,
+    ) -> MidgeResult<()> {
+        let MetadataBlock { bytes, charge } = block;
+        drop(bytes);
+        if let Some(mut charge) = charge {
+            charge.resize(retained, resource)?;
+            self.metadata_reservations.push(charge);
+        }
+        Ok(())
     }
 
     pub(super) fn read_block_from(
@@ -498,4 +552,10 @@ impl SstFileIo {
         }
         Ok(shared_len)
     }
+}
+
+/// A decoded metadata block and the parse charge covering it.
+pub(super) struct MetadataBlock {
+    pub(super) bytes: bytes::Bytes,
+    charge: Option<crate::common::resource_budget::ResourceReservation>,
 }

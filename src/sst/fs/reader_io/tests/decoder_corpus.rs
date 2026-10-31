@@ -69,7 +69,7 @@ fn add_seed_entries(writer: &mut dyn DynSstWriter, seed: u64) -> MidgeResult<()>
 fn retain_real_sst_blocks(directory: &Path, reader: &SstFileIo, seed: u64) -> MidgeResult<()> {
     let name = format!("real-v5-{seed}");
     let footer = reader.footer.as_ref().unwrap();
-    let data = reader.read_block(&reader.index_entries()?[0].1)?;
+    let data = reader.read_block(&reader.index_entries()?.handle(0))?;
     let index = reader.read_block(&footer.index_handle)?;
     let filter = reader.read_block(&footer.block_bloom_handle.unwrap())?;
     let range = reader.read_block(&reader.range_tombstone_handle.unwrap())?;
