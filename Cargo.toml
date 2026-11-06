@@ -86,7 +86,7 @@ tracing-opentelemetry = { version = "0.34", optional = true }
 hex = "0.4"
 hostname = "0.4"
 num_cpus = "1.17"
-sysinfo = "0.39"
+sysinfo = "0.40"
 tempfile = "3.27"
 
 # Cloud Backend Support (optional)
