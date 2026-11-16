@@ -5,12 +5,6 @@ Thank you for your interest in contributing to Midge! This document provides gui
 ## Organization-wide contribution expectations
 
 Midge follows the [cntryl contribution standards](https://github.com/cntryl/.github/blob/main/CONTRIBUTING.md).
-AI-assisted contributions are welcome, but material AI or generative-tool
-assistance must be disclosed. Explain how you encountered the problem or need,
-why the contribution matters, what the tool assisted, and how its output was
-reviewed and validated. You remain responsible for understanding, testing,
-explaining, and revising the complete submission.
-
 Substantial work requires a linked issue and maintainer agreement on scope before
 implementation. Maintainers may close context-free, duplicate, speculative,
 misleading, mass-produced, or unsupported submissions to protect review capacity.
