@@ -33,7 +33,7 @@ fn effective_memory_limit_bytes() -> Option<u64> {
 }
 
 fn host_total_memory_bytes() -> Option<u64> {
-    let mut system = sysinfo::System::new();
+    let mut system = sysinfo::System::new().ok()?;
     system.refresh_memory();
     let total_bytes = system.total_memory();
     if total_bytes == 0 {
@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn should_treat_sysinfo_total_memory_as_bytes() {
         // Arrange
-        let mut system = sysinfo::System::new();
+        let mut system = sysinfo::System::new().expect("system information should be available");
         system.refresh_memory();
         let expected_bytes = system.total_memory();
 

@@ -68,13 +68,12 @@ thiserror = "2.0"
 
 # Hashing
 crc32c = "0.6"
-crc32fast = "1.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Logging & Tracing
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
 
 # OpenTelemetry (Observability)
 opentelemetry = { version = "0.33", optional = true }
@@ -85,8 +84,7 @@ tracing-opentelemetry = { version = "0.34", optional = true }
 # System Utilities
 hex = "0.4"
 hostname = "0.4"
-num_cpus = "1.17"
-sysinfo = "0.39"
+sysinfo = "0.40"
 tempfile = "3.27"
 
 # Cloud Backend Support (optional)
@@ -118,6 +116,9 @@ winapi = { version = "0.3", features = ["fileapi", "winbase"] }
 loom = "0.7"
 
 [dev-dependencies]
+crc32fast = "1.5"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+num_cpus = "1.17"
 proptest = "1.12"
 cntryl-stress = "0.5.1"
 hdrhistogram = "7.6"
@@ -139,6 +140,7 @@ failpoints = ["dep:fail"]
 alloc-mimalloc = ["dep:mimalloc"]
 telemetry = [
     "cloud-common",
+    "dep:tracing-subscriber",
     "dep:opentelemetry",
     "dep:tracing-opentelemetry",
     "dep:opentelemetry_sdk",
