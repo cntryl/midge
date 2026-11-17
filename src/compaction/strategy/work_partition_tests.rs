@@ -57,6 +57,67 @@ fn broad_source_layout() -> Vec<FileMeta> {
 }
 
 #[test]
+fn should_choose_highest_debt_ratio_when_multiple_inner_levels_are_overfull() {
+    // Arrange: L1 has three times its target and L2 only slightly exceeds its target.
+    let compactor = Compactor::new();
+    let files = vec![
+        file("l1", 1, (b"a", b"b"), 120 * MIB),
+        file("l2", 2, (b"a", b"b"), 440 * MIB),
+    ];
+
+    // Act
+    let (plan, _) = compactor
+        .pick_available_inner_compaction(&files, 0, |_, _| true, |_| true)
+        .unwrap()
+        .unwrap();
+
+    // Assert
+    assert_eq!(plan.source_level, 1);
+    assert_eq!(plan.target_files, vec!["l2".to_string()]);
+}
+
+#[test]
+fn should_try_next_debt_ratio_when_highest_level_is_unavailable() {
+    // Arrange
+    let compactor = Compactor::new();
+    let files = vec![
+        file("l1", 1, (b"a", b"b"), 120 * MIB),
+        file("l2", 2, (b"a", b"b"), 440 * MIB),
+    ];
+
+    // Act
+    let (plan, _) = compactor
+        .pick_available_inner_compaction(&files, 0, |_, _| true, |plan| plan.source_level != 1)
+        .unwrap()
+        .unwrap();
+
+    // Assert
+    assert_eq!(plan.source_level, 2);
+}
+
+#[test]
+fn should_break_zero_target_debt_ties_by_deeper_level() {
+    // Arrange
+    let compactor = Compactor::with_config(LeveledCompactionConfig {
+        l1_target_size: 0,
+        ..LeveledCompactionConfig::default()
+    });
+    let files = vec![
+        file("l1", 1, (b"a", b"b"), 2),
+        file("l2", 2, (b"a", b"b"), 1),
+    ];
+
+    // Act
+    let (plan, _) = compactor
+        .pick_available_inner_compaction(&files, 0, |_, _| true, |_| true)
+        .unwrap()
+        .unwrap();
+
+    // Assert
+    assert_eq!(plan.source_level, 2);
+}
+
+#[test]
 fn should_not_fragment_source_when_grandparent_output_policy_is_enabled() {
     // Arrange: the complete target span is large, but its bytes are not the
     // level+2 overlap measured by the output partitioner.
@@ -65,7 +126,7 @@ fn should_not_fragment_source_when_grandparent_output_policy_is_enabled() {
 
     // Act
     let plan = compactor
-        .pick_deepest_inner_compaction(&files, 0)
+        .pick_scored_inner_compaction(&files, 0)
         .expect("valid complete metadata")
         .expect("overfull source level");
 
@@ -91,7 +152,7 @@ fn should_merge_complete_conforming_span_when_only_soft_work_target_is_exceeded(
 
         // Act
         let plan = compactor
-            .pick_deepest_inner_compaction(&files, 0)
+            .pick_scored_inner_compaction(&files, 0)
             .expect("complete layout")
             .expect("source debt");
 
@@ -117,7 +178,7 @@ fn should_keep_legacy_fragmentation_when_grandparent_policy_is_disabled() {
 
     // Act
     let plan = compactor
-        .pick_deepest_inner_compaction(&files, 0)
+        .pick_scored_inner_compaction(&files, 0)
         .expect("complete layout")
         .expect("source debt");
 
@@ -144,7 +205,7 @@ fn should_shrink_source_batch_when_single_source_work_fits() {
 
     // Act
     let plan = compactor
-        .pick_deepest_inner_compaction(&files, 0)
+        .pick_scored_inner_compaction(&files, 0)
         .unwrap()
         .unwrap();
 
@@ -165,7 +226,7 @@ fn should_keep_complete_overlap_when_source_has_no_interior_target_boundary() {
 
     // Act
     let plan = compactor
-        .pick_deepest_inner_compaction(&files, 0)
+        .pick_scored_inner_compaction(&files, 0)
         .unwrap()
         .unwrap();
 
@@ -193,7 +254,7 @@ fn should_preserve_complete_closure_when_fragmentation_bounds_are_unproven() {
 
         // Act
         let plan = compactor
-            .pick_deepest_inner_compaction(&files, 0)
+            .pick_scored_inner_compaction(&files, 0)
             .unwrap()
             .unwrap();
 
@@ -216,13 +277,13 @@ fn should_advance_fragmentation_when_prior_cut_remains_an_inclusive_bound() {
 
     // Act
     let next = compactor
-        .pick_deepest_inner_compaction(&files, 0)
+        .pick_scored_inner_compaction(&files, 0)
         .unwrap()
         .unwrap();
     files[0].largest_key = Some(b"i".to_vec());
     files[0].size_bytes = 32 * MIB;
     let settled = compactor
-        .pick_deepest_inner_compaction(&files, 0)
+        .pick_scored_inner_compaction(&files, 0)
         .unwrap()
         .unwrap();
 
@@ -249,7 +310,7 @@ fn should_keep_source_batch_when_work_exactly_matches_target() {
 
     // Act
     let plan = compactor
-        .pick_deepest_inner_compaction(&files, 0)
+        .pick_scored_inner_compaction(&files, 0)
         .unwrap()
         .unwrap();
 
@@ -268,7 +329,7 @@ fn should_keep_existing_plan_when_work_target_is_disabled() {
 
     // Act
     let plan = compactor
-        .pick_deepest_inner_compaction(&files, 0)
+        .pick_scored_inner_compaction(&files, 0)
         .unwrap()
         .unwrap();
 
@@ -292,7 +353,7 @@ fn should_keep_equality_chain_when_no_further_interior_split_exists() {
 
     // Act
     let plan = compactor
-        .pick_deepest_inner_compaction(&files, 0)
+        .pick_scored_inner_compaction(&files, 0)
         .unwrap()
         .unwrap();
 

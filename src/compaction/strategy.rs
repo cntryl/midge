@@ -229,6 +229,25 @@ pub struct Compactor {
     work_target_bytes: Option<usize>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct DebtScore {
+    bytes: u64,
+    target: u64,
+}
+
+impl DebtScore {
+    pub(crate) fn compare(self, other: Self) -> std::cmp::Ordering {
+        match (self.target == 0, other.target == 0) {
+            (true, false) => return std::cmp::Ordering::Greater,
+            (false, true) => return std::cmp::Ordering::Less,
+            (true, true) => return std::cmp::Ordering::Equal,
+            (false, false) => {}
+        }
+        (u128::from(self.bytes) * u128::from(other.target))
+            .cmp(&(u128::from(other.bytes) * u128::from(self.target)))
+    }
+}
+
 impl Compactor {
     pub fn new() -> Self {
         Self::with_config(LeveledCompactionConfig::default())
@@ -251,7 +270,7 @@ impl Compactor {
     ///
     /// Pick compaction using leveled strategy:
     ///   1. Repair the deepest defective L1+ level.
-    ///   2. Check the deepest overfull L1+ level.
+    ///   2. Check the highest-scored overfull L1+ level.
     ///   3. Check ordinary soft-L0 work.
     ///
     /// NOTE: This picker is deterministic for a given metadata snapshot.
@@ -264,7 +283,7 @@ impl Compactor {
         if let Some(repair) = self.pick_repair_compaction(files, cf_id)? {
             return Ok(Some(repair));
         }
-        self.pick_deepest_inner_compaction(files, cf_id)?
+        self.pick_scored_inner_compaction(files, cf_id)?
             .map_or_else(
                 || self.pick_l0_compaction(files, cf_id, false),
                 |plan| Ok(Some(plan)),
@@ -291,23 +310,13 @@ impl Compactor {
     }
 
     #[cfg(test)]
-    pub(crate) fn pick_deepest_inner_compaction(
+    pub(crate) fn pick_scored_inner_compaction(
         &self,
         files: &[FileMeta],
         cf_id: u32,
     ) -> MidgeResult<Option<CompactionPlan>> {
-        let Some(levels) = self.validated_levels(files, cf_id)? else {
-            return Ok(None);
-        };
-        for level in (1..self.config.max_levels.saturating_sub(1)).rev() {
-            let level_size: u64 = levels[level].iter().map(|file| file.size_bytes).sum();
-            let target_size =
-                self.level_target_size(u32::try_from(level).expect("level index fits in u32"));
-            if level_size > target_size {
-                return self.plan_inner_level_filtered(&levels, cf_id, level, &|_| true);
-            }
-        }
-        Ok(None)
+        self.pick_available_inner_compaction(files, cf_id, |_, _| true, |_| true)
+            .map(|candidate| candidate.map(|(plan, _)| plan))
     }
 
     pub(crate) fn pick_available_inner_compaction(
@@ -316,20 +325,40 @@ impl Compactor {
         cf_id: u32,
         eligible: impl Fn(&FileMeta, u32) -> bool,
         admitted: impl Fn(&CompactionPlan) -> bool,
-    ) -> MidgeResult<Option<CompactionPlan>> {
+    ) -> MidgeResult<Option<(CompactionPlan, DebtScore)>> {
         let Some(levels) = self.validated_levels(files, cf_id)? else {
             return Ok(None);
         };
-        for level in (1..self.config.max_levels.saturating_sub(1)).rev() {
-            let level_size: u64 = levels[level].iter().map(|file| file.size_bytes).sum();
+        let mut candidates = Vec::new();
+        for (level, files) in levels
+            .iter()
+            .enumerate()
+            .take(self.config.max_levels.saturating_sub(1))
+            .skip(1)
+        {
+            let level_size = files
+                .iter()
+                .fold(0_u64, |total, file| total.saturating_add(file.size_bytes));
             let source_level = u32::try_from(level).expect("level index fits u32");
-            if level_size <= self.level_target_size(source_level) {
+            let target = self.level_target_size(source_level);
+            if level_size <= target {
                 continue;
             }
+            candidates.push((
+                level,
+                DebtScore {
+                    bytes: level_size,
+                    target,
+                },
+            ));
+        }
+        candidates.sort_by(|a, b| b.1.compare(a.1).then_with(|| b.0.cmp(&a.0)));
+        for (level, score) in candidates {
+            let source_level = u32::try_from(level).expect("level index fits u32");
             let available = |file: &FileMeta| eligible(file, source_level + 1);
             if let Some(plan) = self.plan_inner_level_filtered(&levels, cf_id, level, &available)? {
                 if admitted(&plan) {
-                    return Ok(Some(plan));
+                    return Ok(Some((plan, score)));
                 }
             }
         }
@@ -1254,7 +1283,7 @@ mod tests {
     }
 
     #[test]
-    fn should_prioritize_deepest_overfull_level_over_ordinary_l0() {
+    fn should_prioritize_overfull_inner_level_over_ordinary_l0() {
         // Arrange
         let compactor = Compactor::new();
         let l0_threshold = compactor.config.l0_compaction_threshold;

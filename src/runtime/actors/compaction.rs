@@ -649,9 +649,12 @@ impl CompactionJobActor {
             }
         }
 
-        // Once no family is critical, pay down the deepest overfull level
+        // Once no family is critical, pay down the highest-scored overfull level
         // before creating more downstream debt from ordinary L0 work.
-        let mut deepest_plan: Option<crate::compaction::CompactionPlan> = None;
+        let mut best_plan: Option<(
+            crate::compaction::CompactionPlan,
+            crate::compaction::strategy::DebtScore,
+        )> = None;
         for cf_id in &cf_ids {
             let candidate = self.compactor.pick_available_inner_compaction(
                 &state.manifest.files,
@@ -659,15 +662,15 @@ impl CompactionJobActor {
                 |file, target| self.jobs.source_available(file, target),
                 |plan| self.jobs.available(plan, &state.manifest.files),
             )?;
-            if candidate.as_ref().is_some_and(|plan| {
-                deepest_plan
+            if candidate.as_ref().is_some_and(|(_, score)| {
+                best_plan
                     .as_ref()
-                    .is_none_or(|current| plan.source_level > current.source_level)
+                    .is_none_or(|(_, current)| score.compare(*current).is_gt())
             }) {
-                deepest_plan = candidate;
+                best_plan = candidate;
             }
         }
-        if let Some(plan) = deepest_plan {
+        if let Some((plan, _)) = best_plan {
             return Ok(Some(self.record_scheduled_plan(plan)));
         }
 
@@ -2250,7 +2253,33 @@ mod tests {
     }
 
     #[test]
-    fn should_pick_deepest_overfull_inner_level_before_soft_l0() {
+    fn should_pick_higher_inner_debt_ratio_across_column_families() {
+        // Arrange
+        let config = LeveledCompactionConfig {
+            l1_target_size: 100,
+            level_multiplier: 10,
+            max_levels: 5,
+            ..LeveledCompactionConfig::default()
+        };
+        let mut actor = create_test_compaction_actor_with_config(config);
+        let mut state = RuntimeState::new("/tmp/test_midge".into(), true);
+        state.set_compaction_enabled(true);
+        let shallow = state.create_cf("shallow".to_string()).unwrap();
+        let deep = state.create_cf("deep".to_string()).unwrap();
+        state.manifest.test_mut().files.extend([
+            make_level_file("shallow.sst", shallow, 1, 300, b"a", b"z"),
+            make_level_file("deep.sst", deep, 3, 11_000, b"a", b"z"),
+        ]);
+
+        // Act
+        let plan = actor.check_compaction(&state).unwrap().unwrap();
+
+        // Assert
+        assert_eq!((plan.cf_id, plan.source_level), (shallow, 1));
+    }
+
+    #[test]
+    fn should_pick_deeper_inner_level_when_debt_ratios_tie_before_soft_l0() {
         // Arrange
         let config = LeveledCompactionConfig {
             l0_file_count_threshold: 2,
