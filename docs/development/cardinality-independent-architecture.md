@@ -214,6 +214,11 @@ repair exclusive and charges child budgets against one shared pool. Reusable
 compute workers and bounded completion polling retain terminal ownership even
 when a notification arrives early or is lost. Per-worker scratch scopes keep
 cleanup proof independent of another job's scratch lifetime.
+For inner levels, a per-family and per-level cursor advances after a job is
+admitted, scans the remaining key range before wrapping, and is shared across
+worker slots. Cursors are in memory and reset on restart. Their retained state
+is charged to the shared compaction budget; admission reports a resource limit
+if a cursor cannot be reserved.
 
 Flush slots admit at most one generation per family and use the same bounded
 global flush budget. Their exact flush IDs bind completion, retries and release.

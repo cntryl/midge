@@ -260,6 +260,160 @@ impl ConcurrentFixture {
     }
 }
 
+fn cursor_fixture() -> MidgeResult<ConcurrentFixture> {
+    let mut fixture = ConcurrentFixture::new(16 * 1024 * 1024, false)?;
+    let factory = Arc::new(FsSstFactoryIo::new(
+        crate::io::subdirectory(Arc::clone(&fixture.event_loop.state.fs), "sst"),
+        64 * 1024,
+    ));
+    let config = crate::compaction::LeveledCompactionConfig {
+        l1_target_size: 1,
+        level_multiplier: 1_000_000,
+        ..Default::default()
+    };
+    let mut actor = crate::runtime::actors::CompactionActor::new_with_config(factory, config);
+    actor.set_execution_limits(128, 16 * 1024 * 1024);
+    actor.configure_concurrency(2)?;
+    fixture.event_loop.actors.compaction_actor = actor;
+    Ok(fixture)
+}
+
+#[test]
+fn should_advance_inner_compaction_across_key_space_when_lower_keys_are_reintroduced(
+) -> MidgeResult<()> {
+    // Arrange: five real, disjoint L1 sources exceed the one-byte target.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut fixture = cursor_fixture()?;
+    for (generation, key) in [(1, b"b"), (2, b"c"), (3, b"d"), (4, b"e"), (5, b"f")] {
+        fixture.file(1, generation, key, b"value", generation)?;
+    }
+    fixture.persist()?;
+    let first = fixture
+        .event_loop
+        .actors
+        .compaction_actor
+        .check_manual_compaction(&fixture.event_loop.state)?
+        .unwrap();
+    assert_eq!(first.source_files.len(), 4);
+    fixture.event_loop.launch_compaction(first)?;
+    fixture.drain();
+    let new_low = fixture.file(1, 6, b"a", b"new", 6)?;
+    fixture.persist()?;
+
+    // Act: reintroducing a low range must not repeatedly preempt the cold tail.
+    let next = fixture
+        .event_loop
+        .actors
+        .compaction_actor
+        .check_manual_compaction(&fixture.event_loop.state)?
+        .unwrap();
+
+    // Assert
+    assert!(
+        next.source_files
+            .iter()
+            .any(|name| name == &crate::cloud_layout::file_name(0, 1, 5)),
+        "cold tail was not selected: {:?}",
+        next.source_files
+    );
+    assert!(
+        !next.source_files.contains(&new_low),
+        "cursor wrapped before selecting the cold tail"
+    );
+    let budget = fixture
+        .event_loop
+        .actors
+        .compaction_actor
+        .shared_memory_budget();
+    let retained_before = fixture
+        .event_loop
+        .actors
+        .compaction_actor
+        .cursor_memory_usage();
+    assert!(retained_before > 0);
+    fixture.event_loop.launch_compaction(next)?;
+    fixture.drain();
+    assert_eq!(
+        fixture
+            .event_loop
+            .actors
+            .compaction_actor
+            .cursor_memory_usage(),
+        retained_before,
+        "replacing a cursor must release its previous charge"
+    );
+    let wrapped = fixture
+        .event_loop
+        .actors
+        .compaction_actor
+        .check_manual_compaction(&fixture.event_loop.state)?
+        .unwrap();
+    assert!(
+        wrapped.source_files.contains(&new_low),
+        "cursor did not wrap to the new low range"
+    );
+    fixture.restart(&[
+        (b"a", b"new"),
+        (b"b", b"value"),
+        (b"c", b"value"),
+        (b"d", b"value"),
+        (b"e", b"value"),
+        (b"f", b"value"),
+    ])?;
+    assert_eq!(
+        budget.used(),
+        0,
+        "dropping the actor must release its cursor charge"
+    );
+    Ok(())
+}
+
+#[test]
+fn should_keep_compaction_retryable_when_cursor_admission_exceeds_memory_budget() -> MidgeResult<()>
+{
+    // Arrange: the file is real and eligible, but the cursor cannot be charged.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut fixture = ConcurrentFixture::new(64, false)?;
+    let factory = Arc::new(FsSstFactoryIo::new(
+        crate::io::subdirectory(Arc::clone(&fixture.event_loop.state.fs), "sst"),
+        64 * 1024,
+    ));
+    let config = crate::compaction::LeveledCompactionConfig {
+        l1_target_size: 1,
+        ..Default::default()
+    };
+    let mut actor = crate::runtime::actors::CompactionActor::new_with_config(factory, config);
+    actor.set_execution_limits(128, 64);
+    fixture.event_loop.actors.compaction_actor = actor;
+    let source = fixture.file(1, 1, b"a", b"value", 1)?;
+    fixture.persist()?;
+    let first = fixture
+        .event_loop
+        .actors
+        .compaction_actor
+        .check_manual_compaction(&fixture.event_loop.state)?
+        .unwrap();
+
+    // Act
+    let result = fixture.event_loop.launch_compaction(first);
+
+    // Assert: failed admission retains both authority and the prior cursor.
+    assert!(
+        matches!(result, Err(MidgeError::ResourceLimit(message)) if message.contains("compaction selection cursor"))
+    );
+    assert_eq!(fixture.event_loop.actors.compaction_actor.active_count(), 0);
+    let retry = fixture
+        .event_loop
+        .actors
+        .compaction_actor
+        .check_manual_compaction(&fixture.event_loop.state)?
+        .unwrap();
+    assert_eq!(retry.source_files, vec![source]);
+    fixture.assert_rows(&[(b"a", b"value")])?;
+    fixture.restart(&[(b"a", b"value")])?;
+    Ok(())
+}
+
 #[test]
 fn should_preserve_l0_level_order_when_an_overlapping_job_is_owned() -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
@@ -521,11 +675,29 @@ fn should_retain_oversized_input_while_sibling_job_uses_the_shared_memory_pool()
         .actors
         .compaction_actor
         .shared_memory_usage();
-    assert_eq!(used, 0);
+    let budget = fixture
+        .event_loop
+        .actors
+        .compaction_actor
+        .shared_memory_budget();
+    assert_eq!(
+        used,
+        fixture
+            .event_loop
+            .actors
+            .compaction_actor
+            .cursor_memory_usage(),
+        "all remaining reservations belong to retained scheduling cursors"
+    );
     assert!(peak > 0 && peak <= 512 * 1024);
     fail::remove("midge::compaction::before_compute");
     drop(held);
     fixture.restart(&[(b"a", &large_value), (b"z", b"small")])?;
+    assert_eq!(
+        budget.used(),
+        0,
+        "dropping the actor must release retained cursors"
+    );
     scenario.teardown();
     Ok(())
 }

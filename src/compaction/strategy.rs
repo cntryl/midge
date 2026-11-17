@@ -235,6 +235,14 @@ pub(crate) struct DebtScore {
     target: u64,
 }
 
+pub(crate) type CompactionCursors = std::collections::HashMap<(u32, u32), SelectionCursor>;
+
+pub(crate) struct SelectionCursor {
+    pub(crate) key: Vec<u8>,
+    pub(crate) name: String,
+    pub(crate) reservation: crate::common::resource_budget::ResourceReservation,
+}
+
 impl DebtScore {
     pub(crate) fn compare(self, other: Self) -> std::cmp::Ordering {
         match (self.target == 0, other.target == 0) {
@@ -315,14 +323,21 @@ impl Compactor {
         files: &[FileMeta],
         cf_id: u32,
     ) -> MidgeResult<Option<CompactionPlan>> {
-        self.pick_available_inner_compaction(files, cf_id, |_, _| true, |_| true)
-            .map(|candidate| candidate.map(|(plan, _)| plan))
+        self.pick_available_inner_compaction(
+            files,
+            cf_id,
+            &CompactionCursors::new(),
+            |_, _| true,
+            |_| true,
+        )
+        .map(|candidate| candidate.map(|(plan, _)| plan))
     }
 
     pub(crate) fn pick_available_inner_compaction(
         &self,
         files: &[FileMeta],
         cf_id: u32,
+        cursors: &CompactionCursors,
         eligible: impl Fn(&FileMeta, u32) -> bool,
         admitted: impl Fn(&CompactionPlan) -> bool,
     ) -> MidgeResult<Option<(CompactionPlan, DebtScore)>> {
@@ -356,7 +371,13 @@ impl Compactor {
         for (level, score) in candidates {
             let source_level = u32::try_from(level).expect("level index fits u32");
             let available = |file: &FileMeta| eligible(file, source_level + 1);
-            if let Some(plan) = self.plan_inner_level_filtered(&levels, cf_id, level, &available)? {
+            if let Some(plan) = self.plan_inner_level_filtered(
+                &levels,
+                cf_id,
+                level,
+                cursors.get(&(cf_id, source_level)),
+                &available,
+            )? {
                 if admitted(&plan) {
                     return Ok(Some((plan, score)));
                 }
@@ -557,6 +578,7 @@ impl Compactor {
         levels: &[Vec<&FileMeta>],
         cf_id: u32,
         level: usize,
+        cursor: Option<&SelectionCursor>,
         eligible: &dyn Fn(&FileMeta) -> bool,
     ) -> MidgeResult<Option<CompactionPlan>> {
         if levels[level].is_empty() {
@@ -574,9 +596,32 @@ impl Compactor {
         });
         // Keep a contiguous available component. Combining both sides of an
         // active publication range would reserve a conflicting output span.
+        let start = cursor.map_or(0, |cursor| {
+            debug_assert!(cursor.reservation.bytes() >= cursor.key.len() + cursor.name.len());
+            source_files.partition_point(|file| {
+                (
+                    file.smallest_key.as_deref().unwrap_or_default(),
+                    file.name.as_str(),
+                ) <= (cursor.key.as_slice(), cursor.name.as_str())
+            })
+        });
+        let selected = source_files[start..]
+            .iter()
+            .position(|file| eligible(file))
+            .map(|offset| (start + offset, source_files.len()))
+            .or_else(|| {
+                source_files[..start]
+                    .iter()
+                    .position(|file| eligible(file))
+                    .map(|index| (index, start))
+            });
+        let Some((first, end)) = selected else {
+            return Ok(None);
+        };
         source_files = source_files
             .into_iter()
-            .skip_while(|file| !eligible(file))
+            .skip(first)
+            .take(end - first)
             .take_while(|file| eligible(file))
             .collect();
         source_files.truncate(self.config.l0_file_count_threshold.max(1));

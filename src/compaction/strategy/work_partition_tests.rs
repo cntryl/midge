@@ -67,7 +67,13 @@ fn should_choose_highest_debt_ratio_when_multiple_inner_levels_are_overfull() {
 
     // Act
     let (plan, _) = compactor
-        .pick_available_inner_compaction(&files, 0, |_, _| true, |_| true)
+        .pick_available_inner_compaction(
+            &files,
+            0,
+            &CompactionCursors::new(),
+            |_, _| true,
+            |_| true,
+        )
         .unwrap()
         .unwrap();
 
@@ -87,7 +93,13 @@ fn should_try_next_debt_ratio_when_highest_level_is_unavailable() {
 
     // Act
     let (plan, _) = compactor
-        .pick_available_inner_compaction(&files, 0, |_, _| true, |plan| plan.source_level != 1)
+        .pick_available_inner_compaction(
+            &files,
+            0,
+            &CompactionCursors::new(),
+            |_, _| true,
+            |plan| plan.source_level != 1,
+        )
         .unwrap()
         .unwrap();
 
@@ -109,7 +121,13 @@ fn should_break_zero_target_debt_ties_by_deeper_level() {
 
     // Act
     let (plan, _) = compactor
-        .pick_available_inner_compaction(&files, 0, |_, _| true, |_| true)
+        .pick_available_inner_compaction(
+            &files,
+            0,
+            &CompactionCursors::new(),
+            |_, _| true,
+            |_| true,
+        )
         .unwrap()
         .unwrap();
 
