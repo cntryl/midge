@@ -150,11 +150,8 @@ mod tests {
 
         // Assert
         assert_eq!(node.children.len(), 26);
-        for i in 0..26 {
-            assert_eq!(
-                node.children[i].first_byte,
-                b"abcdefghijklmnopqrstuvwxyz"[i]
-            );
+        for (child, expected) in node.children.iter().zip(b"abcdefghijklmnopqrstuvwxyz") {
+            assert_eq!(child.first_byte, *expected);
         }
     }
 

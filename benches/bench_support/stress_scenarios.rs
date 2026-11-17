@@ -2381,7 +2381,7 @@ fn append_resource_point(path: &Path, point: ResourcePoint) {
 
 fn current_rss_bytes() -> Option<u64> {
     let pid = sysinfo::get_current_pid().ok()?;
-    let mut system = sysinfo::System::new();
+    let mut system = sysinfo::System::new().ok()?;
     system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
     system.process(pid).map(sysinfo::Process::memory)
 }

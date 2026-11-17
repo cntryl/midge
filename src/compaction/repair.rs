@@ -28,7 +28,11 @@ impl RepairScratch {
                 "overlap repair cannot identify local scratch capacity".into(),
             )
         })?;
-        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let disks = sysinfo::Disks::new_with_refreshed_list().map_err(|error| {
+            MidgeError::ResourceLimit(format!(
+                "overlap repair cannot inspect local disks: {error}"
+            ))
+        })?;
         let available = disks
             .iter()
             .filter_map(|disk| {
@@ -237,7 +241,7 @@ mod tests {
         let root = fs.host_addressing().expect("real host identity").root;
         let retained = directory.path().join("retained");
         std::fs::write(&retained, b"actual retained filesystem bytes")?;
-        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let disks = sysinfo::Disks::new_with_refreshed_list().expect("disk information");
         let native_matches: Vec<_> = disks
             .iter()
             .filter_map(|disk| {

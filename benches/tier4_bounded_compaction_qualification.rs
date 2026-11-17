@@ -109,8 +109,10 @@ impl RssSampler {
         let peak = Arc::new(AtomicU64::new(0));
         let worker_stop = Arc::clone(&stop);
         let worker_peak = Arc::clone(&peak);
+        let mut system = System::new().map_err(|error| {
+            MidgeError::Internal(format!("initialize system information: {error}"))
+        })?;
         let handle = thread::spawn(move || {
-            let mut system = System::new();
             while !worker_stop.load(Ordering::Acquire) {
                 system.refresh_processes_specifics(
                     ProcessesToUpdate::Some(&[pid]),
@@ -495,9 +497,9 @@ fn run_worker(base_records: u64, path: &Path, partial_path: &Path) -> MidgeResul
 
 fn available_disk_bytes(path: &Path) -> MidgeResult<u64> {
     let canonical_path = std::fs::canonicalize(path)?;
-    let disks = Disks::new_with_refreshed_list();
+    let disks = Disks::new_with_refreshed_list()
+        .map_err(|error| MidgeError::Internal(format!("inspect disks: {error}")))?;
     disks
-        .list()
         .iter()
         .filter(|disk| canonical_path.starts_with(disk.mount_point()))
         .max_by_key(|disk| disk.mount_point().components().count())
@@ -652,7 +654,8 @@ fn run_parent(base_records: u64, path: &Path, output: &Path) -> MidgeResult<()> 
     }
     reopened.shutdown(Duration::from_secs(30))?;
 
-    let mut system = System::new_all();
+    let mut system = System::new_all()
+        .map_err(|error| MidgeError::Internal(format!("initialize system information: {error}")))?;
     system.refresh_memory();
     let evidence = QualificationEvidence {
         schema_version: 1,
@@ -660,7 +663,7 @@ fn run_parent(base_records: u64, path: &Path, output: &Path) -> MidgeResult<()> 
         command: std::env::args().collect::<Vec<_>>().join(" "),
         database_path: path.display().to_string(),
         hardware_model: command_value("sysctl", &["-n", "hw.model"])
-            .or_else(System::name)
+            .or_else(|| System::name().ok())
             .unwrap_or_else(|| "unknown".to_string()),
         cpu_model: system
             .cpus()
