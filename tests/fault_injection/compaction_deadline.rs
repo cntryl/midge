@@ -308,9 +308,11 @@ fn should_recover_exact_acknowledged_rows_when_manual_compaction_finishes_within
 }
 
 const OVERLAP_CRASH_ENV: &str = "MIDGE_OVERLAP_PUBLICATION_CRASH_ROOT";
+const OVERLAP_CRASH_PHASE_ENV: &str = "MIDGE_OVERLAP_PUBLICATION_CRASH_PHASE";
 const OVERLAP_CRASH_CHILD: &str =
     "compaction_deadline::should_hold_overlapping_publications_for_crash_parent";
 const FLUSH_INTENT_HOOK: &str = "midge::flush::after_publication_intent_before_manifest";
+const FLUSH_INSTALLED_HOOK: &str = "midge::flush_worker::before_wal_prune";
 
 fn crash_overlap_options(path: &Path) -> OpenOptions {
     OpenOptions::cloud_simulated(path, "compaction-deadline", "overlap-crash")
@@ -331,6 +333,7 @@ fn should_hold_overlapping_publications_for_crash_parent() {
         return;
     };
     let root = std::path::PathBuf::from(root);
+    let after_install = std::env::var(OVERLAP_CRASH_PHASE_ENV).unwrap() == "installed";
     let engine = Arc::new(Engine::open(crash_overlap_options(&root)).unwrap());
     acknowledge_flushed_batches(&engine).unwrap();
     let scenario = fail::FailScenario::setup();
@@ -362,7 +365,12 @@ fn should_hold_overlapping_publications_for_crash_parent() {
     write.commit(WriteOptions::cloud_strict()).unwrap();
     let marker = root.join("overlapping-intents");
     let intent_root = root.clone();
-    fail::cfg_callback(FLUSH_INTENT_HOOK, move || {
+    let hook = if after_install {
+        FLUSH_INSTALLED_HOOK
+    } else {
+        FLUSH_INTENT_HOOK
+    };
+    fail::cfg_callback(hook, move || {
         use cntryl_midge::__internal::io::{Fs, RealFs};
         use cntryl_midge::__internal::recovery::{IntentLogEntry, IntentPersistence};
         let fs: Arc<dyn Fs> = Arc::new(RealFs::new(&intent_root).unwrap());
@@ -385,11 +393,12 @@ fn should_hold_overlapping_publications_for_crash_parent() {
             !outputs.is_empty(),
             "missing physical compaction intent: {intents:?}"
         );
-        assert!(
-            intents
-                .iter()
-                .any(|intent| matches!(intent, IntentLogEntry::FlushPublish { .. })),
-            "missing flush intent: {intents:?}"
+        let has_flush_intent = intents
+            .iter()
+            .any(|intent| matches!(intent, IntentLogEntry::FlushPublish { .. }));
+        assert_eq!(
+            has_flush_intent, !after_install,
+            "unexpected flush intent state: {intents:?}"
         );
         let temporary_marker = marker.with_extension("tmp");
         std::fs::write(&temporary_marker, serde_json::to_vec(&outputs).unwrap()).unwrap();
@@ -400,7 +409,12 @@ fn should_hold_overlapping_publications_for_crash_parent() {
     })
     .unwrap();
     engine.flush_cf(&cf).unwrap();
-    // Assert: the parent must kill the child before the held flush returns.
+    if after_install {
+        loop {
+            std::thread::park();
+        }
+    }
+    // Assert: the parent must kill the child at the selected boundary.
     drop(scenario);
     panic!("expected parent to terminate child at overlapping intents");
 }
@@ -408,11 +422,28 @@ fn should_hold_overlapping_publications_for_crash_parent() {
 #[test]
 fn should_recover_acknowledged_rows_when_killed_with_overlapping_publications() {
     // Arrange
+    let phase = "intent";
+    // Act
+    assert_overlap_crash_recovery(phase);
+    // Assert: the helper checks recovery and authoritative output.
+}
+
+#[test]
+fn should_recover_acknowledged_flush_when_killed_after_install_with_compaction_held() {
+    // Arrange
+    let phase = "installed";
+    // Act
+    assert_overlap_crash_recovery(phase);
+    // Assert: the helper checks recovery and authoritative output.
+}
+
+fn assert_overlap_crash_recovery(phase: &str) {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", OVERLAP_CRASH_CHILD, "--nocapture"])
         .env(OVERLAP_CRASH_ENV, root)
+        .env(OVERLAP_CRASH_PHASE_ENV, phase)
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
