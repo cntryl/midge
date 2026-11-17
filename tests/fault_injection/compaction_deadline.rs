@@ -306,3 +306,173 @@ fn should_recover_exact_acknowledged_rows_when_manual_compaction_finishes_within
     assert_exact_rows(recovered_rows, &acknowledged);
     reopened_shutdown.expect("shutdown healthy recovered engine");
 }
+
+const OVERLAP_CRASH_ENV: &str = "MIDGE_OVERLAP_PUBLICATION_CRASH_ROOT";
+const OVERLAP_CRASH_CHILD: &str =
+    "compaction_deadline::should_hold_overlapping_publications_for_crash_parent";
+const FLUSH_INTENT_HOOK: &str = "midge::flush::after_publication_intent_before_manifest";
+
+fn crash_overlap_options(path: &Path) -> OpenOptions {
+    OpenOptions::cloud_simulated(path, "compaction-deadline", "overlap-crash")
+        .background_compaction(false)
+        .recovery_policy(RecoveryPolicy::Strict)
+        .lease_ttl(Duration::from_secs(18))
+        .lease_clock_skew_tolerance(Duration::ZERO)
+        .storage_io_timeout(Duration::from_secs(4))
+        .runtime_response_timeout(Duration::from_secs(30))
+        .build()
+        .expect("build overlap crash options")
+}
+
+#[test]
+fn should_hold_overlapping_publications_for_crash_parent() {
+    // Arrange
+    let Some(root) = std::env::var_os(OVERLAP_CRASH_ENV) else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let engine = Arc::new(Engine::open(crash_overlap_options(&root)).unwrap());
+    acknowledge_flushed_batches(&engine).unwrap();
+    let scenario = fail::FailScenario::setup();
+    let (entered, received) = mpsc::sync_channel(1);
+    fail::cfg_callback(OUTPUT_PROVED, move || {
+        let _ = entered.try_send(());
+        loop {
+            std::thread::park();
+        }
+    })
+    .unwrap();
+    // Act
+    let compact_engine = Arc::clone(&engine);
+    let _compact = std::thread::spawn(move || compact_engine.compact_all());
+    received
+        .recv_timeout(OBSERVATION_WAIT)
+        .expect("compaction output durable");
+    let cf = engine.get_column_family("default").unwrap();
+    let mut write = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .unwrap();
+    write
+        .put(
+            b"overlap-crash-row".to_vec(),
+            b"acknowledged".to_vec(),
+            None,
+        )
+        .unwrap();
+    write.commit(WriteOptions::cloud_strict()).unwrap();
+    let marker = root.join("overlapping-intents");
+    let intent_root = root.clone();
+    fail::cfg_callback(FLUSH_INTENT_HOOK, move || {
+        use cntryl_midge::__internal::io::{Fs, RealFs};
+        use cntryl_midge::__internal::recovery::{IntentLogEntry, IntentPersistence};
+        let fs: Arc<dyn Fs> = Arc::new(RealFs::new(&intent_root).unwrap());
+        let intents = IntentPersistence::load_with_fs_and_policy(&fs, RecoveryPolicy::Strict)
+            .expect("read both durable publication intents");
+        let outputs: Vec<_> = intents
+            .iter()
+            .filter_map(|intent| match intent {
+                IntentLogEntry::CompactionPublish { removed, added, .. }
+                    if !removed.is_empty() && !added.is_empty() =>
+                {
+                    Some(added)
+                }
+                _ => None,
+            })
+            .flatten()
+            .map(|file| file.name.clone())
+            .collect();
+        assert!(
+            !outputs.is_empty(),
+            "missing physical compaction intent: {intents:?}"
+        );
+        assert!(
+            intents
+                .iter()
+                .any(|intent| matches!(intent, IntentLogEntry::FlushPublish { .. })),
+            "missing flush intent: {intents:?}"
+        );
+        let temporary_marker = marker.with_extension("tmp");
+        std::fs::write(&temporary_marker, serde_json::to_vec(&outputs).unwrap()).unwrap();
+        std::fs::rename(temporary_marker, &marker).unwrap();
+        loop {
+            std::thread::park();
+        }
+    })
+    .unwrap();
+    engine.flush_cf(&cf).unwrap();
+    // Assert: the parent must kill the child before the held flush returns.
+    drop(scenario);
+    panic!("expected parent to terminate child at overlapping intents");
+}
+
+#[test]
+fn should_recover_acknowledged_rows_when_killed_with_overlapping_publications() {
+    // Arrange
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", OVERLAP_CRASH_CHILD, "--nocapture"])
+        .env(OVERLAP_CRASH_ENV, root)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !root.join("overlapping-intents").exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "child exited before both publication boundaries"
+        );
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("overlapping publication boundaries were not reached");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Act: terminate the real process while both publication operations are held.
+    child.kill().unwrap();
+    assert!(!child.wait().unwrap().success());
+    let unpublished_outputs: Vec<String> =
+        serde_json::from_slice(&std::fs::read(root.join("overlapping-intents")).unwrap()).unwrap();
+    crate::common::crash::clear_crashed_process_acquisition_lock(root);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut recovered = loop {
+        match Engine::open(crash_overlap_options(root)) {
+            Ok(engine) => break engine,
+            Err(MidgeError::LeaseHeld(_)) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("reopen after overlapping publication crash: {error}"),
+        }
+    };
+    // Assert: every cloud-acknowledged value remains visible after recovery.
+    let cf = recovered.get_column_family("default").unwrap();
+    let authoritative_names = manifest_names(&recovered).unwrap();
+    assert!(
+        unpublished_outputs
+            .iter()
+            .all(|name| !authoritative_names.contains(name)),
+        "unselected compaction outputs gained authority after recovery"
+    );
+    let read = recovered
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .unwrap();
+    for batch in 0..BATCHES {
+        for index in 0..RECORDS_PER_BATCH {
+            let key = format!("deadline:{batch:02}:{index:03}");
+            let value = format!("strict-acknowledged-value:{batch:02}:{index:03}");
+            assert_eq!(read.get(key.as_bytes()).unwrap(), Some(Bytes::from(value)));
+        }
+    }
+    assert_eq!(
+        read.get(OVERLAP_ANCHOR).unwrap(),
+        Some(Bytes::copy_from_slice(&(BATCHES - 1).to_be_bytes()))
+    );
+    assert_eq!(
+        read.get(b"overlap-crash-row").unwrap(),
+        Some(Bytes::from_static(b"acknowledged"))
+    );
+    let rows: Vec<_> = read.scan(&Query::new()).unwrap().try_collect().unwrap();
+    assert_eq!(rows.len(), BATCHES * RECORDS_PER_BATCH + 2);
+    drop(read);
+    recovered.shutdown(CLEANUP_WAIT).unwrap();
+}
