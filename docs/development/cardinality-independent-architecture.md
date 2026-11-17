@@ -107,12 +107,14 @@ generation. A transaction that consumes the last reserved generation may
 complete, but the next transaction is rejected with `WriteStall` before WAL
 admission. Disabling background compaction does not disable this ceiling.
 
-The single worker chooses work in this order:
+The scheduler chooses work in this order:
 
 1. The globally deepest complete-bound L1+ overlap component, including an
    underfull level.
 2. Critical L0 debt, round-robin across affected column families.
-3. The globally deepest overfull inner level.
+3. The available overfull inner level with the highest ratio of bytes to its
+   target. Equal ratios choose the deeper level within a family, and use the
+   existing round-robin family order across families.
 4. Ordinary soft-L0 work.
 
 For a logical interval at level `i`, assign rank equal to the number of levels
@@ -122,7 +124,9 @@ A successful repair removes one defect component at the same level; its output
 may change the rank sum, but the first coordinate decreases. Ordinary compaction
 does not introduce an L1+ defect, and advances or removes at least one source
 interval, decreasing the second coordinate when the first is unchanged. This
-argument assumes admitted resources and successful storage operations; failures
+argument does not require deepest-first selection: with no admitted writes,
+each successful ordinary compaction decreases the rank sum whichever eligible
+level has the highest ratio. It assumes admitted resources and successful storage operations; failures
 before publication retain the old authority and defer retry until the next
 30-second maintenance check. An ambiguous durable intent fences compaction until
 recovery resolves the publication boundary. `compact_all()` returns success only
