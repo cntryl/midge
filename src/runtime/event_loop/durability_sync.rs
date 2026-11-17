@@ -367,6 +367,12 @@ impl EventLoop {
         // remote DDL decision), leaving those writes to dispatch in order.
         let _ = self.drain_pending_writes(msg_rx, MAX_DRAIN);
 
+        if self.wal_group_in_flight() && !self.pipeline.wal_transition.is_fenced() {
+            return Err(crate::common::MidgeError::WriteStall(
+                "WAL durability barrier is deferred while WAL work is in flight".into(),
+            ));
+        }
+
         self.sync_current_wal()
     }
 
