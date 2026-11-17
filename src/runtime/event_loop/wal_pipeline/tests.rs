@@ -322,6 +322,69 @@ fn should_preserve_ordered_visibility_when_writer_encoding_is_held() -> MidgeRes
 }
 
 #[test]
+fn should_return_retryable_create_when_drain_starts_strict_group() -> MidgeResult<()> {
+    // Arrange: the create barrier drains a strict write that has not started yet.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldSync::at("midge::wal::before_physical_sync");
+    let write_response = event_loop
+        .routing
+        .router
+        .register(97_810, "drained strict write");
+    let create_response = event_loop.routing.router.register(97_811, "create family");
+    let (sender, receiver) = crossbeam::channel::unbounded();
+    sender
+        .send(write(97_810, &[b"before-create"], true))
+        .unwrap();
+
+    // Act
+    event_loop.process_one(
+        RuntimeMsg::ManifestCreateColumnFamily {
+            request_id: 97_811,
+            name: "after-strict".to_string(),
+        },
+        &receiver,
+    );
+
+    // Assert: a caller can retry without mistaking an in-flight group for corruption.
+    let response = create_response.try_recv().expect("create response");
+    assert!(
+        matches!(
+            response,
+            RuntimeResponse::Error {
+                error: crate::common::MidgeError::WriteStall(_),
+                ..
+            }
+        ),
+        "unexpected create response: {response:?}"
+    );
+    assert!(event_loop
+        .state
+        .manifest
+        .get_column_family_by_name("after-strict")
+        .is_none());
+    held.release.send(()).unwrap();
+    applied_cut(&mut event_loop, &write_response);
+    let retry_response = event_loop
+        .routing
+        .router
+        .register(97_812, "retry create family");
+    event_loop.process_one(
+        RuntimeMsg::ManifestCreateColumnFamily {
+            request_id: 97_812,
+            name: "after-strict".to_string(),
+        },
+        &receiver,
+    );
+    assert!(matches!(
+        retry_response.try_recv(),
+        Ok(RuntimeResponse::ColumnFamilyCreated { .. })
+    ));
+    Ok(())
+}
+
+#[test]
 fn should_drain_in_flight_group_before_rotate_given_pending_group() -> MidgeResult<()> {
     // Arrange
     let _guard = crate::failpoints::test_failpoint_guard();
