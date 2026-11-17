@@ -574,23 +574,26 @@ impl CompactionJobActor {
         self.sst_factory.open(path)
     }
 
-    pub fn check_compaction(
+    pub(super) fn check_compaction(
         &mut self,
         state: &RuntimeState,
+        cursors: &crate::compaction::strategy::CompactionCursors,
     ) -> MidgeResult<Option<crate::compaction::CompactionPlan>> {
-        self.check_compaction_with_mode(state, true)
+        self.check_compaction_with_mode(state, cursors, true)
     }
 
-    pub fn check_manual_compaction(
+    pub(super) fn check_manual_compaction(
         &mut self,
         state: &RuntimeState,
+        cursors: &crate::compaction::strategy::CompactionCursors,
     ) -> MidgeResult<Option<crate::compaction::CompactionPlan>> {
-        self.check_compaction_with_mode(state, false)
+        self.check_compaction_with_mode(state, cursors, false)
     }
 
     fn check_compaction_with_mode(
         &mut self,
         state: &RuntimeState,
+        cursors: &crate::compaction::strategy::CompactionCursors,
         respect_background_enabled: bool,
     ) -> MidgeResult<Option<crate::compaction::CompactionPlan>> {
         // If compaction is disabled via runtime configuration, skip checks
@@ -659,6 +662,7 @@ impl CompactionJobActor {
             let candidate = self.compactor.pick_available_inner_compaction(
                 &state.manifest.files,
                 *cf_id,
+                cursors,
                 |file, target| self.jobs.source_available(file, target),
                 |plan| self.jobs.available(plan, &state.manifest.files),
             )?;

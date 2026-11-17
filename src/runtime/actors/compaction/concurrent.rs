@@ -9,6 +9,47 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+// Charge cursor state as well as its owned key/name bytes to the compaction
+// pool, with an additional allowance for map and allocation overhead.
+const CURSOR_ENTRY_OVERHEAD: usize = 128;
+
+fn cursor_charge(state: &RuntimeState, plan: &CompactionPlan) -> MidgeResult<Option<usize>> {
+    Ok(
+        if plan.source_level > 0
+            && matches!(
+                plan.purpose,
+                crate::compaction::strategy::CompactionPurpose::Merge
+            )
+        {
+            let file = plan
+                .source_files
+                .last()
+                .and_then(|name| state.manifest.files.iter().find(|file| file.name == *name))
+                .ok_or_else(|| {
+                    MidgeError::Corruption("compaction cursor source is missing".into())
+                })?;
+            let key = file.smallest_key.as_ref().ok_or_else(|| {
+                MidgeError::Corruption("compaction cursor source has no lower bound".into())
+            })?;
+            Some(
+                key.len()
+                    .checked_add(file.name.len())
+                    .and_then(|size| {
+                        size.checked_add(
+                            std::mem::size_of::<crate::compaction::strategy::SelectionCursor>()
+                                + CURSOR_ENTRY_OVERHEAD,
+                        )
+                    })
+                    .ok_or_else(|| {
+                        MidgeError::ResourceLimit("compaction cursor size overflow".into())
+                    })?,
+            )
+        } else {
+            None
+        },
+    )
+}
+
 /// Each selected operation owns all its mutable compute/publication state.
 /// Shared admission prevents conflicting jobs from occupying different slots.
 pub struct CompactionActor {
@@ -20,6 +61,7 @@ pub struct CompactionActor {
     global_memory_limit: usize,
     target_sst_size: usize,
     last_scheduled_cf: Option<u32>,
+    cursors: crate::compaction::strategy::CompactionCursors,
     hybrid_memory_attached: bool,
 }
 
@@ -53,6 +95,7 @@ impl CompactionActor {
             jobs,
             pool: None,
             last_scheduled_cf: None,
+            cursors: crate::compaction::strategy::CompactionCursors::new(),
             hybrid_memory_attached: false,
         }
     }
@@ -115,6 +158,7 @@ impl CompactionActor {
         }
         self.target_sst_size = target.max(1);
         self.global_memory_limit = memory;
+        self.cursors = crate::compaction::strategy::CompactionCursors::new();
         self.memory = ResourceBudget::new(memory);
         self.hybrid_memory_attached = false;
         let quota = memory / self.slots.len();
@@ -132,6 +176,17 @@ impl CompactionActor {
     #[cfg(all(test, feature = "failpoints"))]
     pub(in crate::runtime) fn shared_memory_usage(&self) -> (usize, usize) {
         (self.memory.used(), self.memory.peak())
+    }
+    #[cfg(all(test, feature = "failpoints"))]
+    pub(in crate::runtime) fn cursor_memory_usage(&self) -> usize {
+        self.cursors
+            .values()
+            .map(|cursor| cursor.reservation.bytes())
+            .sum()
+    }
+    #[cfg(all(test, feature = "failpoints"))]
+    pub(in crate::runtime) fn shared_memory_budget(&self) -> ResourceBudget {
+        self.memory.clone()
     }
     pub(crate) fn target_sst_size(&self) -> usize {
         self.target_sst_size
@@ -170,6 +225,12 @@ impl CompactionActor {
         state: &RuntimeState,
         background: bool,
     ) -> MidgeResult<Option<CompactionPlan>> {
+        let cursor_count = self.cursors.len();
+        self.cursors
+            .retain(|(cf_id, _), _| state.get_cf(*cf_id).is_some());
+        if self.cursors.len() != cursor_count {
+            self.cursors.shrink_to_fit();
+        }
         let Some(index) = self.slots.iter().position(|slot| !slot.compaction_running) else {
             return Ok(None);
         };
@@ -177,9 +238,9 @@ impl CompactionActor {
         let slot = &mut self.slots[index];
         slot.last_scheduled_cf = self.last_scheduled_cf;
         let picked = if background {
-            slot.check_compaction(state)?
+            slot.check_compaction(state, &self.cursors)?
         } else {
-            slot.check_manual_compaction(state)?
+            slot.check_manual_compaction(state, &self.cursors)?
         };
         if let Some(plan) = &picked {
             self.last_scheduled_cf = Some(plan.cf_id);
@@ -208,6 +269,7 @@ impl CompactionActor {
         self.selected = index;
         if !self.hybrid_memory_attached {
             if let Some(parent) = storage.and_then(|storage| storage.maintenance_memory()) {
+                self.cursors = crate::compaction::strategy::CompactionCursors::new();
                 self.memory = parent.child(self.global_memory_limit);
                 self.hybrid_memory_attached = true;
             }
@@ -221,7 +283,65 @@ impl CompactionActor {
             }
             self.slots[index].worker_pool.clone_from(&self.pool);
         }
-        self.slots[index].run_compaction(state, plan, storage, tx, deadline)
+        let cursor_charge = cursor_charge(state, plan)?;
+        let cursor_id = (plan.cf_id, plan.source_level);
+        let mut new_reservation = None;
+        let mut old_charge = None;
+        if let Some(charge) = cursor_charge {
+            if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
+                let previous = cursor.reservation.bytes();
+                cursor
+                    .reservation
+                    .resize(previous.max(charge), "compaction selection cursor")?;
+                old_charge = Some(previous);
+            } else {
+                new_reservation = Some(self.memory.reserve(charge, "compaction selection cursor")?);
+            }
+        }
+        let result = self.slots[index].run_compaction(state, plan, storage, tx, deadline);
+        if let Some(charge) = cursor_charge {
+            if result.is_ok() {
+                // Admission only marks input files in the manifest; publication happens later.
+                let file = state
+                    .manifest
+                    .files
+                    .iter()
+                    .find(|file| Some(&file.name) == plan.source_files.last())
+                    .expect("admitted compaction retains its manifest inputs until publication");
+                let key = file
+                    .smallest_key
+                    .as_ref()
+                    .expect("cursor lower bound was checked before admission");
+                if let Some(cursor) = self.cursors.get_mut(&cursor_id) {
+                    cursor.key = Vec::new();
+                    cursor.name = String::new();
+                    cursor.key.clone_from(key);
+                    cursor.name.clone_from(&file.name);
+                    cursor
+                        .reservation
+                        .resize(charge, "compaction selection cursor")
+                        .expect("shrinking cursor reservation succeeds");
+                } else {
+                    self.cursors.insert(
+                        cursor_id,
+                        crate::compaction::strategy::SelectionCursor {
+                            key: key.clone(),
+                            name: file.name.clone(),
+                            reservation: new_reservation
+                                .expect("new cursor reservation was admitted"),
+                        },
+                    );
+                }
+            } else if let Some(previous) = old_charge {
+                self.cursors
+                    .get_mut(&cursor_id)
+                    .expect("existing cursor remains present")
+                    .reservation
+                    .resize(previous, "compaction selection cursor")
+                    .expect("rolling back cursor growth succeeds");
+            }
+        }
+        result
     }
 
     pub(crate) fn select_job(&mut self, id: u64) -> bool {
