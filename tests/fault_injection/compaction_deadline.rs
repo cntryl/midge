@@ -326,6 +326,7 @@ fn crash_overlap_options(path: &Path) -> OpenOptions {
 
 #[test]
 fn should_hold_overlapping_publications_for_crash_parent() {
+    // Arrange
     let Some(root) = std::env::var_os(OVERLAP_CRASH_ENV) else {
         return;
     };
@@ -341,6 +342,7 @@ fn should_hold_overlapping_publications_for_crash_parent() {
         }
     })
     .unwrap();
+    // Act
     let compact_engine = Arc::clone(&engine);
     let _compact = std::thread::spawn(move || compact_engine.compact_all());
     received
@@ -398,6 +400,7 @@ fn should_hold_overlapping_publications_for_crash_parent() {
     })
     .unwrap();
     engine.flush_cf(&cf).unwrap();
+    // Assert: the parent must kill the child before the held flush returns.
     drop(scenario);
     panic!("expected parent to terminate child at overlapping intents");
 }
