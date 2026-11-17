@@ -251,9 +251,11 @@ fn run_compaction_backpressure_case(
     for latency in measured.commit_latencies.iter().copied() {
         ctx.record_latency(latency);
     }
-    ctx.parameter(
+    ctx.record_observation(
         "end_to_end_commit_latency_sample_count",
-        measured.transactions,
+        counter_as_f64(measured.transactions),
+        ObservationUnit::Count,
+        ObservationDirection::Informational,
     );
     let slowdown_ns = metrics_after
         .write_slowdown_ns_total
