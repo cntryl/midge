@@ -60,7 +60,11 @@ fn value(id: u64, generation: u64) -> [u8; VALUE_BYTES] {
 }
 
 fn shuffled_ids() -> Vec<u32> {
-    let mut ids: Vec<u32> = (0..BASE_KEYS)
+    shuffled_id_range(BASE_KEYS)
+}
+
+fn shuffled_id_range(count: usize) -> Vec<u32> {
+    let mut ids: Vec<u32> = (0..count)
         .map(|id| u32::try_from(id).expect("benchmark key id fits in u32"))
         .collect();
     let mut rng = rand::rngs::StdRng::seed_from_u64(SEED);
@@ -447,6 +451,366 @@ fn run(ctx: &mut StressContext) {
 )]
 fn tier4_compaction_grandparent_cuts(ctx: &mut StressContext) {
     run(ctx);
+}
+
+/// Three-level fixture: small level targets so L1, L2 and L3 are all populated.
+///
+/// The SST size stays at the production default (128 MiB for the default
+/// goal); it is only tunable through the `failpoints` feature. The levels are
+/// therefore scaled instead: L1 64 MiB, L2 256 MiB, L3 1 GiB. The base dataset
+/// fills L1 and L2 and spills the remainder into L3.
+mod three_level {
+    use super::{
+        compact_to_stable_layout, describe_layout, key, u64_as_f64, write_keys, ColumnFamilyHandle,
+        Engine, Instant, StressContext, TransactionMode, KEY_BYTES, SEED, VALUE_BYTES, WRITE_BATCH,
+    };
+    use cntryl_midge::CompactionLevelConfig;
+
+    pub const BASE_KEYS_3L: usize = 3_500_000;
+    pub const ROUNDS: usize = 8;
+    pub const KEYS_PER_ROUND: usize = 300_000;
+    pub const TOP_UP_KEYS: usize = 150_000;
+    pub const READ_SAMPLE_KEYS: usize = 20_000;
+    pub const L1_TARGET_BYTES: u64 = 64 * 1024 * 1024;
+    pub const LEVEL_MULTIPLIER: u64 = 4;
+    pub const MAX_LEVELS: usize = 7;
+    /// 1.5x the production-default 128 MiB SST. Any two adjacent L3 files exceed
+    /// it, so an output may overlap at most one full grandparent file; a
+    /// 10x-file-size limit would exceed all of L3 and never fire.
+    pub const POLICY_ON_OVERLAP_BYTES: u64 = 192 * 1024 * 1024;
+
+    pub fn levels(max_grandparent_overlap_bytes: u64) -> CompactionLevelConfig {
+        CompactionLevelConfig {
+            l1_target_bytes: L1_TARGET_BYTES,
+            level_multiplier: LEVEL_MULTIPLIER,
+            max_levels: MAX_LEVELS,
+            max_grandparent_overlap_bytes,
+        }
+    }
+
+    /// Files and bytes at `level`; zero when the level is empty.
+    pub fn level_shape(engine: &Engine, level: u32) -> (usize, u64) {
+        engine
+            .metrics()
+            .get_storage_layout()
+            .expect("read benchmark storage layout")
+            .levels
+            .iter()
+            .filter(|entry| entry.level == level)
+            .fold((0, 0), |(files, bytes), entry| {
+                (files + entry.file_count, bytes + entry.total_bytes)
+            })
+    }
+
+    pub fn assert_three_inner_levels(engine: &Engine) {
+        for level in 1..=3 {
+            let (files, _) = level_shape(engine, level);
+            assert!(
+                files >= 1,
+                "workload invalid: L{level} holds no SSTs after setup: {}",
+                describe_layout(engine)
+            );
+        }
+    }
+
+    pub struct Measured {
+        pub elapsed: std::time::Duration,
+        pub output_bytes: u64,
+        pub compactions_run: u64,
+        pub final_sst_count: usize,
+    }
+
+    pub fn measure_rounds(engine: &Engine, cf: &ColumnFamilyHandle, ids: &[u32]) -> Measured {
+        let before = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("read metrics before measured rounds");
+        let started = Instant::now();
+        for round in 0..ROUNDS {
+            let slice = &ids[round * KEYS_PER_ROUND..(round + 1) * KEYS_PER_ROUND];
+            write_keys(
+                engine,
+                cf.id(),
+                slice,
+                1 + u64::try_from(round).expect("round fits in u64"),
+            );
+            engine.flush_cf(cf).expect("flush measured round");
+            compact_to_stable_layout(engine);
+        }
+
+        let elapsed = started.elapsed();
+        let after = engine
+            .metrics()
+            .get_runtime_metrics()
+            .expect("read metrics after measured rounds");
+        Measured {
+            elapsed,
+            output_bytes: after
+                .compaction_bytes_rewritten
+                .saturating_sub(before.compaction_bytes_rewritten),
+            compactions_run: after.compactions_run.saturating_sub(before.compactions_run),
+            final_sst_count: after.sst_count,
+        }
+    }
+
+    /// Average SSTs consulted per point read over a fixed key sample.
+    pub fn read_ssts_per_point_read(engine: &Engine, cf: &ColumnFamilyHandle, ids: &[u32]) -> f64 {
+        let before = engine
+            .metrics()
+            .get_read_amp_metrics()
+            .expect("read amplification metrics before reads");
+        let transaction = engine
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin read-only transaction");
+        for id in ids.iter().step_by(ids.len() / READ_SAMPLE_KEYS).copied() {
+            let found = transaction
+                .get(&key(u64::from(id)))
+                .expect("point read benchmark key");
+            assert!(found.is_some(), "benchmark key {id} must exist");
+        }
+        drop(transaction);
+        let after = engine
+            .metrics()
+            .get_read_amp_metrics()
+            .expect("read amplification metrics after reads");
+        let reads = after.reads_total.saturating_sub(before.reads_total);
+        assert!(reads > 0, "read amplification metrics recorded no reads");
+        u64_as_f64(
+            after
+                .ssts_touched_total
+                .saturating_sub(before.ssts_touched_total),
+        ) / u64_as_f64(reads)
+    }
+
+    pub fn record_parameters(ctx: &mut StressContext, overlap_limit: u64) {
+        ctx.parameter("storage", "local");
+        ctx.parameter("seed", SEED);
+        ctx.parameter("base_keys", BASE_KEYS_3L);
+        ctx.parameter("measured_rounds", ROUNDS);
+        ctx.parameter("updated_keys_per_round", KEYS_PER_ROUND);
+        ctx.parameter("key_bytes", KEY_BYTES);
+        ctx.parameter("value_bytes", VALUE_BYTES);
+        ctx.parameter("write_batch_keys", WRITE_BATCH);
+        ctx.parameter("read_sample_keys", READ_SAMPLE_KEYS);
+        ctx.parameter("l1_target_bytes", L1_TARGET_BYTES);
+        ctx.parameter("level_multiplier", LEVEL_MULTIPLIER);
+        ctx.parameter("max_levels", MAX_LEVELS);
+        ctx.parameter("max_grandparent_overlap_bytes", overlap_limit);
+        ctx.parameter(
+            "compaction_during_measurement",
+            "compact_all_after_each_round",
+        );
+        ctx.parameter("compaction_metric", "published compaction output SST bytes");
+        ctx.parameter("flush_bytes_in_compaction_metric", "false");
+    }
+}
+
+fn record_obs(ctx: &mut StressContext, name: &str, value: f64, unit: ObservationUnit) {
+    ctx.record_observation(name, value, unit, ObservationDirection::Informational);
+}
+
+fn record_three_level(
+    ctx: &mut StressContext,
+    engine: &Engine,
+    measured: &three_level::Measured,
+    rolls: (u64, u64),
+    read_ssts_per_read: f64,
+    initial_layout: &str,
+) {
+    let logical_input_bytes = u64::try_from(three_level::ROUNDS * three_level::KEYS_PER_ROUND)
+        .expect("update count fits in u64")
+        .saturating_mul(LOGICAL_BYTES_PER_KEY);
+    ctx.record_external_outcome(
+        "sustained_write_throughput_under_compaction",
+        measured.elapsed,
+        LogicalUnit::new("logical_input_byte"),
+        OperationOutcome::success(logical_input_bytes),
+    );
+    let bytes = ObservationUnit::Bytes;
+    let count = ObservationUnit::Count;
+    record_obs(
+        ctx,
+        "compaction_output_bytes",
+        u64_as_f64(measured.output_bytes),
+        bytes,
+    );
+    record_obs(
+        ctx,
+        "compaction_output_bytes_per_logical_input_byte",
+        u64_as_f64(measured.output_bytes) / u64_as_f64(logical_input_bytes),
+        ObservationUnit::Ratio,
+    );
+    record_obs(
+        ctx,
+        "measured_compactions_run",
+        u64_as_f64(measured.compactions_run),
+        count,
+    );
+    record_obs(
+        ctx,
+        "setup_grandparent_overlap_rolls",
+        u64_as_f64(rolls.0),
+        count,
+    );
+    record_obs(
+        ctx,
+        "measured_grandparent_overlap_rolls",
+        u64_as_f64(rolls.1),
+        count,
+    );
+    record_obs(
+        ctx,
+        "final_sst_count",
+        usize_as_f64(measured.final_sst_count),
+        count,
+    );
+    record_obs(
+        ctx,
+        "read_ssts_touched_per_point_read",
+        read_ssts_per_read,
+        count,
+    );
+    for (level, name) in [(0, "l0"), (1, "l1"), (2, "l2"), (3, "l3")] {
+        let (files, level_bytes) = three_level::level_shape(engine, level);
+        record_obs(
+            ctx,
+            &format!("final_{name}_files"),
+            usize_as_f64(files),
+            count,
+        );
+        record_obs(
+            ctx,
+            &format!("final_{name}_bytes"),
+            u64_as_f64(level_bytes),
+            bytes,
+        );
+    }
+    let fingerprint = xxh3_64_with_seed(initial_layout.as_bytes(), SEED);
+    for (name, half) in [
+        (
+            "pre_measurement_layout_fingerprint_high",
+            fingerprint >> u32::BITS,
+        ),
+        (
+            "pre_measurement_layout_fingerprint_low",
+            fingerprint & u64::from(u32::MAX),
+        ),
+    ] {
+        let half = u32::try_from(half).expect("fingerprint half fits in u32");
+        record_obs(ctx, name, f64::from(half), count);
+    }
+    eprintln!("midge948_three_level_pre_measurement_layout={initial_layout}");
+}
+
+const THREE_LEVEL_CF: &str = "grandparent-cuts-three-level";
+
+fn open_three_level(path: &std::path::Path, overlap_limit: u64) -> Engine {
+    Engine::open(
+        OpenOptions::local(path)
+            .background_compaction(false)
+            .compaction_levels(three_level::levels(overlap_limit))
+            .build()
+            .expect("build three-level options"),
+    )
+    .expect("open local three-level benchmark engine")
+}
+
+/// Builds the shared starting layout under a zero overlap limit, so both rows
+/// begin from identical files. Returns the shuffled ids, the setup roll count
+/// and the layout description.
+fn build_three_level_fixture(path: &std::path::Path) -> (Vec<u32>, u64, String) {
+    let mut engine = open_three_level(path, 0);
+    let cf = engine
+        .create_column_family(THREE_LEVEL_CF)
+        .expect("create benchmark column family");
+    let ids = shuffled_id_range(three_level::BASE_KEYS_3L);
+    write_keys(&engine, cf.id(), &ids, 0);
+    engine.flush_cf(&cf).expect("flush base dataset");
+    compact_to_stable_layout(&engine);
+    // A small top-up of keys the measured rounds never touch leaves a partly
+    // filled L1 behind, so all three inner levels hold data at the start.
+    let top_up = &ids[ids.len() - three_level::TOP_UP_KEYS..];
+    write_keys(&engine, cf.id(), top_up, 100);
+    engine.flush_cf(&cf).expect("flush top-up dataset");
+    compact_to_stable_layout(&engine);
+    three_level::assert_three_inner_levels(&engine);
+    let layout = describe_layout(&engine);
+    let rolls = compaction_grandparent_overlap_roll_count(&engine);
+    engine
+        .shutdown(std::time::Duration::from_secs(60))
+        .expect("shutdown fixture engine");
+    drop(engine);
+    (ids, rolls, layout)
+}
+
+fn run_three_level(ctx: &mut StressContext, overlap_limit: u64) {
+    let path = data_path();
+    if path.exists() {
+        std::fs::remove_dir_all(&path).expect("remove previous benchmark database");
+    }
+    let (ids, setup_rolls, built_layout) = build_three_level_fixture(&path);
+    let mut engine = open_three_level(&path, overlap_limit);
+    let cf = engine
+        .get_column_family(THREE_LEVEL_CF)
+        .expect("reopened benchmark column family");
+    let initial_layout = describe_layout(&engine);
+    if initial_layout != built_layout {
+        eprintln!("midge948_three_level_reopen_changed_layout=true");
+    }
+    let rolls_before = compaction_grandparent_overlap_roll_count(&engine);
+    let measured = three_level::measure_rounds(&engine, &cf, &ids);
+    let measured_rolls =
+        compaction_grandparent_overlap_roll_count(&engine).saturating_sub(rolls_before);
+    if overlap_limit > 0 {
+        assert!(
+            measured_rolls > 0,
+            "policy-on row must roll outputs at grandparent overlap limits"
+        );
+    } else {
+        assert_eq!(
+            measured_rolls, 0,
+            "policy-off row must never roll on overlap"
+        );
+    }
+    let read_ssts = three_level::read_ssts_per_point_read(&engine, &cf, &ids);
+    three_level::record_parameters(ctx, overlap_limit);
+    record_three_level(
+        ctx,
+        &engine,
+        &measured,
+        (setup_rolls, measured_rolls),
+        read_ssts,
+        &initial_layout,
+    );
+    engine
+        .shutdown(std::time::Duration::from_secs(60))
+        .expect("shutdown compaction benchmark engine");
+    drop(engine);
+    std::fs::remove_dir_all(path).expect("remove benchmark database");
+}
+
+#[stress(
+    tier = 4,
+    metadata(
+        component = "engine_compaction",
+        scenario = "grandparent_output_cuts_three_level_policy_on",
+        measurement_shape = "fixed_workload"
+    )
+)]
+fn tier4_compaction_grandparent_cuts_three_level_policy_on(ctx: &mut StressContext) {
+    run_three_level(ctx, three_level::POLICY_ON_OVERLAP_BYTES);
+}
+
+#[stress(
+    tier = 4,
+    metadata(
+        component = "engine_compaction",
+        scenario = "grandparent_output_cuts_three_level_policy_off",
+        measurement_shape = "fixed_workload"
+    )
+)]
+fn tier4_compaction_grandparent_cuts_three_level_policy_off(ctx: &mut StressContext) {
+    run_three_level(ctx, 0);
 }
 
 stress_main!();
