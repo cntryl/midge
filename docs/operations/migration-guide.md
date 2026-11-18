@@ -9,6 +9,27 @@ compatibility and recovery tests, and keep a verified application-level
 backup before changing binaries. Use the applicable release transition below
 before upgrading an existing database.
 
+## 0.5.2 to 0.5.3
+
+0.5.3 keeps the 0.5.2 persisted formats and needs no logical migration. Either
+version reads data written by the other. Upgrade the same way as 0.5.1 to
+0.5.2: stop writers, complete `engine.shutdown(timeout)`, preserve the database
+and cloud prefix, and replace the binary or dependency.
+
+Nothing changes unless an application opts in:
+
+- `compaction_levels` changes level sizing. Do not reopen a store with a
+  smaller `max_levels` than the depth it already uses; the open is refused and
+  the store is left untouched.
+- `amortized_sync_floor` trades lost-write detection inside a small window for
+  strict-commit throughput. Read the durability contract before enabling it.
+
+Builds that named the `cloud_integration` Cargo feature must drop it or use
+`cloud-all`.
+
+Rolling back to 0.5.2 needs no data change. Remove the two builder calls first,
+since 0.5.2 does not have them.
+
 ## 0.5.1 to 0.5.2
 
 The 0.5.2 candidate keeps the 0.5.0 and 0.5.1 persisted formats and needs no

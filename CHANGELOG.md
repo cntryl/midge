@@ -9,6 +9,49 @@ Compatibility expectations for pre-1.0 releases are defined in [docs/development
 
 ## [Unreleased]
 
+## [0.5.3] - Unreleased
+
+### Added
+
+- `OpenOptionsBuilder::compaction_levels(CompactionLevelConfig)` sets the L1
+  target size, level multiplier, level count and grandparent overlap limit.
+  Defaults are unchanged. A store that already holds SSTs deeper than the
+  configured `max_levels` refuses to open and changes nothing (#925).
+- `OpenOptionsBuilder::amortized_sync_floor(AmortizedSyncFloor)`, off by
+  default, for local storage. It records the WAL ledger floor every 256 KiB or
+  20 ms instead of after every strict sync. On a 16-writer strict workload this
+  measured 1.58K against 1.20K transactions per second. With it on, damage
+  inside that window is truncated on recovery where the default refuses a
+  strict open; honest power loss or a crash still loses nothing. See
+  `docs/user-guides/transaction-durability-contract.md` (#904).
+
+### Changed
+
+- Background compaction picks the overfull inner level with the highest debt
+  ratio instead of the deepest one, and advances through each level's key range
+  with a cursor instead of always starting from the lowest keys (#925).
+
+### Fixed
+
+- Creating a column family while a strict commit group is in flight returns a
+  retryable `WriteStall` instead of an `Internal` error (#1045).
+- The internal grandparent-overlap roll counter read zero after compaction
+  slots were configured (#948).
+
+### Removed
+
+- The `cloud_integration` Cargo feature. It only enabled `cloud-all`, which is
+  the default.
+
+### Compatibility and rollback
+
+- Persisted formats are unchanged from 0.5.2, and both versions read each
+  other's data. A store written with `amortized_sync_floor` on opens under
+  0.5.2 and under the default floor.
+- Rolling back to 0.5.2 needs no data conversion. A store that used
+  `compaction_levels` with a non-default layout stays readable; 0.5.2 compacts
+  it toward the built-in level sizes.
+
 ## [0.5.2] - Unreleased
 
 ### Changed
