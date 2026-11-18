@@ -7,7 +7,10 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
-use cntryl_midge::{ColumnFamilyId, Engine, RuntimeMetricsSnapshot, TransactionMode, WriteOptions};
+use cntryl_midge::{
+    AmortizedSyncFloor, ColumnFamilyId, Engine, RuntimeMetricsSnapshot, TransactionMode,
+    WriteOptions,
+};
 use cntryl_stress::{
     stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
     StressContext,
@@ -381,6 +384,7 @@ fn writer_workload(
 fn execute_strict_commit_case(
     writers: usize,
     key_distribution: StrictKeyDistribution,
+    sync_floor: Option<AmortizedSyncFloor>,
 ) -> StrictCommitSample {
     let transactions_per_sample: usize = match writers {
         1 => 2_048,
@@ -392,8 +396,12 @@ fn execute_strict_commit_case(
     let mut opts = stress_config::write_coordination_opts_for_mode("local");
     opts.enable_compaction = false;
     stress_config::init_benchmark_telemetry().expect("initialize benchmark telemetry");
-    let engine =
-        Arc::new(Engine::open(opts.to_open_options()).expect("open durability latency engine"));
+    let mut builder = opts.open_options_builder(1);
+    if let Some(sync_floor) = sync_floor {
+        builder = builder.amortized_sync_floor(sync_floor);
+    }
+    let open_options = builder.build().expect("build durability latency options");
+    let engine = Arc::new(Engine::open(open_options).expect("open durability latency engine"));
     let cf = engine
         .create_column_family("cf1")
         .expect("create durability latency column family");
@@ -475,7 +483,16 @@ fn run_strict_commit_case(
     scenario: &'static str,
     writers: usize,
     key_distribution: StrictKeyDistribution,
+    sync_floor: Option<AmortizedSyncFloor>,
 ) {
+    ctx.parameter(
+        "sync_floor_max_unrecorded_bytes",
+        sync_floor.map_or(0, |floor| floor.max_unrecorded_bytes),
+    );
+    ctx.parameter(
+        "sync_floor_max_unrecorded_delay_ms",
+        sync_floor.map_or(0, |floor| floor.max_unrecorded_delay.as_millis()),
+    );
     let transactions = match writers {
         1 => 2_048,
         16 => 8_192,
@@ -494,7 +511,7 @@ fn run_strict_commit_case(
         "phase_timing_scope",
         "runtime_wall_time_counters_and_writer_service_counters",
     );
-    let sample = execute_strict_commit_case(writers, key_distribution);
+    let sample = execute_strict_commit_case(writers, key_distribution, sync_floor);
     sample.ledger.record(ctx);
     record_success(
         ctx,
@@ -807,6 +824,7 @@ fn tier2_durability_commit_sync_local(ctx: &mut StressContext) {
         "tier2_durability_commit_sync_local",
         1,
         StrictKeyDistribution::Distinct,
+        None,
     );
 }
 
@@ -817,6 +835,7 @@ fn tier2_durability_commit_sync_local_16_writers(ctx: &mut StressContext) {
         "tier2_durability_commit_sync_local_16_writers",
         16,
         StrictKeyDistribution::Distinct,
+        None,
     );
 }
 
@@ -827,6 +846,7 @@ fn tier2_durability_commit_sync_local_16_writers_hot_key(ctx: &mut StressContext
         "tier2_durability_commit_sync_local_16_writers_hot_key",
         16,
         StrictKeyDistribution::SharedHotKey,
+        None,
     );
 }
 
@@ -837,6 +857,56 @@ fn tier2_durability_commit_sync_local_64_writers(ctx: &mut StressContext) {
         "tier2_durability_commit_sync_local_64_writers",
         64,
         StrictKeyDistribution::Distinct,
+        None,
+    );
+}
+
+#[stress(tier = 2)]
+fn tier2_durability_commit_sync_local_amortized_floor(ctx: &mut StressContext) {
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local_amortized_floor",
+        1,
+        StrictKeyDistribution::Distinct,
+        Some(AmortizedSyncFloor::default()),
+    );
+}
+
+#[stress(tier = 2)]
+fn tier2_durability_commit_sync_local_16_writers_amortized_floor(ctx: &mut StressContext) {
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local_16_writers_amortized_floor",
+        16,
+        StrictKeyDistribution::Distinct,
+        Some(AmortizedSyncFloor::default()),
+    );
+}
+
+#[stress(tier = 2)]
+fn tier2_durability_commit_sync_local_16_writers_amortized_floor_1mib_100ms(
+    ctx: &mut StressContext,
+) {
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local_16_writers_amortized_floor_1mib_100ms",
+        16,
+        StrictKeyDistribution::Distinct,
+        Some(AmortizedSyncFloor {
+            max_unrecorded_bytes: 1024 * 1024,
+            max_unrecorded_delay: Duration::from_millis(100),
+        }),
+    );
+}
+
+#[stress(tier = 2)]
+fn tier2_durability_commit_sync_local_64_writers_amortized_floor(ctx: &mut StressContext) {
+    run_strict_commit_case(
+        ctx,
+        "tier2_durability_commit_sync_local_64_writers_amortized_floor",
+        64,
+        StrictKeyDistribution::Distinct,
+        Some(AmortizedSyncFloor::default()),
     );
 }
 
