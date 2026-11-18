@@ -282,6 +282,19 @@ enum WalTransitionOperation {
     Rotate,
 }
 
+/// When the ledger floor must follow a completed WAL fsync (#904).
+///
+/// `Exact` records the receipt's end offset before the sync is acknowledged.
+/// `Amortizable` is used only by strict transaction groups, whose
+/// acknowledgement may precede the floor edit when the opt-in sync floor
+/// allows it. Ticketed barriers (batched windows, shutdown, DDL,
+/// verification, rotation preparation) are always `Exact`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncCadence {
+    Exact,
+    Amortizable,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WalSyncReceipt {
     durable_sequence: u64,

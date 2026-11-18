@@ -1,7 +1,8 @@
 //! Split strict append, physical sync completion, and loop-owned publication.
 
 use super::{
-    PendingStrictIo, PendingStrictSync, PreparedTransactionAppend, WalActor, WalTransitionOperation,
+    PendingStrictIo, PendingStrictSync, PreparedTransactionAppend, SyncCadence, WalActor,
+    WalTransitionOperation,
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
@@ -212,6 +213,7 @@ impl WalActor {
                 state,
                 pending.root.as_ref(),
                 pending.receipt.end_offset,
+                SyncCadence::Amortizable,
             );
             self.counters.record(|metrics| {
                 metrics.record_wal_sync_ledger_proof_latency(proof_started.elapsed());
