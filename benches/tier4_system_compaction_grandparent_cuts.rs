@@ -6,6 +6,7 @@
 //! counter delta only; it excludes flush bytes and is not total physical write
 //! amplification.
 
+use cntryl_midge::__internal::diagnostics::compaction_grandparent_overlap_roll_count;
 use cntryl_midge::{
     ColumnFamilyHandle, Engine, MidgeError, OpenOptions, TransactionMode, WriteOptions,
 };
@@ -404,8 +405,22 @@ fn run(ctx: &mut StressContext) {
         .create_column_family("grandparent-cuts")
         .expect("create benchmark column family");
     let (ids, l2_overlap, initial_layout) = prepare_fixture(&engine, &cf);
+    let setup_rolls = compaction_grandparent_overlap_roll_count(&engine);
     let (elapsed, compaction_output_bytes, compactions_run, final_sst_count) =
         measure_updates(&engine, &cf, &ids[..UPDATE_KEYS]);
+    let measured_rolls =
+        compaction_grandparent_overlap_roll_count(&engine).saturating_sub(setup_rolls);
+    for (name, rolls) in [
+        ("setup_grandparent_overlap_rolls", setup_rolls),
+        ("measured_grandparent_overlap_rolls", measured_rolls),
+    ] {
+        ctx.record_observation(
+            name,
+            u64_as_f64(rolls),
+            ObservationUnit::Count,
+            ObservationDirection::Informational,
+        );
+    }
     record_measurement(
         ctx,
         &l2_overlap,
