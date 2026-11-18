@@ -54,7 +54,10 @@ fn should_issue_fewer_ledger_syncs_than_wal_fsyncs_when_floor_is_amortized() -> 
     let directory = tempfile::tempdir().unwrap();
     let options = OpenOptions::local(directory.path())
         .background_compaction(false)
-        .amortized_sync_floor(AmortizedSyncFloor::default())
+        .amortized_sync_floor(AmortizedSyncFloor {
+            max_unrecorded_bytes: 64 * 1024 * 1024,
+            max_unrecorded_delay: Duration::from_secs(10),
+        })
         .build()?;
     let mut engine = Engine::open(options.clone())?;
     let family = engine.get_column_family("default").unwrap();

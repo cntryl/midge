@@ -67,8 +67,8 @@ fn should_default_amortized_sync_floor_to_documented_bounds_when_unconfigured() 
 
     // Assert
     assert_eq!(options.amortized_sync_floor(), None);
-    assert_eq!(defaults.max_unrecorded_bytes, 1024 * 1024);
-    assert_eq!(defaults.max_unrecorded_delay, Duration::from_millis(100));
+    assert_eq!(defaults.max_unrecorded_bytes, 256 * 1024);
+    assert_eq!(defaults.max_unrecorded_delay, Duration::from_millis(20));
 }
 
 #[test]

@@ -38,8 +38,8 @@ impl Default for AmortizedSyncFloor {
 }
 
 impl AmortizedSyncFloor {
-    const DEFAULT_BYTES: u64 = 1024 * 1024;
-    const DEFAULT_DELAY: Duration = Duration::from_millis(100);
+    const DEFAULT_BYTES: u64 = 256 * 1024;
+    const DEFAULT_DELAY: Duration = Duration::from_millis(20);
     const BYTES_RANGE: std::ops::RangeInclusive<u64> = 1..=64 * 1024 * 1024;
     const MIN_DELAY: Duration = Duration::from_millis(1);
     const MAX_DELAY: Duration = Duration::from_secs(10);
