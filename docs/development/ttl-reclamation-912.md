@@ -1,7 +1,8 @@
 # TTL reclamation with a caller-supplied horizon (#912)
 
-Status: proposed design. No reclamation code exists. This note answers the three questions on
-[#912](https://github.com/cntryl/midge/issues/912) and proposes the contract and slices.
+Status: accepted design (2026-11-18), implementation deferred. No reclamation code exists; #912 is closed
+until a user needs TTL reclamation. This note answers the three
+questions on [#912](https://github.com/cntryl/midge/issues/912) and sets the contract and slices.
 
 ## Problem
 
@@ -38,8 +39,8 @@ the 2026-10-24 decision was made to avoid.
 
 **Proposed contract.** The engine never deletes on its own clock.
 
-- The application may record a *reclamation horizon* `H`, a wall-clock timestamp in milliseconds, per
-  column family. It is unset by default.
+- The application may record a *reclamation horizon* `H`, a wall-clock timestamp in milliseconds. There
+  is one horizon per store, shared by every column family. It is unset by default.
 - `H` is durable in the manifest and never moves backwards.
 - Compaction may delete a value only if its expiry is at or before `H`.
 - Reads treat any value whose expiry is at or before `H` as expired, whatever the clock says. This keeps
@@ -90,9 +91,9 @@ and budgets. Advancing `H` marks compaction due.
 
 ## Public surface
 
-- `Engine::advance_ttl_reclamation_horizon(cf, millis)`: durable before it returns; an older value than
+- `Engine::advance_ttl_reclamation_horizon(millis)`: durable before it returns; an older value than
   the stored one is a no-op; a value later than the engine's observed clock is `InvalidArgument`.
-- `Engine::ttl_reclamation_horizon(cf) -> Option<u64>`.
+- `Engine::ttl_reclamation_horizon() -> Option<u64>`.
 - Metrics: values reclaimed, bytes reclaimed, values converted to tombstones.
 
 A new manifest field means a metadata format bump. Formats may break without migration.
@@ -122,11 +123,19 @@ A new manifest field means a metadata format bump. Formats may break without mig
 
 Each slice is safe to ship alone. Slice 1 changes no on-disk data.
 
-## Open points for review
+## Decisions
 
-- Per column family or per store for `H`. Per family matches how transactions and TTL workloads are
-  scoped; per store is simpler.
-- Whether reads applying `H` should be part of slice 1 or arrive with slice 2. This note puts it in
-  slice 1 so that no release can delete what a read would still return.
-- #958 (durable-read retention) was closed as not planned. If it returns, its retention rule must
-  respect `H`.
+Weighed with Jev on 2026-11-18; strong leans adopted, weak ones scrapped in favour of the simpler form.
+
+| Point | Weight | Decision |
+|---|---:|---|
+| Accept the caller-supplied horizon contract | 0.86 | Adopted |
+| Reads honour `H` from slice 1 | 0.98 | Adopted: no release can delete what a read would still return |
+| Reject a horizon later than the engine's observed clock | 0.97 | Adopted |
+| Horizon per column family rather than per store | 0.61, weak | Scrapped: one horizon per store |
+
+One horizon per store means an application cannot keep expired data in one family while reclaiming
+another. That is a new issue if it is ever needed.
+
+#958 (durable-read retention) was closed as not planned. If it returns, its retention rule must respect
+`H`.
