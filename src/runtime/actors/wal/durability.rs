@@ -1,5 +1,5 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
-use super::{SyncCadence, WalActor, WalSyncReceipt, WalTransitionOperation};
+use super::{FloorEdit, SyncCadence, WalActor, WalSyncReceipt, WalTransitionOperation};
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
@@ -298,15 +298,18 @@ impl WalActor {
         group: Option<&crate::lease::WriterEffectGroup>,
         end_offset: Option<u64>,
         cadence: SyncCadence,
-    ) -> MidgeResult<()> {
-        match cadence {
-            SyncCadence::Exact | SyncCadence::Amortizable => {
-                self.record_exact_sync_boundary(state, group, end_offset)
+    ) -> MidgeResult<FloorEdit> {
+        match (cadence, self.sync_floor) {
+            (SyncCadence::Amortizable, Some(policy)) => {
+                self.persist_amortized_sync_boundary(state, group, end_offset, policy)
             }
+            _ => self
+                .record_exact_floor(state, group, end_offset)
+                .map(|()| FloorEdit::Recorded),
         }
     }
 
-    fn record_exact_sync_boundary(
+    pub(super) fn record_exact_sync_boundary(
         &mut self,
         state: &mut RuntimeState,
         group: Option<&crate::lease::WriterEffectGroup>,

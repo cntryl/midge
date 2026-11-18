@@ -1,8 +1,8 @@
 //! Split strict append, physical sync completion, and loop-owned publication.
 
 use super::{
-    PendingStrictIo, PendingStrictSync, PreparedTransactionAppend, SyncCadence, WalActor,
-    WalTransitionOperation,
+    FloorEdit, PendingStrictIo, PendingStrictSync, PreparedTransactionAppend, SyncCadence,
+    WalActor, WalTransitionOperation,
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
@@ -215,9 +215,12 @@ impl WalActor {
                 pending.receipt.end_offset,
                 SyncCadence::Amortizable,
             );
-            self.counters.record(|metrics| {
-                metrics.record_wal_sync_ledger_proof_latency(proof_started.elapsed());
-            });
+            // A deferred floor writes no ledger proof, so it has no latency.
+            if !matches!(proof, Ok(FloorEdit::Deferred)) {
+                self.counters.record(|metrics| {
+                    metrics.record_wal_sync_ledger_proof_latency(proof_started.elapsed());
+                });
+            }
             proof?;
             Ok(receipt)
         });

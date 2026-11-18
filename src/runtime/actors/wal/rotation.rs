@@ -433,6 +433,9 @@ impl WalActor {
     ) -> MidgeResult<()> {
         drop(self.take_transition_writer());
         self.ensure_transition_authority(state)?;
+        // The rotation seals the segment with exact facts. A deferred end of
+        // the old segment must never be recorded on the new one.
+        self.unrecorded_floor = None;
         let recorded = state.wal.history.record_rotation(prepared);
         self.mark_transition_sealed(old_segment);
         if let Err(error) = recorded {
