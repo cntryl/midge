@@ -3029,6 +3029,56 @@ fn should_reject_noncanonical_v3_lease_documents() {
 }
 
 #[test]
+fn should_reject_lease_with_embedded_committed_metadata_pointer_when_old_layout_remains() {
+    // Arrange: an old-layout (V3) lease embedding a metadata pointer, one live
+    // and one long expired, plus a V4 wire form that still carries the pointer.
+    let now = chrono::Utc::now();
+    let old_layout = |acquired: chrono::DateTime<chrono::Utc>,
+                      expires: chrono::DateTime<chrono::Utc>| {
+        LeaseDocument {
+            version: LeaseDocumentVersion::V3,
+            epoch: Some(8),
+            holder_id: "old-holder@host".to_string(),
+            owner_token: Some("owner-token".to_string()),
+            acquired_at: acquired.to_rfc3339(),
+            expires_at: expires.to_rfc3339(),
+            committed_metadata: Some(test_metadata_generation(4)),
+        }
+    };
+    let live = old_layout(now, now + chrono::Duration::seconds(60));
+    let expired = old_layout(
+        now - chrono::Duration::seconds(120),
+        now - chrono::Duration::seconds(60),
+    );
+    let forged_v4 =
+        format_lease_document(&live).replacen("lease_version: 3", "lease_version: 4", 1);
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        Arc::clone(&cloud),
+    ));
+
+    // Act
+    put_remote_lease(&cloud, format_lease_document(&live));
+    let live_result = Arc::clone(&lease).try_acquire();
+    put_remote_lease(&cloud, format_lease_document(&expired));
+    let expired_result = Arc::clone(&lease).try_acquire();
+
+    // Assert: explicit rejection, never adoption of the pointer or takeover.
+    for result in [live_result, expired_result] {
+        assert!(
+            matches!(&result, Err(LeaseError::Indeterminate(message))
+                if message.contains("legacy cloud lease layout is unsupported")),
+            "{:?}",
+            result.err()
+        );
+    }
+    assert!(parse_lease_document(&forged_v4).is_none());
+    assert_eq!(lease.epoch(), 0);
+}
+
+#[test]
 fn should_reject_metadata_descriptor_with_duplicate_names_or_unsafe_keys() {
     // Arrange
     let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());

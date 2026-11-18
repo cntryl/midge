@@ -92,6 +92,54 @@ fn should_invalidate_cloud_reads_when_monotonic_lease_expires_before_notificatio
     Ok(())
 }
 
+#[test]
+fn should_fence_scan_instead_of_ending_range_when_authority_expires_after_last_row(
+) -> MidgeResult<()> {
+    // Arrange: a cloud scan that has already returned every row of its range.
+    let directory = tempfile::tempdir()?;
+    let engine = Engine::open(
+        OpenOptions::cloud_simulated(directory.path(), "read-fence-tail", "db").build()?,
+    )?;
+    let cf = engine.get_column_family("default").unwrap();
+    let mut seed = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+    seed.put(b"a".to_vec(), b"one".to_vec(), None)?;
+    seed.put(b"b".to_vec(), b"two".to_vec(), None)?;
+    seed.commit(WriteOptions::cloud_strict())?;
+    engine.flush_cf(&cf)?;
+    let reader = engine.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+    let mut forward = reader.scan(&Query::new())?;
+    let mut reverse = reader.scan(&Query::new().reverse())?;
+    assert_eq!(forward.next().unwrap()?.0.as_ref(), b"a");
+    assert_eq!(forward.next().unwrap()?.0.as_ref(), b"b");
+    assert_eq!(reverse.next().unwrap()?.0.as_ref(), b"b");
+    assert_eq!(reverse.next().unwrap()?.0.as_ref(), b"a");
+
+    // Act: expire only the monotonic authority; the natural next result of
+    // both scans is end-of-range.
+    let mut heartbeat = engine
+        .lease_state
+        .heartbeat
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap();
+    heartbeat.stop();
+    heartbeat.validity_for_test().unwrap().expire_for_test();
+    drop(heartbeat);
+
+    // Assert: end-of-range never escapes in place of Fenced, and it is sticky.
+    for scan in [&mut forward, &mut reverse] {
+        for _ in 0..2 {
+            assert!(
+                matches!(scan.next(), Some(Err(MidgeError::Fenced(_)))),
+                "expired authority must not surface as end-of-range"
+            );
+            assert_eq!(scan.state(), IteratorState::Failed);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_preserve_read_authority_after_wal_io_fence_with_live_lease() -> MidgeResult<()> {

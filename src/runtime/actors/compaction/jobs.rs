@@ -332,4 +332,85 @@ mod tests {
         ));
         Ok(())
     }
+
+    /// Layout-level statement of which two single-source jobs may not be in
+    /// flight together: a shared input, two L0 sources in one family, or a
+    /// shared source/target level whose key ranges overlap or are unknown.
+    fn layout_conflicts(first: &FileMeta, second: &FileMeta) -> bool {
+        if first.name == second.name {
+            return true;
+        }
+        if first.cf_id != second.cf_id {
+            return false;
+        }
+        if first.level == 0 && second.level == 0 {
+            return true;
+        }
+        let touches = |file: &FileMeta, level: u32| file.level == level || file.level + 1 == level;
+        let shared_level = touches(second, first.level) || touches(second, first.level + 1);
+        let proven_disjoint = first.key_bounds_complete
+            && second.key_bounds_complete
+            && (first.largest_key < second.smallest_key || second.largest_key < first.smallest_key);
+        shared_level && !proven_disjoint
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn should_never_hold_conflicting_jobs_given_random_reserve_and_release_orders(
+            specs in proptest::collection::vec(
+                (0_u32..2, 0_u32..4, 0_u8..6, 0_u8..3, proptest::bool::weighted(0.85)),
+                2..8,
+            ),
+            steps in proptest::collection::vec((0_usize..8, proptest::bool::weighted(0.7)), 1..40),
+        ) {
+            // Arrange
+            const LIMIT: usize = 3;
+            let jobs = CompactionJobs::new(LIMIT);
+            let files: Vec<FileMeta> = specs
+                .iter()
+                .enumerate()
+                .map(|(index, &(cf_id, level, lower, width, complete))| {
+                    let mut meta =
+                        file(&format!("sst-{index}"), cf_id, level, &[lower], &[lower + width]);
+                    meta.key_bounds_complete = complete;
+                    meta
+                })
+                .collect();
+            let mut active: Vec<(usize, CompactionJobGuard)> = Vec::new();
+
+            for (pick, reserve) in steps {
+                if !reserve {
+                    if !active.is_empty() {
+                        active.remove(pick % active.len());
+                    }
+                    continue;
+                }
+                let index = pick % files.len();
+                let blocked = active
+                    .iter()
+                    .any(|(held, _)| layout_conflicts(&files[*held], &files[index]));
+
+                // Act
+                let outcome = jobs.reserve(&plan(&files[index], files[index].level + 1), &files);
+
+                // Assert: admission never co-schedules a conflicting pair, and
+                // refusal always has a live conflict or a full pool behind it.
+                match outcome {
+                    Ok(guard) => {
+                        proptest::prop_assert!(!blocked, "conflicting job {index} was admitted");
+                        proptest::prop_assert!(active.len() < LIMIT, "job limit exceeded");
+                        active.push((index, guard));
+                    }
+                    Err(MidgeError::Busy(_)) => proptest::prop_assert!(
+                        blocked || active.len() >= LIMIT,
+                        "independent job {index} was refused"
+                    ),
+                    Err(other) => proptest::prop_assert!(false, "unexpected error: {other:?}"),
+                }
+                proptest::prop_assert_eq!(jobs.active_count(), active.len());
+            }
+        }
+    }
 }
