@@ -322,9 +322,61 @@ fn silence_batched_sync(event_loop: &mut EventLoop) {
 }
 
 #[test]
+fn should_bound_idle_wait_by_delay_without_writing_when_delay_has_not_elapsed() -> MidgeResult<()> {
+    // Arrange: the maximum delay cannot elapse during the test.
+    const DELAY: Duration = Duration::from_secs(10);
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = loop_with_floor(window(1024 * 1024, DELAY))?;
+    silence_batched_sync(&mut event_loop);
+    commit_strict(&mut event_loop, 95_690, b"warmup");
+    commit_strict(&mut event_loop, 95_691, b"idle-tail");
+    let ledger_syncs = ledger_file_syncs(&event_loop);
+
+    // Act
+    let timeout = event_loop.idle_progress_timeout();
+    event_loop.record_due_sync_floor();
+
+    // Assert
+    assert!(timeout.is_some_and(|wait| wait <= DELAY), "{timeout:?}");
+    assert_eq!(recorded_floor(&event_loop), Some(HEADER));
+    assert_eq!(ledger_file_syncs(&event_loop), ledger_syncs);
+    assert!(event_loop
+        .actors
+        .wal_actor
+        .unrecorded_floor_for_test()
+        .is_some());
+    Ok(())
+}
+
+#[test]
+fn should_not_report_floor_deadline_when_the_transition_is_not_ready() -> MidgeResult<()> {
+    // Arrange: an overdue deferral while a sync ticket holds the protocol
+    // phase non-Ready and the actor is still Open.
+    const DELAY: Duration = Duration::from_millis(20);
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = loop_with_floor(window(1024 * 1024, DELAY))?;
+    silence_batched_sync(&mut event_loop);
+    commit_strict(&mut event_loop, 95_650, b"warmup");
+    commit_strict(&mut event_loop, 95_651, b"overdue");
+    std::thread::sleep(DELAY + Duration::from_millis(30));
+    let generation = event_loop.pipeline.durability.current_key();
+    let _ticket = event_loop.pipeline.wal_transition.begin_sync(generation)?;
+    assert!(event_loop.actors.wal_actor.is_open());
+
+    // Act
+    let actionable = event_loop.has_actionable_work();
+    let timeout = event_loop.idle_progress_timeout();
+
+    // Assert: the timer cannot write now, so it must not spin the loop.
+    assert!(!actionable, "an unwritable floor is not actionable work");
+    assert_ne!(timeout, Some(Duration::ZERO));
+    Ok(())
+}
+
+#[test]
 fn should_record_floor_on_idle_tail_when_delay_elapses() -> MidgeResult<()> {
     // Arrange
-    const DELAY: Duration = Duration::from_millis(150);
+    const DELAY: Duration = Duration::from_millis(40);
     let _guard = crate::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1024 * 1024, DELAY))?;
     silence_batched_sync(&mut event_loop);
@@ -332,20 +384,13 @@ fn should_record_floor_on_idle_tail_when_delay_elapses() -> MidgeResult<()> {
     commit_strict(&mut event_loop, 95_701, b"idle-tail");
     let len = open_segment_len(&event_loop)?;
     let ledger_syncs = ledger_file_syncs(&event_loop);
-    assert_eq!(recorded_floor(&event_loop), Some(HEADER));
 
-    // Act: before the delay the idle loop must wake no later than the bound
-    // and must not write; after it, one idle pass records the exact end.
-    let timeout = event_loop.idle_progress_timeout();
-    event_loop.record_due_sync_floor();
-    let early = recorded_floor(&event_loop);
-    std::thread::sleep(DELAY + Duration::from_millis(50));
+    // Act: once the delay has elapsed one idle pass records the exact end.
+    std::thread::sleep(DELAY + Duration::from_millis(40));
     let actionable = event_loop.has_actionable_work();
     event_loop.progress_pass(&crossbeam::channel::never());
 
     // Assert
-    assert!(timeout.is_some_and(|wait| wait <= DELAY), "{timeout:?}");
-    assert_eq!(early, Some(HEADER));
     assert!(actionable, "a due floor edit is actionable work");
     assert_eq!(recorded_floor(&event_loop), Some(len));
     assert_eq!(ledger_file_syncs(&event_loop) - ledger_syncs, 1);

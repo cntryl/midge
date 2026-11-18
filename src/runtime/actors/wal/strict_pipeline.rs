@@ -208,6 +208,11 @@ impl WalActor {
             self.ensure_lease_validity()?;
             Self::after_fsync_boundary()?;
             WalTransitionBoundary::AfterFsync.check()?;
+            debug_assert_eq!(
+                pending.receipt.segment_id,
+                state.wal.open_segment(),
+                "a strict sync receipt must be persisted on the segment it was captured on"
+            );
             let proof_started = std::time::Instant::now();
             let proof = self.persist_sync_boundary(
                 state,

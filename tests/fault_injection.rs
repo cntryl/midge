@@ -458,13 +458,30 @@ mod failure_injection {
             OpenOptions::local(db_path)
                 .recovery_policy(RecoveryPolicy::Strict)
                 .background_compaction(false)
-                .amortized_sync_floor(cntryl_midge::AmortizedSyncFloor::default())
+                .amortized_sync_floor(cntryl_midge::AmortizedSyncFloor {
+                    max_unrecorded_bytes: 64 * 1024 * 1024,
+                    max_unrecorded_delay: std::time::Duration::from_secs(10),
+                })
                 .build()
                 .expect("build amortized options")
         };
         let mut engine = Engine::open(amortized()).expect("open engine");
         let cf = default_cf(&engine);
+        write_cf_value(&engine, &cf, b"warmup", b"value");
+        let ledger_syncs = || {
+            engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics")
+                .wal_ledger_file_syncs
+        };
+        let before = ledger_syncs();
         write_cf_value(&engine, &cf, b"deferred-before-failure", b"value");
+        assert_eq!(
+            ledger_syncs(),
+            before,
+            "the acknowledged commit must leave its floor edit deferred"
+        );
         let scenario = fail::FailScenario::setup();
         let point = "midge::wal::after_fsync_before_durable_frontier";
         fail::cfg(point, "return").expect("configure post-fsync frontier failure");
