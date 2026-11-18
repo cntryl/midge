@@ -12,7 +12,7 @@ use crate::config::AmortizedSyncFloor;
 use crate::runtime::state::RuntimeState;
 use crate::wal::format::HEADER_LEN;
 use crate::wal::ledger::SegmentId;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The end of a completed, acknowledged fsync whose ledger edit was deferred.
 ///
@@ -95,6 +95,57 @@ impl WalActor {
             since,
         });
         Ok(FloorEdit::Deferred)
+    }
+
+    /// How long until the oldest deferred acknowledgement reaches its delay
+    /// bound; `None` when nothing is deferred or the WAL cannot take an edit.
+    pub(crate) fn floor_deadline_timeout(&self) -> Option<Duration> {
+        let policy = self.sync_floor?;
+        let deferred = self.unrecorded_floor?;
+        self.is_open().then(|| {
+            policy
+                .max_unrecorded_delay
+                .saturating_sub(deferred.since.elapsed())
+        })
+    }
+
+    pub(crate) fn has_unrecorded_floor(&self) -> bool {
+        self.unrecorded_floor.is_some()
+    }
+
+    /// Record the deferred floor outside a strict group: when its delay bound
+    /// has passed, or at once with `force`.
+    ///
+    /// The edit is the deferred receipt's end, never the writer's position.
+    /// The caller must hold the loop-owned WAL still: no strict group in
+    /// flight (its writer root is parked) and no sync or seal ticket, which is
+    /// what makes a standalone fenced edit as safe as the sequence
+    /// reservation's. A deferred end of another segment is dropped unrecorded.
+    ///
+    /// # Errors
+    ///
+    /// The lease or ledger error; the WAL is then fenced, as for any failed
+    /// floor edit.
+    pub(crate) fn record_deferred_floor(
+        &mut self,
+        state: &mut RuntimeState,
+        force: bool,
+    ) -> MidgeResult<()> {
+        let (Some(policy), Some(deferred)) = (self.sync_floor, self.unrecorded_floor) else {
+            return Ok(());
+        };
+        if !self.is_open() {
+            return Ok(());
+        }
+        if deferred.segment_id != state.wal.open_segment() {
+            self.unrecorded_floor = None;
+            return Ok(());
+        }
+        if !force && deferred.since.elapsed() < policy.max_unrecorded_delay {
+            return Ok(());
+        }
+        self.ensure_lease_validity()?;
+        self.record_exact_floor(state, None, Some(deferred.end_offset))
     }
 
     /// The deferred floor as `(segment, end offset)`, for tests.

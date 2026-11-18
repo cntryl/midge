@@ -147,11 +147,17 @@ impl EventLoop {
             return HandleOutcome::Continue;
         }
 
-        if sync_wal {
-            if let Err(error) = self.sync_current_wal() {
-                self.respond(request_id, RuntimeResponse::Error { request_id, error });
-                return HandleOutcome::Continue;
-            }
+        // Backup capture takes a ticketed exact sync. Verification takes no
+        // sync, but must read an exact floor when the amortized option has
+        // deferred one; with the option off this is a no-op.
+        let floor = if sync_wal {
+            self.sync_current_wal()
+        } else {
+            self.record_deferred_sync_floor()
+        };
+        if let Err(error) = floor {
+            self.respond(request_id, RuntimeResponse::Error { request_id, error });
+            return HandleOutcome::Continue;
         }
 
         let activated = self.publication.verification_barrier.activate(request_id);

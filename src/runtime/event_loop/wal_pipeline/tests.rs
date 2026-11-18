@@ -1261,3 +1261,88 @@ fn should_record_receipt_end_when_amortized_threshold_edit_runs_behind_a_queued_
     );
     Ok(())
 }
+
+#[test]
+fn should_not_record_deferred_floor_from_timer_when_a_strict_group_is_held_in_fsync(
+) -> MidgeResult<()> {
+    assert_timer_abstains_while_group_is_held("midge::wal::before_physical_sync")
+}
+
+#[test]
+fn should_not_record_deferred_floor_from_timer_when_a_strict_group_is_held_in_encoding(
+) -> MidgeResult<()> {
+    assert_timer_abstains_while_group_is_held("midge::wal::before_writer_encode")
+}
+
+fn assert_timer_abstains_while_group_is_held(hook: &'static str) -> MidgeResult<()> {
+    // Arrange: the first group's floor is deferred; the second group is held
+    // at `hook` after the delay has elapsed.
+    const DELAY: Duration = Duration::from_millis(30);
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    event_loop
+        .actors
+        .wal_actor
+        .set_sync_floor(Some(crate::config::AmortizedSyncFloor {
+            max_unrecorded_bytes: 1024 * 1024,
+            max_unrecorded_delay: DELAY,
+        }));
+    let first = event_loop.routing.router.register(95_950, "deferred group");
+    let second = event_loop.routing.router.register(95_951, "held group");
+    event_loop.process_one(
+        write(95_950, &[b"deferred"], true),
+        &crossbeam::channel::never(),
+    );
+    applied_cut(&mut event_loop, &first);
+    let ledger_syncs = event_loop
+        .state
+        .wal
+        .history
+        .ledger_sync_counts()
+        .file_completed;
+    let held = HeldSync::at(hook);
+    event_loop.process_one(
+        write(95_951, &[b"held"], true),
+        &crossbeam::channel::never(),
+    );
+    wait_for_hold(&mut event_loop, &held);
+    std::thread::sleep(DELAY + Duration::from_millis(20));
+    assert!(event_loop.wal_group_in_flight());
+
+    // Act: the idle timer fires while the group owns the writer root.
+    event_loop.record_due_sync_floor();
+
+    // Assert: it abstained. The group's own completion then records the exact
+    // end of its own fsync because the oldest deferral is past its delay.
+    assert_eq!(
+        event_loop
+            .state
+            .wal
+            .history
+            .ledger_sync_counts()
+            .file_completed,
+        ledger_syncs
+    );
+    held.release.send(()).expect("release held sync");
+    applied_cut(&mut event_loop, &second);
+    let len = event_loop
+        .state
+        .fs
+        .metadata(&crate::wal::segment_key(
+            event_loop.state.wal.open_segment(),
+        ))
+        .map_err(crate::io::FsError::into_midge)?
+        .len;
+    assert_eq!(
+        event_loop
+            .state
+            .wal
+            .history
+            .ledger()
+            .open_member()
+            .durable_bytes,
+        Some(len)
+    );
+    Ok(())
+}

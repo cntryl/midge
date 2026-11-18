@@ -298,3 +298,194 @@ fn should_clear_deferred_floor_when_the_wal_is_fenced() -> MidgeResult<()> {
     );
     Ok(())
 }
+
+fn buffered_write(request_id: u64, key: &'static [u8]) -> RuntimeMsg {
+    let mut message = write(request_id, &[key], false);
+    if let RuntimeMsg::ApplyTransaction {
+        durability_policy, ..
+    } = &mut message
+    {
+        *durability_policy = Some(crate::wal::DurabilityPolicy::Batched);
+    }
+    message
+}
+
+/// Keep the batched-window sync out of the way so only the floor timer acts.
+fn silence_batched_sync(event_loop: &mut EventLoop) {
+    event_loop.actors.wal_actor.set_durability(
+        crate::wal::DurabilityPolicy::Batched,
+        crate::wal::policy::BatchConfig {
+            max_delay_ms: 3_600_000,
+            max_bytes: usize::MAX,
+        },
+    );
+}
+
+#[test]
+fn should_record_floor_on_idle_tail_when_delay_elapses() -> MidgeResult<()> {
+    // Arrange
+    const DELAY: Duration = Duration::from_millis(150);
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = loop_with_floor(window(1024 * 1024, DELAY))?;
+    silence_batched_sync(&mut event_loop);
+    commit_strict(&mut event_loop, 95_700, b"warmup");
+    commit_strict(&mut event_loop, 95_701, b"idle-tail");
+    let len = open_segment_len(&event_loop)?;
+    let ledger_syncs = ledger_file_syncs(&event_loop);
+    assert_eq!(recorded_floor(&event_loop), Some(HEADER));
+
+    // Act: before the delay the idle loop must wake no later than the bound
+    // and must not write; after it, one idle pass records the exact end.
+    let timeout = event_loop.idle_progress_timeout();
+    event_loop.record_due_sync_floor();
+    let early = recorded_floor(&event_loop);
+    std::thread::sleep(DELAY + Duration::from_millis(50));
+    let actionable = event_loop.has_actionable_work();
+    event_loop.progress_pass(&crossbeam::channel::never());
+
+    // Assert
+    assert!(timeout.is_some_and(|wait| wait <= DELAY), "{timeout:?}");
+    assert_eq!(early, Some(HEADER));
+    assert!(actionable, "a due floor edit is actionable work");
+    assert_eq!(recorded_floor(&event_loop), Some(len));
+    assert_eq!(ledger_file_syncs(&event_loop) - ledger_syncs, 1);
+    assert_eq!(
+        event_loop.actors.wal_actor.unrecorded_floor_for_test(),
+        None
+    );
+    assert_eq!(event_loop.actors.wal_actor.floor_deadline_timeout(), None);
+    Ok(())
+}
+
+#[test]
+fn should_never_record_floor_past_completed_sync_when_later_append_is_queued() -> MidgeResult<()> {
+    // Arrange: a buffered append sits in the segment past the last fsync.
+    const DELAY: Duration = Duration::from_millis(50);
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = loop_with_floor(window(1024 * 1024, DELAY))?;
+    silence_batched_sync(&mut event_loop);
+    commit_strict(&mut event_loop, 95_800, b"warmup");
+    commit_strict(&mut event_loop, 95_801, b"synced");
+    let synced_end = open_segment_len(&event_loop)?;
+    let response = event_loop
+        .routing
+        .router
+        .register(95_802, "buffered append");
+    event_loop.process_one(
+        buffered_write(95_802, b"unsynced"),
+        &crossbeam::channel::never(),
+    );
+    settle(&mut event_loop, &response);
+    let writer_end = open_segment_len(&event_loop)?;
+    assert!(writer_end > synced_end);
+
+    // Act
+    std::thread::sleep(DELAY + Duration::from_millis(30));
+    event_loop.record_due_sync_floor();
+
+    // Assert: the edit covers the completed fsync, never the queued append.
+    assert_eq!(recorded_floor(&event_loop), Some(synced_end));
+    assert!(synced_end < writer_end);
+    Ok(())
+}
+
+#[test]
+fn should_discard_stale_deferred_floor_when_timer_runs_on_another_segment() -> MidgeResult<()> {
+    // Arrange
+    const DELAY: Duration = Duration::from_millis(30);
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = loop_with_floor(window(1024 * 1024, DELAY))?;
+    silence_batched_sync(&mut event_loop);
+    commit_strict(&mut event_loop, 95_900, b"warmup");
+    let rotate = event_loop.routing.router.register(95_901, "rotate");
+    event_loop.process_one(
+        RuntimeMsg::Test(TestRuntimeMsg::WalRotate { request_id: 95_901 }),
+        &crossbeam::channel::never(),
+    );
+    settle(&mut event_loop, &rotate);
+    let old_segment = event_loop.state.wal.open_segment() - 1;
+    event_loop
+        .actors
+        .wal_actor
+        .plant_unrecorded_floor_for_test(old_segment, 1_000_000);
+    std::thread::sleep(DELAY + Duration::from_millis(20));
+
+    // Act
+    event_loop.record_due_sync_floor();
+
+    // Assert: nothing was recorded on the new segment and the stale end is gone.
+    assert_eq!(recorded_floor(&event_loop), Some(HEADER));
+    assert_eq!(
+        event_loop.actors.wal_actor.unrecorded_floor_for_test(),
+        None
+    );
+    assert!(!event_loop.actors.wal_actor.is_fenced());
+    Ok(())
+}
+
+#[test]
+fn should_record_exact_floor_when_storage_verification_barrier_begins() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = loop_with_floor(window(1024 * 1024, Duration::from_secs(10)))?;
+    commit_strict(&mut event_loop, 96_000, b"warmup");
+    commit_strict(&mut event_loop, 96_001, b"deferred");
+    let len = open_segment_len(&event_loop)?;
+    let wal_fsyncs = event_loop.state.diagnostics.counters().wal_fsync_count;
+    assert_eq!(recorded_floor(&event_loop), Some(HEADER));
+    let begin = event_loop
+        .routing
+        .router
+        .register(96_002, "begin verification");
+
+    // Act
+    event_loop.process_one(
+        RuntimeMsg::BeginStorageVerification { request_id: 96_002 },
+        &crossbeam::channel::never(),
+    );
+    let response = settle(&mut event_loop, &begin);
+
+    // Assert: the barrier answers only after the floor is exact, and it did
+    // not need a second fsync because the deferred end was already synced.
+    assert!(matches!(
+        response,
+        RuntimeResponse::StorageVerificationBarrier { .. }
+    ));
+    assert_eq!(recorded_floor(&event_loop), Some(len));
+    assert_eq!(
+        event_loop.actors.wal_actor.unrecorded_floor_for_test(),
+        None
+    );
+    assert_eq!(
+        event_loop.state.diagnostics.counters().wal_fsync_count,
+        wal_fsyncs
+    );
+    Ok(())
+}
+
+#[test]
+fn should_not_write_ledger_when_storage_verification_barrier_begins_with_exact_floor(
+) -> MidgeResult<()> {
+    // Arrange: the default configuration records every strict sync exactly.
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    commit_strict(&mut event_loop, 96_100, b"warmup");
+    commit_strict(&mut event_loop, 96_101, b"exact");
+    let ledger_syncs = ledger_file_syncs(&event_loop);
+    let begin = event_loop
+        .routing
+        .router
+        .register(96_102, "begin verification");
+
+    // Act
+    event_loop.process_one(
+        RuntimeMsg::BeginStorageVerification { request_id: 96_102 },
+        &crossbeam::channel::never(),
+    );
+    settle(&mut event_loop, &begin);
+
+    // Assert: with the option off the barrier is exactly as before.
+    assert_eq!(ledger_file_syncs(&event_loop), ledger_syncs);
+    Ok(())
+}
