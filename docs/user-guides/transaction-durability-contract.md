@@ -290,6 +290,33 @@ At return:
 
 Use `sync()` for data that must survive a local crash before the caller continues.
 
+#### Optional amortized sync floor (local storage only)
+
+By default every `sync()` fsync is followed by a ledger edit that records the
+exact synced length of the open WAL segment (the floor). Recovery uses the floor
+to tell lost acknowledged bytes from an unsynced tail, so a strict open fails if
+the file is damaged or shorter below it.
+
+`OpenOptionsBuilder::amortized_sync_floor` is an opt-in, default-off option that
+skips that ledger edit while fewer than 256 KiB (default) are unrecorded and the
+oldest unrecorded acknowledgement is younger than 20 ms (default). Both bounds
+are configurable (`1..=64 MiB`, `1 ms..=10 s`). The floor is recorded exactly at
+rotation, clean shutdown, DDL, backup capture, storage verification and salvage.
+
+Unchanged: the WAL fsync still completes before every acknowledgement. An honest
+power loss or process crash loses nothing acknowledged, and an intact tail above
+the recorded floor replays in full.
+
+Weaker: damage or truncation inside the window (between the recorded floor and
+the acknowledged end) is classified as a torn tail. Recovery truncates at the
+first damaged frame and drops it together with every valid acknowledged frame
+after it, and opens normally, where the default configuration refuses a strict
+open. The loss is bounded by the window.
+
+Cloud storage rejects the option at `build()`; in-memory storage accepts it and
+ignores it. If the idle-timer floor edit fails, the WAL is fenced like any other
+failed floor edit.
+
 ### `WriteOptions::buffered()`
 
 `buffered()` is valid only for local or in-memory storage. Cloud-backed storage rejects it with `MidgeError::InvalidArgument`.

@@ -58,9 +58,10 @@ Active regressions exercise actual ledger publication, append, compaction,
 file/directory failure boundaries and a public Strict commit/reopen path.
 Behavioral execution remains pending in the implementation-first batch.
 
-Amortized ledger floors exist as an opt-in, default-off option
-(`OpenOptionsBuilder::amortized_sync_floor`, local storage only) pending owner
-sign-off of the contract below. With the option off every metric above and
+Amortized ledger floors were adopted on 2026-11-18 as an opt-in, default-off
+option (`OpenOptionsBuilder::amortized_sync_floor`, local storage only) after
+measurement; the default stays exact. The default window is 256 KiB or 20 ms
+since the oldest unrecorded acknowledgement. With the option off every metric above and
 every recovery decision is unchanged. With it on, a strict group's ledger
 `SyncOpen` is deferred while fewer than `max_unrecorded_bytes` follow the
 recorded floor and the oldest deferred acknowledgement is younger than
@@ -71,5 +72,18 @@ clean shutdown, ticketed barriers (DDL, batched windows, backup capture,
 pre-prune rotation) and storage verification record the floor exactly, and
 salvage is unchanged. The cost is lost-write detection inside the window:
 damage between the recorded floor and the acknowledged end is truncated as a
-torn tail instead of failing a strict open. These observations and the
-option's tests do not grant approval of that tradeoff.
+torn tail instead of failing a strict open.
+
+Measurement (single local runs, not a hosted campaign; release profile, Apple
+M5, macOS, 5 samples per row; `tier2_durability_commit_sync_local_16_writers`
+against its `_amortized_floor` variants):
+
+- Both rows at gate trust: option off 1.20K txn/s (6.0% variance), 629 ledger
+  syncs for 629 WAL fsyncs, commit p99 27.92 ms; option on at the default
+  window 1.58K txn/s (7.2% variance), 161 ledger syncs for 697 WAL fsyncs,
+  commit p99 21.89 ms. That is +32% throughput.
+- An earlier run on a busier host: off 1.20K (13.7%, diagnostic); on at the
+  default 1.64K (17.1%, diagnostic), 177 ledger syncs for 612 fsyncs; on at
+  1 MiB / 100 ms 1.99K (4.8%, gate), 37 ledger syncs for 599 fsyncs.
+- A first run under host load 20-31 was unusable for throughput (variance
+  24-27%) but showed the same ledger-sync reduction (215 of 579).

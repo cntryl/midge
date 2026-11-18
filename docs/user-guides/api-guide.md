@@ -20,7 +20,9 @@ options before opening. Public builder controls include `goal`,
 `with_memtable_flush_threshold`, `transaction_memory_pool_size`,
 `block_cache_policy`, `cloud_write_policy`, `background_compaction`,
 `recovery_policy`, `storage_io_timeout`, `runtime_response_timeout`,
-`on_lease_loss`, `lease_clock_skew_tolerance`, and `ttl_clock`.
+`on_lease_loss`, `lease_clock_skew_tolerance`, `ttl_clock`, and the opt-in
+`amortized_sync_floor` (local storage; see the
+[durability contract](transaction-durability-contract.md)).
 
 ## Entry size admission
 
