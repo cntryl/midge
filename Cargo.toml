@@ -2,28 +2,24 @@
 name = "cntryl-midge"
 version = "0.5.2"
 edition = "2021"
-resolver = "2"
 rust-version = "1.97"
 autobenches = false
 description = "A high-performance embedded key-value database with LSM-tree storage"
 license = "Apache-2.0"
 repository = "https://github.com/cntryl/midge"
 readme = "README.md"
-exclude = ["possible-sst-design.md"]
 keywords = ["database", "kv", "lsm", "embedded", "storage"]
 categories = ["database-implementations"]
 
-[workspace.lints.clippy]
-pedantic = "deny"
+# Marks this manifest as its own workspace root, so a checkout nested inside
+# another copy of the repository (a git worktree) does not join that workspace.
+[workspace]
 
 [lib]
-name = "cntryl_midge"
-path = "src/lib.rs"
 bench = false
 
 [[bin]]
 name = "midge"
-path = "src/bin/midge.rs"
 bench = false
 
 # `panic = "unwind"` (the default) stays: worker panics are isolated with
@@ -122,7 +118,6 @@ num_cpus = "1.17"
 proptest = "1.12"
 cntryl-stress = "0.5.1"
 hdrhistogram = "7.6"
-sha2 = "0.11"
 # Self dev-dependency: turns on `internal-testing` for tests/ and benches/ so
 # they can reach implementation internals through `cntryl_midge::__internal`
 # without those modules being public API for downstream consumers.
@@ -146,65 +141,39 @@ telemetry = [
     "dep:opentelemetry_sdk",
 ]
 telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
+
+# Cloud storage backends, enabled by default for current deployment profiles.
+cloud-common = ["dep:tokio", "dep:reqwest"]
+# Request signing shared by every provider. Not a backend by itself.
+cloud-signing = [
+    "cloud-common",
+    "dep:base64",
+    "dep:hmac",
+    "dep:percent-encoding",
+    "dep:urlencoding",
+]
+cloud-aws = ["cloud-signing"]
+cloud-azure = ["cloud-signing", "dep:md5"]
+cloud-gcp = ["cloud-signing", "dep:ring", "dep:sha1"]
+cloud-oci = ["cloud-signing"]
+cloud-all = ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci"]
+
+# Test and benchmark only. Never enable these from a downstream crate.
+# Exposes `cntryl_midge::__internal` for this crate's own tests, benches and
+# fuzz targets; nothing behind it is stable API.
+internal-testing = []
+sqrzl-tests = []
 stress-soak = ["cloud-all"]
 checkpoint-bench = ["internal-testing"]
-# Enables the candidate-only #908 admission configuration in the Tier 4
-# compaction backpressure benchmark. Keep this disabled for the preregistered
-# base revision, whose public API predates WriteBackpressureConfig.
+# Enables the #908 admission configuration in the Tier 4 compaction
+# backpressure benchmark; without it the row runs with hard stalls only.
 candidate-write-backpressure-bench = []
-
-# Cloud storage backend support enabled by default for current deployment profiles.
-cloud-common = [
-    "dep:tokio",
-    "dep:reqwest",
-]
-cloud-aws = [
-    "cloud-common",
-    "dep:base64",
-    "dep:hmac",
-    "dep:percent-encoding",
-    "dep:urlencoding",
-]
-
-sqrzl-tests = []
-
-# Exposes `cntryl_midge::__internal` for this crate's own tests, benches and
-# fuzz targets. Never enable it from a downstream crate: nothing behind it is
-# stable API.
-internal-testing = []
-cloud-azure = [
-    "cloud-common",
-    "dep:base64",
-    "dep:hmac",
-    "dep:md5",
-    "dep:percent-encoding",
-    "dep:urlencoding",
-]
-cloud-gcp = [
-    "cloud-common",
-    "dep:base64",
-    "dep:hmac",
-    "dep:ring",
-    "dep:sha1",
-    "dep:percent-encoding",
-    "dep:urlencoding",
-]
-cloud-oci = [
-    "cloud-common",
-    "dep:base64",
-    "dep:hmac",
-    "dep:percent-encoding",
-    "dep:urlencoding",
-]
-cloud-all = ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci"]
-cloud_integration = ["cloud-all"]
 
 
 # Fault injection is run explicitly and serially because failpoints are
 # process-global. Broad test selections must not run this target.
 [[test]]
 name = "fault_injection"
-path = "tests/fault_injection.rs"
 test = false
 required-features = ["failpoints"]
 
@@ -222,237 +191,191 @@ required-features = ["internal-testing"]
 # Tier 1
 [[bench]]
 name = "tier1_hotpath_api"
-path = "benches/tier1_hotpath_api.rs"
 harness = false
 
 [[bench]]
 name = "tier1_hotpath_bloom"
-path = "benches/tier1_hotpath_bloom.rs"
 harness = false
 
 [[bench]]
 name = "tier1_hotpath_block_cache"
-path = "benches/tier1_hotpath_block_cache.rs"
 harness = false
 
 [[bench]]
 name = "tier1_hotpath_iterator"
-path = "benches/tier1_hotpath_iterator.rs"
 harness = false
 
 [[bench]]
 name = "tier1_hotpath_memtable"
-path = "benches/tier1_hotpath_memtable.rs"
 harness = false
 
 [[bench]]
 name = "tier1_hotpath_sst"
-path = "benches/tier1_hotpath_sst.rs"
 harness = false
 
 [[bench]]
 name = "tier1_hotpath_trie"
-path = "benches/tier1_hotpath_trie.rs"
 harness = false
 
 [[bench]]
 name = "tier1_hotpath_wal"
-path = "benches/tier1_hotpath_wal.rs"
 harness = false
 
 [[bench]]
 name = "tier1_hotpath_keyed_group_commit"
-path = "benches/tier1_hotpath_keyed_group_commit.rs"
 harness = false
 
 [[bench]]
 name = "tier1_hotpath_compression"
-path = "benches/tier1_hotpath_compression.rs"
 harness = false
 
 [[bench]]
 name = "tier1_hotpath_event_loop"
-path = "benches/tier1_hotpath_event_loop.rs"
 harness = false
 
 # Tier 2
 [[bench]]
 name = "tier2_subsystem_block_cache"
-path = "benches/tier2_subsystem_block_cache.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_bloom_build"
-path = "benches/tier2_subsystem_bloom_build.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_compression"
-path = "benches/tier2_subsystem_compression.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_range_scan_cache"
-path = "benches/tier2_subsystem_range_scan_cache.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_iterator_multi_sst"
-path = "benches/tier2_subsystem_iterator_multi_sst.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_memtable_rotate"
-path = "benches/tier2_subsystem_memtable_rotate.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_read_amplification"
-path = "benches/tier2_subsystem_read_amplification.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_event_loop"
-path = "benches/tier2_subsystem_event_loop.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_transaction_latency"
-path = "benches/tier2_subsystem_transaction_latency.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_durability_commit_latency"
-path = "benches/tier2_subsystem_durability_commit_latency.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_hybrid_durability_lag"
-path = "benches/tier2_subsystem_hybrid_durability_lag.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_baseline_matrix"
-path = "benches/tier2_subsystem_baseline_matrix.rs"
 harness = false
 
 [[bench]]
 name = "tier2_subsystem_compaction"
-path = "benches/tier2_subsystem_compaction.rs"
 harness = false
 
 # Tier 3
 [[bench]]
 name = "tier3_system_engine"
-path = "benches/tier3_system_engine.rs"
 harness = false
 
 [[bench]]
 name = "tier3_system_mvcc"
-path = "benches/tier3_system_mvcc.rs"
 harness = false
 
 [[bench]]
 name = "tier3_system_sst"
-path = "benches/tier3_system_sst.rs"
 harness = false
 
 [[bench]]
 name = "tier3_system_scan"
-path = "benches/tier3_system_scan.rs"
 harness = false
 
 [[bench]]
 name = "tier3_system_lifecycle"
-path = "benches/tier3_system_lifecycle.rs"
 harness = false
 
 # Tier 4
 [[bench]]
 name = "tier4_system_checkpoint_write_amplification"
-path = "benches/tier4_system_checkpoint_write_amplification.rs"
 harness = false
 required-features = ["checkpoint-bench"]
 
 [[bench]]
 name = "tier4_system_local_throughput_regression"
-path = "benches/tier4_system_local_throughput_regression.rs"
 harness = false
 
 [[bench]]
 name = "tier4_system_strict_group_commit"
-path = "benches/tier4_system_strict_group_commit.rs"
 harness = false
 
 [[bench]]
 name = "tier4_system_compression_policy"
-path = "benches/tier4_system_compression_policy.rs"
 harness = false
 
 [[bench]]
 name = "tier4_ycsb_workload_a"
-path = "benches/tier4_ycsb_workload_a.rs"
 harness = false
 
 [[bench]]
 name = "tier4_system_compaction_backpressure"
-path = "benches/tier4_system_compaction_backpressure.rs"
 harness = false
 
 [[bench]]
 name = "tier4_system_compaction_grandparent_cuts"
-path = "benches/tier4_system_compaction_grandparent_cuts.rs"
 harness = false
 
 [[bench]]
 name = "tier4_system_sst_v5"
-path = "benches/tier4_system_sst_v5.rs"
 harness = false
 required-features = ["internal-testing"]
 
 [[bench]]
 name = "tier4_system_sst_footprint"
-path = "benches/tier4_system_sst_footprint.rs"
 harness = false
 
 [[bench]]
 name = "tier4_ycsb_workload_b"
-path = "benches/tier4_ycsb_workload_b.rs"
 harness = false
 
 [[bench]]
 name = "tier4_ycsb_workload_c"
-path = "benches/tier4_ycsb_workload_c.rs"
 harness = false
 
 [[bench]]
 name = "tier4_ycsb_workload_d"
-path = "benches/tier4_ycsb_workload_d.rs"
 harness = false
 
 [[bench]]
 name = "tier4_ycsb_workload_e"
-path = "benches/tier4_ycsb_workload_e.rs"
 harness = false
 
 [[bench]]
 name = "tier4_ycsb_workload_f"
-path = "benches/tier4_ycsb_workload_f.rs"
 harness = false
 
 [[bench]]
 name = "tier4_streaming_workload"
-path = "benches/tier4_streaming_workload.rs"
 harness = false
 
 [[bench]]
 name = "tier4_system_recovery_throughput"
-path = "benches/tier4_system_recovery_throughput.rs"
 harness = false
 
 [[bench]]
 name = "tier4_bounded_compaction_qualification"
-path = "benches/tier4_bounded_compaction_qualification.rs"
 harness = false
 required-features = ["failpoints"]
 
@@ -460,19 +383,16 @@ required-features = ["failpoints"]
 # feature keeps ordinary `cargo bench` from starting a soak accidentally.
 [[bench]]
 name = "tier5_stress_workloads"
-path = "benches/tier5_stress_workloads.rs"
 harness = false
 required-features = ["stress-soak"]
 
 [[bench]]
 name = "tier5_hybrid_durability_lag"
-path = "benches/tier5_hybrid_durability_lag.rs"
 harness = false
 required-features = ["stress-soak"]
 
 [[bench]]
 name = "tier6_mixed_workload_soak"
-path = "benches/tier6_mixed_workload_soak.rs"
 harness = false
 required-features = ["stress-soak"]
 
@@ -485,4 +405,5 @@ required-features = ["internal-testing"]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(midge_loom)'] }
 
 [lints.clippy]
+pedantic = { level = "deny", priority = -1 }
 too_many_lines = "forbid"
