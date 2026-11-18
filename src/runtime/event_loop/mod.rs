@@ -532,6 +532,7 @@ impl EventLoop {
         Self::attach_engine_counters(state, wal_actor, config);
         wal_actor.set_read_resources(read_resources.cloned());
         wal_actor.set_lease_validity(config.lease_validity.clone());
+        wal_actor.set_sync_floor(config.wal_sync_floor);
         if let Some(store) = config.leader_store.clone() {
             wal_actor.set_leader_store(store, config.leader_holder_id.clone().unwrap_or_default());
         }

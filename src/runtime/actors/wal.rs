@@ -369,6 +369,8 @@ pub struct WalActor {
     sync_authority_prevalidated: bool,
     /// Largest transaction WAL footprint recovery can replay, when bounded.
     max_replayable_txn_bytes: Option<usize>,
+    /// Opt-in amortized sync floor (#904); `None` records every sync exactly.
+    sync_floor: Option<crate::config::AmortizedSyncFloor>,
 
     // === Optional instrumentation ===
     sync_calls: u64,
@@ -828,6 +830,7 @@ impl WalActor {
             leader_holder_id: String::new(),
             sync_authority_prevalidated: false,
             max_replayable_txn_bytes: None,
+            sync_floor: None,
         };
 
         // Log resolved WAL mode for diagnostics
@@ -844,6 +847,10 @@ impl WalActor {
 
     pub(crate) fn durability_policy(&self) -> DurabilityPolicy {
         self.durability_policy
+    }
+
+    pub(crate) fn set_sync_floor(&mut self, floor: Option<crate::config::AmortizedSyncFloor>) {
+        self.sync_floor = floor;
     }
 
     pub(crate) fn set_max_replayable_txn_bytes(&mut self, limit: Option<usize>) {
