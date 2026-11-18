@@ -272,9 +272,13 @@ fn should_replay_intact_tail_above_amortized_floor_after_crash() {
     // a buffered tail makes the device's power-loss outcomes non-trivial.
     let crashed = Crashed::run(Some(wide_window()), &[b"first", b"later"], Some(b"tail"));
 
-    // Act / Assert: whichever way power is lost, a strict open succeeds and
-    // every acknowledged write replays. The floor lags; the bytes do not.
-    for fork in crashed.power_losses() {
+    // Act
+    let forks = crashed.power_losses();
+
+    // Assert: whichever way power is lost, a strict open succeeds and every
+    // acknowledged write replays. The floor lags; the bytes do not.
+    assert!(!forks.is_empty());
+    for fork in forks {
         let options = crashed.options(&fork, Some(wide_window()), RecoveryPolicy::Strict);
         let mut reopened = Engine::open(options).expect("strict open above the floor");
         for key in [b"first".as_slice(), b"later"] {
@@ -288,7 +292,7 @@ fn should_replay_intact_tail_above_amortized_floor_after_crash() {
 }
 
 #[test]
-fn should_open_and_drop_tail_when_damage_is_inside_floor_window() {
+fn should_drop_tail_when_damage_is_inside_floor_window() {
     // Arrange: damage lands in the first acknowledged frame, which the
     // amortized floor had not yet recorded.
     let crashed = Crashed::run(Some(wide_window()), &[b"first", b"later"], None);

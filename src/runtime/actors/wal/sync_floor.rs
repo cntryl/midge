@@ -149,14 +149,14 @@ impl WalActor {
     }
 
     /// The deferred floor as `(segment, end offset)`, for tests.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "failpoints"))]
     pub(crate) fn unrecorded_floor_for_test(&self) -> Option<(SegmentId, u64)> {
         self.unrecorded_floor
             .map(|floor| (floor.segment_id, floor.end_offset))
     }
 
     /// Plant a deferred end, as if a segment change had failed to clear it.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "failpoints"))]
     pub(crate) fn plant_unrecorded_floor_for_test(&mut self, segment_id: SegmentId, end: u64) {
         self.unrecorded_floor = Some(UnrecordedFloor {
             segment_id,

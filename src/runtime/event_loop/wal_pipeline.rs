@@ -676,5 +676,5 @@ impl EventLoop {
 #[cfg(all(test, feature = "failpoints"))]
 pub(super) mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "failpoints"))]
 mod floor_tests;

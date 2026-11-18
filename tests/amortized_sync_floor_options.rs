@@ -57,7 +57,7 @@ fn should_accept_amortized_sync_floor_when_bounds_are_inclusive_edges() {
 }
 
 #[test]
-fn should_default_amortized_sync_floor_to_one_mib_and_one_hundred_ms_when_unconfigured() {
+fn should_default_amortized_sync_floor_to_documented_bounds_when_unconfigured() {
     // Arrange
     let dir = tempfile::tempdir().unwrap();
 
@@ -90,8 +90,11 @@ fn should_reject_amortized_sync_floor_when_storage_is_cloud() {
 
 #[test]
 fn should_accept_amortized_sync_floor_when_storage_is_in_memory() {
-    // Arrange / Act
-    let options = OpenOptions::in_memory()
+    // Arrange
+    let builder = OpenOptions::in_memory();
+
+    // Act
+    let options = builder
         .amortized_sync_floor(AmortizedSyncFloor::default())
         .build()
         .unwrap();
