@@ -58,7 +58,18 @@ Active regressions exercise actual ledger publication, append, compaction,
 file/directory failure boundaries and a public Strict commit/reopen path.
 Behavioral execution remains pending in the implementation-first batch.
 
-Amortized ledger floors remain unapproved. Before considering that proposal,
-complete any broader physical-call accounting needed by its claimed scope,
-run the recovery campaigns, and obtain explicit approval of the lost-write
-detection tradeoff. These observations do not grant that approval.
+Amortized ledger floors exist as an opt-in, default-off option
+(`OpenOptionsBuilder::amortized_sync_floor`, local storage only) pending owner
+sign-off of the contract below. With the option off every metric above and
+every recovery decision is unchanged. With it on, a strict group's ledger
+`SyncOpen` is deferred while fewer than `max_unrecorded_bytes` follow the
+recorded floor and the oldest deferred acknowledgement is younger than
+`max_unrecorded_delay`; the WAL fsync itself is never skipped or delayed. The
+deferred end is the completed fsync's receipt end, keyed to its segment, and is
+recorded by the byte bound, an idle timer, or any exact edit. Rotation,
+clean shutdown, ticketed barriers (DDL, batched windows, backup capture,
+pre-prune rotation) and storage verification record the floor exactly, and
+salvage is unchanged. The cost is lost-write detection inside the window:
+damage between the recorded floor and the acknowledged end is truncated as a
+torn tail instead of failing a strict open. These observations and the
+option's tests do not grant approval of that tradeoff.
