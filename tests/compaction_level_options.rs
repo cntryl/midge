@@ -198,3 +198,45 @@ fn should_refuse_open_without_changing_files_when_max_levels_is_below_existing_d
     assert_all_keys_readable(&reopened)?;
     reopened.shutdown(Duration::from_secs(10))
 }
+
+#[cfg(all(feature = "internal-testing", feature = "failpoints"))]
+#[test]
+fn should_report_grandparent_overlap_rolls_when_a_tiny_overlap_limit_cuts_outputs(
+) -> MidgeResult<()> {
+    // Arrange: small SSTs give every level several files, so outputs cross
+    // grandparent file boundaries.
+    let directory = tempfile::tempdir().unwrap();
+    let mut engine = Engine::open(
+        OpenOptions::local(directory.path())
+            .background_compaction(false)
+            .target_sst_size_for_testing(4096)
+            .compaction_levels(CompactionLevelConfig {
+                max_grandparent_overlap_bytes: 1,
+                ..small_levels()
+            })
+            .build()?,
+    )?;
+
+    let family = engine.get_column_family("default").unwrap();
+
+    // Act: each round's keys interleave with every earlier round's.
+    for flush in 0..4 {
+        let mut tx = engine.begin_tx(family.id(), TransactionMode::ReadWrite)?;
+        for slot in 0..KEYS_PER_FLUSH {
+            let ordinal = flush * KEYS_PER_FLUSH + slot;
+            tx.put(key_for(ordinal), value_for(ordinal), None)?;
+        }
+        tx.commit(WriteOptions::sync())?;
+        engine.flush_cf(&family)?;
+        engine.compact_all()?;
+    }
+
+    // Assert
+    let rolls =
+        cntryl_midge::__internal::diagnostics::compaction_grandparent_overlap_roll_count(&engine);
+    assert!(
+        rolls > 0,
+        "the engine reported no grandparent overlap rolls"
+    );
+    engine.shutdown(Duration::from_secs(10))
+}
