@@ -148,6 +148,51 @@ fn should_publish_one_ordered_cut_when_later_apply_finishes_before_first_unit(
 }
 
 #[test]
+fn should_reconcile_memtable_accounting_when_authority_is_lost_during_apply(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let mut event_loop = super::super::tests::create_test_local_event_loop()?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let healthy = Arc::new(AtomicBool::new(true));
+    event_loop.authority.fencing.lease_healthy = Some(Arc::clone(&healthy));
+    let held = HeldApply::new();
+    let (first, later) = start_group(&mut event_loop);
+    held.wait(&mut event_loop);
+
+    // Act: both multi-key transactions fail after their effects were admitted.
+    healthy.store(false, Ordering::Release);
+    held.release.send(()).expect("release after authority loss");
+    for response in [&first, &later] {
+        assert!(matches!(
+            settle(&mut event_loop, response),
+            RuntimeResponse::Error {
+                error: MidgeError::OutcomeUnknown(_),
+                ..
+            }
+        ));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while event_loop.wal_group_in_flight() {
+        event_loop.progress_wal_pipeline();
+        assert!(
+            Instant::now() < deadline,
+            "admitted apply effects did not drain"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    // Assert: the incremental total still equals what the memtables hold.
+    let accounted = event_loop.state.total_memtable_bytes;
+    let resident = event_loop.state.get_cf(0).unwrap().memtable.size_bytes();
+    event_loop.state.recompute_total_memtable_bytes();
+    assert_eq!(event_loop.state.total_memtable_bytes, accounted);
+    assert_eq!(accounted, resident);
+    assert!(accounted > 0, "the failed group left no admitted effects");
+    Ok(())
+}
+
+#[test]
 fn should_preserve_group_authority_when_authority_is_lost_during_apply(
 ) -> crate::common::MidgeResult<()> {
     // Arrange

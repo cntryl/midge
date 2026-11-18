@@ -135,6 +135,159 @@ fn should_write_legacy_bytes_when_sequenced_units_encode_on_writer() -> MidgeRes
     Ok(())
 }
 
+fn entropy_value(len: usize) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state.to_le_bytes()[3]
+        })
+        .collect()
+}
+
+fn put(key: &'static [u8], value: Vec<u8>, seq: u64, txn_id: u64) -> WalRecord {
+    let mut record = WalRecord::new_cf(
+        0,
+        WalOpKind::Put,
+        Bytes::from_static(key),
+        Some(value.into()),
+        seq,
+    );
+    record.txn_id = Some(txn_id);
+    record
+}
+
+fn multi_op_unit(txn_id: u64, begin: u64, values: [Vec<u8>; 3]) -> SequencedWalUnit {
+    let [small, entropy, compressible] = values;
+    let mut ttl = put(b"ttl", small, begin + 1, txn_id);
+    ttl.expiration = Some(777_000);
+    let mut delete = WalRecord::new_cf(
+        0,
+        WalOpKind::Delete,
+        Bytes::from_static(b"gone"),
+        None,
+        begin + 4,
+    );
+    delete.txn_id = Some(txn_id);
+    let mut range = WalRecord::new_cf(
+        0,
+        WalOpKind::DeleteRange,
+        Bytes::from_static(b"r0"),
+        None,
+        begin + 5,
+    );
+    range.range_end = Some(Bytes::from_static(b"r9"));
+    range.txn_id = Some(txn_id);
+    SequencedWalUnit {
+        txn_id,
+        begin_sequence: begin,
+        commit_sequence: begin + 6,
+        cf_id: 0,
+        operations: vec![
+            ttl,
+            put(b"noisy", entropy, begin + 2, txn_id),
+            put(b"packed", compressible, begin + 3, txn_id),
+            delete,
+            range,
+        ],
+    }
+}
+
+#[test]
+fn should_write_legacy_bytes_when_batch_has_multiple_multi_operation_units() -> MidgeResult<()> {
+    // Arrange: two transactions, each mixing TTL/no-TTL puts, a delete and a
+    // delete-range, with one value below the threshold, one high-entropy value
+    // above it, and one compressible value above it.
+    let small = vec![b's'; 16];
+    let entropy = entropy_value(4096);
+    let compressible = vec![b'z'; 4096];
+    assert!(crate::codec::compress_wal_value_borrowed(&small)
+        .1
+        .is_none());
+    assert!(
+        crate::codec::compress_wal_value_borrowed(&entropy)
+            .1
+            .is_none(),
+        "high-entropy value is stored raw"
+    );
+    assert!(
+        crate::codec::compress_wal_value_borrowed(&compressible)
+            .1
+            .is_some(),
+        "compressible value is stored compressed"
+    );
+    let units = vec![
+        multi_op_unit(
+            41,
+            1,
+            [small.clone(), entropy.clone(), compressible.clone()],
+        ),
+        multi_op_unit(
+            42,
+            8,
+            [small.clone(), entropy.clone(), compressible.clone()],
+        ),
+    ];
+    let mut expected = Vec::new();
+    for unit in &units {
+        expected.extend(reference_frame(unit)?);
+    }
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
+    create_test_segment(fs.as_ref(), "wal.log")?;
+    let writer = FsWalWriterIo::new("wal.log", Arc::clone(&fs))?;
+    let identity = WalAppendPrefix {
+        barrier_id: 74,
+        writer_epoch: writer.header.epoch,
+        segment_id: writer.header.id,
+        first_sequence: 1,
+        last_sequence: 14,
+    };
+
+    // Act
+    let pending = writer
+        .submit_sequenced_batch(identity, units, Duration::from_secs(5), None)
+        .expect("sequenced capability")
+        .map_err(|failure| failure.error)?;
+    let receipt = completed(&pending).map_err(|failure| failure.error)?;
+    writer.sync_with_timeout(Duration::from_secs(5))?;
+    let bytes =
+        crate::io::read_all(fs.as_ref(), &FsPath::new("wal.log")).map_err(FsError::into_midge)?;
+
+    // Assert: byte-identical to the independent frames, and replayable.
+    assert_eq!(&bytes[HEADER_LEN..], expected.as_slice());
+    assert_eq!(receipt.prefix, identity);
+    assert_eq!(receipt.end_offset, bytes.len() as u64);
+    let records = crate::wal::format::segment::records(&bytes)?;
+    assert_eq!(records.len(), 2);
+    for (record, txn_id) in records.iter().zip([41, 42]) {
+        let decoded =
+            crate::wal::encoding::decode_txn_batch_payload(record, record.value.as_ref().unwrap())?;
+        assert_eq!(decoded.records.len(), 5);
+        assert_eq!(decoded.records[0].expiration, Some(777_000));
+        assert_eq!(decoded.records[1].expiration, None);
+        assert_eq!(decoded.records[0].value.as_deref(), Some(small.as_slice()));
+        assert_eq!(
+            decoded.records[1].value.as_deref(),
+            Some(entropy.as_slice())
+        );
+        assert_eq!(
+            decoded.records[2].value.as_deref(),
+            Some(compressible.as_slice())
+        );
+        assert_eq!(decoded.records[3].op, WalOpKind::Delete);
+        assert_eq!(
+            decoded.records[4].range_end.as_deref(),
+            Some(b"r9".as_slice())
+        );
+        assert_eq!(decoded.txn_id, txn_id);
+        assert_eq!(decoded.commit_seq, decoded.begin_seq + 6);
+    }
+    assert_eq!(writer.tail().last_seq, Some(14));
+    Ok(())
+}
+
 #[test]
 fn should_reject_raw_encoding_before_enqueue_when_memory_budget_is_too_small() -> MidgeResult<()> {
     // Arrange

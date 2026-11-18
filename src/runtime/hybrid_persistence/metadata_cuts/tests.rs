@@ -1166,6 +1166,63 @@ fn should_reject_owned_capture_when_successor_takes_writer_epoch() {
     );
 }
 
+#[test]
+fn should_reject_metadata_chain_when_later_ordinal_carries_a_lower_writer_epoch() {
+    // Arrange: a successor (epoch 2) publishes the chain head, then a stale
+    // epoch-1 edit object is appended on top of it at the next ordinal.
+    let fixture = Fixture::new(CloudStorage::with_mock());
+    fixture.store.acquire_leadership("successor").unwrap();
+    let successor_cut = fixture.cut_for_epoch(2);
+    fixture
+        .mirror_as(&successor_cut, "successor", 2, Duration::from_secs(5))
+        .unwrap();
+    let (head, bodies) = fixture.selected_bodies();
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    let valid = super::super::metadata_chain::read(&fixture.cloud, &head, &deadline).unwrap();
+    assert_eq!(valid, bodies, "the epoch-2 chain alone is authoritative");
+    let mut local = bodies.clone();
+    local
+        .values_mut()
+        .next()
+        .expect("a control file is mirrored")
+        .extend_from_slice(b"stale-epoch-edit");
+    let next = head.id.checked_next().unwrap();
+    let stale_objects = super::super::metadata_chain::publish(
+        &CloudMetadataMirrorContext {
+            cloud: &fixture.cloud,
+            fs: fixture.fs.as_ref(),
+            publication_lock: &fixture.lock,
+            lock_wait_budget: Duration::from_secs(5),
+            deadline: &deadline,
+            authority: super::super::CloudMetadataMirrorAuthority {
+                store: fixture.store.as_ref(),
+                holder_id: "writer",
+                writer_epoch: 1,
+            },
+        },
+        &local,
+        Some(&head),
+        Some(&bodies),
+        None,
+        next,
+    )
+    .unwrap();
+    let regressed = CloudMetadataGeneration {
+        id: next,
+        manifest_horizon: head.manifest_horizon,
+        objects: stale_objects,
+    };
+
+    // Act
+    let result = super::super::metadata_chain::read(&fixture.cloud, &regressed, &deadline);
+
+    // Assert: the regressing epoch is corruption, never an authoritative view.
+    assert!(
+        matches!(&result, Err(MidgeError::Corruption(message)) if message.contains("lineage")),
+        "{result:?}"
+    );
+}
+
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_capture_exact_checkpoint_cut_when_snapshot_installation_is_between_rename_and_truncate() {
