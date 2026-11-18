@@ -172,6 +172,7 @@ pub struct OpenOptions {
     compaction_concurrency: usize,
     flush_concurrency: usize,
     write_backpressure: crate::config::WriteBackpressureConfig,
+    compaction_levels: crate::config::CompactionLevelConfig,
     drop_transaction_wait_timeout: Duration,
     storage: Storage,
     goal: Goal,
@@ -205,6 +206,7 @@ pub struct OpenOptionsBuilder {
     compaction_concurrency: usize,
     flush_concurrency: usize,
     write_backpressure: crate::config::WriteBackpressureConfig,
+    compaction_levels: crate::config::CompactionLevelConfig,
     drop_transaction_wait_timeout: Duration,
     storage: Storage,
     goal: Goal,
@@ -253,6 +255,11 @@ impl OpenOptions {
     #[must_use]
     pub fn write_backpressure(&self) -> &crate::config::WriteBackpressureConfig {
         &self.write_backpressure
+    }
+    /// Leveled-compaction level sizing.
+    #[must_use]
+    pub fn compaction_levels(&self) -> &crate::config::CompactionLevelConfig {
+        &self.compaction_levels
     }
     /// Maximum Drop-reaper wait for client-owned transactions (default 30s).
     #[must_use]
@@ -588,6 +595,13 @@ impl OpenOptionsBuilder {
         self.write_backpressure = config;
         self
     }
+    /// Configure leveled-compaction level sizing. A store already holding SSTs at
+    /// level `max_levels` or deeper refuses to open.
+    #[must_use]
+    pub fn compaction_levels(mut self, config: crate::config::CompactionLevelConfig) -> Self {
+        self.compaction_levels = config;
+        self
+    }
     /// Bound how long dropping an Engine retains client-owned transactions.
     /// After this window they return Fenced. Admitted workers still drain
     /// before lease release, which can take longer for blocked storage I/O.
@@ -602,6 +616,7 @@ impl OpenOptionsBuilder {
             compaction_concurrency: 1,
             flush_concurrency: 1,
             write_backpressure: crate::config::WriteBackpressureConfig::default(),
+            compaction_levels: crate::config::CompactionLevelConfig::default(),
             drop_transaction_wait_timeout: Duration::from_secs(30),
             storage,
             goal: Goal::default(),
@@ -1019,6 +1034,7 @@ impl OpenOptionsBuilder {
         };
         let compression_policy = Self::derive_compression_policy(self.goal);
 
+        self.compaction_levels.validate()?;
         self.write_backpressure.validate(
             l0_compaction_trigger + crate::config::DEFAULT_MAX_IMMUTABLE_MEMTABLES + 1,
             pools.memtable_flush_threshold.saturating_mul(2),
@@ -1028,6 +1044,7 @@ impl OpenOptionsBuilder {
             compaction_concurrency: self.compaction_concurrency,
             flush_concurrency: self.flush_concurrency,
             write_backpressure: self.write_backpressure,
+            compaction_levels: self.compaction_levels,
             storage: self.storage,
             goal: self.goal,
             memory_budget: self.memory_budget,
