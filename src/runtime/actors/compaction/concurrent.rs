@@ -134,6 +134,9 @@ impl CompactionActor {
         }
         let factory = Arc::clone(&self.slots[0].sst_factory);
         let config = self.slots[0].compactor.config.clone();
+        // Every owner reports rolls to the one engine counter; a rebuilt slot
+        // must not fall back to a private one.
+        let rolls = Arc::clone(&self.slots[0].grandparent_overlap_rolls);
         self.pool = None;
         self.jobs = jobs::CompactionJobs::new(limit);
         self.slots = (0..limit)
@@ -143,6 +146,7 @@ impl CompactionActor {
                     .unwrap_or_else(|| Arc::clone(&factory));
                 let mut core = CompactionJobActor::new_with_config(worker_factory, config.clone());
                 core.jobs = Arc::clone(&self.jobs);
+                core.set_grandparent_overlap_roll_counter(Arc::clone(&rolls));
                 core.set_execution_limits(self.target_sst_size, self.global_memory_limit / limit);
                 core
             })
