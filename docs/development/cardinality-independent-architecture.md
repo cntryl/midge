@@ -257,6 +257,20 @@ rate-limited bytes and the enabled pending-byte estimate separately from stalls.
 Sustainable-load latency, hard-stall reduction and rate tuning still require
 the #908/#935 benchmark qualification; the optional controls imply no gain.
 
+### Leveled-compaction sizing
+
+`OpenOptionsBuilder::compaction_levels` accepts `CompactionLevelConfig`:
+`l1_target_bytes` (default 40 MiB, positive), `level_multiplier` (default 10,
+`2..=100`), `max_levels` (default 7, `3..=7`) and
+`max_grandparent_overlap_bytes` (default 320 MiB; zero disables output cuts and
+restores legacy source fragmentation). Level `n >= 2` targets
+`l1_target_bytes * level_multiplier^(n - 1)`; invalid values fail at `build()`.
+The same values feed the planner and the pending-compaction-byte estimate. A
+store already holding SSTs at level `max_levels` or deeper refuses to open with
+`InvalidArgument` before any file is touched; reopen with the original
+`max_levels` to use it. Smaller targets deepen the tree sooner and raise write
+amplification; the defaults are unchanged.
+
 ```text
 cargo test --lib runtime::sst_read_view::tests::should_prove_read_work_bounds_across_synthetic_manifest_cardinalities -- --nocapture
 cargo test --lib compaction::tests::should_keep_compaction_work_bounded_across_ten_thousand_targets -- --nocapture

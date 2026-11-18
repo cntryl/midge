@@ -3684,3 +3684,29 @@ fn should_publish_applied_sequence_given_failed_group_when_snapshot_published(
     assert_eq!(snapshot.get(b"unapplied", visible)?, None);
     Ok(())
 }
+
+#[test]
+fn should_pass_configured_grandparent_overlap_to_compaction_actor_when_creating_it() {
+    for configured in [0_u64, 12_345] {
+        // Arrange
+        let factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::FsSstFactoryIo::new(
+            Arc::new(crate::io::MockFs::new()),
+            4096,
+        ));
+        let config = crate::runtime::RuntimeConfig {
+            compaction_levels: crate::config::CompactionLevelConfig {
+                max_grandparent_overlap_bytes: configured,
+                ..crate::config::CompactionLevelConfig::default()
+            },
+            ..crate::runtime::RuntimeConfig::default()
+        };
+
+        // Act
+        let actor =
+            EventLoop::create_compaction_actor(factory, &config, Arc::new(AtomicU64::new(0)))
+                .expect("compaction actor");
+
+        // Assert
+        assert_eq!(actor.max_grandparent_overlap_bytes(), configured);
+    }
+}

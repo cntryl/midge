@@ -314,8 +314,7 @@ impl EventLoop {
         observed_frontiers: Arc<crate::runtime::frontiers::ObservedDurabilityFrontiers>,
         observed_pending_cloud_uploads: Arc<crate::runtime::frontiers::ObservedPendingCloudUploads>,
     ) -> crate::common::MidgeResult<Self> {
-        // Seal the recovered tail before admission so reserved sequences are never reused (#843).
-        let sealed_tail = state.begin_wal_epoch(config.writer_epoch)?;
+        let sealed_tail = Self::seal_recovered_tail(&mut state, &config)?;
         let (inline_flush_worker, worker_msg_tx) = (
             flush_worker_mode.is_inline(),
             flush_worker_mode.worker_msg_tx(),
@@ -506,10 +505,11 @@ impl EventLoop {
         config: &super::RuntimeConfig,
         grandparent_overlap_rolls: Arc<std::sync::atomic::AtomicU64>,
     ) -> crate::common::MidgeResult<CompactionActor> {
-        let compaction_config = crate::compaction::LeveledCompactionConfig {
+        let mut compaction_config = crate::compaction::LeveledCompactionConfig {
             l0_file_count_threshold: config.l0_compaction_trigger.max(1),
             ..Default::default()
         };
+        config.compaction_levels.apply_to(&mut compaction_config);
         let mut actor = CompactionActor::new_with_config(sst_factory, compaction_config);
         actor.set_grandparent_overlap_roll_counter(grandparent_overlap_rolls);
         actor.set_execution_limits(config.target_sst_size, config.compaction_memory_limit);
@@ -551,6 +551,34 @@ impl EventLoop {
         )?;
         Self::configure_wal_actor(state, &mut wal_actor, config, read_resources);
         Ok(wal_actor)
+    }
+
+    /// Seals the recovered tail before admission so reserved sequences are never
+    /// reused (#843), after refusing a store deeper than the configured levels.
+    fn seal_recovered_tail(
+        state: &mut RuntimeState,
+        config: &super::RuntimeConfig,
+    ) -> crate::common::MidgeResult<Option<crate::runtime::wal_history::SealedSegment>> {
+        Self::check_existing_levels(state, &config.compaction_levels)?;
+        state.begin_wal_epoch(config.writer_epoch)
+    }
+
+    /// Refuses to open a store whose SSTs sit deeper than the configured
+    /// `max_levels`; nothing is modified before this check.
+    fn check_existing_levels(
+        state: &RuntimeState,
+        levels: &crate::config::CompactionLevelConfig,
+    ) -> crate::common::MidgeResult<()> {
+        let deepest = state.manifest.files.iter().map(|file| file.level).max();
+        match deepest {
+            Some(deepest) if usize::try_from(deepest).map_or(true, |d| d >= levels.max_levels) => {
+                Err(crate::common::MidgeError::InvalidArgument(format!(
+                    "store holds SSTs at level {deepest}, which is not below configured compaction max_levels {}",
+                    levels.max_levels
+                )))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn apply_runtime_state_config(
