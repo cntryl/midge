@@ -6,6 +6,7 @@
 #[path = "./stress_config.rs"]
 mod stress_config;
 
+use cntryl_midge::__internal::diagnostics::{write_admission_snapshot, WriteAdmissionSnapshot};
 use cntryl_midge::{Engine, MidgeError, TransactionMode, WriteOptions};
 use cntryl_stress::{
     stress, stress_main, LogicalUnit, ObservationDirection, ObservationUnit, OperationOutcome,
@@ -207,11 +208,7 @@ fn run_compaction_backpressure_case(
         .metrics()
         .get_runtime_metrics()
         .expect("capture backpressure metrics before measurement");
-    let gate_before = engine
-        .metrics()
-        .get_runtime_metrics()
-        .expect("capture publication deferrals before measurement")
-        .flush_publication_deferred_by_gate;
+    let admission_before = write_admission_snapshot(&engine);
     let measured = run_write_phase(
         &engine,
         cf_id,
@@ -226,11 +223,6 @@ fn run_compaction_backpressure_case(
         .metrics()
         .get_runtime_metrics()
         .expect("capture backpressure metrics after measurement");
-    let gate_after = engine
-        .metrics()
-        .get_runtime_metrics()
-        .expect("capture publication deferrals after measurement")
-        .flush_publication_deferred_by_gate;
 
     record_backpressure_parameters(ctx, mode, compaction_concurrency, measured_duration);
     assert_eq!(
@@ -263,7 +255,10 @@ fn run_compaction_backpressure_case(
     let slowdown_count = metrics_after
         .write_slowdown_count
         .saturating_sub(metrics_before.write_slowdown_count);
-    let deferrals = gate_after.saturating_sub(gate_before);
+    let deferrals = metrics_after
+        .flush_publication_deferred_by_gate
+        .saturating_sub(metrics_before.flush_publication_deferred_by_gate);
+    record_stall_causes(ctx, &admission_before, &write_admission_snapshot(&engine));
     record_backpressure_observations(
         ctx,
         slowdown_ns,
@@ -306,6 +301,66 @@ fn record_backpressure_parameters(
     ctx.parameter("logical_bytes_per_operation", ycsb::KEY_SIZE + VALUE_SIZE);
     ctx.parameter("warmup_secs", WARMUP.as_secs_f64());
     ctx.parameter("measured_secs", measured_duration.as_secs_f64());
+}
+
+/// Attribute the measured window's rejected commits to the pressure sources
+/// the engine reported with each rejection. One rejection can name several.
+fn record_stall_causes(
+    ctx: &mut StressContext,
+    before: &WriteAdmissionSnapshot,
+    after: &WriteAdmissionSnapshot,
+) {
+    let causes = [
+        (
+            "stall_rejections_ingest_hint",
+            before.ingest_hint_total,
+            after.ingest_hint_total,
+        ),
+        (
+            "stall_cause_runtime",
+            before.hint_runtime_total,
+            after.hint_runtime_total,
+        ),
+        ("stall_cause_l0", before.hint_l0_total, after.hint_l0_total),
+        (
+            "stall_cause_memory",
+            before.hint_memory_total,
+            after.hint_memory_total,
+        ),
+        (
+            "stall_cause_cloud_pending",
+            before.hint_cloud_pending_total,
+            after.hint_cloud_pending_total,
+        ),
+        (
+            "stall_cause_upload_stalled",
+            before.hint_upload_stalled_total,
+            after.hint_upload_stalled_total,
+        ),
+        (
+            "stall_cause_unknown",
+            before.hint_unknown_total,
+            after.hint_unknown_total,
+        ),
+        (
+            "stall_rejections_commit",
+            before.commit_write_stall_total,
+            after.commit_write_stall_total,
+        ),
+        (
+            "stall_rejections_queue",
+            before.queue_total,
+            after.queue_total,
+        ),
+    ];
+    for (name, start, end) in causes {
+        ctx.record_observation(
+            name,
+            counter_as_f64(end.saturating_sub(start)),
+            ObservationUnit::Count,
+            ObservationDirection::Informational,
+        );
+    }
 }
 
 fn record_backpressure_observations(
