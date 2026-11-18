@@ -1,5 +1,5 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
-use super::{WalActor, WalSyncReceipt, WalTransitionOperation};
+use super::{FloorEdit, SyncCadence, WalActor, WalSyncReceipt, WalTransitionOperation};
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
@@ -72,7 +72,7 @@ impl WalActor {
         state: &mut RuntimeState,
         group: Option<&crate::lease::WriterEffectGroup>,
     ) -> MidgeResult<()> {
-        let receipt = self.begin_sync_io(state, group)?;
+        let receipt = self.begin_sync_io(state, group, SyncCadence::Amortizable)?;
         self.commit_sync_io(state, receipt)
     }
 
@@ -87,10 +87,12 @@ impl WalActor {
         state: &mut RuntimeState,
         ticket: &WalSyncTicket,
     ) -> MidgeResult<WalSyncReceipt> {
-        let result = self.begin_sync_io(state, None).map(|mut receipt| {
-            receipt.generation = Some(ticket.generation());
-            receipt
-        });
+        let result = self
+            .begin_sync_io(state, None, SyncCadence::Exact)
+            .map(|mut receipt| {
+                receipt.generation = Some(ticket.generation());
+                receipt
+            });
         debug_assert!(
             result.is_ok() || self.is_open() || self.is_fenced(),
             "a failed WAL sync must settle in Open or Fenced"
@@ -154,6 +156,7 @@ impl WalActor {
         &mut self,
         state: &mut RuntimeState,
         group: Option<&crate::lease::WriterEffectGroup>,
+        cadence: SyncCadence,
     ) -> MidgeResult<WalSyncReceipt> {
         self.validate_sync_authority(state)?;
         self.begin_io_transition(WalTransitionOperation::Sync)?;
@@ -269,7 +272,7 @@ impl WalActor {
             }
         }
 
-        self.persist_sync_boundary(state, group, receipt.end_offset)?;
+        self.persist_sync_boundary(state, group, receipt.end_offset, cadence)?;
         Ok(receipt)
     }
 
@@ -290,6 +293,23 @@ impl WalActor {
     }
 
     pub(super) fn persist_sync_boundary(
+        &mut self,
+        state: &mut RuntimeState,
+        group: Option<&crate::lease::WriterEffectGroup>,
+        end_offset: Option<u64>,
+        cadence: SyncCadence,
+    ) -> MidgeResult<FloorEdit> {
+        match (cadence, self.sync_floor) {
+            (SyncCadence::Amortizable, Some(policy)) => {
+                self.persist_amortized_sync_boundary(state, group, end_offset, policy)
+            }
+            _ => self
+                .record_exact_floor(state, group, end_offset)
+                .map(|()| FloorEdit::Recorded),
+        }
+    }
+
+    pub(super) fn record_exact_sync_boundary(
         &mut self,
         state: &mut RuntimeState,
         group: Option<&crate::lease::WriterEffectGroup>,

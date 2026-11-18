@@ -282,6 +282,29 @@ enum WalTransitionOperation {
     Rotate,
 }
 
+/// When the ledger floor must follow a completed WAL fsync (#904).
+///
+/// `Exact` records the receipt's end offset before the sync is acknowledged.
+/// `Amortizable` is used only by strict transaction groups, whose
+/// acknowledgement may precede the floor edit when the opt-in sync floor
+/// allows it. Ticketed barriers (batched windows, shutdown, DDL,
+/// verification, rotation preparation) are always `Exact`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncCadence {
+    Exact,
+    Amortizable,
+}
+
+/// What handling a completed fsync's floor did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FloorEdit {
+    /// The exact floor edit was attempted and the open segment's recorded
+    /// floor is at least the receipt's end.
+    Recorded,
+    /// The amortized floor kept the receipt's end for a later edit.
+    Deferred,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct WalSyncReceipt {
     durable_sequence: u64,
@@ -369,6 +392,11 @@ pub struct WalActor {
     sync_authority_prevalidated: bool,
     /// Largest transaction WAL footprint recovery can replay, when bounded.
     max_replayable_txn_bytes: Option<usize>,
+    /// Opt-in amortized sync floor (#904); `None` records every sync exactly.
+    sync_floor: Option<crate::config::AmortizedSyncFloor>,
+    /// The completed, acknowledged fsync whose ledger edit the amortized floor
+    /// deferred. Always `None` while `sync_floor` is `None`.
+    unrecorded_floor: Option<sync_floor::UnrecordedFloor>,
 
     // === Optional instrumentation ===
     sync_calls: u64,
@@ -390,6 +418,7 @@ mod spill;
 mod spill_validation;
 mod staged_writes;
 mod strict_pipeline;
+mod sync_floor;
 #[cfg(test)]
 mod test_append;
 mod transaction;
@@ -708,6 +737,8 @@ impl WalActor {
         authority_lost: bool,
     ) {
         let reason = reason.into();
+        // A fenced WAL records no further floor, so a deferred end is dead.
+        self.unrecorded_floor = None;
         let previous = std::mem::replace(&mut self.io, WalIoState::Memory);
         self.io = match previous {
             WalIoState::Memory => WalIoState::Memory,
@@ -828,6 +859,8 @@ impl WalActor {
             leader_holder_id: String::new(),
             sync_authority_prevalidated: false,
             max_replayable_txn_bytes: None,
+            sync_floor: None,
+            unrecorded_floor: None,
         };
 
         // Log resolved WAL mode for diagnostics
@@ -844,6 +877,10 @@ impl WalActor {
 
     pub(crate) fn durability_policy(&self) -> DurabilityPolicy {
         self.durability_policy
+    }
+
+    pub(crate) fn set_sync_floor(&mut self, floor: Option<crate::config::AmortizedSyncFloor>) {
+        self.sync_floor = floor;
     }
 
     pub(crate) fn set_max_replayable_txn_bytes(&mut self, limit: Option<usize>) {

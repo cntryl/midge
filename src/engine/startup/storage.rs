@@ -1287,6 +1287,7 @@ impl RuntimeStorageMaterialization {
         let runtime_config = crate::runtime::RuntimeConfig {
             write_backpressure: opts.write_backpressure().clone(),
             compaction_levels: opts.compaction_levels().clone(),
+            wal_sync_floor: opts.amortized_sync_floor(),
             ttl_clock: opts.ttl_clock(),
             wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
             wal_batch_config: batch_config,

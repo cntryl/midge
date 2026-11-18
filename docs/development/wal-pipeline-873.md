@@ -221,6 +221,14 @@ assigned to a slice. None is in the backlog issues as written.
 
 ## 5. The #904 decision
 
+> **Note, 2026-11-18:** #904 shipped as an opt-in, default-off option with a
+> 256 KiB / 20 ms default window. Two claims below were found wrong in
+> implementation: `sync_deadline_timeout` is not reusable (it returns `None`
+> when nothing is pending and is keyed to the batch config), so a separate idle
+> floor deadline was added; and the appendix C.1 statement that the floor is
+> read after the fsync is wrong, because the floor is captured before the fsync
+> (receipt end, constraint C1). See `wal-sync-accounting.md`.
+
 **Decision: accept, modified.**
 
 - **Rejected:** requirement R1 as written (derive the durable prefix from the last valid frame). That removes the

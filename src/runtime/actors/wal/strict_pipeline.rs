@@ -1,7 +1,8 @@
 //! Split strict append, physical sync completion, and loop-owned publication.
 
 use super::{
-    PendingStrictIo, PendingStrictSync, PreparedTransactionAppend, WalActor, WalTransitionOperation,
+    FloorEdit, PendingStrictIo, PendingStrictSync, PreparedTransactionAppend, SyncCadence,
+    WalActor, WalTransitionOperation,
 };
 use crate::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
@@ -207,15 +208,24 @@ impl WalActor {
             self.ensure_lease_validity()?;
             Self::after_fsync_boundary()?;
             WalTransitionBoundary::AfterFsync.check()?;
+            debug_assert_eq!(
+                pending.receipt.segment_id,
+                state.wal.open_segment(),
+                "a strict sync receipt must be persisted on the segment it was captured on"
+            );
             let proof_started = std::time::Instant::now();
             let proof = self.persist_sync_boundary(
                 state,
                 pending.root.as_ref(),
                 pending.receipt.end_offset,
+                SyncCadence::Amortizable,
             );
-            self.counters.record(|metrics| {
-                metrics.record_wal_sync_ledger_proof_latency(proof_started.elapsed());
-            });
+            // A deferred floor writes no ledger proof, so it has no latency.
+            if !matches!(proof, Ok(FloorEdit::Deferred)) {
+                self.counters.record(|metrics| {
+                    metrics.record_wal_sync_ledger_proof_latency(proof_started.elapsed());
+                });
+            }
             proof?;
             Ok(receipt)
         });

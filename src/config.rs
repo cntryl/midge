@@ -63,8 +63,10 @@ pub(crate) fn validate_memtable_limits(
 pub(crate) mod cloud_validation;
 mod compaction_levels;
 mod provider;
+mod wal_sync_floor;
 mod write_backpressure;
 pub use compaction_levels::CompactionLevelConfig;
+pub use wal_sync_floor::AmortizedSyncFloor;
 pub use write_backpressure::WriteBackpressureConfig;
 
 pub use cloud_validation::{

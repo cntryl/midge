@@ -83,6 +83,9 @@ pub struct RuntimeConfig {
     pub(crate) flush_concurrency: usize,
     pub(crate) write_backpressure: crate::config::WriteBackpressureConfig,
     pub(crate) compaction_levels: crate::config::CompactionLevelConfig,
+    /// Opt-in amortized WAL sync floor (#904); `None` records every strict
+    /// sync's floor exactly.
+    pub(crate) wal_sync_floor: Option<crate::config::AmortizedSyncFloor>,
     pub(crate) ttl_clock: Arc<crate::common::time::ObservedClock>,
     pub wal_durability_policy: DurabilityPolicy,
     pub wal_batch_config: BatchConfig,
@@ -162,6 +165,7 @@ impl Default for RuntimeConfig {
             flush_concurrency: 1,
             write_backpressure: crate::config::WriteBackpressureConfig::default(),
             compaction_levels: crate::config::CompactionLevelConfig::default(),
+            wal_sync_floor: None,
             ttl_clock: Arc::new(crate::common::time::ObservedClock::default()),
             wal_durability_policy: DurabilityPolicy::Batched,
             wal_batch_config: BatchConfig::default(),

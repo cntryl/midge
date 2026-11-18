@@ -356,6 +356,7 @@ pub use engine::{Direction, IteratorState, Query, ScanIterator};
 pub use sst::cache::CacheFill;
 
 // Observability and diagnostics
+pub use config::AmortizedSyncFloor;
 pub use config::CompactionLevelConfig;
 pub use config::{
     AwsS3Config, AzureBlobConfig, AzureCredentialSource, CloudCheckCode, CloudCheckOutcome,

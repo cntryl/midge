@@ -1,4 +1,6 @@
-use cntryl_midge::{Engine, MidgeResult, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{
+    AmortizedSyncFloor, Engine, MidgeResult, OpenOptions, TransactionMode, WriteOptions,
+};
 use std::time::Duration;
 
 #[test]
@@ -42,6 +44,55 @@ fn should_account_strict_sync_boundaries_through_restart() -> MidgeResult<()> {
     let read = reopened.begin_tx(family.id(), TransactionMode::ReadOnly)?;
     assert_eq!(read.get(b"first")?.as_deref(), Some(b"one".as_slice()));
     assert_eq!(read.get(b"second")?.as_deref(), Some(b"two".as_slice()));
+    drop(read);
+    reopened.shutdown(Duration::from_secs(10))
+}
+
+#[test]
+fn should_issue_fewer_ledger_syncs_than_wal_fsyncs_when_floor_is_amortized() -> MidgeResult<()> {
+    // Arrange: warm the sequence reservation, then measure inside the window.
+    let directory = tempfile::tempdir().unwrap();
+    let options = OpenOptions::local(directory.path())
+        .background_compaction(false)
+        .amortized_sync_floor(AmortizedSyncFloor {
+            max_unrecorded_bytes: 64 * 1024 * 1024,
+            max_unrecorded_delay: Duration::from_secs(10),
+        })
+        .build()?;
+    let mut engine = Engine::open(options.clone())?;
+    let family = engine.get_column_family("default").unwrap();
+    let mut warmup = engine.begin_tx(family.id(), TransactionMode::ReadWrite)?;
+    warmup.put(b"first".to_vec(), b"one".to_vec(), None)?;
+    warmup.commit(WriteOptions::sync())?;
+    let before = engine.metrics().get_runtime_metrics()?;
+
+    // Act
+    for key in [b"second".as_slice(), b"third"] {
+        let mut measured = engine.begin_tx(family.id(), TransactionMode::ReadWrite)?;
+        measured.put(key.to_vec(), b"value".to_vec(), None)?;
+        measured.commit(WriteOptions::sync())?;
+    }
+    let after = engine.metrics().get_runtime_metrics()?;
+
+    // Assert: each acknowledged commit paid its own WAL fsync, and none paid
+    // a ledger sync while the unrecorded window stayed open.
+    assert_eq!(after.wal_fsync_count - before.wal_fsync_count, 2);
+    assert_eq!(
+        after.wal_ledger_file_syncs - before.wal_ledger_file_syncs,
+        0
+    );
+    assert_eq!(
+        after.wal_ledger_file_sync_attempts - before.wal_ledger_file_sync_attempts,
+        0
+    );
+    assert_eq!(after.wal_accounted_syncs - before.wal_accounted_syncs, 2);
+    engine.shutdown(Duration::from_secs(10))?;
+    drop(engine);
+    let mut reopened = Engine::open(options)?;
+    let read = reopened.begin_tx(family.id(), TransactionMode::ReadOnly)?;
+    for key in [b"first".as_slice(), b"second", b"third"] {
+        assert!(read.get(key)?.is_some());
+    }
     drop(read);
     reopened.shutdown(Duration::from_secs(10))
 }

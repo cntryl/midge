@@ -119,6 +119,15 @@ impl MidgeOptions {
         &self,
         workers: usize,
     ) -> cntryl_midge::OpenOptions {
+        self.open_options_builder(workers)
+            .build()
+            .expect("build benchmark open options")
+    }
+
+    /// The same options as `to_open_options`, before `build`, so a row can add
+    /// one more setting without restating the shared ones.
+    #[must_use]
+    pub fn open_options_builder(&self, workers: usize) -> cntryl_midge::OpenOptionsBuilder {
         let storage = match &self.storage_mode {
             StorageMode::Memory => cntryl_midge::Storage::InMemory,
             StorageMode::LocalDisk { db_path } => cntryl_midge::Storage::Local {
@@ -178,7 +187,7 @@ impl MidgeOptions {
             open_opts = open_opts.write_backpressure(config);
         }
 
-        open_opts.build().expect("build benchmark open options")
+        open_opts
     }
 }
 

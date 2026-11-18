@@ -173,6 +173,7 @@ pub struct OpenOptions {
     flush_concurrency: usize,
     write_backpressure: crate::config::WriteBackpressureConfig,
     compaction_levels: crate::config::CompactionLevelConfig,
+    amortized_sync_floor: Option<crate::config::AmortizedSyncFloor>,
     drop_transaction_wait_timeout: Duration,
     storage: Storage,
     goal: Goal,
@@ -207,6 +208,7 @@ pub struct OpenOptionsBuilder {
     flush_concurrency: usize,
     write_backpressure: crate::config::WriteBackpressureConfig,
     compaction_levels: crate::config::CompactionLevelConfig,
+    amortized_sync_floor: Option<crate::config::AmortizedSyncFloor>,
     drop_transaction_wait_timeout: Duration,
     storage: Storage,
     goal: Goal,
@@ -260,6 +262,12 @@ impl OpenOptions {
     #[must_use]
     pub fn compaction_levels(&self) -> &crate::config::CompactionLevelConfig {
         &self.compaction_levels
+    }
+    /// Opt-in amortized WAL sync floor; `None` (the default) records the
+    /// exact floor after every strict sync.
+    #[must_use]
+    pub fn amortized_sync_floor(&self) -> Option<crate::config::AmortizedSyncFloor> {
+        self.amortized_sync_floor
     }
     /// Maximum Drop-reaper wait for client-owned transactions (default 30s).
     #[must_use]
@@ -602,6 +610,19 @@ impl OpenOptionsBuilder {
         self.compaction_levels = config;
         self
     }
+    /// Opt in to an amortized WAL sync floor for local storage. The default,
+    /// `None`, records an exact floor after every strict sync. With a floor
+    /// configured, a strict commit skips that ledger edit while both bounds
+    /// hold: an intact tail past the recorded floor is still replayed, but
+    /// damage or loss inside the window is truncated as a torn tail instead
+    /// of failing a strict open. See [`crate::AmortizedSyncFloor`]. Cloud and
+    /// simulated-cloud storage reject the option at [`Self::build`]; in-memory
+    /// storage accepts it and ignores it.
+    #[must_use]
+    pub fn amortized_sync_floor(mut self, config: crate::config::AmortizedSyncFloor) -> Self {
+        self.amortized_sync_floor = Some(config);
+        self
+    }
     /// Bound how long dropping an Engine retains client-owned transactions.
     /// After this window they return Fenced. Admitted workers still drain
     /// before lease release, which can take longer for blocked storage I/O.
@@ -617,6 +638,7 @@ impl OpenOptionsBuilder {
             flush_concurrency: 1,
             write_backpressure: crate::config::WriteBackpressureConfig::default(),
             compaction_levels: crate::config::CompactionLevelConfig::default(),
+            amortized_sync_floor: None,
             drop_transaction_wait_timeout: Duration::from_secs(30),
             storage,
             goal: Goal::default(),
@@ -956,6 +978,21 @@ impl OpenOptionsBuilder {
         self.local_storage_budget(bytes)
     }
 
+    fn validate_amortized_sync_floor(&self) -> MidgeResult<()> {
+        let Some(floor) = &self.amortized_sync_floor else {
+            return Ok(());
+        };
+        if matches!(
+            self.storage,
+            Storage::Cloud { .. } | Storage::CloudSimulated { .. }
+        ) {
+            return Err(MidgeError::InvalidArgument(
+                "amortized sync floor applies to local storage only; cloud storage keeps its own WAL durability".into(),
+            ));
+        }
+        floor.validate()
+    }
+
     fn validate_open_timeout(&self) -> MidgeResult<()> {
         if let Some(timeout) = self.open_timeout {
             if timeout < Duration::from_millis(1)
@@ -1035,6 +1072,7 @@ impl OpenOptionsBuilder {
         let compression_policy = Self::derive_compression_policy(self.goal);
 
         self.compaction_levels.validate()?;
+        self.validate_amortized_sync_floor()?;
         self.write_backpressure.validate(
             l0_compaction_trigger + crate::config::DEFAULT_MAX_IMMUTABLE_MEMTABLES + 1,
             pools.memtable_flush_threshold.saturating_mul(2),
@@ -1045,6 +1083,7 @@ impl OpenOptionsBuilder {
             flush_concurrency: self.flush_concurrency,
             write_backpressure: self.write_backpressure,
             compaction_levels: self.compaction_levels,
+            amortized_sync_floor: self.amortized_sync_floor,
             storage: self.storage,
             goal: self.goal,
             memory_budget: self.memory_budget,

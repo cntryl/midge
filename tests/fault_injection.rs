@@ -446,6 +446,81 @@ mod failure_injection {
     }
 
     #[test]
+    fn should_replay_intact_synced_tail_when_frontier_recording_fails_under_amortized_floor() {
+        // Arrange: the same post-fsync failure as the exact-floor contract, but
+        // the first commit's floor edit was already deferred by the option.
+        let _guard = failpoint_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let temp_dir = TempDir::new().expect("temporary database directory");
+        let db_path = temp_dir.path();
+        let amortized = || {
+            OpenOptions::local(db_path)
+                .recovery_policy(RecoveryPolicy::Strict)
+                .background_compaction(false)
+                .amortized_sync_floor(cntryl_midge::AmortizedSyncFloor {
+                    max_unrecorded_bytes: 64 * 1024 * 1024,
+                    max_unrecorded_delay: std::time::Duration::from_secs(10),
+                })
+                .build()
+                .expect("build amortized options")
+        };
+        let mut engine = Engine::open(amortized()).expect("open engine");
+        let cf = default_cf(&engine);
+        write_cf_value(&engine, &cf, b"warmup", b"value");
+        let ledger_syncs = || {
+            engine
+                .metrics()
+                .get_runtime_metrics()
+                .expect("runtime metrics")
+                .wal_ledger_file_syncs
+        };
+        let before = ledger_syncs();
+        write_cf_value(&engine, &cf, b"deferred-before-failure", b"value");
+        assert_eq!(
+            ledger_syncs(),
+            before,
+            "the acknowledged commit must leave its floor edit deferred"
+        );
+        let scenario = fail::FailScenario::setup();
+        let point = "midge::wal::after_fsync_before_durable_frontier";
+        fail::cfg(point, "return").expect("configure post-fsync frontier failure");
+        let mut transaction = engine
+            .begin_tx(cf.id(), TransactionMode::ReadWrite)
+            .expect("begin strict transaction");
+        transaction
+            .put(b"synced-before-frontier".to_vec(), b"value".to_vec(), None)
+            .expect("stage value");
+
+        // Act
+        let commit = transaction.commit(WriteOptions::sync());
+        fail::remove(point);
+        scenario.teardown();
+        assert!(commit.is_err(), "frontier failure must fail the commit");
+        let _ = engine.shutdown(std::time::Duration::from_secs(5));
+        drop(engine);
+
+        // Assert: both the deferred and the post-fsync commit replay.
+        let reopened = Engine::open(amortized())
+            .expect("intact synced tail must replay beyond the recorded floor");
+        let cf = default_cf(&reopened);
+        let read = reopened
+            .begin_tx(cf.id(), TransactionMode::ReadOnly)
+            .expect("begin recovered read transaction");
+        for key in [
+            b"deferred-before-failure".as_slice(),
+            b"synced-before-frontier",
+        ] {
+            assert_eq!(
+                read.get(key).expect("read recovered value").as_deref(),
+                Some(&b"value"[..])
+            );
+        }
+        drop(read);
+        shutdown_engine(reopened);
+    }
+
+    #[test]
     fn should_reject_column_family_drop_when_wal_sync_fails() {
         // Arrange
         let _guard = failpoint_test_lock()

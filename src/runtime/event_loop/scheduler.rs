@@ -90,6 +90,9 @@ impl EventLoop {
         if self.actors.wal_actor.should_sync_batch() {
             return true;
         }
+        if self.floor_deadline_timeout() == Some(Duration::ZERO) {
+            return true;
+        }
 
         if self.pipeline.durability.cloud_seal_retry_due() && self.state.wal.pending_writes > 0 {
             return true;
@@ -127,6 +130,7 @@ impl EventLoop {
             && (self.actors.wal_actor.has_pending_data()
                 || self.pipeline.durability.has_pending_waiters());
         due_sync
+            || self.floor_deadline_timeout() == Some(Duration::ZERO)
             || self
                 .actors
                 .cloud_coordinator
@@ -152,6 +156,7 @@ impl EventLoop {
             // batched WAL sync deadline still applies.
             return [
                 self.actors.wal_actor.sync_deadline_timeout(),
+                self.floor_deadline_timeout(),
                 authority_poll,
                 CompactionCoordinator::manual_compaction_wait_timeout(self),
             ]
@@ -162,6 +167,7 @@ impl EventLoop {
 
         [
             self.actors.wal_actor.sync_deadline_timeout(),
+            self.floor_deadline_timeout(),
             self.retry_deadlines().min(),
             self.flush_mirror_retry_timeout(),
             self.actors
@@ -235,6 +241,7 @@ impl EventLoop {
             // Mutations stay deferred behind the barrier, so sync only what
             // is already in the WAL; do not drain queued writes into it.
             // Cloud acknowledgements still complete their waiters.
+            self.record_due_sync_floor();
             self.sync_batched_wal_without_draining();
             self.drain_hybrid_storage_events();
             return;
@@ -254,6 +261,7 @@ impl EventLoop {
             self.drain_validation_results(&crossbeam::channel::never());
             return;
         }
+        self.record_due_sync_floor();
         CompactionCoordinator::expire_manual_compaction_waiters(self);
         self.wake_write_stall_waiters();
         self.reap_compaction_compute_results();
@@ -285,6 +293,64 @@ impl EventLoop {
         self.run_background_compaction_maintenance_if_due();
         self.schedule_metadata_retention_if_due();
         self.prefetch_flush_sst_names_if_due();
+    }
+
+    /// Whether the loop owns the WAL still enough to write a floor edit: no
+    /// strict group in flight and the transition protocol `Ready`.
+    fn sync_floor_writable(&self) -> bool {
+        !self.wal_group_in_flight() && self.pipeline.wal_transition.ensure_ready().is_ok()
+    }
+
+    /// The floor's delay deadline, only while `record_due_sync_floor` would
+    /// actually write. Counting it otherwise would spin the idle loop.
+    pub(super) fn floor_deadline_timeout(&self) -> Option<Duration> {
+        self.sync_floor_writable()
+            .then(|| self.actors.wal_actor.floor_deadline_timeout())
+            .flatten()
+    }
+
+    /// Record the amortized sync floor once its delay bound has passed.
+    ///
+    /// Safe only while the loop owns the WAL still (constraint C3): a strict
+    /// group in flight holds the thread-bound writer root, and a sync or seal
+    /// ticket means a transition is mid-flight. Either way the group's own
+    /// completion or the transition's exact sync settles the floor, so the
+    /// timer abstains and the next idle pass retries.
+    pub(super) fn record_due_sync_floor(&mut self) {
+        if !self.sync_floor_writable() {
+            return;
+        }
+        if let Err(error) = self
+            .actors
+            .wal_actor
+            .record_deferred_floor(&mut self.state, false)
+        {
+            tracing::error!(%error, "failed to record the amortized WAL sync floor");
+            self.fence_wal_transition(&error, None);
+        }
+    }
+
+    /// Make a deferred floor exact before a barrier that reads the ledger.
+    /// With no deferred floor, including whenever the option is off, nothing
+    /// happens.
+    pub(super) fn record_deferred_sync_floor(&mut self) -> crate::common::MidgeResult<()> {
+        if !self.actors.wal_actor.has_unrecorded_floor() {
+            return Ok(());
+        }
+        if self.wal_group_in_flight() {
+            return Err(crate::common::MidgeError::WriteStall(
+                "WAL floor barrier is deferred while WAL work is in flight".into(),
+            ));
+        }
+        self.pipeline.wal_transition.ensure_ready()?;
+        let recorded = self
+            .actors
+            .wal_actor
+            .record_deferred_floor(&mut self.state, true);
+        if let Err(error) = &recorded {
+            self.fence_wal_transition(error, None);
+        }
+        recorded
     }
 
     pub(super) fn retry_manifest_reclamation_if_due(&mut self) {
