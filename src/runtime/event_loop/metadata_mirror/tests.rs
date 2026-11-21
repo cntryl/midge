@@ -119,8 +119,12 @@ impl HeldMetadataObjectStore {
 }
 
 fn seed_compaction_name_source(event_loop: &mut EventLoop) -> MidgeResult<String> {
+    seed_manifest_sst(event_loop, 0, 1)
+}
+
+fn seed_manifest_sst(event_loop: &mut EventLoop, cf_id: u32, seq: u64) -> MidgeResult<String> {
     use crate::sst::SstFactory as _;
-    let name = crate::cloud_layout::file_name(0, 0, 1);
+    let name = crate::cloud_layout::file_name(cf_id, 0, seq);
     let factory = crate::sst::FsSstFactoryIo::new(
         crate::io::subdirectory(Arc::clone(&event_loop.state.fs), "sst"),
         4096,
@@ -144,9 +148,9 @@ fn seed_compaction_name_source(event_loop: &mut EventLoop) -> MidgeResult<String
         .files
         .push(crate::metadata::FileMeta {
             name: name.clone(),
-            cf_id: 0,
+            cf_id,
             level: 0,
-            sst_seq: 1,
+            sst_seq: seq,
             size_bytes: finalized.size_bytes,
             content_crc32c: Some(finalized.content_crc32c),
             smallest_key: Some(summary.smallest_key),
@@ -531,4 +535,124 @@ fn should_fail_the_original_flush_attempt_when_name_publication_loses_authority(
     fail::remove("midge::metadata_mirror::before_provider");
     scenario.teardown();
     Ok(())
+}
+
+fn sst_is_resident(event_loop: &EventLoop, name: &str) -> bool {
+    event_loop
+        .state
+        .fs
+        .metadata(&crate::sst::fs::sst_key(name))
+        .is_ok()
+}
+
+fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+    let limit = Instant::now() + Duration::from_secs(5);
+    while !condition() {
+        assert!(Instant::now() < limit, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn queued_reclamation(event_loop: &EventLoop) -> Vec<String> {
+    let mut names = event_loop.actors.gc_actor.manifest_reclamation_snapshot();
+    names.sort();
+    names
+}
+
+/// Drops family A to start a held reclamation mirror, then drops `later`
+/// more families while it is held.
+fn assert_reclamation_mirror_releases_only_covered_names(later: usize) -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let (_sender, messages) = crossbeam::channel::unbounded();
+    let mut families = Vec::new();
+    for index in 0..=later {
+        let request_id = 91000 + u64::try_from(index).unwrap();
+        let name = format!("mirror-drop-{index}");
+        let created = event_loop.routing.router.register(request_id, "create");
+        ManifestCoordinator::create_column_family(&mut event_loop, &messages, request_id, &name);
+        let response = created.try_recv();
+        assert!(
+            matches!(response, Ok(RuntimeResponse::ColumnFamilyCreated { .. })),
+            "{response:?}"
+        );
+        let cf_id = event_loop
+            .state
+            .manifest
+            .get_column_family_by_name(&name)
+            .unwrap()
+            .id;
+        families.push((cf_id, seed_manifest_sst(&mut event_loop, cf_id, 1)?));
+    }
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(10));
+
+    // Act: the later families are dropped while the mirror for the first
+    // family's drop owns publication.
+    for (index, (cf_id, _)) in families.iter().enumerate() {
+        let request_id = 91100 + u64::try_from(index).unwrap();
+        let _response = event_loop.routing.router.register(request_id, "drop");
+        ManifestCoordinator::drop_column_family(
+            &mut event_loop,
+            &messages,
+            request_id,
+            *cf_id,
+            false,
+        );
+        if index == 0 {
+            held.await_entry();
+        }
+    }
+    held.release.try_send(()).unwrap();
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+
+    // Assert: the first mirror's cut still lists the later families, so only
+    // the first family's SST may go and their names stay queued.
+    let (first, rest) = families.split_first().unwrap();
+    let mut expected = rest
+        .iter()
+        .map(|(_, name)| name.clone())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(queued_reclamation(&event_loop), expected);
+    wait_until("the first dropped family's SST deletion", || {
+        !sst_is_resident(&event_loop, &first.1)
+    });
+    // All names would drain in one worker batch; give it time to reach the
+    // later ones before judging.
+    std::thread::sleep(Duration::from_millis(300));
+    for (_, name) in rest {
+        assert!(
+            sst_is_resident(&event_loop, name),
+            "{name} was deleted although the published manifest still references it"
+        );
+    }
+
+    // A later mirror whose cut includes the later drops releases them.
+    wait_until("the follow-up mirror to release the later SSTs", || {
+        event_loop.retry_manifest_reclamation_if_due();
+        event_loop.reap_metadata_mirror();
+        rest.iter()
+            .all(|(_, name)| !sst_is_resident(&event_loop, name))
+    });
+    assert_eq!(queued_reclamation(&event_loop), Vec::<String>::new());
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_retain_second_dropped_family_ssts_when_first_reclamation_mirror_completes(
+) -> MidgeResult<()> {
+    assert_reclamation_mirror_releases_only_covered_names(1)
+}
+
+#[test]
+fn should_retain_two_later_dropped_family_ssts_when_first_reclamation_mirror_completes(
+) -> MidgeResult<()> {
+    assert_reclamation_mirror_releases_only_covered_names(2)
 }
