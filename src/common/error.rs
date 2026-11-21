@@ -75,6 +75,8 @@ pub enum MidgeError {
 
     /// The write or column-family change may be committed even though
     /// acknowledgement failed. Do not retry blindly; reconcile its outcome.
+    /// A commit still pending when the runtime event loop panics or exits
+    /// reports this, because its WAL record may already be durable.
     OutcomeUnknown(String),
 
     /// A bounded resource pool cannot admit more work.

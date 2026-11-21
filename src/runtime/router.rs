@@ -306,6 +306,15 @@ impl ResponseRouter {
                                 pending.request_kind
                             ))
                         }
+                        // The router cannot tell whether the WAL record was
+                        // already appended or synced, so a lost commit is
+                        // never reported as a definite failure.
+                        "ApplyTransaction" | "ApplySpilledTransaction" => {
+                            crate::common::error::classify_commit_error(
+                                MidgeError::Internal(message.to_string()),
+                                false,
+                            )
+                        }
                         _ => MidgeError::Internal(message.to_string()),
                     };
                     let _ = pending
@@ -749,6 +758,45 @@ mod tests {
             registered_at.is_none(),
             "an abandoned caller must read as cancelled, not as an unbounded budget"
         );
+    }
+
+    #[test]
+    fn should_classify_pending_requests_by_kind_when_fail_all_runs() {
+        // Arrange
+        let router = ResponseRouter::new();
+        let kinds = [
+            "ApplyTransaction",
+            "ApplySpilledTransaction",
+            "Queue",
+            "ManifestCreateColumnFamily",
+        ];
+        let receivers = kinds
+            .iter()
+            .zip(1_u64..)
+            .map(|(kind, id)| router.register(id, kind))
+            .collect::<Vec<_>>();
+        let message = "runtime event loop panicked before responding";
+
+        // Act
+        router.fail_all(message);
+
+        // Assert
+        for (kind, rx) in kinds.iter().zip(receivers) {
+            let error = match rx.try_recv() {
+                Ok(RuntimeResponse::Error { error, .. }) => error,
+                other => panic!("{kind} was not failed: {other:?}"),
+            };
+            match *kind {
+                "Queue" => assert!(
+                    matches!(&error, MidgeError::Internal(text) if text == message),
+                    "{kind}: {error:?}"
+                ),
+                _ => assert!(
+                    matches!(&error, MidgeError::OutcomeUnknown(text) if text.contains(message)),
+                    "{kind}: {error:?}"
+                ),
+            }
+        }
     }
 
     #[test]
