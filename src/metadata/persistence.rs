@@ -1096,8 +1096,11 @@ mod tests {
     fn should_fail_default_load_when_manifest_journal_is_corrupt() {
         // Arrange
         let test_dir = create_test_dir();
-        crate::metadata::journal::append_edit(&test_dir, &add_sst("a.sst")).expect("append a");
-        append_record_with_stale_crc(&test_dir, &add_sst("corrupt.sst"));
+        std::fs::write(
+            test_dir.join("manifest.journal"),
+            b"not-a-valid-manifest-journal",
+        )
+        .expect("write corrupt manifest journal");
 
         // Act
         let error =

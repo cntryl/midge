@@ -708,6 +708,123 @@ fn should_treat_unknown_record_type_without_later_marker_as_torn_tail_when_repla
     assert_eq!(repaired.len(), 2);
 }
 
+/// Two durable edits, each followed by its marker. Returns the directory and
+/// the start offset of the final marker.
+fn write_two_durable_edits() -> (tempfile::TempDir, u64) {
+    let td = tempdir().expect("create temp directory");
+    append_edit(
+        td.path(),
+        &ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 1,
+        },
+    )
+    .expect("append first edit");
+    let second_start = std::fs::metadata(td.path().join(JOURNAL_FILE))
+        .expect("journal metadata")
+        .len();
+    append_edit(
+        td.path(),
+        &ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 2,
+        },
+    )
+    .expect("append second edit");
+    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
+        std::sync::Arc::new(crate::io::real::RealFs::new(td.path()).expect("open RealFs"));
+    let file = open_journal_for_replay(&fs)
+        .expect("open journal")
+        .expect("journal exists");
+    let file_len = file.len().expect("journal length");
+    let JournalRecordStatus::Record(edit) =
+        read_journal_record(&*file, second_start, file_len, true).expect("read second edit")
+    else {
+        panic!("expected a complete second edit record");
+    };
+    (td, edit.next_offset)
+}
+
+fn overwrite_journal_byte(db: &std::path::Path, offset: u64, byte: u8) {
+    use std::io::Seek as _;
+    let mut journal = std::fs::OpenOptions::new()
+        .write(true)
+        .open(db.join(JOURNAL_FILE))
+        .expect("open journal for byte corruption");
+    journal
+        .seek(std::io::SeekFrom::Start(offset))
+        .expect("seek to byte");
+    journal.write_all(&[byte]).expect("overwrite byte");
+    journal.sync_all().expect("sync corrupted journal");
+}
+
+#[test]
+fn should_fail_replay_when_final_fsync_marker_type_byte_is_damaged() {
+    // Arrange: the damaged record is the marker that acknowledged the last
+    // edit, so no verified marker follows it, but its shape is complete.
+    let (td, final_marker_start) = write_two_durable_edits();
+    overwrite_journal_byte(td.path(), final_marker_start, 0xFF);
+
+    // Act
+    let result = replay_journal(td.path());
+
+    // Assert
+    assert!(
+        matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+        "a damaged final marker must not drop its acknowledged edit: {result:?}"
+    );
+}
+
+#[test]
+fn should_fail_replay_when_unknown_record_type_starts_the_journal() {
+    // Arrange: no verified marker precedes the garbage, so nothing proves it
+    // is a torn append rather than a damaged or foreign journal.
+    let td = tempdir().expect("create temp directory");
+    write_and_sync_test_journal(td.path(), &[0xFF, 0x13, 0x37, 0x42, 0x99, 0x01]);
+
+    // Act
+    let result = replay_journal(td.path());
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::Corruption(_))
+    ));
+}
+
+#[test]
+fn should_fail_replay_when_unknown_type_tail_has_a_complete_record_shape() {
+    // Arrange: garbage after a real marker whose "length" fits inside the
+    // file is indistinguishable from a damaged record, so it stays corruption.
+    let td = tempdir().expect("create temp directory");
+    append_edit(
+        td.path(),
+        &ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 1,
+        },
+    )
+    .expect("append first edit");
+    let mut journal = std::fs::OpenOptions::new()
+        .append(true)
+        .open(td.path().join(JOURNAL_FILE))
+        .expect("open journal");
+    journal
+        .write_all(&[0xFF, 2, 0, 0, 0, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF])
+        .expect("append complete-shaped garbage");
+    journal.sync_all().expect("sync");
+    drop(journal);
+
+    // Act
+    let result = replay_journal(td.path());
+
+    // Assert
+    assert!(matches!(
+        result,
+        Err(crate::common::MidgeError::Corruption(_))
+    ));
+}
+
 #[test]
 fn should_reject_zero_region_followed_by_data_as_corruption() {
     // Arrange
@@ -1144,7 +1261,7 @@ fn should_emit_fsync_marker_for_batch_append() {
         .len();
 
     let JournalRecordStatus::Record(batch_record) =
-        read_journal_record(&*file, 0, file_len).expect("read first journal record")
+        read_journal_record(&*file, 0, file_len, false).expect("read first journal record")
     else {
         panic!("expected a complete record at offset 0");
     };
@@ -1154,7 +1271,7 @@ fn should_emit_fsync_marker_for_batch_append() {
     );
 
     let JournalRecordStatus::Record(marker_record) =
-        read_journal_record(&*file, batch_record.next_offset, file_len)
+        read_journal_record(&*file, batch_record.next_offset, file_len, false)
             .expect("read second journal record")
     else {
         panic!("expected a complete record immediately after the batch record");
