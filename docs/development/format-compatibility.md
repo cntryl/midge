@@ -97,11 +97,14 @@ checksum and nesting bound before applying semantic manifest validation.
 The intent file is an append-only sequence of binary suffix edits. Each edit
 names its predecessor checksum and next sequence, retains a prefix of the prior
 intent set and records the replacement suffix. A torn final append retains the
-prior complete intent set; an invalid complete frame or predecessor chain fails
-recovery. A subsequent append first durably repairs any torn tail. At 1 MiB or
-1,024 records the log atomically checkpoints its current intent set. Existing
-metadata filenames retain their historical `.json` suffix, but their contents
-are binary and there is no JSON fallback under FORMAT 9.
+prior complete intent set (an all-zero tail, or an overrunning final length
+that neither hides a later complete valid frame nor verifies once corrected to
+end at EOF, counts as torn); a length that overruns EOF and hides a later
+complete valid frame or is the only damage to a final frame, an invalid
+complete frame, or a bad predecessor chain fails recovery. A subsequent append
+first durably repairs any torn tail. At 1 MiB or 1,024 records the log
+atomically checkpoints its current intent set. Existing metadata filenames
+retain their historical `.json` suffix, but their contents are binary and there is no JSON fallback under FORMAT 9.
 
 Version 9 is an intentional pre-1.0 break with no in-place upgrade and no
 migration: current binaries reject database FORMAT versions 1 through 8 with

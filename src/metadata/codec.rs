@@ -62,6 +62,81 @@ pub(crate) fn frame_len(bytes: &[u8]) -> MidgeResult<Option<usize>> {
     Ok((bytes.len() >= extent).then_some(extent))
 }
 
+/// Frame extent at the end of an append-only log's verified prefix, or `None`
+/// for a torn final append. A torn append is the only unacknowledged state, so
+/// the bytes after the verified prefix are classified:
+/// an all-zero remainder (an unsynced append that persisted its length but not
+/// its bytes) is torn; a frame whose announced extent overruns the end is
+/// corruption if a complete, checksum-valid frame of `kind` sits inside the
+/// bytes it would swallow (durable history follows), or if the frame verifies
+/// when its length is corrected to run exactly to the end (only the length
+/// field is damaged). Otherwise it is a torn append. A multi-field damage to a
+/// final frame remains indistinguishable from a torn append.
+pub(crate) fn tail_frame_len(bytes: &[u8], kind: u8) -> MidgeResult<Option<usize>> {
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Ok(None);
+    }
+    let extent = frame_len(bytes)?;
+    if extent.is_none()
+        && (contains_complete_frame(&bytes[1..], kind) || frame_runs_to_end(bytes, kind))
+    {
+        return Err(MidgeError::Corruption(
+            "metadata frame length overruns EOF but a verified frame is present".into(),
+        ));
+    }
+    Ok(extent)
+}
+
+fn frame_crc_valid(frame: &[u8]) -> bool {
+    let (signed, checksum) = frame.split_at(frame.len() - CHECKSUM_BYTES);
+    checksum == crc32c::crc32c(signed).to_be_bytes()
+}
+
+/// Whether `bytes` verify as one complete frame of `kind` whose length field
+/// is replaced by the one that makes it end exactly at the end of `bytes`.
+/// The CRC covers the header and length, so the candidate length is
+/// substituted before it is recomputed.
+fn frame_runs_to_end(bytes: &[u8], kind: u8) -> bool {
+    let Some(length) = bytes
+        .len()
+        .checked_sub(HEADER_BYTES + CHECKSUM_BYTES)
+        .filter(|length| *length <= MAX_PAYLOAD_BYTES)
+    else {
+        return false;
+    };
+    let Ok(length) = u32::try_from(length) else {
+        return false;
+    };
+    let mut candidate = bytes.to_vec();
+    candidate[9..13].copy_from_slice(&length.to_le_bytes());
+    candidate[8] == kind && frame_crc_valid(&candidate)
+}
+
+/// Whether `bytes` contain a complete frame of `kind` with a valid CRC32C. A
+/// candidate whose announced extent does not fit is skipped before any CRC work.
+fn contains_complete_frame(bytes: &[u8], kind: u8) -> bool {
+    bytes
+        .windows(MAGIC.len())
+        .enumerate()
+        .filter(|(_, window)| *window == MAGIC)
+        .any(|(start, _)| {
+            let candidate = &bytes[start..];
+            if candidate.len() < HEADER_BYTES + CHECKSUM_BYTES || candidate[8] != kind {
+                return false;
+            }
+            let mut length = [0_u8; 4];
+            length.copy_from_slice(&candidate[9..13]);
+            let length = u32::from_le_bytes(length) as usize;
+            let Some(extent) = HEADER_BYTES
+                .checked_add(length)
+                .and_then(|end| end.checked_add(CHECKSUM_BYTES))
+            else {
+                return false;
+            };
+            candidate.get(..extent).is_some_and(frame_crc_valid)
+        })
+}
+
 pub(crate) fn decode<T: DeserializeOwned>(kind: u8, bytes: &[u8]) -> MidgeResult<T> {
     let extent = frame_len(bytes)?
         .ok_or_else(|| MidgeError::Corruption("truncated metadata frame".into()))?;
