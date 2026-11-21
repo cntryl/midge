@@ -47,16 +47,19 @@ fn replay_journal_file(
 
     while offset < file_len {
         check_replay_scope(scope)?;
-        let status = match read_journal_record(file, offset, file_len) {
-            Ok(status) => status,
-            // A read error is not evidence of corruption: salvaging past it
-            // would drop durable edits whose bytes are fine.
-            Err(error) if mode == JournalReplayMode::SalvagePrefix && error.is_salvageable() => {
-                corruption = Some(format!("at byte {offset}: {error}"));
-                break;
-            }
-            Err(error) => return Err(error),
-        };
+        let status =
+            match read_journal_record(file, offset, file_len, state.last_marker_offset.is_some()) {
+                Ok(status) => status,
+                // A read error is not evidence of corruption: salvaging past it
+                // would drop durable edits whose bytes are fine.
+                Err(error)
+                    if mode == JournalReplayMode::SalvagePrefix && error.is_salvageable() =>
+                {
+                    corruption = Some(format!("at byte {offset}: {error}"));
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
         check_replay_scope(scope)?;
         match status {
             JournalRecordStatus::Record(record) => {
@@ -240,6 +243,7 @@ pub(super) fn read_journal_record(
     file: &dyn crate::io::ReadFile,
     offset: u64,
     file_len: u64,
+    has_durable_history: bool,
 ) -> MidgeResult<JournalRecordStatus> {
     let record_start = offset;
     let typ = file.read_at(offset, 1).map_err(FsError::into_midge)?[0];
@@ -254,7 +258,29 @@ pub(super) fn read_journal_record(
             return Ok(JournalRecordStatus::PartialHeader { record_start });
         }
     }
-    validate_journal_record_type(typ, record_start)?;
+    if let Err(error) = validate_journal_record_type(typ, record_start) {
+        // Torn only when all three hold, otherwise corruption:
+        // 1. A verified marker precedes it: no durable history means a foreign
+        //    or damaged journal, not an unsynced append.
+        // 2. The bytes at `record_start` do not frame a complete record: a
+        //    complete shape may be a damaged durable record, including the
+        //    final fsync marker that acknowledged the last edit.
+        // 3. No verified marker follows: one would make this durable history.
+        // A zero type reaching here is followed by data and stays corruption.
+        if typ == 0
+            || !has_durable_history
+            || record_frames_complete_extent(file, offset, file_len)?
+        {
+            return Err(error);
+        }
+        let rest = file
+            .read_at(record_start, file_len - record_start)
+            .map_err(FsError::into_midge)?;
+        if contains_verified_fsync_marker(&rest) {
+            return Err(error);
+        }
+        return Ok(JournalRecordStatus::PartialPayload { record_start });
+    }
     if offset + 5 > file_len {
         return Ok(JournalRecordStatus::PartialHeader { record_start });
     }
@@ -294,6 +320,26 @@ pub(super) fn read_journal_record(
         got_crc,
         next_offset: crc_offset + 4,
     }))
+}
+
+/// Whether the header at `offset` and its length field describe a record that
+/// fits entirely inside the file.
+fn record_frames_complete_extent(
+    file: &dyn crate::io::ReadFile,
+    offset: u64,
+    file_len: u64,
+) -> MidgeResult<bool> {
+    if offset + 5 > file_len {
+        return Ok(false);
+    }
+    let len_bytes = file.read_at(offset + 1, 4).map_err(FsError::into_midge)?;
+    let len = u64::from(u32::from_le_bytes([
+        len_bytes[0],
+        len_bytes[1],
+        len_bytes[2],
+        len_bytes[3],
+    ]));
+    Ok(offset + 5 + len + 4 <= file_len)
 }
 
 /// Whether `bytes` contain a complete, CRC-valid fsync marker record. Every
