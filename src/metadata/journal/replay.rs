@@ -254,7 +254,23 @@ pub(super) fn read_journal_record(
             return Ok(JournalRecordStatus::PartialHeader { record_start });
         }
     }
-    validate_journal_record_type(typ, record_start)?;
+    if let Err(error) = validate_journal_record_type(typ, record_start) {
+        // Stale non-zero bytes past the durable end are as torn as zeros: every
+        // durable append ends with a verified fsync marker, so an unknown type
+        // with no verified marker anywhere after it was never acknowledged. A
+        // marker after it means durable history is damaged. A zero type that
+        // reaches here is followed by data and stays corruption.
+        if typ == 0 {
+            return Err(error);
+        }
+        let rest = file
+            .read_at(record_start, file_len - record_start)
+            .map_err(FsError::into_midge)?;
+        if contains_verified_fsync_marker(&rest) {
+            return Err(error);
+        }
+        return Ok(JournalRecordStatus::PartialPayload { record_start });
+    }
     if offset + 5 > file_len {
         return Ok(JournalRecordStatus::PartialHeader { record_start });
     }

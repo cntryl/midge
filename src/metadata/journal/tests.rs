@@ -637,6 +637,77 @@ fn should_treat_all_zero_journal_tail_as_torn_append_when_replaying() {
     assert_eq!(repaired.len(), 3);
 }
 
+/// Journal bytes of one durable edit, then garbage with an unknown non-zero
+/// type byte, then (optionally) the durable bytes of a second edit and its
+/// fsync marker. Returns the journal path's directory.
+fn write_journal_with_garbage_type_tail(include_durable_record_after: bool) -> tempfile::TempDir {
+    let td = tempdir().expect("create temp directory");
+    append_edit(
+        td.path(),
+        &ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 1,
+        },
+    )
+    .expect("append first edit");
+    let path = td.path().join(JOURNAL_FILE);
+    let first_len = usize::try_from(std::fs::metadata(&path).expect("journal metadata").len())
+        .expect("journal length fits usize");
+    append_edit(
+        td.path(),
+        &ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 2,
+        },
+    )
+    .expect("append second edit");
+    let bytes = std::fs::read(&path).expect("read journal");
+    let mut rebuilt = bytes[..first_len].to_vec();
+    rebuilt.extend_from_slice(&[0xFF, 0x13, 0x37, 0x42, 0x99, 0x01, 0x02, 0x03]);
+    if include_durable_record_after {
+        rebuilt.extend_from_slice(&bytes[first_len..]);
+    }
+    write_and_sync_test_journal(td.path(), &rebuilt);
+    td
+}
+
+#[test]
+fn should_fail_replay_when_unknown_record_type_precedes_durable_marker() {
+    // Arrange
+    let td = write_journal_with_garbage_type_tail(true);
+
+    // Act
+    let result = replay_journal(td.path());
+
+    // Assert
+    assert!(
+        matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+        "an unknown type before a verified marker is durable-history damage: {result:?}"
+    );
+}
+
+#[test]
+fn should_treat_unknown_record_type_without_later_marker_as_torn_tail_when_replaying() {
+    // Arrange
+    let td = write_journal_with_garbage_type_tail(false);
+
+    // Act
+    let edits = replay_journal(td.path()).expect("garbage after the last marker is a torn append");
+    append_edit(
+        td.path(),
+        &ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 3,
+        },
+    )
+    .expect("append after repair");
+    let repaired = replay_journal(td.path()).expect("replay repaired journal");
+
+    // Assert
+    assert_eq!(edits.len(), 1);
+    assert_eq!(repaired.len(), 2);
+}
+
 #[test]
 fn should_reject_zero_region_followed_by_data_as_corruption() {
     // Arrange
