@@ -1340,11 +1340,12 @@ fn should_answer_pending_router_request_given_event_loop_panic_when_awaiting_res
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_answer_pending_apply_transaction_request_given_event_loop_panic_when_awaiting_response() {
+fn should_answer_outcome_unknown_for_pending_apply_transaction_given_event_loop_panic_when_awaiting_response(
+) {
     if std::env::var(RUNTIME_PANIC_CHILD).as_deref() != Ok("apply") {
         run_runtime_panic_child(
             "apply",
-            "runtime::tests::should_answer_pending_apply_transaction_request_given_event_loop_panic_when_awaiting_response",
+            "runtime::tests::should_answer_outcome_unknown_for_pending_apply_transaction_given_event_loop_panic_when_awaiting_response",
         );
         return;
     }
@@ -1388,15 +1389,16 @@ fn should_answer_pending_apply_transaction_request_given_event_loop_panic_when_a
         submission,
     );
 
-    // Assert: routed transactions receive the same explicit panic response as
-    // every other request instead of waiting for their response deadline.
+    // Assert: routed transactions receive an explicit panic response instead
+    // of waiting for their response deadline. The router cannot prove the
+    // write never reached the WAL, so the outcome is unknown even here.
     assert!(fired.load(std::sync::atomic::Ordering::SeqCst));
     assert!(matches!(
         response,
         Ok(RuntimeResponse::Error {
-            error: MidgeError::Internal(message),
+            error: MidgeError::OutcomeUnknown(message),
             ..
-        }) if message == "runtime event loop panicked before responding"
+        }) if message.contains("runtime event loop panicked before responding")
     ));
     assert!(runtime.wait_for_exit(Duration::from_secs(1)));
     fail::remove("midge::runtime::strict_group_before_collect");

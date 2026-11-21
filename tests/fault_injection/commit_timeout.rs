@@ -115,3 +115,61 @@ fn should_keep_backpressure_given_runtime_timeout_when_no_write_was_admitted() {
     // Assert
     assert_eq!(severity, Severity::Backpressure);
 }
+
+#[test]
+fn should_report_outcome_unknown_when_event_loop_panics_after_transaction_wal_sync() {
+    // Arrange: the event loop panics after the strict WAL sync and before it
+    // answers, so the record is durable while the caller is still waiting.
+    let scenario = fail::FailScenario::setup();
+    let point = "midge::wal::txn_after_sync_before_ack";
+    fail::cfg(point, "1*panic->off").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let options = || {
+        OpenOptions::local(dir.path())
+            .background_compaction(false)
+            .build()
+            .unwrap()
+    };
+    let mut engine = Engine::open(options()).unwrap();
+    let cf = engine.get_column_family("default").unwrap();
+    let mut tx = engine
+        .begin_tx(cf.id(), TransactionMode::ReadWrite)
+        .unwrap();
+    tx.put(b"panic-after-sync".to_vec(), b"value".to_vec(), None)
+        .unwrap();
+
+    // Act
+    let result = tx.commit(WriteOptions::sync());
+    fail::remove(point);
+    let _ = engine.shutdown(Duration::from_secs(5));
+    drop(engine);
+    drop(scenario);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut reopened = loop {
+        match Engine::open(options()) {
+            Ok(reopened) => break reopened,
+            Err(MidgeError::LeaseHeld(_)) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("reopen after runtime exit: {error:?}"),
+        }
+    };
+
+    // Assert: the synced record replays, so the caller must not have been told
+    // the commit definitely failed.
+    let read = reopened
+        .begin_tx(cf.id(), TransactionMode::ReadOnly)
+        .unwrap();
+    assert_eq!(
+        read.get(b"panic-after-sync").unwrap().as_deref(),
+        Some(&b"value"[..]),
+        "the synced transaction must replay on reopen"
+    );
+    drop(read);
+    reopened.shutdown(Duration::from_secs(5)).unwrap();
+    assert!(
+        matches!(&result, Err(MidgeError::OutcomeUnknown(message))
+            if message.contains("runtime event loop panicked before responding")),
+        "a commit lost to an event-loop panic after the WAL sync must be uncertain: {result:?}"
+    );
+}

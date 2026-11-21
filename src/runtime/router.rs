@@ -306,6 +306,15 @@ impl ResponseRouter {
                                 pending.request_kind
                             ))
                         }
+                        // The router cannot tell whether the WAL record was
+                        // already appended or synced, so a lost commit is
+                        // never reported as a definite failure.
+                        "ApplyTransaction" | "ApplySpilledTransaction" => {
+                            crate::common::error::classify_commit_error(
+                                MidgeError::Internal(message.to_string()),
+                                false,
+                            )
+                        }
                         _ => MidgeError::Internal(message.to_string()),
                     };
                     let _ = pending
