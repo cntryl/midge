@@ -128,6 +128,22 @@ impl FsLeaderStore {
         })
     }
 
+    /// Decision for a leader record that is not on disk. Absence means "no
+    /// leader" only when no committed shared metadata exists; otherwise the
+    /// fencing record was lost and granting a fresh epoch could regress it.
+    fn absent_leader_record(&self) -> Result<Option<LeaderRecord>, LeaseError> {
+        if self
+            .fs
+            .exists(&FsPath::new(METADATA_POINTER_FILE))
+            .map_err(|error| Self::fs_io_error("check shared metadata presence", error))?
+        {
+            return Err(LeaseError::Indeterminate(
+                "shared metadata pointer exists without its fencing record".into(),
+            ));
+        }
+        Ok(None)
+    }
+
     fn fs_io_error(operation: &str, error: FsError) -> LeaseError {
         match error {
             FsError::Timeout(message) => LeaseError::Timeout(format!("{operation}: {message}")),
@@ -635,18 +651,7 @@ impl LeaderStore for FsLeaderStore {
 
         match self.fs.exists(&path) {
             Ok(true) => {}
-            Ok(false) => {
-                if self
-                    .fs
-                    .exists(&FsPath::new(METADATA_POINTER_FILE))
-                    .map_err(|error| Self::fs_io_error("check shared metadata presence", error))?
-                {
-                    return Err(LeaseError::Indeterminate(
-                        "shared metadata pointer exists without its fencing record".into(),
-                    ));
-                }
-                return Ok(None);
-            }
+            Ok(false) => return self.absent_leader_record(),
             Err(error) => return Err(Self::fs_io_error("leader record exists check", error)),
         }
 
@@ -659,8 +664,9 @@ impl LeaderStore for FsLeaderStore {
 
         let file = match self.fs.open(&path, opts) {
             Ok(f) => f,
-            // The record may have been removed between exists() and open().
-            Err(crate::io::FsError::NotFound(_)) => return Ok(None),
+            // The record may have been removed between exists() and open();
+            // that is the same absence decision as exists() == false.
+            Err(crate::io::FsError::NotFound(_)) => return self.absent_leader_record(),
             Err(error) => return Err(Self::fs_io_error("failed to open leader record", error)),
         };
 
@@ -2224,6 +2230,142 @@ mod lock_init_failure_tests {
         fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
             self.inner.rename_atomic(from, to)
         }
+    }
+
+    /// While `vanish` is set, the leader record reports as present to
+    /// `exists()` but is gone when opened. The flag is consumed by that open,
+    /// so only the next read of the record races.
+    struct RecordVanishesOnOpenFs {
+        inner: MockFs,
+        vanish: AtomicBool,
+    }
+
+    impl ReadFs for RecordVanishesOnOpenFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            self.open(path, OpenOptions::READ_ONLY)
+                .map(|file| file as Box<dyn crate::io::ReadFile>)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            if path.0 == LEADER_RECORD_FILE && self.vanish.load(Ordering::SeqCst) {
+                return Ok(true);
+            }
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
+    impl Fs for RecordVanishesOnOpenFs {
+        fn try_lock_exclusive(&self, path: &FsPath) -> FsResult<Box<dyn FsLock>> {
+            self.inner.try_lock_exclusive(path)
+        }
+        fn open(&self, path: &FsPath, opts: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            if path.0 == LEADER_RECORD_FILE && self.vanish.swap(false, Ordering::SeqCst) {
+                return Err(crate::io::FsError::NotFound(path.0.clone()));
+            }
+            self.inner.open(path, opts)
+        }
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+        fn sync_dir(&self, path: &FsPath, dur: Durability) -> FsResult<()> {
+            self.inner.sync_dir(path, dur)
+        }
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+            self.inner.rename_atomic(from, to)
+        }
+    }
+
+    fn metadata_generation(horizon: u64) -> crate::lease::CloudMetadataGeneration {
+        crate::lease::CloudMetadataGeneration {
+            id: crate::lease::SharedGenerationId::FIRST,
+            manifest_horizon: horizon,
+            objects: [
+                crate::metadata::files::FORMAT,
+                crate::metadata::files::MANIFEST_SNAPSHOT,
+            ]
+            .into_iter()
+            .map(|file_name| crate::lease::CloudMetadataObject {
+                file_name: file_name.into(),
+                object_key: format!("metadata/generations/{}/{file_name}", uuid::Uuid::new_v4()),
+                len: 1,
+                crc32c: 1,
+            })
+            .collect(),
+        }
+    }
+
+    fn vanishing_record_store() -> (Arc<RecordVanishesOnOpenFs>, FsLeaderStore) {
+        let fs = Arc::new(RecordVanishesOnOpenFs {
+            inner: MockFs::new(),
+            vanish: AtomicBool::new(false),
+        });
+        let store = FsLeaderStore::new(
+            fs.clone() as Arc<dyn Fs>,
+            crate::lease::clock::LeaseClock::default(),
+        );
+        (fs, store)
+    }
+
+    #[test]
+    fn should_refuse_a_new_epoch_when_the_leader_record_vanishes_between_exists_and_open() {
+        // Arrange
+        let (fs, store) = vanishing_record_store();
+        let record = store.acquire_leadership("writer").unwrap();
+        store
+            .publish_committed_metadata(
+                "writer",
+                record.epoch,
+                None,
+                metadata_generation(10),
+                std::time::Duration::from_secs(1),
+            )
+            .unwrap();
+
+        // Act
+        fs.vanish.store(true, Ordering::SeqCst);
+        let read = store.read_current();
+        fs.vanish.store(true, Ordering::SeqCst);
+        let acquired = store.acquire_leadership("successor");
+
+        // Assert
+        assert!(
+            matches!(read, Err(LeaseError::Indeterminate(_))),
+            "{read:?}"
+        );
+        assert!(
+            matches!(acquired, Err(LeaseError::Indeterminate(_))),
+            "{acquired:?}"
+        );
+    }
+
+    #[test]
+    fn should_grant_epoch_one_when_a_fresh_store_has_no_leader_record_at_open() {
+        // Arrange
+        let (fs, store) = vanishing_record_store();
+
+        // Act
+        fs.vanish.store(true, Ordering::SeqCst);
+        let read = store.read_current();
+        fs.vanish.store(true, Ordering::SeqCst);
+        let acquired = store.acquire_leadership("first");
+
+        // Assert
+        assert!(matches!(read, Ok(None)), "{read:?}");
+        assert_eq!(acquired.expect("first acquisition").epoch, 1);
     }
 
     #[test]
