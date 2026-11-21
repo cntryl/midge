@@ -28,7 +28,8 @@ impl EventLoop {
         for op in ops {
             add_operation_growth(&mut growth, op);
         }
-        self.admit_cloud_memtable_growth(&growth, window)
+        self.admit_cloud_memtable_growth(&growth, window, true)
+            .map(|_| ())
     }
 
     pub(super) fn prepare_cloud_spilled_transaction_memtables(
@@ -43,15 +44,19 @@ impl EventLoop {
             add_operation_growth(&mut growth, &op);
             Ok(())
         })?;
-        self.admit_cloud_memtable_growth(&growth, window)
+        self.admit_cloud_memtable_growth(&growth, window, true)
+            .map(|_| ())
     }
 
     /// Reserve for every prepared member, whose writes are not yet reflected
     /// in the active memtable. False ends the group before this transaction;
     /// ordinary admission can then freeze the earlier group's generation.
+    /// No freeze happens while a prepared member is unapplied, because a
+    /// freeze stamps a frontier covering that member's commit sequence.
     pub(super) fn prepare_coalesced_cloud_memtables(
         &mut self,
         ops: &[TransactionOp],
+        group_has_prepared_member: bool,
         staged_growth: &mut HashMap<u32, usize>,
     ) -> MidgeResult<bool> {
         let Some(window) = self.cloud_flush_staging_window() else {
@@ -68,7 +73,14 @@ impl EventLoop {
         {
             return Ok(false);
         }
-        self.admit_cloud_memtable_growth(&growth, window)?;
+        // A freeze stamps `state.sequence`, which already covers every staged
+        // member's commit. Those members are not in the memtable yet, so the
+        // frozen generation's flush frontier would outrun its records. End
+        // the group instead; the member is re-admitted once they are applied.
+        // Growth is no proxy: an empty-range delete stages a commit with none.
+        if !self.admit_cloud_memtable_growth(&growth, window, !group_has_prepared_member)? {
+            return Ok(false);
+        }
         *staged_growth = growth;
         Ok(true)
     }
@@ -77,7 +89,8 @@ impl EventLoop {
         &mut self,
         growth: &HashMap<u32, usize>,
         window: u64,
-    ) -> MidgeResult<()> {
+        may_freeze: bool,
+    ) -> MidgeResult<bool> {
         let mut freeze = Vec::new();
         // Validate every family before changing any generation. In particular,
         // an indivisible transaction must fail before its first WAL frame.
@@ -110,6 +123,9 @@ impl EventLoop {
                 freeze.push(cf_id);
             }
         }
+        if !may_freeze && !freeze.is_empty() {
+            return Ok(false);
+        }
         let required = self.pending_cloud_flush_headroom(growth, window);
         self.actors
             .cloud_coordinator
@@ -121,7 +137,7 @@ impl EventLoop {
             self.freeze_active_memtable(cf_id)?;
         }
         self.schedule_next_flush_worker();
-        Ok(())
+        Ok(true)
     }
 
     fn pending_cloud_flush_headroom(&self, growth: &HashMap<u32, usize>, window: u64) -> u64 {
@@ -426,6 +442,162 @@ mod tests {
             }
             assert_eq!(event_loop.actors.wal_actor.append_calls(), appends);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_stamp_flush_frontier_past_staged_member_when_coalesced_follower_needs_freeze(
+    ) -> MidgeResult<()> {
+        use super::super::wal::ApplyTransactionRequest;
+        use crate::runtime::{ConflictPolicy, RuntimeMsg, RuntimeResponse};
+        use crate::wal::DurabilityPolicy;
+
+        for policy in [DurabilityPolicy::Strict, DurabilityPolicy::Batched] {
+            // Arrange: the seeded memtable plus both members exceed the window,
+            // but the members alone fit, so only the follower's admission freezes.
+            let (_directory, mut event_loop, _hybrid) = fixture()?;
+            event_loop.state.get_cf(0).unwrap().memtable.put_with_seq(
+                b"seed".to_vec(),
+                vec![1; 12 * 1024],
+                1,
+                None,
+            )?;
+            event_loop.state.sequence = 1;
+            let put = |key: &'static [u8]| TransactionOp::Put {
+                cf_id: 0,
+                key: bytes::Bytes::from_static(key),
+                value: bytes::Bytes::from(vec![3; 10_800]),
+                ttl_seconds: None,
+                insert_only: false,
+            };
+            let (messages, message_rx) = crossbeam::channel::unbounded();
+            let first_rx = event_loop.routing.router.register(7401, "ApplyTransaction");
+            let second_rx = event_loop.routing.router.register(7402, "ApplyTransaction");
+            messages
+                .send(RuntimeMsg::ApplyTransaction {
+                    request_id: 7402,
+                    ops: vec![put(b"second")],
+                    assertions: Vec::new(),
+                    durability_policy: Some(policy),
+                    start_sequence: None,
+                    conflict_policy: ConflictPolicy::LastWriteWins,
+                    response_tx: None,
+                })
+                .unwrap();
+
+            // Act
+            event_loop.apply_transaction_with_coalescing(
+                &message_rx,
+                ApplyTransactionRequest {
+                    validation: None,
+                    request_id: 7401,
+                    ops: vec![put(b"first")],
+                    assertions: Vec::new(),
+                    durability_policy: Some(policy),
+                    start_sequence: None,
+                    conflict_policy: ConflictPolicy::LastWriteWins,
+                },
+                2,
+            );
+
+            // Assert: both are acknowledged, and any frozen generation whose
+            // flush frontier covers the first member's commit contains it.
+            let Ok(RuntimeResponse::TransactionApplied {
+                last_sequence: first_commit,
+                ..
+            }) = first_rx.try_recv()
+            else {
+                panic!("first member must be acknowledged under {policy:?}");
+            };
+            assert!(matches!(
+                second_rx.try_recv(),
+                Ok(RuntimeResponse::TransactionApplied { .. })
+            ));
+            let cf = event_loop.state.get_cf(0).unwrap();
+            let mut frozen_generations = 0;
+            for flush in &cf.immutable_flushes {
+                frozen_generations += 1;
+                assert!(
+                    flush.sequence < first_commit || flush.memtable.get(b"first")?.is_some(),
+                    "flush frontier {} covers staged commit {first_commit} that its \
+                     frozen memtable lacks under {policy:?}",
+                    flush.sequence
+                );
+            }
+            assert!(
+                frozen_generations > 0,
+                "fixture must freeze under {policy:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_freeze_while_member_with_no_growth_is_staged_when_follower_needs_freeze(
+    ) -> MidgeResult<()> {
+        use super::super::wal::ApplyTransactionRequest;
+        use crate::runtime::{ConflictPolicy, RuntimeMsg, RuntimeResponse};
+        use crate::wal::DurabilityPolicy;
+
+        // Arrange: an empty-range delete stages a commit sequence but adds no
+        // growth; the follower alone fits the window but not beside the seed.
+        let (_directory, mut event_loop, _hybrid) = fixture()?;
+        event_loop.state.get_cf(0).unwrap().memtable.put_with_seq(
+            b"seed".to_vec(),
+            vec![1; 20 * 1024],
+            1,
+            None,
+        )?;
+        event_loop.state.sequence = 1;
+        let (messages, message_rx) = crossbeam::channel::unbounded();
+        let first_rx = event_loop.routing.router.register(7501, "ApplyTransaction");
+        let second_rx = event_loop.routing.router.register(7502, "ApplyTransaction");
+        messages
+            .send(RuntimeMsg::ApplyTransaction {
+                request_id: 7502,
+                ops: vec![TransactionOp::Put {
+                    cf_id: 0,
+                    key: bytes::Bytes::from_static(b"second"),
+                    value: bytes::Bytes::from(vec![3; 18 * 1024]),
+                    ttl_seconds: None,
+                    insert_only: false,
+                }],
+                assertions: Vec::new(),
+                durability_policy: Some(DurabilityPolicy::Strict),
+                start_sequence: None,
+                conflict_policy: ConflictPolicy::LastWriteWins,
+                response_tx: None,
+            })
+            .unwrap();
+
+        // Act
+        event_loop.apply_transaction_with_coalescing(
+            &message_rx,
+            ApplyTransactionRequest {
+                validation: None,
+                request_id: 7501,
+                ops: vec![TransactionOp::DeleteRange {
+                    cf_id: 0,
+                    start_key: bytes::Bytes::from_static(b"b"),
+                    end_key: bytes::Bytes::from_static(b"a"),
+                }],
+                assertions: Vec::new(),
+                durability_policy: Some(DurabilityPolicy::Strict),
+                start_sequence: None,
+                conflict_policy: ConflictPolicy::LastWriteWins,
+            },
+            2,
+        );
+
+        // Assert: the follower was not coalesced behind the staged member, so
+        // no freeze could stamp a frontier past it; each append stands alone.
+        for response in [first_rx, second_rx] {
+            assert!(matches!(
+                response.try_recv(),
+                Ok(RuntimeResponse::TransactionApplied { .. })
+            ));
+        }
+        assert_eq!(event_loop.actors.wal_actor.append_calls(), 2);
         Ok(())
     }
 
