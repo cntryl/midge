@@ -1341,3 +1341,99 @@ proptest! {
         );
     }
 }
+
+/// Rewrites the journal as its first `keep` bytes followed by `zeros` zero bytes.
+fn truncate_journal_then_zero_extend(db: &std::path::Path, keep: u64, zeros: usize) {
+    let path = db.join(JOURNAL_FILE);
+    let bytes = std::fs::read(&path).expect("read journal");
+    let keep = usize::try_from(keep).expect("journal offset fits usize");
+    let mut torn = bytes[..keep].to_vec();
+    torn.resize(torn.len() + zeros, 0);
+    write_and_sync_test_journal(db, &torn);
+}
+
+#[test]
+fn should_fail_replay_when_final_fsync_marker_length_overruns_eof() {
+    // Arrange: [E1][M1][E2][M2] where M2 acknowledged E2 and is the last record.
+    let (td, final_marker_start) = write_two_durable_edits();
+    corrupt_journal_record_length(td.path(), final_marker_start, 0x7fff_0000);
+
+    // Act
+    let result = replay_journal(td.path());
+
+    // Assert
+    assert!(
+        matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+        "a damaged length on the durable final marker must not drop its edit: {result:?}"
+    );
+}
+
+#[test]
+fn should_keep_durable_edit_when_torn_final_edit_append_overruns_eof() {
+    // Arrange: [E1][M1] then E2 cut short before it was ever acknowledged.
+    let (td, final_marker_start) = write_two_durable_edits();
+    let path = td.path().join(JOURNAL_FILE);
+    let torn_len = final_marker_start - 3;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open journal")
+        .set_len(torn_len)
+        .expect("tear the final edit");
+
+    // Act
+    let edits = replay_journal(td.path()).expect("a torn unacknowledged append is not corruption");
+
+    // Assert
+    assert_eq!(edits.len(), 1);
+}
+
+#[test]
+fn should_drop_unacknowledged_edit_when_final_fsync_marker_is_partial() {
+    // Arrange: [E1][M1][E2][partial M2]; M2 never became durable.
+    let (td, final_marker_start) = write_two_durable_edits();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(td.path().join(JOURNAL_FILE))
+        .expect("open journal")
+        .set_len(final_marker_start + 8)
+        .expect("tear the final marker");
+
+    // Act
+    let edits = replay_journal(td.path()).expect("a partial final marker is a torn tail");
+    append_edit(
+        td.path(),
+        &ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 3,
+        },
+    )
+    .expect("append after repair");
+    let repaired = replay_journal(td.path()).expect("replay repaired journal");
+
+    // Assert
+    assert_eq!(edits.len(), 1, "E2 was never acknowledged");
+    assert_eq!(repaired.len(), 2);
+}
+
+#[test]
+fn should_treat_zero_extended_partial_records_as_torn_when_replaying() {
+    // Arrange: a partial final marker, then a partial final edit, each padded
+    // with zeros the way an unsynced append can extend the file.
+    for (keep_back, expected_edits) in [(0_u64, 1_usize), (3, 1)] {
+        let (td, final_marker_start) = write_two_durable_edits();
+        let keep = if keep_back == 0 {
+            final_marker_start + 8
+        } else {
+            final_marker_start - keep_back
+        };
+        truncate_journal_then_zero_extend(td.path(), keep, 2);
+
+        // Act
+        let result = replay_journal(td.path());
+
+        // Assert
+        let edits = result.expect("a zero-extended partial append is a torn tail");
+        assert_eq!(edits.len(), expected_edits);
+    }
+}

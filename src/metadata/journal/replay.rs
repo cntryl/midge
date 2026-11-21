@@ -303,6 +303,16 @@ pub(super) fn read_journal_record(
                 "manifest journal record length at byte {record_start} overruns EOF and hides a verified later record (len={len}, file_len={file_len})"
             )));
         }
+        // The damaged field may be this record's own length: when it is the
+        // fsync marker that acknowledged the last edit, no marker follows it
+        // and the scan above cannot see it. Test whether the marker really
+        // runs to EOF. A torn append is a strict prefix of one record, so it
+        // verifies only by a 2^-32 CRC coincidence.
+        if typ == FSYNC_MARKER_TYPE && marker_runs_to_eof(&rest) {
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "manifest journal fsync marker at byte {record_start} has a corrupt length that overruns EOF (len={len}, file_len={file_len})"
+            )));
+        }
         return Ok(JournalRecordStatus::PartialPayload { record_start });
     }
 
@@ -340,6 +350,19 @@ fn record_frames_complete_extent(
         len_bytes[3],
     ]));
     Ok(offset + 5 + len + 4 <= file_len)
+}
+
+/// Whether `after_header` (the bytes following a marker header up to EOF) is a
+/// complete, CRC-valid marker payload plus CRC, i.e. the marker's length field
+/// alone is damaged. The CRC covers the payload only, not the length.
+fn marker_runs_to_eof(after_header: &[u8]) -> bool {
+    const CRC_LEN: usize = 4;
+    let Some(payload_len) = after_header.len().checked_sub(CRC_LEN) else {
+        return false;
+    };
+    let (payload, crc_bytes) = after_header.split_at(payload_len);
+    let expected = u32::from_be_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+    crc32c::crc32c(payload) == expected && journal_deserialize::<FsyncMarker>(payload).is_ok()
 }
 
 /// Whether `bytes` contain a complete, CRC-valid fsync marker record. Every
