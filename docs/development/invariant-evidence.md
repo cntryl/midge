@@ -258,7 +258,7 @@ Catalog review: Direct WAL ownership, append/sync outcome, exact durable-floor, 
 
 ## WAL-2
 
-Production: [src/runtime/actors/wal.rs:814](../../src/runtime/actors/wal.rs#L814) `WalActor::admit_wal_records`; [src/runtime/actors/wal.rs:963](../../src/runtime/actors/wal.rs#L963) `WalActor::fail_unapplied_transactions`; [src/wal/recovery/streaming.rs:278](../../src/wal/recovery/streaming.rs#L278) `replay_wal_with_options`; [src/runtime/actors/wal/transaction.rs:696](../../src/runtime/actors/wal/transaction.rs#L696) `append_prepared_transaction_batches`.
+Production: [src/runtime/actors/wal.rs:814](../../src/runtime/actors/wal.rs#L814) `WalActor::admit_wal_records`; [src/runtime/actors/wal.rs:963](../../src/runtime/actors/wal.rs#L963) `WalActor::fail_unapplied_transactions`; [src/wal/recovery/streaming.rs:278](../../src/wal/recovery/streaming.rs#L278) `replay_wal_with_options`; [src/runtime/actors/wal/transaction.rs:696](../../src/runtime/actors/wal/transaction.rs#L696) `append_prepared_transaction_batches`; [src/runtime/router.rs:290](../../src/runtime/router.rs#L290) `ResponseRouter::fail_all`.
 
 Active regression references (not executed by this refresh):
 
