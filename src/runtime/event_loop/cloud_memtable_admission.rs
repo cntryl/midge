@@ -51,9 +51,12 @@ impl EventLoop {
     /// Reserve for every prepared member, whose writes are not yet reflected
     /// in the active memtable. False ends the group before this transaction;
     /// ordinary admission can then freeze the earlier group's generation.
+    /// No freeze happens while a prepared member is unapplied, because a
+    /// freeze stamps a frontier covering that member's commit sequence.
     pub(super) fn prepare_coalesced_cloud_memtables(
         &mut self,
         ops: &[TransactionOp],
+        group_has_prepared_member: bool,
         staged_growth: &mut HashMap<u32, usize>,
     ) -> MidgeResult<bool> {
         let Some(window) = self.cloud_flush_staging_window() else {
@@ -74,7 +77,8 @@ impl EventLoop {
         // member's commit. Those members are not in the memtable yet, so the
         // frozen generation's flush frontier would outrun its records. End
         // the group instead; the member is re-admitted once they are applied.
-        if !self.admit_cloud_memtable_growth(&growth, window, staged_growth.is_empty())? {
+        // Growth is no proxy: an empty-range delete stages a commit with none.
+        if !self.admit_cloud_memtable_growth(&growth, window, !group_has_prepared_member)? {
             return Ok(false);
         }
         *staged_growth = growth;
@@ -525,6 +529,75 @@ mod tests {
                 "fixture must freeze under {policy:?}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_freeze_while_member_with_no_growth_is_staged_when_follower_needs_freeze(
+    ) -> MidgeResult<()> {
+        use super::super::wal::ApplyTransactionRequest;
+        use crate::runtime::{ConflictPolicy, RuntimeMsg, RuntimeResponse};
+        use crate::wal::DurabilityPolicy;
+
+        // Arrange: an empty-range delete stages a commit sequence but adds no
+        // growth; the follower alone fits the window but not beside the seed.
+        let (_directory, mut event_loop, _hybrid) = fixture()?;
+        event_loop.state.get_cf(0).unwrap().memtable.put_with_seq(
+            b"seed".to_vec(),
+            vec![1; 20 * 1024],
+            1,
+            None,
+        )?;
+        event_loop.state.sequence = 1;
+        let (messages, message_rx) = crossbeam::channel::unbounded();
+        let first_rx = event_loop.routing.router.register(7501, "ApplyTransaction");
+        let second_rx = event_loop.routing.router.register(7502, "ApplyTransaction");
+        messages
+            .send(RuntimeMsg::ApplyTransaction {
+                request_id: 7502,
+                ops: vec![TransactionOp::Put {
+                    cf_id: 0,
+                    key: bytes::Bytes::from_static(b"second"),
+                    value: bytes::Bytes::from(vec![3; 18 * 1024]),
+                    ttl_seconds: None,
+                    insert_only: false,
+                }],
+                assertions: Vec::new(),
+                durability_policy: Some(DurabilityPolicy::Strict),
+                start_sequence: None,
+                conflict_policy: ConflictPolicy::LastWriteWins,
+                response_tx: None,
+            })
+            .unwrap();
+
+        // Act
+        event_loop.apply_transaction_with_coalescing(
+            &message_rx,
+            ApplyTransactionRequest {
+                validation: None,
+                request_id: 7501,
+                ops: vec![TransactionOp::DeleteRange {
+                    cf_id: 0,
+                    start_key: bytes::Bytes::from_static(b"b"),
+                    end_key: bytes::Bytes::from_static(b"a"),
+                }],
+                assertions: Vec::new(),
+                durability_policy: Some(DurabilityPolicy::Strict),
+                start_sequence: None,
+                conflict_policy: ConflictPolicy::LastWriteWins,
+            },
+            2,
+        );
+
+        // Assert: the follower was not coalesced behind the staged member, so
+        // no freeze could stamp a frontier past it; each append stands alone.
+        for response in [first_rx, second_rx] {
+            assert!(matches!(
+                response.try_recv(),
+                Ok(RuntimeResponse::TransactionApplied { .. })
+            ));
+        }
+        assert_eq!(event_loop.actors.wal_actor.append_calls(), 2);
         Ok(())
     }
 

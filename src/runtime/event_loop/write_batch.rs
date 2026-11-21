@@ -316,6 +316,7 @@ impl EventLoop {
         match self.prepare_transaction_for_coalescing(
             initial,
             batch.coalescing_key,
+            !batch.prepared.is_empty(),
             &mut batch.staged_writes,
             &mut batch.staged_growth,
         ) {
@@ -467,6 +468,7 @@ impl EventLoop {
                 match self.prepare_transaction_for_coalescing(
                     request,
                     batch.coalescing_key,
+                    !batch.prepared.is_empty(),
                     &mut batch.staged_writes,
                     &mut batch.staged_growth,
                 ) {
@@ -665,6 +667,7 @@ impl EventLoop {
         &mut self,
         request: ApplyTransactionRequest,
         coalescing_key: TransactionCoalescingKey,
+        group_has_prepared_member: bool,
         staged_writes: &mut StagedWriteOverlay,
         staged_growth: &mut HashMap<u32, usize>,
     ) -> PrepareOutcome {
@@ -680,7 +683,11 @@ impl EventLoop {
         if let Err(error) = self.admit_drained_transaction(&touched_cfs) {
             return PrepareOutcome::Error { request_id, error };
         }
-        match self.prepare_coalesced_cloud_memtables(&request.ops, staged_growth) {
+        match self.prepare_coalesced_cloud_memtables(
+            &request.ops,
+            group_has_prepared_member,
+            staged_growth,
+        ) {
             Ok(true) => {}
             Ok(false) => return PrepareOutcome::Fallback(request),
             Err(error) => return PrepareOutcome::Error { request_id, error },
