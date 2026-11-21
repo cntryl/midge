@@ -52,7 +52,8 @@ fn read_state(fs: &Arc<dyn Fs>) -> MidgeResult<IntentState> {
         bytes,
         ..IntentState::default()
     };
-    while let Some(frame) = codec::frame_len(&state.bytes[state.valid_bytes..])? {
+    while let Some(frame) = codec::tail_frame_len(&state.bytes[state.valid_bytes..], codec::INTENT)?
+    {
         let end = state.valid_bytes + frame;
         let encoded = &state.bytes[state.valid_bytes..end];
         let edit: IntentEdit = codec::decode(codec::INTENT, encoded)?;
@@ -231,6 +232,204 @@ mod tests {
                 repaired[1],
                 IntentLogEntry::SeqnoAllocated { seqno: 3, cf_id: 0 }
             ));
+        }
+        Ok(())
+    }
+
+    struct Log {
+        _directory: tempfile::TempDir,
+        fs: Arc<dyn Fs>,
+        path: std::path::PathBuf,
+        /// Start offset of each frame, plus the final file length.
+        starts: Vec<usize>,
+    }
+
+    fn strict_load(fs: &Arc<dyn Fs>) -> MidgeResult<Vec<IntentLogEntry>> {
+        super::super::IntentPersistence::load_with_fs_and_policy_typed(
+            fs,
+            crate::config::RecoveryPolicy::Strict,
+        )
+    }
+
+    fn log_with_edits(count: u64) -> MidgeResult<Log> {
+        let directory = tempfile::tempdir()?;
+        let fs: Arc<dyn Fs> =
+            Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+        let path = directory
+            .path()
+            .join(super::super::IntentPersistence::INTENT_FILE);
+        let mut starts = vec![0];
+        let mut intents = Vec::new();
+        for sequence in 1..=count {
+            intents.push(entry(sequence));
+            save(&fs, &intents)?;
+            starts.push(usize::try_from(std::fs::metadata(&path)?.len()).unwrap());
+        }
+        Ok(Log {
+            _directory: directory,
+            fs,
+            path,
+            starts,
+        })
+    }
+
+    fn assert_corruption(result: &MidgeResult<Vec<IntentLogEntry>>) {
+        assert!(
+            matches!(result, Err(MidgeError::Corruption(_))),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn should_fail_when_mid_file_frame_length_overruns_and_hides_later_frames() -> MidgeResult<()> {
+        // Arrange: inflate the second frame's length past EOF but under the cap.
+        let log = log_with_edits(3)?;
+        let mut bytes = std::fs::read(&log.path)?;
+        bytes[log.starts[1] + 9..log.starts[1] + 13].copy_from_slice(&1_000_000_u32.to_le_bytes());
+        std::fs::write(&log.path, &bytes)?;
+
+        // Act
+        let loaded = strict_load(&log.fs);
+        let saved = save(&log.fs, &[entry(1), entry(9)]);
+
+        // Assert: durable history follows, so neither load nor save may
+        // treat this as a torn tail or rewrite the file to its prefix.
+        assert_corruption(&loaded);
+        assert!(saved.is_err());
+        assert_eq!(std::fs::read(&log.path)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn should_load_durable_prefix_when_tail_is_zero_filled() -> MidgeResult<()> {
+        // Arrange: an unsynced append that persisted its length but not bytes.
+        for zeros in [1, 8, 12, 13, 64] {
+            let log = log_with_edits(1)?;
+            let mut bytes = std::fs::read(&log.path)?;
+            bytes.extend(std::iter::repeat_n(0, zeros));
+            std::fs::write(&log.path, &bytes)?;
+
+            // Act
+            let loaded = strict_load(&log.fs)?;
+            save(&log.fs, &[entry(1), entry(2)])?;
+            let repaired = strict_load(&log.fs)?;
+
+            // Assert
+            assert_eq!(loaded.len(), 1, "zeros={zeros}");
+            assert_eq!(repaired.len(), 2, "zeros={zeros}");
+            assert_eq!(
+                std::fs::read(&log.path)?[..log.starts[1]],
+                bytes[..log.starts[1]]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn should_fail_when_zero_tail_is_followed_by_data() -> MidgeResult<()> {
+        // Arrange
+        let log = log_with_edits(1)?;
+        let mut bytes = std::fs::read(&log.path)?;
+        bytes.extend([0; 16]);
+        bytes.push(7);
+        std::fs::write(&log.path, &bytes)?;
+
+        // Act
+        let loaded = strict_load(&log.fs);
+        let saved = save(&log.fs, &[entry(1), entry(2)]);
+
+        // Assert: still an error, and the file is untouched.
+        assert!(
+            matches!(loaded, Err(MidgeError::CompatibilityError(_))),
+            "{loaded:?}"
+        );
+        assert!(saved.is_err());
+        assert_eq!(std::fs::read(&log.path)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn should_keep_compatibility_error_when_magic_at_offset_zero_is_wrong() -> MidgeResult<()> {
+        // Arrange
+        let log = log_with_edits(2)?;
+        let mut bytes = std::fs::read(&log.path)?;
+        bytes[0] ^= 1;
+        std::fs::write(&log.path, &bytes)?;
+
+        // Act
+        let loaded = strict_load(&log.fs);
+
+        // Assert
+        assert!(
+            matches!(loaded, Err(MidgeError::CompatibilityError(_))),
+            "{loaded:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_load_prefix_when_torn_final_frame_has_inflated_length_and_nothing_follows(
+    ) -> MidgeResult<()> {
+        // Arrange: a torn final append whose header is intact and whose body is
+        // partial; nothing valid follows it.
+        let log = log_with_edits(2)?;
+        let bytes = std::fs::read(&log.path)?;
+        let mut torn = bytes[..log.starts[1] + 20].to_vec();
+        torn[log.starts[1] + 9..log.starts[1] + 13].copy_from_slice(&5_000_u32.to_le_bytes());
+        std::fs::write(&log.path, &torn)?;
+
+        // Act
+        let loaded = strict_load(&log.fs)?;
+        save(&log.fs, &[entry(1), entry(5)])?;
+
+        // Assert
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(strict_load(&log.fs)?.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn should_load_prefix_when_final_durable_frame_length_is_inflated() -> MidgeResult<()> {
+        // Arrange: with the current format a damaged length in the FINAL frame
+        // is indistinguishable from a torn final append, so it loads as the
+        // prefix. This pins that known limitation.
+        let log = log_with_edits(3)?;
+        let mut bytes = std::fs::read(&log.path)?;
+        bytes[log.starts[2] + 9..log.starts[2] + 13].copy_from_slice(&1_000_000_u32.to_le_bytes());
+        std::fs::write(&log.path, &bytes)?;
+
+        // Act
+        let loaded = strict_load(&log.fs)?;
+
+        // Assert
+        assert_eq!(loaded.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn should_report_corruption_when_single_field_of_a_complete_frame_is_damaged() -> MidgeResult<()>
+    {
+        // Arrange: magic (8), kind (8 = byte 8), deflated length, payload, crc.
+        let log = log_with_edits(3)?;
+        let original = std::fs::read(&log.path)?;
+        for frame in [1, 2] {
+            let start = log.starts[frame];
+            let end = log.starts[frame + 1];
+            for offset in [start + 3, start + 8, start + 9, start + 14, end - 1] {
+                let mut bytes = original.clone();
+                bytes[offset] ^= 1;
+                std::fs::write(&log.path, &bytes)?;
+
+                // Act
+                let loaded = strict_load(&log.fs);
+                let saved = save(&log.fs, &[entry(1), entry(9)]);
+
+                // Assert: damage to a complete durable frame, mid-file or
+                // final, is reported and never silently dropped or rewritten.
+                assert!(loaded.is_err(), "frame={frame} offset={offset}: {loaded:?}");
+                assert!(saved.is_err(), "frame={frame} offset={offset}");
+                assert_eq!(std::fs::read(&log.path)?, bytes);
+            }
         }
         Ok(())
     }

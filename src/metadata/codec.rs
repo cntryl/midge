@@ -62,6 +62,55 @@ pub(crate) fn frame_len(bytes: &[u8]) -> MidgeResult<Option<usize>> {
     Ok((bytes.len() >= extent).then_some(extent))
 }
 
+/// Frame extent at the end of an append-only log's verified prefix, or `None`
+/// for a torn final append. A torn append is the only unacknowledged state, so
+/// two shapes are classified from the bytes after the verified prefix:
+/// an all-zero remainder (an unsynced append that persisted its length but not
+/// its bytes) is torn, and a frame whose announced extent overruns the end is
+/// torn only if no complete, checksum-valid frame of `kind` sits inside the
+/// bytes it would swallow. Otherwise durable history follows a damaged header
+/// and truncating there would destroy it, so it is corruption.
+pub(crate) fn tail_frame_len(bytes: &[u8], kind: u8) -> MidgeResult<Option<usize>> {
+    if bytes.iter().all(|byte| *byte == 0) {
+        return Ok(None);
+    }
+    let extent = frame_len(bytes)?;
+    if extent.is_none() && contains_complete_frame(&bytes[1..], kind) {
+        return Err(MidgeError::Corruption(
+            "metadata frame length overruns EOF and hides a verified later frame".into(),
+        ));
+    }
+    Ok(extent)
+}
+
+/// Whether `bytes` contain a complete frame of `kind` with a valid CRC32C.
+fn contains_complete_frame(bytes: &[u8], kind: u8) -> bool {
+    bytes
+        .windows(MAGIC.len())
+        .enumerate()
+        .filter(|(_, window)| *window == MAGIC)
+        .any(|(start, _)| {
+            let candidate = &bytes[start..];
+            if candidate.len() < HEADER_BYTES + CHECKSUM_BYTES || candidate[8] != kind {
+                return false;
+            }
+            let mut length = [0_u8; 4];
+            length.copy_from_slice(&candidate[9..13]);
+            let length = u32::from_le_bytes(length) as usize;
+            let Some(extent) = HEADER_BYTES
+                .checked_add(length)
+                .and_then(|end| end.checked_add(CHECKSUM_BYTES))
+            else {
+                return false;
+            };
+            let Some(frame) = candidate.get(..extent) else {
+                return false;
+            };
+            let (signed, checksum) = frame.split_at(extent - CHECKSUM_BYTES);
+            checksum == crc32c::crc32c(signed).to_be_bytes()
+        })
+}
+
 pub(crate) fn decode<T: DeserializeOwned>(kind: u8, bytes: &[u8]) -> MidgeResult<T> {
     let extent = frame_len(bytes)?
         .ok_or_else(|| MidgeError::Corruption("truncated metadata frame".into()))?;

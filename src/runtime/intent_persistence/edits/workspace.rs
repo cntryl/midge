@@ -182,7 +182,7 @@ pub(super) fn decoded_workspace_bound(
     let mut state = ReplayFootprint::default();
     let mut position = 0;
     check_deadline(deadline)?;
-    while let Some(frame) = codec::frame_len(&bytes[position..])? {
+    while let Some(frame) = codec::tail_frame_len(&bytes[position..], codec::INTENT)? {
         check_deadline(deadline)?;
         let end = position.checked_add(frame).ok_or_else(overflow)?;
         let encoded = &bytes[position..end];
