@@ -303,6 +303,17 @@ pub(super) fn read_journal_record(
                 "manifest journal record length at byte {record_start} overruns EOF and hides a verified later record (len={len}, file_len={file_len})"
             )));
         }
+        // The damaged field may be this marker's own length: the scan above
+        // cannot see a marker that starts before `payload_offset`. A torn
+        // marker append is a strict prefix of the record, so its inner frame
+        // is incomplete or its outer CRC is missing; a fully persisted marker
+        // has an intact length and never reaches this branch. A positive thus
+        // needs an intact payload and outer CRC under a wrong length: damage.
+        if typ == FSYNC_MARKER_TYPE && marker_frame_verifies(&rest) {
+            return Err(crate::common::MidgeError::Corruption(format!(
+                "manifest journal fsync marker at byte {record_start} has a corrupt length that overruns EOF (len={len}, file_len={file_len})"
+            )));
+        }
         return Ok(JournalRecordStatus::PartialPayload { record_start });
     }
 
@@ -340,6 +351,24 @@ fn record_frames_complete_extent(
         len_bytes[3],
     ]));
     Ok(offset + 5 + len + 4 <= file_len)
+}
+
+/// Whether the bytes at the start of `after_header` are a complete inner
+/// marker frame followed by its matching outer CRC32C, wherever the record
+/// ends. The inner frame announces its own extent, so only the outer length
+/// needs to be wrong; trailing bytes do not matter. The outer CRC covers the
+/// payload only.
+fn marker_frame_verifies(after_header: &[u8]) -> bool {
+    const CRC_LEN: usize = 4;
+    let Ok(Some(extent)) = crate::metadata::codec::frame_len(after_header) else {
+        return false;
+    };
+    let Some(crc_bytes) = after_header.get(extent..extent + CRC_LEN) else {
+        return false;
+    };
+    let payload = &after_header[..extent];
+    let expected = u32::from_be_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+    crc32c::crc32c(payload) == expected && journal_deserialize::<FsyncMarker>(payload).is_ok()
 }
 
 /// Whether `bytes` contain a complete, CRC-valid fsync marker record. Every
