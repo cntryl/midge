@@ -196,6 +196,18 @@ impl EventLoop {
                 completion.identity.sequence,
                 &error,
             );
+            // A flush this runtime epoch still owns must stay schedulable:
+            // nothing else leaves Publishing, so a fence that later clears
+            // would strand it and stall its family. A superseded epoch is
+            // left to restart recovery.
+            if self
+                .state
+                .immutable_flush_by_id(completion.identity.flush_id)
+                .is_some_and(|(_, flush)| flush.writer_epoch == self.authority.fencing.writer_epoch)
+            {
+                self.state
+                    .mark_immutable_flush_failed(completion.identity.flush_id);
+            }
             return false;
         }
         match completion.result {
