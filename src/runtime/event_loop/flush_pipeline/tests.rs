@@ -1778,3 +1778,229 @@ fn should_reject_publication_completion_after_lease_loss() -> crate::common::Mid
     );
     Ok(())
 }
+
+fn event_loop_with_frozen_publishing_flush(
+    directory: &tempfile::TempDir,
+) -> crate::common::MidgeResult<(EventLoop, FlushIdentity)> {
+    let (mut event_loop, _hybrid) = event_loop_with_hybrid_storage(directory)?;
+    event_loop.state.sequence = 1;
+    event_loop
+        .state
+        .get_cf(0)
+        .expect("family")
+        .memtable
+        .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+    let flush_id = event_loop.freeze_active_memtable(0)?.expect("frozen");
+    let identity = FlushIdentity {
+        flush_id,
+        writer_epoch: event_loop.authority.fencing.writer_epoch,
+        cf_id: 0,
+        sequence: 1,
+    };
+    let (_, flush) = event_loop
+        .state
+        .immutable_flush_by_id_mut(flush_id)
+        .expect("immutable");
+    flush.phase = ImmutableFlushPhase::Publishing;
+    Ok((event_loop, identity))
+}
+
+fn deliver_failed_publish(event_loop: &mut EventLoop, identity: FlushIdentity) {
+    event_loop.handle_flush_publish_completion(FlushPublishCompletion {
+        identity,
+        reservation: None,
+        publish_ns: 1,
+        result: Err(crate::common::MidgeError::Internal("unused".into())),
+    });
+}
+
+#[test]
+fn should_retry_flush_publication_when_ddl_authority_ambiguity_clears_after_completion(
+) -> crate::common::MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let (mut event_loop, identity) = event_loop_with_frozen_publishing_flush(&directory)?;
+    event_loop.authority.fencing.ddl_authority_ambiguous = true;
+
+    // Act: the publish worker returns while the writer is fenced.
+    deliver_failed_publish(&mut event_loop, identity);
+    event_loop.authority.fencing.ddl_authority_ambiguous = false;
+    let (_, flush) = event_loop
+        .state
+        .immutable_flush_by_id_mut(identity.flush_id)
+        .expect("immutable still owned");
+    let phase = flush.phase;
+    flush.retry.mark_due();
+    let selected = event_loop.state.begin_next_immutable_flush();
+
+    // Assert: the flush is retryable and the scheduler picks it up again.
+    assert_eq!(phase, ImmutableFlushPhase::RetryPending);
+    assert_eq!(
+        selected.map(|flush| flush.flush_id),
+        Some(identity.flush_id),
+        "a flush that failed validation while fenced must stay schedulable"
+    );
+    Ok(())
+}
+
+fn recv_flush_result(event_loop: &EventLoop) -> FlushWorkerResult {
+    event_loop
+        .pipeline
+        .flush_worker_result_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("flush worker result")
+}
+
+type PendingPublish = (
+    EventLoop,
+    Arc<crate::storage::HybridStorage>,
+    u64,
+    FlushWorkerResult,
+    crossbeam::channel::Receiver<crate::runtime::RuntimeResponse>,
+);
+
+/// Freezes one flush, runs the real inline worker through its build and hands
+/// back the publish result before the loop has handled it.
+fn event_loop_with_publish_result_pending(
+    directory: &tempfile::TempDir,
+) -> crate::common::MidgeResult<PendingPublish> {
+    let (mut event_loop, hybrid) = event_loop_with_hybrid_storage(directory)?;
+    hybrid.enable_ephemeral_sst_cache(1 << 20);
+    event_loop.state.sequence = 1;
+    event_loop
+        .state
+        .get_cf(0)
+        .expect("family")
+        .memtable
+        .put_with_seq(b"key".to_vec(), b"value".to_vec(), 1, None)?;
+    let flush_id = event_loop.freeze_active_memtable(0)?.expect("frozen");
+    let response = event_loop.routing.router.register(77, "FlushMemtable");
+    event_loop.publication.flush_barrier_waiters.insert(
+        0,
+        vec![super::super::flush::FlushBarrierWaiter {
+            request_id: 77,
+            frontier: 1,
+        }],
+    );
+    event_loop.schedule_next_flush_worker();
+    let build = recv_flush_result(&event_loop);
+    assert!(matches!(build, FlushWorkerResult::Build(_)));
+    event_loop.handle_flush_worker_result(build);
+    let publish = recv_flush_result(&event_loop);
+    assert!(matches!(publish, FlushWorkerResult::Publish(_)));
+    Ok((event_loop, hybrid, flush_id, publish, response))
+}
+
+fn flush_frontier(event_loop: &EventLoop) -> Option<u64> {
+    match event_loop.state.manifest.flush_frontiers().get(0).ok()? {
+        crate::metadata::frontiers::FamilyFrontier::Live { through_sequence } => {
+            Some(through_sequence)
+        }
+        crate::metadata::frontiers::FamilyFrontier::Dropped => None,
+    }
+}
+
+#[test]
+fn should_republish_built_flush_exactly_once_when_fence_clears_after_publish_completion(
+) -> crate::common::MidgeResult<()> {
+    // Arrange: baseline with no fence.
+    let baseline_dir = tempfile::tempdir()?;
+    let (mut baseline, baseline_hybrid, _, publish, _) =
+        event_loop_with_publish_result_pending(&baseline_dir)?;
+    baseline.handle_flush_worker_result(publish);
+    baseline.drain_inline_flush_worker();
+    let baseline_budget = baseline_hybrid.budget_snapshot();
+    assert_eq!(baseline.state.manifest.files.len(), 1);
+
+    // Arrange: same flush, fenced before its Ok publish result is handled.
+    let directory = tempfile::tempdir()?;
+    let (mut event_loop, hybrid, flush_id, publish, response) =
+        event_loop_with_publish_result_pending(&directory)?;
+    let (name, seq) = {
+        let (_, flush) = event_loop
+            .state
+            .immutable_flush_by_id(flush_id)
+            .expect("flush");
+        (flush.sst_name.clone(), flush.sst_seq)
+    };
+    event_loop.authority.fencing.ddl_authority_ambiguous = true;
+
+    // Act
+    event_loop.handle_flush_worker_result(publish);
+
+    // Assert: retryable, output kept, nothing published, waiter fenced.
+    let (_, flush) = event_loop
+        .state
+        .immutable_flush_by_id(flush_id)
+        .expect("immutable still owned");
+    assert_eq!(flush.phase, ImmutableFlushPhase::RetryPending);
+    assert_eq!(flush.failures, 1);
+    assert!(flush.built.is_some());
+    assert_eq!((flush.sst_name.clone(), flush.sst_seq), (name.clone(), seq));
+    assert!(event_loop.state.manifest.files.is_empty());
+    assert!(matches!(
+        response.recv_timeout(std::time::Duration::from_secs(1)),
+        Ok(crate::runtime::RuntimeResponse::Error {
+            error: crate::common::MidgeError::Fenced(_),
+            ..
+        })
+    ));
+
+    // Act: the fence clears and the retry comes due.
+    event_loop.authority.fencing.ddl_authority_ambiguous = false;
+    event_loop.state.make_immutable_flush_retry_due(0);
+    event_loop.schedule_next_flush_worker();
+    event_loop.drain_inline_flush_worker();
+
+    // Assert: published exactly once, frontier advanced, queue drained, and
+    // staging accounting matches an unfenced flush.
+    let files = &event_loop.state.manifest.files;
+    assert_eq!(files.len(), 1);
+    assert_eq!(Some(files[0].name.clone()), name);
+    assert_eq!(flush_frontier(&event_loop), Some(1));
+    assert!(event_loop
+        .state
+        .get_cf(0)
+        .expect("family")
+        .immutable_flushes
+        .is_empty());
+    assert_eq!(
+        format!("{:?}", hybrid.budget_snapshot()),
+        format!("{baseline_budget:?}")
+    );
+    Ok(())
+}
+
+#[test]
+fn should_back_off_each_retry_when_fence_never_clears() -> crate::common::MidgeResult<()> {
+    // Arrange
+    let directory = tempfile::tempdir()?;
+    let (mut event_loop, hybrid, flush_id, publish, _response) =
+        event_loop_with_publish_result_pending(&directory)?;
+    event_loop.authority.fencing.ddl_authority_ambiguous = true;
+    event_loop.handle_flush_worker_result(publish);
+    let committed = hybrid.budget_snapshot().total_committed_bytes;
+    let mut last_backoff = std::time::Duration::ZERO;
+
+    for expected_failures in [2_u32, 3] {
+        // Act: the retry comes due and fails validation again.
+        event_loop.state.make_immutable_flush_retry_due(0);
+        event_loop.schedule_next_flush_worker();
+
+        // Assert
+        let (_, flush) = event_loop
+            .state
+            .immutable_flush_by_id(flush_id)
+            .expect("immutable retained");
+        assert_eq!(flush.phase, ImmutableFlushPhase::RetryPending);
+        assert_eq!(flush.failures, expected_failures);
+        let backoff = flush.retry.remaining().expect("backoff scheduled");
+        assert!(backoff > last_backoff, "{backoff:?} <= {last_backoff:?}");
+        last_backoff = backoff;
+        assert!(event_loop.state.manifest.files.is_empty());
+        assert!(!event_loop.publication.publication_gate.is_active());
+        assert!(!event_loop.actors.flush_actor.is_inflight());
+        assert_eq!(hybrid.budget_snapshot().total_committed_bytes, committed);
+    }
+    Ok(())
+}
