@@ -225,7 +225,8 @@ fn should_rediscover_original_delete_obligation_when_cloud_recovery_loses_local_
     // from an unmirrored local state merely because a file is absent there.
     assert!(restarted.has_manifest_reclamation());
     assert_eq!(fixture.remote().unwrap(), b"original");
-    let names = restarted.take_manifest_reclamation();
+    let covered = restarted.manifest_reclamation_snapshot();
+    let names = restarted.take_covered_manifest_reclamation(&covered);
     restarted.delete_ssts(
         &mut fixture.state,
         &names,

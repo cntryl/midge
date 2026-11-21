@@ -11,7 +11,7 @@ pub(super) enum MirrorContinuation {
     Request { request_id: u64 },
     Auxiliary { context: String },
     SstReservation { cf_id: u32, next_seq: u64 },
-    Reclamation,
+    Reclamation { covered: Vec<String> },
     Retention,
     OrphanSweep(orphans::OrphanSweepTask),
 }
@@ -258,8 +258,8 @@ impl EventLoop {
                     }
                 }
             }
-            MirrorContinuation::Reclamation => {
-                super::gc::GcCoordinator::finish_manifest_reclamation(self, result);
+            MirrorContinuation::Reclamation { covered } => {
+                super::gc::GcCoordinator::finish_manifest_reclamation(self, result, &covered);
             }
             MirrorContinuation::Retention => {
                 if let Err(error) = result {

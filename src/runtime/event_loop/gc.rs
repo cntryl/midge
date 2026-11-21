@@ -40,6 +40,9 @@ impl GcCoordinator {
             }
         }
         if event_loop.actors.gc_actor.has_manifest_reclamation() {
+            // Everything queued before the cut is captured is covered by this
+            // publication; anything queued while it runs is not.
+            let covered = event_loop.actors.gc_actor.manifest_reclamation_snapshot();
             let published = crate::runtime::actors::ManifestActor::persist_for(
                 &mut event_loop.state,
                 crate::metadata::accounting::Origin::Administration,
@@ -49,7 +52,9 @@ impl GcCoordinator {
                 // the remote manifest mirror succeeds, its old snapshot
                 // may still reference every queued SST.
                 event_loop.start_metadata_mirror(
-                    super::metadata_mirror::MirrorContinuation::Reclamation,
+                    super::metadata_mirror::MirrorContinuation::Reclamation {
+                        covered: covered.clone(),
+                    },
                     *deadline,
                 )
             });
@@ -57,10 +62,10 @@ impl GcCoordinator {
                 return HandleOutcome::Continue;
             }
             if published.is_err() {
-                Self::finish_manifest_reclamation(event_loop, published.map(|_| ()));
+                Self::finish_manifest_reclamation(event_loop, published.map(|_| ()), &covered);
                 return HandleOutcome::Continue;
             }
-            Self::finish_manifest_reclamation(event_loop, Ok(()));
+            Self::finish_manifest_reclamation(event_loop, Ok(()), &covered);
         }
         event_loop
             .actors
@@ -72,6 +77,7 @@ impl GcCoordinator {
     pub(super) fn finish_manifest_reclamation(
         event_loop: &mut EventLoop,
         result: crate::common::MidgeResult<()>,
+        covered: &[String],
     ) {
         if let Err(error) = result {
             event_loop
@@ -82,7 +88,10 @@ impl GcCoordinator {
             tracing::warn!(%error, "dropped column-family manifest publication failed; retaining files");
             return;
         }
-        let reclaimed = event_loop.actors.gc_actor.take_manifest_reclamation();
+        let reclaimed = event_loop
+            .actors
+            .gc_actor
+            .take_covered_manifest_reclamation(covered);
         // The exact publication completion, not caller timeout, releases the
         // old manifest's references. Snapshot pins still protect old readers.
         event_loop.publish_snapshot();

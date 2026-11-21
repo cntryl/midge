@@ -119,8 +119,12 @@ impl HeldMetadataObjectStore {
 }
 
 fn seed_compaction_name_source(event_loop: &mut EventLoop) -> MidgeResult<String> {
+    seed_manifest_sst(event_loop, 0, 1)
+}
+
+fn seed_manifest_sst(event_loop: &mut EventLoop, cf_id: u32, seq: u64) -> MidgeResult<String> {
     use crate::sst::SstFactory as _;
-    let name = crate::cloud_layout::file_name(0, 0, 1);
+    let name = crate::cloud_layout::file_name(cf_id, 0, seq);
     let factory = crate::sst::FsSstFactoryIo::new(
         crate::io::subdirectory(Arc::clone(&event_loop.state.fs), "sst"),
         4096,
@@ -144,9 +148,9 @@ fn seed_compaction_name_source(event_loop: &mut EventLoop) -> MidgeResult<String
         .files
         .push(crate::metadata::FileMeta {
             name: name.clone(),
-            cf_id: 0,
+            cf_id,
             level: 0,
-            sst_seq: 1,
+            sst_seq: seq,
             size_bytes: finalized.size_bytes,
             content_crc32c: Some(finalized.content_crc32c),
             smallest_key: Some(summary.smallest_key),
@@ -529,6 +533,88 @@ fn should_fail_the_original_flush_attempt_when_name_publication_loses_authority(
         1
     );
     fail::remove("midge::metadata_mirror::before_provider");
+    scenario.teardown();
+    Ok(())
+}
+
+fn sst_is_resident(event_loop: &EventLoop, name: &str) -> bool {
+    event_loop
+        .state
+        .fs
+        .metadata(&crate::sst::fs::sst_key(name))
+        .is_ok()
+}
+
+fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+    let limit = Instant::now() + Duration::from_secs(5);
+    while !condition() {
+        assert!(Instant::now() < limit, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn should_retain_second_dropped_family_ssts_when_first_reclamation_mirror_completes(
+) -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let (_sender, messages) = crossbeam::channel::unbounded();
+    let mut cf_ids = Vec::new();
+    for (request_id, name) in [(91000, "mirror-drop-a"), (91003, "mirror-drop-b")] {
+        let created = event_loop.routing.router.register(request_id, "create");
+        ManifestCoordinator::create_column_family(&mut event_loop, &messages, request_id, name);
+        let response = created.try_recv();
+        assert!(
+            matches!(response, Ok(RuntimeResponse::ColumnFamilyCreated { .. })),
+            "{response:?}"
+        );
+        cf_ids.push(
+            event_loop
+                .state
+                .manifest
+                .get_column_family_by_name(name)
+                .unwrap()
+                .id,
+        );
+    }
+    event_loop.pipeline.inline_flush_worker = false;
+    let (cf_a, cf_b) = (cf_ids[0], cf_ids[1]);
+    let sst_a = seed_manifest_sst(&mut event_loop, cf_a, 1)?;
+    let sst_b = seed_manifest_sst(&mut event_loop, cf_b, 1)?;
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    let _drop_a = event_loop.routing.router.register(91001, "drop a");
+    let _drop_b = event_loop.routing.router.register(91002, "drop b");
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(10));
+
+    // Act: B is dropped while the mirror for A's drop owns publication.
+    ManifestCoordinator::drop_column_family(&mut event_loop, &messages, 91001, cf_a, false);
+    held.await_entry();
+    ManifestCoordinator::drop_column_family(&mut event_loop, &messages, 91002, cf_b, false);
+    held.release.try_send(()).unwrap();
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+
+    // Assert: the first mirror's cut still lists B, so only A's SST may go.
+    wait_until("the first dropped family's SST deletion", || {
+        !sst_is_resident(&event_loop, &sst_a)
+    });
+    // A's and B's names would drain in one worker batch; give it time to
+    // reach B before judging.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        sst_is_resident(&event_loop, &sst_b),
+        "B's SST was deleted although the published manifest still references it"
+    );
+
+    // A later mirror whose cut includes B's drop releases B's SST.
+    wait_until("the follow-up mirror to release B", || {
+        event_loop.retry_manifest_reclamation_if_due();
+        event_loop.reap_metadata_mirror();
+        !sst_is_resident(&event_loop, &sst_b)
+    });
     scenario.teardown();
     Ok(())
 }

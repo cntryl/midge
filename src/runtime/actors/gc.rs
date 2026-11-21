@@ -560,9 +560,29 @@ impl GcActor {
         !self.pending_manifest_reclamation.is_empty()
     }
 
-    pub fn take_manifest_reclamation(&mut self) -> Vec<String> {
-        self.manifest_reclamation_retry.clear();
-        self.pending_manifest_reclamation.drain(..).collect()
+    /// Names queued now. A mirror job captures its control cut after this
+    /// snapshot, so only these names are covered by that job's publication.
+    #[must_use]
+    pub fn manifest_reclamation_snapshot(&self) -> Vec<String> {
+        self.pending_manifest_reclamation.iter().cloned().collect()
+    }
+
+    /// Release only the names that a completed publication covered. Names
+    /// queued after that publication captured its cut stay queued, and another
+    /// attempt is armed so the next mirror can cover and release them.
+    pub fn take_covered_manifest_reclamation(&mut self, covered: &[String]) -> Vec<String> {
+        let covered = covered.iter().collect::<std::collections::HashSet<_>>();
+        let (released, retained): (VecDeque<String>, VecDeque<String>) = self
+            .pending_manifest_reclamation
+            .drain(..)
+            .partition(|name| covered.contains(name));
+        self.pending_manifest_reclamation = retained;
+        if self.pending_manifest_reclamation.is_empty() {
+            self.manifest_reclamation_retry.clear();
+        } else {
+            self.manifest_reclamation_retry.defer();
+        }
+        released.into_iter().collect()
     }
 
     /// Start an explicit or scheduled publication attempt. A failure must arm
