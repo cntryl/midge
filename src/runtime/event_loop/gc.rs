@@ -61,6 +61,16 @@ impl GcCoordinator {
             if matches!(published, Ok(true)) {
                 return HandleOutcome::Continue;
             }
+            if let Err(crate::common::MidgeError::Busy(reason)) = &published {
+                // Contention with another mirror is retried, not a failure:
+                // keep the queue and arm the retry without marking an anomaly.
+                tracing::debug!(%reason, "reclamation mirror deferred behind another publication");
+                event_loop
+                    .actors
+                    .gc_actor
+                    .defer_manifest_reclamation_retry();
+                return HandleOutcome::Continue;
+            }
             if published.is_err() {
                 Self::finish_manifest_reclamation(event_loop, published.map(|_| ()), &covered);
                 return HandleOutcome::Continue;

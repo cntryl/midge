@@ -656,3 +656,98 @@ fn should_retain_two_later_dropped_family_ssts_when_first_reclamation_mirror_com
 ) -> MidgeResult<()> {
     assert_reclamation_mirror_releases_only_covered_names(2)
 }
+
+/// Drops one family so its reclamation is queued while a held mirror owns
+/// publication, and returns the event loop with that mirror still in flight.
+fn queue_reclamation_behind_held_mirror(
+    event_loop: &mut EventLoop,
+    held: &HeldMirror,
+) -> MidgeResult<String> {
+    let (_sender, messages) = crossbeam::channel::unbounded();
+    let created = event_loop.routing.router.register(92000, "create");
+    ManifestCoordinator::create_column_family(event_loop, &messages, 92000, "busy-drop");
+    assert!(matches!(
+        created.try_recv(),
+        Ok(RuntimeResponse::ColumnFamilyCreated { .. })
+    ));
+    let cf_id = event_loop
+        .state
+        .manifest
+        .get_column_family_by_name("busy-drop")
+        .unwrap()
+        .id;
+    let sst = seed_manifest_sst(event_loop, cf_id, 1)?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let _response = event_loop.routing.router.register(92001, "drop");
+    ManifestCoordinator::drop_column_family(event_loop, &messages, 92001, cf_id, false);
+    held.await_entry();
+    Ok(sst)
+}
+
+#[test]
+fn should_defer_reclamation_without_anomaly_when_retry_meets_a_running_mirror() -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    let sst = queue_reclamation_behind_held_mirror(&mut event_loop, &held)?;
+    assert!(event_loop
+        .actors
+        .cloud_coordinator
+        .metadata_mirror
+        .is_running());
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(10));
+
+    // Act: the retry's own mirror start loses to the running mirror.
+    crate::runtime::event_loop::gc::GcCoordinator::retry_within(&mut event_loop, &deadline);
+
+    // Assert: contention is a deferral, not a persistence anomaly.
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    assert!(event_loop.actors.gc_actor.has_manifest_reclamation());
+    held.release.try_send(()).unwrap();
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+    crate::runtime::event_loop::gc::GcCoordinator::retry_within(&mut event_loop, &deadline);
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+    wait_until("reclamation to delete the dropped family's SST", || {
+        !sst_is_resident(&event_loop, &sst)
+    });
+    assert_eq!(queued_reclamation(&event_loop), Vec::<String>::new());
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    assert_eq!(
+        event_loop.state.health(),
+        crate::config::EngineHealth::Healthy
+    );
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_mark_persistence_anomaly_when_reclamation_mirror_start_fails_for_a_real_reason(
+) -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    let _sst = queue_reclamation_behind_held_mirror(&mut event_loop, &held)?;
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(10));
+    fail::cfg("midge::manifest::persist", "return").unwrap();
+
+    // Act: the local persist before the mirror fails outright.
+    crate::runtime::event_loop::gc::GcCoordinator::retry_within(&mut event_loop, &deadline);
+
+    // Assert
+    assert!(event_loop.state.persistence_anomaly_detected());
+    assert_eq!(
+        event_loop.state.health(),
+        crate::config::EngineHealth::Degraded
+    );
+    fail::remove("midge::manifest::persist");
+    scenario.teardown();
+    Ok(())
+}
