@@ -1437,3 +1437,147 @@ fn should_treat_zero_extended_partial_records_as_torn_when_replaying() {
         assert_eq!(edits.len(), expected_edits);
     }
 }
+
+/// Appends raw bytes to the journal and syncs it.
+fn append_raw_journal_bytes(db: &std::path::Path, bytes: &[u8]) {
+    let mut journal = std::fs::OpenOptions::new()
+        .append(true)
+        .open(db.join(JOURNAL_FILE))
+        .expect("open journal for raw append");
+    journal.write_all(bytes).expect("append raw bytes");
+    journal.sync_all().expect("sync raw bytes");
+}
+
+/// Start offsets of every complete record in the journal.
+fn journal_record_starts(db: &std::path::Path) -> Vec<u64> {
+    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
+        std::sync::Arc::new(crate::io::real::RealFs::new(db).expect("open RealFs"));
+    let file = open_journal_for_replay(&fs)
+        .expect("open journal")
+        .expect("journal exists");
+    let file_len = file.len().expect("journal length");
+    let mut starts = Vec::new();
+    let mut offset = 0;
+    while offset < file_len {
+        let JournalRecordStatus::Record(record) =
+            read_journal_record(&*file, offset, file_len, true).expect("read record")
+        else {
+            panic!("expected only complete records");
+        };
+        starts.push(record.record_start);
+        offset = record.next_offset;
+    }
+    starts
+}
+
+#[test]
+fn should_fail_replay_when_final_marker_length_overruns_and_zero_tail_follows() {
+    // Arrange: M2's length is damaged, then a later append extended the file
+    // with bytes that never reached disk.
+    let (td, final_marker_start) = write_two_durable_edits();
+    corrupt_journal_record_length(td.path(), final_marker_start, 0x7fff_0000);
+    append_raw_journal_bytes(td.path(), &[0_u8; 40]);
+
+    // Act
+    let result = replay_journal(td.path());
+
+    // Assert
+    assert!(
+        matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+        "a damaged durable marker followed by a zero tail must not drop its edit: {result:?}"
+    );
+}
+
+#[test]
+fn should_fail_replay_when_final_marker_length_overruns_and_torn_edit_follows() {
+    // Arrange: M2's length is damaged, then a later edit append was torn.
+    let (td, final_marker_start) = write_two_durable_edits();
+    corrupt_journal_record_length(td.path(), final_marker_start, u32::MAX);
+    let journal = std::fs::read(td.path().join(JOURNAL_FILE)).expect("read journal");
+    append_raw_journal_bytes(td.path(), &journal[..8]);
+
+    // Act
+    let result = replay_journal(td.path());
+
+    // Assert
+    assert!(
+        matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+        "a damaged durable marker followed by a torn edit must not drop its edit: {result:?}"
+    );
+}
+
+#[test]
+fn should_fail_replay_when_only_marker_length_overruns_eof() {
+    // Arrange: [E1][M1] where M1 is the first and only marker.
+    let td = tempdir().expect("create temp directory");
+    append_edit(
+        td.path(),
+        &ManifestEdit::BumpNextSstSeq {
+            cf_id: 0,
+            next_seq: 1,
+        },
+    )
+    .expect("append edit");
+    let first_marker_start = journal_record_starts(td.path())[1];
+    corrupt_journal_record_length(td.path(), first_marker_start, 0x7fff_0000);
+
+    // Act
+    let result = replay_journal(td.path());
+
+    // Assert
+    assert!(
+        matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+        "the only marker with a damaged length must not drop E1: {result:?}"
+    );
+}
+
+#[test]
+fn should_open_with_durable_edit_when_final_marker_is_cut_at_any_point_and_zero_extended() {
+    // Arrange: every cut of M2 past its header, with and without a short zero
+    // extension that still leaves the record overrunning EOF.
+    let (td, final_marker_start) = write_two_durable_edits();
+    let full = std::fs::read(td.path().join(JOURNAL_FILE)).expect("read journal");
+    let full_len = u64::try_from(full.len()).expect("journal length fits u64");
+    for keep in final_marker_start + 5..full_len {
+        for zeros in 0..=2_u64 {
+            if keep + zeros >= full_len {
+                continue;
+            }
+            let dir = tempdir().expect("create temp directory");
+            let keep_len = usize::try_from(keep).expect("offset fits usize");
+            let mut torn = full[..keep_len].to_vec();
+            torn.resize(
+                keep_len + usize::try_from(zeros).expect("zeros fit usize"),
+                0,
+            );
+            write_and_sync_test_journal(dir.path(), &torn);
+
+            // Act
+            let result = replay_journal(dir.path());
+
+            // Assert
+            let edits = result.unwrap_or_else(|error| {
+                panic!("cut at {keep} plus {zeros} zeros is a torn tail: {error:?}")
+            });
+            assert_eq!(edits.len(), 1, "unacknowledged E2 dropped at cut {keep}");
+        }
+    }
+}
+
+#[test]
+fn should_stop_at_durable_prefix_when_salvaging_a_damaged_final_marker_length() {
+    // Arrange
+    let (td, final_marker_start) = write_two_durable_edits();
+    corrupt_journal_record_length(td.path(), final_marker_start, 0x7fff_0000);
+    let fs: std::sync::Arc<dyn crate::io::traits::Fs> =
+        std::sync::Arc::new(crate::io::real::RealFs::new(td.path()).expect("open RealFs"));
+
+    // Act
+    let replay =
+        replay::replay_journal_with_mode(&fs, replay::JournalReplayMode::SalvagePrefix, None)
+            .expect("salvage keeps the durable prefix");
+
+    // Assert: same as other mid-journal corruption under salvage.
+    assert_eq!(replay.edits.len(), 1);
+    assert!(replay.corruption.is_some(), "salvage reports the damage");
+}
