@@ -381,16 +381,24 @@ impl PrimaryLease for FileSystemLease {
         }
 
         let our_epoch = self.acquired_epoch.load(Ordering::Acquire);
+        // The local writer stops accepting writes as soon as release is
+        // requested, even if the record write below fails and the record is
+        // left to expire at its TTL.
+        self.validity.deactivate(our_epoch);
         if our_epoch > 0 {
             // Conditional release preserves a newer holder's record if this
             // lease was fenced between shutdown admission and release.
+            //
+            // On failure `acquired` and the epoch stay set: they are the
+            // pending-release marker that lets a retry (see
+            // `release_lease_bounded`) rewrite the record and that makes
+            // `try_acquire` refuse until the release completes.
             self.leader_store
                 .release_if_owner(&self.holder_id, our_epoch)?;
         }
 
         self.acquired.store(false, Ordering::Release);
         self.acquired_epoch.store(0, Ordering::Release);
-        self.validity.deactivate(our_epoch);
 
         tracing::info!(
             holder_id = %self.holder_id,
@@ -750,6 +758,51 @@ mod tests {
         assert!(retried.is_ok(), "{retried:?}");
         assert!(lease.acquired.load(Ordering::Acquire));
         assert!(lease.validity.remaining(epoch).is_ok());
+    }
+
+    #[test]
+    fn should_stop_local_validity_when_release_write_fails() {
+        // Arrange
+        let fs = Arc::new(FlakyRenameFs {
+            inner: crate::io::MockFs::new(),
+            fail_next_rename: AtomicBool::new(false),
+            effect_attempted: None,
+            cancel_after_leader_rename: None,
+        });
+        let lease = Arc::new(FileSystemLease::new_with_fs_for_test(
+            Arc::clone(&fs) as Arc<dyn crate::io::Fs>,
+            Duration::from_secs(30),
+        ));
+        let _guard = Arc::clone(&lease).try_acquire().expect("acquire lease");
+        let epoch = lease.epoch();
+        fs.fail_next_rename.store(true, Ordering::Release);
+
+        // Act
+        let failed = lease.release();
+        let validity_after_failure = lease.validity.remaining(epoch);
+        let reacquire = Arc::clone(&lease).try_acquire();
+        let retried = lease.release();
+        let record = lease.leader_store.read_current().unwrap().unwrap();
+
+        // Assert
+        assert!(matches!(failed, Err(LeaseError::IoError(_))), "{failed:?}");
+        assert!(
+            validity_after_failure.is_err(),
+            "a released writer must stop accepting writes even if the record write failed"
+        );
+        assert!(
+            matches!(reacquire, Err(LeaseError::AlreadyAcquired(_))),
+            "a pending release must block reacquisition on the same lease"
+        );
+        assert!(retried.is_ok(), "{retried:?}");
+        assert_eq!(record.holder_id, lease.holder_id);
+        assert_eq!(
+            record.acquired_at,
+            super::super::fs_leader_store::RELEASED_TIMESTAMP,
+            "the retry must still write the released leader record"
+        );
+        assert!(!lease.acquired.load(Ordering::Acquire));
+        assert!(lease.validity.remaining(epoch).is_err());
     }
 
     #[test]
