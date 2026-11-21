@@ -286,6 +286,57 @@ fn should_stop_at_the_same_torn_tail_when_preflighting_an_intent_history() -> Mi
     Ok(())
 }
 
+fn two_frames() -> MidgeResult<(Vec<u8>, Vec<u8>)> {
+    let first = codec::encode(codec::INTENT, &edit(nested_entries()))?;
+    let second = codec::encode(
+        codec::INTENT,
+        &IntentEdit {
+            sequence: 2,
+            previous_checksum: frame_checksum(&first),
+            keep: 10,
+            append: vec![IntentLogEntry::WalSynced {
+                segment_id: 2,
+                seqno: 4,
+            }],
+        },
+    )?;
+    Ok((first, second))
+}
+
+#[test]
+fn should_stop_at_a_zero_filled_tail_when_preflighting_an_intent_history() -> MidgeResult<()> {
+    // Arrange
+    let (first, _) = two_frames()?;
+    let expected = decoded_workspace_bound(&first, &OperationDeadline::unbounded())?;
+    let mut padded = first.clone();
+    padded.extend([0; 64]);
+
+    // Act
+    let bound = decoded_workspace_bound(&padded, &OperationDeadline::unbounded())?;
+
+    // Assert: admission selects the same prefix as the production reader.
+    assert_eq!(bound.bytes, expected.bytes);
+    assert_eq!(replay(&padded)?.len(), 10);
+    Ok(())
+}
+
+#[test]
+fn should_reject_an_overrunning_length_that_hides_a_later_frame_when_preflighting(
+) -> MidgeResult<()> {
+    // Arrange: inflate the first frame's length past EOF, under the cap.
+    let (first, second) = two_frames()?;
+    let mut bytes = first;
+    bytes[9..13].copy_from_slice(&1_000_000_u32.to_le_bytes());
+    bytes.extend_from_slice(&second);
+
+    // Act
+    let bound = decoded_workspace_bound(&bytes, &OperationDeadline::unbounded());
+
+    // Assert
+    assert!(matches!(bound, Err(MidgeError::Corruption(_))));
+    Ok(())
+}
+
 #[test]
 fn should_reject_invalid_predecessors_before_admitting_typed_replay() -> MidgeResult<()> {
     // Arrange

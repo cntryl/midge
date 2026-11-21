@@ -64,26 +64,56 @@ pub(crate) fn frame_len(bytes: &[u8]) -> MidgeResult<Option<usize>> {
 
 /// Frame extent at the end of an append-only log's verified prefix, or `None`
 /// for a torn final append. A torn append is the only unacknowledged state, so
-/// two shapes are classified from the bytes after the verified prefix:
+/// the bytes after the verified prefix are classified:
 /// an all-zero remainder (an unsynced append that persisted its length but not
-/// its bytes) is torn, and a frame whose announced extent overruns the end is
-/// torn only if no complete, checksum-valid frame of `kind` sits inside the
-/// bytes it would swallow. Otherwise durable history follows a damaged header
-/// and truncating there would destroy it, so it is corruption.
+/// its bytes) is torn; a frame whose announced extent overruns the end is
+/// corruption if a complete, checksum-valid frame of `kind` sits inside the
+/// bytes it would swallow (durable history follows), or if the frame verifies
+/// when its length is corrected to run exactly to the end (only the length
+/// field is damaged). Otherwise it is a torn append. A multi-field damage to a
+/// final frame remains indistinguishable from a torn append.
 pub(crate) fn tail_frame_len(bytes: &[u8], kind: u8) -> MidgeResult<Option<usize>> {
     if bytes.iter().all(|byte| *byte == 0) {
         return Ok(None);
     }
     let extent = frame_len(bytes)?;
-    if extent.is_none() && contains_complete_frame(&bytes[1..], kind) {
+    if extent.is_none()
+        && (contains_complete_frame(&bytes[1..], kind) || frame_runs_to_end(bytes, kind))
+    {
         return Err(MidgeError::Corruption(
-            "metadata frame length overruns EOF and hides a verified later frame".into(),
+            "metadata frame length overruns EOF but a verified frame is present".into(),
         ));
     }
     Ok(extent)
 }
 
-/// Whether `bytes` contain a complete frame of `kind` with a valid CRC32C.
+fn frame_crc_valid(frame: &[u8]) -> bool {
+    let (signed, checksum) = frame.split_at(frame.len() - CHECKSUM_BYTES);
+    checksum == crc32c::crc32c(signed).to_be_bytes()
+}
+
+/// Whether `bytes` verify as one complete frame of `kind` whose length field
+/// is replaced by the one that makes it end exactly at the end of `bytes`.
+/// The CRC covers the header and length, so the candidate length is
+/// substituted before it is recomputed.
+fn frame_runs_to_end(bytes: &[u8], kind: u8) -> bool {
+    let Some(length) = bytes
+        .len()
+        .checked_sub(HEADER_BYTES + CHECKSUM_BYTES)
+        .filter(|length| *length <= MAX_PAYLOAD_BYTES)
+    else {
+        return false;
+    };
+    let Ok(length) = u32::try_from(length) else {
+        return false;
+    };
+    let mut candidate = bytes.to_vec();
+    candidate[9..13].copy_from_slice(&length.to_le_bytes());
+    candidate[8] == kind && frame_crc_valid(&candidate)
+}
+
+/// Whether `bytes` contain a complete frame of `kind` with a valid CRC32C. A
+/// candidate whose announced extent does not fit is skipped before any CRC work.
 fn contains_complete_frame(bytes: &[u8], kind: u8) -> bool {
     bytes
         .windows(MAGIC.len())
@@ -103,11 +133,7 @@ fn contains_complete_frame(bytes: &[u8], kind: u8) -> bool {
             else {
                 return false;
             };
-            let Some(frame) = candidate.get(..extent) else {
-                return false;
-            };
-            let (signed, checksum) = frame.split_at(extent - CHECKSUM_BYTES);
-            checksum == crc32c::crc32c(signed).to_be_bytes()
+            candidate.get(..extent).is_some_and(frame_crc_valid)
         })
 }
 

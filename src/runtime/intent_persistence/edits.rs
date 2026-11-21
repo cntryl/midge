@@ -389,20 +389,80 @@ mod tests {
     }
 
     #[test]
-    fn should_load_prefix_when_final_durable_frame_length_is_inflated() -> MidgeResult<()> {
-        // Arrange: with the current format a damaged length in the FINAL frame
-        // is indistinguishable from a torn final append, so it loads as the
-        // prefix. This pins that known limitation.
+    fn should_fail_when_final_durable_frame_length_is_inflated() -> MidgeResult<()> {
+        // Arrange: only the length field of the final frame is damaged, so the
+        // frame still runs to EOF with a valid CRC once its length is corrected.
         let log = log_with_edits(3)?;
         let mut bytes = std::fs::read(&log.path)?;
         bytes[log.starts[2] + 9..log.starts[2] + 13].copy_from_slice(&1_000_000_u32.to_le_bytes());
         std::fs::write(&log.path, &bytes)?;
 
         // Act
-        let loaded = strict_load(&log.fs)?;
+        let loaded = strict_load(&log.fs);
+        let saved = save(&log.fs, &[entry(1), entry(9)]);
+
+        // Assert: an acknowledged frame is reported, never dropped or rewritten.
+        assert_corruption(&loaded);
+        assert!(saved.is_err());
+        assert_eq!(std::fs::read(&log.path)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn should_load_prefix_when_torn_final_frame_is_zero_extended() -> MidgeResult<()> {
+        // Arrange: a strict prefix of the final frame, extended with zeros to
+        // the persisted file length.
+        let log = log_with_edits(2)?;
+        let bytes = std::fs::read(&log.path)?;
+        let added = log.starts[2] - log.starts[1];
+        // Zero extension stays short of the frame's full extent; one that
+        // reaches it is a complete frame with a bad CRC and is reported.
+        for (kept, zeros) in [(13, 5), (20, 5), (added - 5, 4)] {
+            let mut torn = bytes[..log.starts[1] + kept].to_vec();
+            torn.extend(std::iter::repeat_n(0, zeros));
+            std::fs::write(&log.path, &torn)?;
+
+            // Act
+            let loaded = strict_load(&log.fs)?;
+
+            // Assert
+            assert_eq!(loaded.len(), 1, "kept={kept} zeros={zeros}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn should_fail_when_mid_file_frame_is_entirely_zeroed() -> MidgeResult<()> {
+        // Arrange
+        let log = log_with_edits(3)?;
+        let mut bytes = std::fs::read(&log.path)?;
+        bytes[log.starts[1]..log.starts[2]].fill(0);
+        std::fs::write(&log.path, &bytes)?;
+
+        // Act
+        let loaded = strict_load(&log.fs);
+        let saved = save(&log.fs, &[entry(1), entry(9)]);
 
         // Assert
-        assert_eq!(loaded.len(), 2);
+        assert!(loaded.is_err(), "{loaded:?}");
+        assert!(saved.is_err());
+        assert_eq!(std::fs::read(&log.path)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn should_load_empty_when_file_is_entirely_zeros() -> MidgeResult<()> {
+        // Arrange: a first append that persisted its length but not its bytes.
+        let log = log_with_edits(1)?;
+        std::fs::write(&log.path, [0_u8; 64])?;
+
+        // Act
+        let loaded = strict_load(&log.fs)?;
+        save(&log.fs, &[entry(4)])?;
+
+        // Assert
+        assert!(loaded.is_empty());
+        assert_eq!(strict_load(&log.fs)?.len(), 1);
         Ok(())
     }
 
