@@ -1,9 +1,9 @@
 # Metadata durability boundary and FORMAT 9 upgrade (#1093)
 
-**Status:** protocol proposal for review. No new format, migration command, or
-recovery behavior is implemented by this document. The selected product
-direction is a crash-safe, explicit FORMAT 9 upgrade. Ordinary `Engine::open`
-must never upgrade a database implicitly.
+`Engine::upgrade_format_9(&options, timeout)` explicitly selects FORMAT 10
+metadata for an existing database. Newly created databases use FORMAT 9.
+`Engine::open` can finish a cloud migration whose compatibility gate already
+records an explicit upgrade. It does not initiate a migration.
 
 This design addresses ambiguous append recovery in both the manifest journal
 and intent log. FORMAT 9 stores framing, length, payload and checksums in the
@@ -36,7 +36,7 @@ ambiguous FORMAT 9 evidence. This protocol follows the direction recorded in
 6. Checkpoint and compaction select new generations. Old referenced bytes
    remain available until safe collection.
 
-## Proposed v10 wire and authority layout
+## FORMAT 10 wire and authority layout
 
 FORMAT 10 keeps the existing `FORMAT` filename and uses the exact marker
 `midge-format-version=10\n`. It introduces a dedicated v10 metadata codec and
@@ -47,10 +47,10 @@ A generation contains a checkpoint base plus zero or more immutable append
 segments for each stream:
 
 ```text
-metadata/generations/<generation-id>/manifest.base
-metadata/generations/<generation-id>/manifest/<segment-id>
-metadata/generations/<generation-id>/intent.base
-metadata/generations/<generation-id>/intent/<segment-id>
+metadata/generations/<generation-id>/manifest/base
+metadata/generations/<generation-id>/manifest/<head-sequence>-<first-id>-<last-id>.seg
+metadata/generations/<generation-id>/intent/base
+metadata/generations/<generation-id>/intent/<head-sequence>-<first-id>-<last-id>.seg
 metadata/HEAD
 ```
 
@@ -66,18 +66,18 @@ contains:
 - intent base object name, exact byte length, CRC32C and SHA-256, plus its
   last sequence and checksum
 - the ordered intent segment references, each with exact length, CRC32C,
-  SHA-256, predecessor checksum and inclusive sequence range
+  SHA-256, predecessor digest and inclusive sequence range
 - the highest manifest edit ID and intent sequence represented by the
-  selected closure.
+  selected closure
+- pending immutable object identities used to reclaim unselected partial
+  appends, a previous generation to reclaim after selection, and a source
+  digest for an upgrade candidate.
 
-Each immutable segment contains one complete logical append operation. A
-manifest segment carries its edit envelope(s) and terminal fsync marker. An
-intent segment carries its suffix edit. The selected head makes the whole
-segment durable. Decoders verify the segment frame, checksum, stream identity,
-predecessor, identity range and semantics before applying it. The terminal
-manifest marker remains an internal consistency check. The selected head
-provides independent evidence that distinguishes a committed append from an
-interrupted one.
+Each `MDGEOB10` segment contains one complete logical operation. A manifest
+segment stores an edit, which may be an atomic batch. An intent segment stores
+the resulting intent state. The head selects the whole segment, which replaces
+the old in-stream durability marker. Decoders verify segment framing, checksum,
+stream identity, predecessor, identity range and semantics before replay.
 
 The names in `HEAD` are canonical generation-relative names, never arbitrary
 paths. A local reader resolves only those names and verifies every declared
@@ -124,11 +124,14 @@ this order:
 
 1. Read and validate the selected head. Validate the requested edit and
    reserve the bounded segment/head workspace.
-2. Write a new uniquely named immutable segment. Sync the segment and each
+2. Record the new segment in `HEAD` as pending for bounded cleanup. The
+   selected history remains the previous base and segments. Write the new
+   uniquely named immutable segment. Sync the segment and each
    affected directory, including the parent of any newly created directory.
    Verify the bytes that were persisted.
 3. Construct a head whose predecessor digest equals the head read in step 1,
-   and whose selected closure includes the new segment.
+   and whose selected closure includes the new segment. Clear the pending
+   record in this candidate.
 4. Stage `HEAD` with the existing write, file-sync, atomic-rename,
    parent-directory-sync lifecycle. The staged replacement is the commit
    point.
@@ -152,22 +155,21 @@ remote selector. The v10 pointer closure must identify the exact immutable
 head, bases and segments with the existing object identity, length and
 checksum checks. Cloud metadata capture, chain decoding, retention, orphan
 sweeping and cache hydration must recognize the v10 closure as one versioned
-protocol. Extend the v9 filename allowlist explicitly for v10 objects. The
-pointer CAS is the remote acknowledgement boundary. Validate the candidate
-closure before CAS. On a lost response, read the selected pointer and accept
+protocol. One publication UUID scopes all v10 objects for the pointer,
+including the optional `metadata/cut-proof` object that binds a captured cut
+to its exact selected closure. The pointer CAS is the remote acknowledgement
+boundary. Validate the candidate closure before CAS. On a lost response, read
+the selected pointer and accept
 only the exact candidate under the active lease epoch and owner. CloudSim uses
 the same remote-pointer rule. Its local cache is derived state and must be
 rehydrated from the selected generation after interruption or cache loss.
 
 ## Explicit v9 upgrade
 
-The proposed maintenance entry point is an explicit pre-open operation, for
-example `Engine::upgrade_format_9(options, timeout)`. It acquires the existing
-primary lease and returns without starting a runtime. The exact public name
-and report type need API review. `Engine::open` never invokes migration
-implicitly. A verified pre-upgrade backup is required for rollback after v10
-writes begin. The upgrade operation does not require a backup artifact when
-the v9 source validates.
+The pre-open operation acquires the existing primary lease and returns without
+starting a runtime. A verified pre-upgrade backup is required for rollback
+after v10 writes begin. The upgrade operation accepts a validated v9 source
+without an existing backup artifact.
 
 ### Local upgrade
 
