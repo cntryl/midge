@@ -150,9 +150,7 @@ fn read_format_marker(fs: &dyn Fs) -> Result<bytes::Bytes, FsError> {
     let path = FsPath::new(FORMAT_FILE);
     let metadata = fs.metadata(&path)?;
     if metadata.is_dir {
-        return Err(FsError::Io(
-            "cannot read FORMAT marker from a directory".into(),
-        ));
+        return Err(FsError::Io(format!("{FORMAT_FILE}: Is a directory")));
     }
     if metadata.len > MAX_FORMAT_MARKER_BYTES {
         return Err(FsError::Corruption(format!(
