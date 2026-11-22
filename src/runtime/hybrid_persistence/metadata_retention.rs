@@ -3,6 +3,7 @@
 use super::metadata_snapshot::CloudMetadataMirrorContext;
 use crate::common::{MidgeError, MidgeResult};
 use crate::lease::{CloudMetadataGeneration, CloudMetadataHead};
+use crate::runtime::MetadataCutProof;
 use crate::storage::cloud::BlockingCloud;
 use crate::storage::{
     StorageBackend, StorageEvent, StorageObjectMetadata, StorageOutcome, StoragePrecondition,
@@ -216,7 +217,7 @@ fn collect_format_10_after_commit(
     generation: &CloudMetadataGeneration,
     state: &mut MetadataRetentionState,
 ) {
-    if generation.objects.len() > crate::metadata::local_authority::MAX_OBJECTS + 2
+    if generation.objects.len() > crate::metadata::local_authority::MAX_OBJECTS + 3
         || !state.begin_format_10()
     {
         return;
@@ -282,6 +283,7 @@ fn collect_format_10_after_commit(
 enum Format10CandidateKind {
     Format,
     Head,
+    CutProof,
     Closure,
 }
 
@@ -300,6 +302,7 @@ fn format_10_candidate_kind(key: &str) -> Option<Format10CandidateKind> {
     match relative_path {
         crate::metadata::files::FORMAT => Some(Format10CandidateKind::Format),
         HEAD_PATH => Some(Format10CandidateKind::Head),
+        MetadataCutProof::CLOUD_OBJECT_NAME => Some(Format10CandidateKind::CutProof),
         path if crate::metadata::local_authority::closure_path_parts(path).is_ok() => {
             Some(Format10CandidateKind::Closure)
         }
@@ -319,6 +322,7 @@ fn reclaim_format_10_candidate(
     let limit = match kind {
         Format10CandidateKind::Format => 64,
         Format10CandidateKind::Head => MAX_HEAD_BYTES as u64,
+        Format10CandidateKind::CutProof => MetadataCutProof::MAX_CLOUD_OBJECT_BYTES as u64,
         Format10CandidateKind::Closure => MAX_CLOSURE_BYTES,
     };
     if metadata.size == 0 || metadata.size > limit {
