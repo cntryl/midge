@@ -152,7 +152,7 @@ impl<'a> BlockingCloud<'a> {
         })
     }
 
-    fn range_identity(&self, key: &str) -> MidgeResult<Option<ObjectMetadata>> {
+    pub(crate) fn range_identity(&self, key: &str) -> MidgeResult<Option<ObjectMetadata>> {
         let deadline = self.begin("range HEAD", key)?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.cloud.heads.head_for_range(
@@ -260,6 +260,38 @@ impl<'a> BlockingCloud<'a> {
                     .map_err(|error| MidgeError::Corruption(error.to_string()))
             })
             .transpose()
+    }
+
+    /// An admitted FORMAT 10 stage can be reclaimed only after each payload
+    /// PUT has a positive terminal reply. Readback alone can prove bytes, but
+    /// cannot prove that a timed-out request will never create them again.
+    pub(crate) fn put_immutable_terminal(&self, key: &str, bytes: &[u8]) -> MidgeResult<()> {
+        use crate::storage::{StoragePrecondition, StorageRequest};
+        let deadline = self.begin("immutable put", key)?;
+        let timeout = self.remaining(&deadline, "immutable put", key)?;
+        let mut request = StorageRequest::new(key, deadline, timeout)
+            .with_precondition(StoragePrecondition::IfAbsent);
+        request.reservation.clone_from(&self.reservation);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cloud
+            .submit_write_receipt_request(request, bytes.to_vec(), tx);
+        match rx.recv_timeout(self.remaining(&deadline, "immutable put", key)?) {
+            Ok(Ok(Some(receipt))) if receipt.matches(bytes) => Ok(()),
+            Ok(Ok(None))
+                if self.get_exact_len(key, bytes.len() as u64)?.as_deref() == Some(bytes) =>
+            {
+                Ok(())
+            }
+            Ok(Ok(_)) => Err(MidgeError::Corruption(format!(
+                "immutable cloud PUT '{key}' differs from the reserved body"
+            ))),
+            Ok(Err(error)) => Err(MidgeError::OutcomeUnknown(format!(
+                "immutable cloud PUT '{key}' has no positive terminal reply: {error}"
+            ))),
+            Err(error) => Err(MidgeError::OutcomeUnknown(format!(
+                "immutable cloud PUT '{key}' callback could not prove completion: {error}"
+            ))),
+        }
     }
 
     #[cfg(test)]

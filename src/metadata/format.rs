@@ -117,6 +117,9 @@ pub fn validate_format_marker(fs: &dyn Fs, db_path: &Path) -> MidgeResult<u32> {
     }
 
     if version == MAX_SUPPORTED_FORMAT_VERSION {
+        if bytes.as_ref() != b"midge-format-version=10\n" {
+            return Err(invalid());
+        }
         super::local_authority::LocalMetadataAuthority::validate(fs)?;
     }
 
@@ -146,7 +149,12 @@ fn read_format_marker(fs: &dyn Fs) -> Result<bytes::Bytes, FsError> {
     const MAX_FORMAT_MARKER_BYTES: u64 = 64;
     let path = FsPath::new(FORMAT_FILE);
     let metadata = fs.metadata(&path)?;
-    if metadata.is_dir || metadata.len > MAX_FORMAT_MARKER_BYTES {
+    if metadata.is_dir {
+        return Err(FsError::Io(
+            "cannot read FORMAT marker from a directory".into(),
+        ));
+    }
+    if metadata.len > MAX_FORMAT_MARKER_BYTES {
         return Err(FsError::Corruption(format!(
             "FORMAT marker length {} exceeds bound {MAX_FORMAT_MARKER_BYTES}",
             metadata.len

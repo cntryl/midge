@@ -622,6 +622,14 @@ pub(crate) fn mirror_control_metadata_within(
     context: CloudMetadataMirrorContext<'_>,
     mut validate_lease: impl FnMut(&OperationDeadline) -> MidgeResult<()>,
 ) -> MidgeResult<()> {
+    let format_10 = crate::metadata::format::is_format_10(context.fs)?;
+    let _format_10_writer = format_10
+        .then(|| {
+            context
+                .publication_lock
+                .lock_format_10_writer(context.deadline.remaining())
+        })
+        .transpose()?;
     let timeout = if context.lock_wait_budget.is_zero() {
         if context.deadline.is_expired() {
             return Err(MidgeError::Timeout(
@@ -646,7 +654,7 @@ pub(crate) fn mirror_control_metadata_within(
     let mut guard = context.publication_lock.lock_for(timeout).ok_or_else(|| {
         MidgeError::Timeout("metadata mirror timed out acquiring publication lock".into())
     })?;
-    mirror_under_lock(&context, &mut guard.cached, &mut validate_lease)?;
+    mirror_under_lock(&context, format_10, &mut guard.cached, &mut validate_lease)?;
     if let Some(cached) = &guard.cached {
         let generation = cached.generation.clone();
         super::metadata_retention::collect_after_commit(
@@ -660,6 +668,7 @@ pub(crate) fn mirror_control_metadata_within(
 
 fn mirror_under_lock(
     context: &CloudMetadataMirrorContext<'_>,
+    format_10: bool,
     cache: &mut Option<MetadataMirrorCache>,
     validate_lease: &mut impl FnMut(&OperationDeadline) -> MidgeResult<()>,
 ) -> MidgeResult<()> {
@@ -691,7 +700,7 @@ fn mirror_under_lock(
             ))
         }
     };
-    if crate::metadata::format::is_format_10(context.fs)? {
+    if format_10 {
         return mirror_format10_under_lock(context, cache, previous.as_ref(), validate_lease);
     }
     let local = capture_local_metadata(context)?;
@@ -827,11 +836,16 @@ fn mirror_format10_under_lock(
             MidgeError::ResourceLimit("shared metadata generation ordinal exhausted".into())
         })?;
     let publication_id = uuid::Uuid::new_v4();
+    if let Some(previous) = previous {
+        super::metadata_retention::reclaim_finished_format10_stages(context, previous)?;
+    }
     let (horizon, objects) = super::publish_format10_closure(
         context.cloud,
         context.deadline,
         publication_id,
+        context.authority.writer_epoch,
         &captured.bodies,
+        None,
         &captured.reservation,
     )?;
     if horizon != candidate.edit_checkpoint_id {
@@ -846,6 +860,7 @@ fn mirror_format10_under_lock(
         objects,
     };
     commit_metadata_generation(context, previous, generation.clone())?;
+    super::format10_closure::finish_format10_stage(context.cloud, context.deadline, publication_id);
     *cache = Some(MetadataMirrorCache::new(
         generation,
         context.authority.writer_epoch,

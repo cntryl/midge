@@ -120,45 +120,46 @@ impl Fixture {
 fn format_10_generation(fixture: &Fixture) -> CloudMetadataGeneration {
     use crate::lease::SharedGenerationId;
 
-    let directory = fixture.directory.path().join("format10-source");
-    std::fs::create_dir(&directory).unwrap();
-    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(&directory).unwrap());
+    let directory = tempfile::tempdir_in(fixture.directory.path()).unwrap();
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(directory.path()).unwrap());
     let manifest =
         crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &Manifest::default())
             .unwrap();
     let intents = serde_json::to_vec(&Vec::<crate::runtime::IntentLogEntry>::new()).unwrap();
-    let authority = crate::metadata::local_authority::LocalMetadataAuthority::initialize(
+    crate::metadata::local_authority::LocalMetadataAuthority::initialize(
         Arc::clone(&fs),
         "retention-generation",
         &manifest,
         &intents,
     )
     .unwrap();
-    std::fs::write(directory.join(files::FORMAT), b"midge-format-version=10\n").unwrap();
+    std::fs::write(
+        directory.path().join(files::FORMAT),
+        b"midge-format-version=10\n",
+    )
+    .unwrap();
 
-    let publication_id = uuid::Uuid::new_v4().to_string();
-    let mut objects = vec![files::FORMAT.to_owned()];
-    objects.extend(authority.selected_relative_paths());
+    let publication_id = uuid::Uuid::new_v4();
     let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
-    let io = BlockingCloud::new(&fixture.cloud, &deadline);
-    let objects = objects
-        .into_iter()
-        .map(|relative| {
-            let bytes = std::fs::read(directory.join(&relative)).unwrap();
-            let object_key = format!("metadata/generations/{publication_id}/{relative}");
-            io.put_with_headers(&object_key, bytes.clone(), Vec::new())
-                .unwrap();
-            crate::lease::CloudMetadataObject {
-                file_name: relative,
-                object_key,
-                len: bytes.len() as u64,
-                crc32c: crc32c::crc32c(&bytes),
-            }
-        })
-        .collect();
+    let captured =
+        super::super::capture_selected_format10_closure(fs.as_ref(), &fixture.lock, &deadline)
+            .unwrap();
+    let (manifest_horizon, objects) = super::super::publish_format10_closure(
+        &fixture.cloud,
+        &deadline,
+        publication_id,
+        1,
+        &captured.bodies,
+        None,
+        &captured.reservation,
+    )
+    .unwrap();
+    Format10AdmissionStore::new(&fixture.cloud, &deadline)
+        .finish(publication_id)
+        .unwrap();
     CloudMetadataGeneration {
         id: SharedGenerationId::FIRST,
-        manifest_horizon: 0,
+        manifest_horizon,
         objects,
     }
 }
@@ -500,7 +501,7 @@ fn should_continue_bounded_pages_when_one_old_ordinal_has_many_orphan_attempts()
 }
 
 #[test]
-fn should_reclaim_only_unselected_format_10_paths_with_bounded_pages() {
+fn should_reclaim_only_finished_unselected_format_10_stages() {
     // Arrange
     let fixture = Fixture::new();
     let selected = format_10_generation(&fixture);
@@ -510,14 +511,20 @@ fn should_reclaim_only_unselected_format_10_paths_with_bounded_pages() {
         .iter()
         .map(|object| object.object_key.clone())
         .collect::<Vec<_>>();
-    let orphan_id = uuid::Uuid::new_v4();
-    let orphan_head = format!("metadata/generations/{orphan_id}/metadata/HEAD");
-    let orphan_base =
-        format!("metadata/generations/{orphan_id}/metadata/generations/stale-local/manifest/base");
-    let orphan_marker = format!("metadata/generations/{orphan_id}/FORMAT");
-    put_metadata_object(&fixture, &orphan_head, b"unselected head");
-    put_metadata_object(&fixture, &orphan_base, b"unselected base");
-    put_metadata_object(&fixture, &orphan_marker, b"midge-format-version=10\n");
+    let orphan = format_10_generation(&fixture);
+    let pending_id = uuid::Uuid::new_v4();
+    let pending = selected
+        .objects
+        .iter()
+        .cloned()
+        .map(|mut object| {
+            object.object_key = format!("metadata/generations/{pending_id}/{}", object.file_name);
+            object
+        })
+        .collect::<Vec<_>>();
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    let admission = Format10AdmissionStore::new(&fixture.cloud, &deadline);
+    admission.reserve(pending_id, 1, &pending).unwrap();
 
     let legacy_id = uuid::Uuid::new_v4();
     let legacy_marker = format!("metadata/generations/{legacy_id}/FORMAT");
@@ -538,32 +545,37 @@ fn should_reclaim_only_unselected_format_10_paths_with_bounded_pages() {
         b"pre-upgrade source descriptor",
     );
 
-    let mut state = MetadataRetentionState {
-        interval: Duration::ZERO,
-        ..Default::default()
-    };
-
-    // Act: listing and delete admission are bounded independently per pass.
-    for _ in 0..4 {
-        let pages = state.totals.lists;
-        let probes = state.totals.probes;
-        collect_after_commit(
-            &fixture.context(&OperationDeadline::from_budget(Duration::from_secs(5))),
-            &selected,
-            &mut state,
-        );
-        assert!(state.totals.lists - pages <= LIST_BUDGET as u64);
-        assert!(state.totals.probes - probes <= CANDIDATE_BUDGET as u64);
-    }
+    // Act: a pending body is still missing when cleanup checks ownership.
+    let _turn = fixture.lock.lock();
+    reclaim_finished_format10_stages(&fixture.context(&deadline), &selected).unwrap();
+    let late_marker = pending
+        .iter()
+        .find(|object| object.file_name == files::FORMAT)
+        .unwrap();
+    put_metadata_object(
+        &fixture,
+        &late_marker.object_key,
+        b"midge-format-version=10\n",
+    );
 
     // Assert: only canonical v10 body objects outside the exact selected set
     // were removed; legacy sources and migration descriptors stay intact.
     assert!(selected_keys
         .iter()
         .all(|key| object_is_present(&fixture, key)));
-    assert!(!object_is_present(&fixture, &orphan_head));
-    assert!(!object_is_present(&fixture, &orphan_base));
-    assert!(!object_is_present(&fixture, &orphan_marker));
+    assert!(orphan
+        .objects
+        .iter()
+        .all(|object| !object_is_present(&fixture, &object.object_key)));
+    assert!(object_is_present(&fixture, &late_marker.object_key));
+    assert!(admission
+        .list_slots()
+        .unwrap()
+        .into_iter()
+        .flatten()
+        .any(
+            |record| record.publication_id == pending_id && record.phase == AdmissionPhase::Pending
+        ));
     assert!(object_is_present(&fixture, &legacy_marker));
     assert!(object_is_present(&fixture, &legacy_snapshot));
     assert!(object_is_present(&fixture, &migration_candidate));
@@ -576,9 +588,7 @@ fn should_retain_format_10_candidate_when_pointer_changes_before_delete() {
     let fixture = Fixture::new();
     let selected = format_10_generation(&fixture);
     publish_format_10_head(&fixture, &selected);
-    let orphan_id = uuid::Uuid::new_v4();
-    let orphan = format!("metadata/generations/{orphan_id}/metadata/HEAD");
-    put_metadata_object(&fixture, &orphan, b"unselected head");
+    let orphan = format_10_generation(&fixture);
     let mut successor = selected.clone();
     successor.id = crate::lease::SharedGenerationId::new(2).unwrap();
     let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
@@ -594,14 +604,13 @@ fn should_retain_format_10_candidate_when_pointer_changes_before_delete() {
         .unwrap();
 
     // Act
-    let result = reclaim_format_10_candidate(
-        &fixture.context(&deadline),
-        &selected,
-        &orphan,
-        Format10CandidateKind::Head,
-    );
+    let _turn = fixture.lock.lock();
+    let result = reclaim_finished_format10_stages(&fixture.context(&deadline), &selected);
 
     // Assert
     assert!(matches!(result, Err(MidgeError::Fenced(_))));
-    assert!(object_is_present(&fixture, &orphan));
+    assert!(orphan
+        .objects
+        .iter()
+        .all(|object| object_is_present(&fixture, &object.object_key)));
 }

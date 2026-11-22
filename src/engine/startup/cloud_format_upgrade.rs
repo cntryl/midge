@@ -11,6 +11,7 @@ use crate::lease::{
 };
 use crate::runtime::hybrid_persistence::{
     decode_generation_manifest, metadata_chain, read_committed_metadata_bodies_within,
+    Format10AdmissionStore,
 };
 use crate::storage::cloud::{BlockingCloud, CloudEvent, CloudStorage};
 use crate::storage::StoragePrecondition;
@@ -379,7 +380,13 @@ fn reconcile_pending(
             &candidate,
             remaining(cloud, deadline)?,
         )
-        .map_err(map_lease_error)
+        .map_err(map_lease_error)?;
+    if let Ok(publication_id) = uuid::Uuid::parse_str(&pending.migration_id) {
+        if let Err(error) = Format10AdmissionStore::new(cloud, deadline).finish(publication_id) {
+            tracing::warn!(%error, "retaining unsettled FORMAT 10 migration reservation");
+        }
+    }
+    Ok(())
 }
 
 fn read_candidate_descriptor(

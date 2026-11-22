@@ -86,9 +86,10 @@ authority.
 
 ### Bounded closure and checkpointing
 
-Use the existing shared metadata limits as the initial v10 bound: at most 16
-selected immutable metadata objects and at most 64 MiB of encoded metadata in
-one selected closure. Cap the encoded head at 64 KiB. A writer must checkpoint
+One selected cloud closure is limited to 16 objects and 64 MiB, including
+FORMAT, HEAD, and an optional cut proof. The local format reserves those slots
+and permits up to 13 immutable bases and segments. HEAD and the cut proof are
+each limited to 64 KiB. A writer must checkpoint
 before an append would exceed either closure limit. It must reserve the
 required encoded and decode workspace before constructing a replacement
 closure. If admission or durable publication fails, keep the current head and
@@ -97,24 +98,24 @@ all referenced objects. Report the failure without acknowledging the append.
 A manifest checkpoint writes a new complete manifest base. Intent compaction
 writes a new complete intent base. Both are staged under a fresh generation
 identity, verified, then selected with one head replacement. Per-closure
-bounds alone do not bound cumulative retained generations. Require a retention
-and admission policy before v10 release. Keep at most four complete closures:
-the selected generation and up to three predecessors. The v9 migration source
-and active capture pins occupy predecessor slots. Four closures at up to
-64 MiB and 16 immutable objects each yield aggregate caps of 256 MiB and 64
-objects. If a pin or migration source would exceed either cap, block another
-checkpoint or compaction until the retained closure can be reduced. A backup
-is a separate copied artifact and does not hold live database objects after
-capture finishes.
+bounds alone do not bound cumulative retained generations. In cloud storage,
+the preserved v9 source occupies one closure allowance. The selected, staged,
+and retired v10 closures share three fixed durable reservation slots. Each
+slot reserves up to 64 MiB and 16 exact payload objects before the first PUT.
+The four closure allowances cap payload storage at 256 MiB and 64 objects.
+Lease, selector, and reservation records have separate bounded encodings.
 
-Unselected objects left by an interrupted append or migration count against
-the same retained-byte and object budgets. The pending cloud migration pins
-both its source and candidate closures through takeover and finalization.
-Under the writer lease, a bounded collector may remove only objects it
-proves are outside the selected closure and every active pin. If a bounded
-scan cannot prove the state or reclaim enough space, retain the objects and
-block new metadata publication with a resource error. Never fall back to
-unbounded listing or delete candidates on age alone.
+Every reservation identifies its publication UUID and exact keys, lengths,
+and checksums. A pending reservation survives failed writes, lease changes,
+and restart. The writer records a completed upload only after each PUT has
+a positive terminal result. It marks the reservation finished after the
+publication attempt is settled. The pending migration retains both source
+and candidate through activation. Under the writer lease, the collector
+releases a finished reservation only after proving that its objects are
+unselected, unpinned, and removed. A missing body cannot release a pending
+reservation because a delayed PUT can still arrive. If all slots are held,
+admission fails without sending a new body PUT. A backup is a separate copied
+artifact and holds live objects only during capture.
 
 ## Append and checkpoint lifecycle
 

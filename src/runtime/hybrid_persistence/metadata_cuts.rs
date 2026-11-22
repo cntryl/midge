@@ -39,10 +39,17 @@ pub(crate) fn mirror_captured_control_metadata_within(
     };
     let local = capture_local_metadata(&context)?;
     cut.proof.validate(&local)?;
-    let candidate = if local
+    let format_10 = local
         .get(crate::metadata::files::FORMAT)
-        .is_some_and(|format| format == b"midge-format-version=10\n")
-    {
+        .is_some_and(|format| format == b"midge-format-version=10\n");
+    let _format_10_writer = format_10
+        .then(|| {
+            context
+                .publication_lock
+                .lock_format_10_writer(context.deadline.remaining())
+        })
+        .transpose()?;
+    let candidate = if format_10 {
         decode_format10_cut_manifest(&local, context.deadline)?
     } else {
         super::metadata_snapshot::decode_manifest_bodies(&local, context.deadline)?
@@ -59,7 +66,8 @@ pub(crate) fn mirror_captured_control_metadata_within(
         if let Some(cache) = &selected.cache {
             validate_manifest_successor(&candidate, &cache.manifest)?;
         }
-        let generation = stage_cut(&context, &local, &candidate, &selected, cut)?;
+        let (generation, publication_id) =
+            stage_cut(&context, &local, &candidate, &selected, cut, format_10)?;
         let mut staged = MetadataMirrorCache::new(
             generation.clone(),
             context.authority.writer_epoch,
@@ -81,12 +89,26 @@ pub(crate) fn mirror_captured_control_metadata_within(
                 // A native validated checksum receipt, or the store's exact
                 // pinned readback, proves this cut selected even when a later
                 // cut has already advanced the pointer before this returns.
+                if let Some(publication_id) = publication_id {
+                    super::format10_closure::finish_format10_stage(
+                        context.cloud,
+                        context.deadline,
+                        publication_id,
+                    );
+                }
                 install_cache(&context, staged)?;
                 cut.mark_committed();
                 collect_if_idle(&context, Some(&generation));
                 return Ok(());
             }
             Err(LeaseError::AcquisitionFailed(_)) => {
+                if let Some(publication_id) = publication_id {
+                    super::format10_closure::finish_format10_stage(
+                        context.cloud,
+                        context.deadline,
+                        publication_id,
+                    );
+                }
                 fresh = true;
             }
             Err(
@@ -96,7 +118,15 @@ pub(crate) fn mirror_captured_control_metadata_within(
             ) => {
                 // Unknown effects remain owned unless an exact later selected
                 // body proves coverage. Do not retry their write blindly.
-                return resolve_uncertain(&context, cut, error, &mut validate_lease);
+                resolve_uncertain(&context, cut, error, &mut validate_lease)?;
+                if let Some(publication_id) = publication_id {
+                    super::format10_closure::finish_format10_stage(
+                        context.cloud,
+                        context.deadline,
+                        publication_id,
+                    );
+                }
+                return Ok(());
             }
             Err(error) => return Err(error.into_validation_error("captured metadata publication")),
         }
@@ -340,7 +370,8 @@ fn stage_cut(
     candidate: &crate::metadata::Manifest,
     selected: &SelectedCut,
     cut: &CapturedMetadataCut,
-) -> MidgeResult<CloudMetadataGeneration> {
+    format_10: bool,
+) -> MidgeResult<(CloudMetadataGeneration, Option<uuid::Uuid>)> {
     let id = selected
         .generation
         .as_ref()
@@ -350,15 +381,25 @@ fn stage_cut(
         .ok_or_else(|| {
             MidgeError::ResourceLimit("shared metadata generation ordinal exhausted".into())
         })?;
-    let objects = if local
-        .get(crate::metadata::files::FORMAT)
-        .is_some_and(|format| format == b"midge-format-version=10\n")
-    {
-        let (horizon, mut objects) = super::publish_format10_closure(
+    let publication_id = format_10.then(uuid::Uuid::new_v4);
+    let objects = if let Some(publication_id) = publication_id {
+        if let Some(previous) = &selected.generation {
+            let _turn = context
+                .publication_lock
+                .lock_for(context.deadline.remaining())
+                .ok_or_else(|| {
+                    MidgeError::Timeout("FORMAT 10 staging waits for retention authority".into())
+                })?;
+            super::metadata_retention::reclaim_finished_format10_stages(context, previous)?;
+        }
+        let proof_body = cut.proof.cloud_body()?;
+        let (horizon, objects) = super::publish_format10_closure(
             context.cloud,
             context.deadline,
-            uuid::Uuid::new_v4(),
+            publication_id,
+            context.authority.writer_epoch,
             local,
+            Some(&proof_body),
             &cut.memory_reservation(),
         )?;
         if horizon != candidate.edit_checkpoint_id {
@@ -366,31 +407,6 @@ fn stage_cut(
                 "captured FORMAT 10 manifest horizon changed before publication".into(),
             ));
         }
-        let publication_id = objects
-            .first()
-            .and_then(|object| object.object_key.strip_prefix("metadata/generations/"))
-            .and_then(|suffix| suffix.split_once('/'))
-            .map(|(id, _)| id.to_owned())
-            .ok_or_else(|| MidgeError::Internal("FORMAT 10 publication key is malformed".into()))?;
-        let proof_body = cut.proof.cloud_body()?;
-        let proof_key = format!(
-            "metadata/generations/{publication_id}/{}",
-            crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME
-        );
-        super::metadata_chain::publish_bytes(
-            context.cloud,
-            &proof_key,
-            &proof_body,
-            context.deadline,
-            Some(&cut.memory_reservation()),
-            "FORMAT 10 metadata cut proof",
-        )?;
-        objects.push(crate::lease::CloudMetadataObject {
-            file_name: crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME.into(),
-            object_key: proof_key,
-            len: u64::try_from(proof_body.len()).unwrap_or(u64::MAX),
-            crc32c: crc32c::crc32c(&proof_body),
-        });
         objects
     } else {
         super::metadata_chain::publish_with_cut(
@@ -404,11 +420,14 @@ fn stage_cut(
         )?
     };
     crate::failpoints::fail_point!("midge::cloud::after_metadata_chain_upload_before_pointer_cas");
-    Ok(CloudMetadataGeneration {
-        id,
-        manifest_horizon: candidate.edit_checkpoint_id,
-        objects,
-    })
+    Ok((
+        CloudMetadataGeneration {
+            id,
+            manifest_horizon: candidate.edit_checkpoint_id,
+            objects,
+        },
+        publication_id,
+    ))
 }
 
 fn decode_format10_cut_manifest(

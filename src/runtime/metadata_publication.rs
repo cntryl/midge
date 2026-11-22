@@ -13,6 +13,7 @@ pub(crate) use cut::{CapturedMetadataCut, MetadataCutProof, SelectedTerminalWitn
 #[derive(Clone, Default)]
 pub(crate) struct MetadataPublicationLock {
     state: Arc<Mutex<MetadataPublicationState>>,
+    format_10_writer: Arc<Mutex<()>>,
     cuts: Arc<Mutex<cut::CutRegistry>>,
     capture_memory: Arc<OnceLock<crate::common::resource_budget::ResourceBudget>>,
     capture_slots: Arc<OnceLock<crate::common::resource_budget::ResourceBudget>>,
@@ -61,6 +62,19 @@ impl MetadataPublicationLock {
         timeout: std::time::Duration,
     ) -> Option<MutexGuard<'_, MetadataPublicationState>> {
         self.state.try_lock_for(timeout)
+    }
+
+    /// FORMAT 10 staging can recycle a terminal predecessor while this turn
+    /// owns the read-to-CAS interval. FORMAT 9 keeps its optimistic pipeline.
+    pub(crate) fn lock_format_10_writer(
+        &self,
+        timeout: std::time::Duration,
+    ) -> crate::common::MidgeResult<MutexGuard<'_, ()>> {
+        self.format_10_writer.try_lock_for(timeout).ok_or_else(|| {
+            crate::common::MidgeError::Timeout(
+                "FORMAT 10 publication waits for staging authority".into(),
+            )
+        })
     }
 
     #[cfg(test)]

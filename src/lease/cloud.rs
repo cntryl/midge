@@ -845,7 +845,6 @@ impl LeaderStore for ProviderLeaderStore {
     }
 
     fn release_leadership(&self, holder_id: &str, expected_epoch: u64) -> Result<(), LeaseError> {
-        self.invalidate_migration_gate();
         let release_offset = chrono::Duration::from_std(
             self.clock_skew_tolerance()
                 .saturating_add(Duration::from_millis(1)),
@@ -893,7 +892,10 @@ impl LeaderStore for ProviderLeaderStore {
                 ));
             }
             match provider_write_doc_with_timeout(&self.cloud, &released, headers, remaining) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.invalidate_migration_gate();
+                    return Ok(());
+                }
                 Err(LeaseError::AcquisitionFailed(_)) => {
                     // This PUT was definitely rejected. Re-read the current
                     // epoch and preserve its committed pointer.
@@ -1744,7 +1746,6 @@ fn validate_format_10_generation(generation: &CloudMetadataGeneration) -> Result
     let mut publication_uuid: Option<String> = None;
     let mut have_manifest_base = false;
     let mut have_intent_base = false;
-    let mut have_cut_proof = false;
     for object in &generation.objects {
         let object_publication = validate_immutable_body_key(object)?;
         if publication_uuid.get_or_insert_with(|| object_publication.clone()) != &object_publication
@@ -1759,6 +1760,9 @@ fn validate_format_10_generation(generation: &CloudMetadataGeneration) -> Result
                 "cloud FORMAT 10 descriptor contains an empty or duplicate object".into(),
             ));
         }
+        total = total.checked_add(object.len).ok_or_else(|| {
+            LeaseError::Indeterminate("cloud FORMAT 10 metadata length overflow".into())
+        })?;
         match name {
             FORMAT if object.len == b"midge-format-version=10\n".len() as u64 => continue,
             HEAD_PATH if object.len <= MAX_HEAD_BYTES as u64 => continue,
@@ -1766,12 +1770,6 @@ fn validate_format_10_generation(generation: &CloudMetadataGeneration) -> Result
                 if object.len
                     <= crate::runtime::MetadataCutProof::MAX_CLOUD_OBJECT_BYTES as u64 =>
             {
-                if have_cut_proof {
-                    return Err(LeaseError::Indeterminate(
-                        "cloud FORMAT 10 descriptor repeats its cut proof".into(),
-                    ));
-                }
-                have_cut_proof = true;
                 continue;
             }
             _ => {}
@@ -1785,9 +1783,6 @@ fn validate_format_10_generation(generation: &CloudMetadataGeneration) -> Result
         }
         have_manifest_base |= body == "manifest/base";
         have_intent_base |= body == "intent/base";
-        total = total.checked_add(object.len).ok_or_else(|| {
-            LeaseError::Indeterminate("cloud FORMAT 10 metadata length overflow".into())
-        })?;
     }
     if total > MAX_CLOSURE_BYTES
         || !have_manifest_base

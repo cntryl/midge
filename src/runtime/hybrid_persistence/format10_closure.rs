@@ -1,9 +1,10 @@
 //! Immutable publication of the exact local FORMAT 10 metadata closure.
 
+use super::format10_admission::Format10AdmissionStore;
 use crate::common::resource_budget::ResourceReservation;
 use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::lease::CloudMetadataObject;
-use crate::storage::cloud::CloudStorage;
+use crate::storage::cloud::{BlockingCloud, CloudStorage};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -105,7 +106,9 @@ pub(crate) fn publish_format10_closure(
     cloud: &CloudStorage,
     deadline: &OperationDeadline,
     publication_id: uuid::Uuid,
+    writer_epoch: u64,
     bodies: &BTreeMap<String, Vec<u8>>,
+    cut_proof: Option<&[u8]>,
     reservation: &Arc<ResourceReservation>,
 ) -> MidgeResult<(u64, Vec<CloudMetadataObject>)> {
     let horizon =
@@ -115,38 +118,60 @@ pub(crate) fn publish_format10_closure(
             "FORMAT 10 metadata closure exceeds its object bound".into(),
         ));
     }
-    let total_bytes = bodies.values().try_fold(0_u64, |total, body| {
-        total
-            .checked_add(u64::try_from(body.len()).unwrap_or(u64::MAX))
-            .filter(|next| *next <= crate::metadata::local_authority::MAX_CLOSURE_BYTES)
-    });
+    let total_bytes = bodies.values().try_fold(
+        cut_proof.map_or(0, |proof| proof.len() as u64),
+        |total, body| {
+            total
+                .checked_add(u64::try_from(body.len()).unwrap_or(u64::MAX))
+                .filter(|next| *next <= crate::metadata::local_authority::MAX_CLOSURE_BYTES)
+        },
+    );
     if total_bytes.is_none() {
         return Err(MidgeError::ResourceLimit(
             "FORMAT 10 metadata closure exceeds its byte bound".into(),
         ));
     }
 
-    let mut objects = Vec::with_capacity(bodies.len());
-    for (relative_path, body) in bodies {
-        DeadlineScope::new(*deadline).check("FORMAT 10 metadata closure upload")?;
-        validate_relative_path(relative_path)?;
-        let object_key = format!("metadata/generations/{publication_id}/{relative_path}");
-        super::metadata_chain::publish_bytes(
-            cloud,
-            &object_key,
-            body,
-            deadline,
-            Some(reservation),
-            "FORMAT 10 metadata",
-        )?;
-        objects.push(CloudMetadataObject {
-            file_name: relative_path.clone(),
-            object_key,
-            len: u64::try_from(body.len()).unwrap_or(u64::MAX),
-            crc32c: crc32c::crc32c(body),
-        });
+    let payloads = || {
+        bodies
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+            .chain(
+                cut_proof.map(|bytes| (crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME, bytes)),
+            )
+    };
+    let objects = payloads()
+        .map(|(relative_path, body)| {
+            validate_relative_path(relative_path)?;
+            Ok(CloudMetadataObject {
+                file_name: relative_path.to_owned(),
+                object_key: format!("metadata/generations/{publication_id}/{relative_path}"),
+                len: body.len() as u64,
+                crc32c: crc32c::crc32c(body),
+            })
+        })
+        .collect::<MidgeResult<Vec<_>>>()?;
+    let admission = Format10AdmissionStore::new(cloud, deadline);
+    admission.reserve(publication_id, writer_epoch, &objects)?;
+
+    let io = BlockingCloud::new(cloud, deadline).with_reservation(Arc::clone(reservation));
+    for (object, (_, bytes)) in objects.iter().zip(payloads()) {
+        io.put_immutable_terminal(&object.object_key, bytes)?;
     }
+    admission.mark_uploaded(publication_id, &objects)?;
     Ok((horizon, objects))
+}
+
+/// The pointer has already settled. An uncertain admission update may retain
+/// capacity, but must not turn a proven commit into an unacknowledged write.
+pub(super) fn finish_format10_stage(
+    cloud: &CloudStorage,
+    deadline: &OperationDeadline,
+    publication_id: uuid::Uuid,
+) {
+    if let Err(error) = Format10AdmissionStore::new(cloud, deadline).finish(publication_id) {
+        tracing::warn!(%error, %publication_id, "retaining unsettled FORMAT 10 stage reservation");
+    }
 }
 
 fn validate_relative_path(path: &str) -> MidgeResult<()> {
@@ -210,23 +235,16 @@ mod tests {
             &cloud,
             &deadline,
             publication_id,
+            1,
             &captured.bodies,
-            &captured.reservation,
-        )?;
-        let (same_horizon, same_objects) = publish_format10_closure(
-            &cloud,
-            &deadline,
-            publication_id,
-            &captured.bodies,
+            None,
             &captured.reservation,
         )?;
 
         // Assert
         assert_eq!(horizon, 0);
         assert_eq!(horizon, captured.horizon);
-        assert_eq!(same_horizon, horizon);
         assert_eq!(objects.len(), captured.bodies.len());
-        assert_eq!(same_objects, objects);
         assert!(objects.iter().all(|object| {
             object.object_key
                 == format!("metadata/generations/{publication_id}/{}", object.file_name)

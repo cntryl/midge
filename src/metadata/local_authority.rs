@@ -17,9 +17,12 @@ const HEAD_MAGIC: &[u8; 8] = b"MDGEHD10";
 const OBJECT_MAGIC: &[u8; 8] = b"MDGEOB10";
 const WIRE_VERSION: u16 = 10;
 pub(crate) const MAX_HEAD_BYTES: usize = 64 * 1024;
-pub(crate) const MAX_OBJECTS: usize = 16;
+// A cloud closure reserves three of its 16 slots for FORMAT, HEAD and cut proof.
+pub(crate) const MAX_OBJECTS: usize = 13;
 pub(crate) const MAX_CLOSURE_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_OBJECT_BYTES: u64 = MAX_CLOSURE_BYTES;
+const MAX_LOCAL_PAYLOAD_BYTES: u64 =
+    MAX_CLOSURE_BYTES - 2 * MAX_HEAD_BYTES as u64 - b"midge-format-version=10\n".len() as u64;
+const MAX_OBJECT_BYTES: u64 = MAX_LOCAL_PAYLOAD_BYTES;
 type StreamSegments = Vec<(u64, u64, Vec<u8>)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -796,7 +799,7 @@ impl LocalMetadataAuthority {
         let candidate = existing
             .checked_add(u64::try_from(encoded.len()).unwrap_or(u64::MAX))
             .ok_or_else(|| MidgeError::ResourceLimit("FORMAT 10 closure size overflow".into()))?;
-        Ok(candidate > MAX_CLOSURE_BYTES)
+        Ok(candidate > MAX_LOCAL_PAYLOAD_BYTES)
     }
 
     pub(crate) fn base_id(&self, stream: Stream) -> u64 {
@@ -1206,7 +1209,7 @@ fn validate_head(head: &HeadBody) -> MidgeResult<()> {
     }
     let mut total = validate_selected_streams(head)?;
     total = validate_pending_objects(head, total)?;
-    if total > MAX_CLOSURE_BYTES {
+    if total > MAX_LOCAL_PAYLOAD_BYTES {
         return Err(MidgeError::ResourceLimit(
             "FORMAT 10 closure and pending object exceed 64 MiB".into(),
         ));
@@ -1384,7 +1387,7 @@ fn preflight_replacement(retained: &StreamHead, replacement_base_len: usize) -> 
                 .try_fold(total, |total, object| total.checked_add(object.len))
         })
         .ok_or_else(|| MidgeError::ResourceLimit("FORMAT 10 closure size overflow".into()))?;
-    if object_count > MAX_OBJECTS || bytes > MAX_CLOSURE_BYTES {
+    if object_count > MAX_OBJECTS || bytes > MAX_LOCAL_PAYLOAD_BYTES {
         return Err(MidgeError::ResourceLimit(
             "FORMAT 10 replacement closure exceeds its object or byte limit".into(),
         ));

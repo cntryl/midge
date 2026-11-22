@@ -1987,7 +1987,10 @@ mod compatibility_fixtures {
         let first = fresh_cache(source.path());
         let mut engine = Engine::open(cloud_options(first.path())).expect("recover upgraded cloud");
         assert_published_v0_5_3_fixture_state(&engine);
-        write_published_fixture_upgrade_values(&engine, true);
+        // Six flushes require reusing the three durable cloud staging slots.
+        for _ in 0..3 {
+            write_published_fixture_upgrade_values(&engine, true);
+        }
         engine.shutdown(timeout).expect("shut down upgraded cloud");
         let second = fresh_cache(first.path());
         let mut reopened =

@@ -41,6 +41,7 @@ pub(super) fn upgrade_cloud(opts: &OpenOptions, timeout: Duration) -> MidgeResul
         return Ok(());
     }
     let source = read_source(store, &holder, epoch, &deadline)?;
+    check_legacy_closure_budget(&source)?;
     let bodies = read_committed_metadata_bodies_within(&cloud, &source, &deadline)?;
     let memory = MetadataPublicationLock::default();
     memory.configure_capture_memory(crate::common::resource_budget::ResourceBudget::new(
@@ -52,8 +53,15 @@ pub(super) fn upgrade_cloud(opts: &OpenOptions, timeout: Duration) -> MidgeResul
     drop(admission);
     let admission = memory.reserve_metadata_body_memory(encoded_size(&candidate_bodies)?)?;
     let operation = uuid::Uuid::new_v4();
-    let (manifest_horizon, objects) =
-        publish_format10_closure(&cloud, &deadline, operation, &candidate_bodies, &admission)?;
+    let (manifest_horizon, objects) = publish_format10_closure(
+        &cloud,
+        &deadline,
+        operation,
+        epoch,
+        &candidate_bodies,
+        None,
+        &admission,
+    )?;
     let candidate = CloudMetadataGeneration {
         id: source.id.checked_next().ok_or_else(|| {
             MidgeError::ResourceLimit("cloud metadata generation exhausted".into())
@@ -210,4 +218,20 @@ fn encoded_size(bodies: &BTreeMap<String, Vec<u8>>) -> MidgeResult<u64> {
             MidgeError::ResourceLimit("cloud FORMAT upgrade metadata length overflow".into())
         })
     })
+}
+
+fn check_legacy_closure_budget(source: &CloudMetadataGeneration) -> MidgeResult<()> {
+    use crate::metadata::cloud_manifest::{MAX_CHAIN_BYTES, MAX_CHAIN_OBJECTS};
+    let encoded = source
+        .objects
+        .iter()
+        .try_fold(0u64, |total, object| total.checked_add(object.len));
+    if source.objects.len() > MAX_CHAIN_OBJECTS
+        || encoded.is_none_or(|bytes| bytes > MAX_CHAIN_BYTES)
+    {
+        return Err(MidgeError::ResourceLimit(
+            "legacy metadata exceeds its reserved FORMAT 10 migration allowance".into(),
+        ));
+    }
+    Ok(())
 }
