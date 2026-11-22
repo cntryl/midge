@@ -1,6 +1,6 @@
 //! Append-only intent suffix edits with a checksummed predecessor chain.
 
-use super::{IntentLogEntry, MidgeError, MidgeResult};
+use super::{IntentLogEntry, IntentUpgradeState, MidgeError, MidgeResult};
 use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::metadata::codec;
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,24 @@ pub(super) fn load(fs: &Arc<dyn Fs>) -> MidgeResult<Vec<IntentLogEntry>> {
     read_state(fs).map(|state| state.intents)
 }
 
+pub(super) fn decode_for_upgrade(
+    bytes: bytes::Bytes,
+    scope: &crate::common::DeadlineScope,
+) -> MidgeResult<IntentUpgradeState> {
+    let state = replay(bytes, Some(scope))?;
+    if state.valid_bytes != state.bytes.len() {
+        return Err(MidgeError::Corruption(format!(
+            "FORMAT 9 upgrade requires a complete intent log; unverified bytes after byte {}",
+            state.valid_bytes
+        )));
+    }
+    Ok(IntentUpgradeState {
+        entries: state.intents,
+        sequence: state.sequence,
+        checksum: state.checksum,
+    })
+}
+
 fn read_state(fs: &Arc<dyn Fs>) -> MidgeResult<IntentState> {
     let path = FsPath::new(super::IntentPersistence::INTENT_FILE);
     let file = match fs.open(&path, OpenOptions::READ_ONLY) {
@@ -48,12 +66,22 @@ fn read_state(fs: &Arc<dyn Fs>) -> MidgeResult<IntentState> {
     };
     let length = file.len().map_err(FsError::into_midge)?;
     let bytes = file.read_at(0, length).map_err(FsError::into_midge)?;
+    replay(bytes, None)
+}
+
+fn replay(
+    bytes: bytes::Bytes,
+    scope: Option<&crate::common::DeadlineScope>,
+) -> MidgeResult<IntentState> {
     let mut state = IntentState {
         bytes,
         ..IntentState::default()
     };
     while let Some(frame) = codec::tail_frame_len(&state.bytes[state.valid_bytes..], codec::INTENT)?
     {
+        if let Some(scope) = scope {
+            scope.check("intent edit replay")?;
+        }
         let end = state.valid_bytes + frame;
         let encoded = &state.bytes[state.valid_bytes..end];
         let edit: IntentEdit = codec::decode(codec::INTENT, encoded)?;
@@ -70,6 +98,9 @@ fn read_state(fs: &Arc<dyn Fs>) -> MidgeResult<IntentState> {
         state.sequence = edit.sequence;
         state.checksum = frame_checksum(encoded);
         state.valid_bytes = end;
+    }
+    if let Some(scope) = scope {
+        scope.check("intent edit replay")?;
     }
     Ok(state)
 }
@@ -404,6 +435,65 @@ mod tests {
         // Assert: an acknowledged frame is reported, never dropped or rewritten.
         assert_corruption(&loaded);
         assert!(saved.is_err());
+        assert_eq!(std::fs::read(&log.path)?, bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn should_decode_complete_intent_log_with_committed_sequence_and_checksum_for_upgrade(
+    ) -> MidgeResult<()> {
+        // Arrange
+        let log = log_with_edits(2)?;
+        let bytes = std::fs::read(&log.path)?;
+        let checksum = frame_checksum(&bytes[log.starts[1]..]);
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+        );
+
+        // Act
+        let state = super::super::IntentPersistence::decode_for_upgrade(bytes.into(), &scope)?;
+
+        // Assert
+        assert_eq!(state.entries.len(), 2);
+        assert!(matches!(
+            state.entries[1],
+            IntentLogEntry::SeqnoAllocated { seqno: 2, cf_id: 0 }
+        ));
+        assert_eq!(state.sequence, 2);
+        assert_eq!(state.checksum, checksum);
+        Ok(())
+    }
+
+    #[test]
+    fn should_reject_upgrade_when_final_intent_length_overruns_and_crc_is_corrupt(
+    ) -> MidgeResult<()> {
+        // Arrange: damage two framing fields in an otherwise complete edit.
+        let log = log_with_edits(2)?;
+        let mut bytes = std::fs::read(&log.path)?;
+        let tail = log.starts[1];
+        let length = tail + 9;
+        let payload_len = u32::from_le_bytes(bytes[length..length + 4].try_into().unwrap());
+        bytes[length..length + 4].copy_from_slice(&(payload_len + 1).to_le_bytes());
+        *bytes.last_mut().expect("intent checksum byte") ^= 1;
+        std::fs::write(&log.path, &bytes)?;
+        let scope = crate::common::DeadlineScope::new(
+            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+        );
+
+        // Act
+        let legacy_recovery = strict_load(&log.fs);
+        let upgrade = super::super::IntentPersistence::decode_for_upgrade(
+            bytes::Bytes::copy_from_slice(&bytes),
+            &scope,
+        );
+
+        // Assert: ordinary recovery accepts the prefix, but migration declines
+        // to certify it while leaving the legacy input intact.
+        assert_eq!(legacy_recovery?.len(), 1);
+        assert!(matches!(
+            upgrade,
+            Err(MidgeError::Corruption(message)) if message.contains("unverified bytes")
+        ));
         assert_eq!(std::fs::read(&log.path)?, bytes);
         Ok(())
     }

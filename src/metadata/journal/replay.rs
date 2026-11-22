@@ -135,6 +135,34 @@ pub(crate) fn replay_identified_edits_from_bytes(
     checkpoint: u64,
     scope: &crate::common::DeadlineScope,
 ) -> MidgeResult<Vec<(u64, ManifestEdit)>> {
+    let replay = replay_immutable_journal(bytes, scope)?;
+    Ok(identified_edits_after(replay, checkpoint))
+}
+
+/// Migration cannot infer a committed boundary from an ignored FORMAT 9 tail.
+pub(crate) fn replay_clean_edits_for_upgrade(
+    bytes: &[u8],
+    checkpoint: u64,
+    scope: &crate::common::DeadlineScope,
+) -> MidgeResult<Vec<(u64, ManifestEdit)>> {
+    let replay = replay_immutable_journal(bytes, scope)?;
+    if let JournalReplayTail::PartialEof {
+        last_valid_offset,
+        reason,
+        ..
+    } = replay.tail
+    {
+        return Err(crate::common::MidgeError::Corruption(format!(
+            "FORMAT 9 upgrade requires a complete manifest journal; unverified bytes after byte {last_valid_offset}: {reason}"
+        )));
+    }
+    Ok(identified_edits_after(replay, checkpoint))
+}
+
+fn replay_immutable_journal(
+    bytes: &[u8],
+    scope: &crate::common::DeadlineScope,
+) -> MidgeResult<JournalReplay> {
     struct SliceFile<'a>(&'a [u8]);
     impl crate::io::ReadFile for SliceFile<'_> {
         fn read_at(&self, offset: u64, len: u64) -> crate::io::FsResult<bytes::Bytes> {
@@ -154,13 +182,16 @@ pub(crate) fn replay_identified_edits_from_bytes(
             Ok(self.0.len() as u64)
         }
     }
-    let replay = replay_journal_file(&SliceFile(bytes), JournalReplayMode::Strict, Some(scope))?;
-    Ok(replay
+    replay_journal_file(&SliceFile(bytes), JournalReplayMode::Strict, Some(scope))
+}
+
+fn identified_edits_after(replay: JournalReplay, checkpoint: u64) -> Vec<(u64, ManifestEdit)> {
+    replay
         .edits
         .into_iter()
         .filter(|edit| edit.edit_id > checkpoint)
         .map(|edit| (edit.edit_id, edit.edit))
-        .collect())
+        .collect()
 }
 
 pub(super) fn check_replay_scope(scope: Option<&crate::common::DeadlineScope>) -> MidgeResult<()> {

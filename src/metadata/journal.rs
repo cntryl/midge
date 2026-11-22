@@ -291,11 +291,11 @@ pub(crate) use recovery::{
     replay_identified_edits_after_with_fs_unlocked_within,
     salvage_edits_after_with_fs_unlocked_within,
 };
-pub(crate) use replay::replay_identified_edits_from_bytes;
 #[cfg(test)]
 use replay::{
     open_journal_for_replay, read_journal_record, replay_journal_with_state, JournalRecordStatus,
 };
+pub(crate) use replay::{replay_clean_edits_for_upgrade, replay_identified_edits_from_bytes};
 
 /// Append `edit` through a `RealFs` rooted at `db_path`.
 #[cfg(test)]

@@ -135,8 +135,7 @@ impl ManifestPersistence {
         let data = file
             .read_at(0, len)
             .map_err(|error| recovery_io_error(error, &format!("failed to read {context}")))?;
-        let manifest: Manifest = super::codec::decode(super::codec::MANIFEST, &data)?;
-        manifest.validate_persisted()?;
+        let manifest = Self::decode_manifest(&data)?;
         let elapsed = start.elapsed();
         tracing::info!(
             path = ?path,
@@ -145,6 +144,38 @@ impl ManifestPersistence {
             elapsed_ms = elapsed.as_secs_f64() * 1000.0,
             "binary manifest loaded"
         );
+        Ok(manifest)
+    }
+
+    fn decode_manifest(bytes: &[u8]) -> MidgeResult<Manifest> {
+        let manifest: Manifest = super::codec::decode(super::codec::MANIFEST, bytes)?;
+        manifest.validate_persisted()?;
+        Ok(manifest)
+    }
+
+    /// Validate and apply the exact captured FORMAT 9 snapshot and journal.
+    pub(crate) fn decode_for_upgrade(
+        snapshot: Option<&[u8]>,
+        journal: &[u8],
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Manifest> {
+        scope.check("FORMAT 9 manifest validation")?;
+        let mut manifest = snapshot
+            .map(Self::decode_manifest)
+            .transpose()?
+            .unwrap_or_default();
+        let edits = super::journal::replay_clean_edits_for_upgrade(
+            journal,
+            manifest.edit_checkpoint_id,
+            scope,
+        )?;
+        for (edit_id, edit) in edits {
+            scope.check("FORMAT 9 manifest application")?;
+            manifest.apply_edit(&edit)?;
+            manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(edit_id);
+        }
+        Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
+        scope.check("FORMAT 9 manifest validation")?;
         Ok(manifest)
     }
 

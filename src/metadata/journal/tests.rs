@@ -1471,6 +1471,50 @@ fn journal_record_starts(db: &std::path::Path) -> Vec<u64> {
 }
 
 #[test]
+fn should_decode_complete_manifest_journal_with_committed_horizon_for_upgrade() {
+    // Arrange
+    let (td, _) = write_two_durable_edits();
+    let journal = std::fs::read(td.path().join(JOURNAL_FILE)).expect("read full journal");
+    let scope = crate::common::DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+        std::time::Duration::from_secs(5),
+    ));
+
+    // Act
+    let manifest = crate::metadata::ManifestPersistence::decode_for_upgrade(None, &journal, &scope)
+        .expect("every journal byte belongs to verified history");
+
+    // Assert
+    assert_eq!(manifest.edit_checkpoint_id, 2);
+}
+
+#[test]
+fn should_reject_upgrade_when_corrupted_final_marker_looks_like_a_torn_tail() {
+    // Arrange: damage both the outer length and checksum of an acknowledged marker.
+    let (td, marker_start) = write_two_durable_edits();
+    let path = td.path().join(JOURNAL_FILE);
+    corrupt_journal_record_length(td.path(), marker_start, u32::MAX);
+    let mut journal = std::fs::read(&path).expect("read damaged journal");
+    *journal.last_mut().expect("marker CRC byte") ^= 1;
+    std::fs::write(&path, &journal).expect("persist damaged marker");
+    let scope = crate::common::DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+        std::time::Duration::from_secs(5),
+    ));
+
+    // Act
+    let legacy_recovery = replay_journal(td.path());
+    let upgrade = crate::metadata::ManifestPersistence::decode_for_upgrade(None, &journal, &scope);
+
+    // Assert: ordinary v9 recovery accepts the verified prefix. Upgrade must
+    // preserve the source and decline to bless that prefix as the full history.
+    assert_eq!(legacy_recovery.expect("legacy verified prefix").len(), 1);
+    assert!(matches!(
+        upgrade,
+        Err(crate::common::MidgeError::Corruption(message)) if message.contains("unverified bytes")
+    ));
+    assert_eq!(std::fs::read(&path).expect("read original bytes"), journal);
+}
+
+#[test]
 fn should_fail_replay_when_final_marker_length_overruns_and_zero_tail_follows() {
     // Arrange: M2's length is damaged, then a later append extended the file
     // with bytes that never reached disk.

@@ -15,6 +15,12 @@ pub struct IntentPersistence;
 mod edits;
 pub(crate) use edits::IntentDecodeWorkspace;
 
+pub(crate) struct IntentUpgradeState {
+    pub(crate) entries: Vec<IntentLogEntry>,
+    pub(crate) sequence: u64,
+    pub(crate) checksum: u32,
+}
+
 impl IntentPersistence {
     const INTENT_FILE: &'static str = crate::metadata::files::INTENT_LOG;
     const INTENT_FILE_TEMP: &'static str = "intent_log.json.tmp";
@@ -82,6 +88,16 @@ impl IntentPersistence {
         };
         Self::validate_persisted_sst_names(&intents).map_err(MidgeError::RecoveryFailed)?;
         Ok(intents)
+    }
+
+    /// Validate every byte of the captured FORMAT 9 intent history before upgrade.
+    pub(crate) fn decode_for_upgrade(
+        bytes: bytes::Bytes,
+        scope: &crate::common::DeadlineScope,
+    ) -> MidgeResult<IntentUpgradeState> {
+        let state = edits::decode_for_upgrade(bytes, scope)?;
+        Self::validate_persisted_sst_names(&state.entries).map_err(MidgeError::RecoveryFailed)?;
+        Ok(state)
     }
 
     fn validate_persisted_sst_names(intents: &[IntentLogEntry]) -> Result<(), String> {
