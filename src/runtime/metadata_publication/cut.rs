@@ -412,7 +412,7 @@ impl MetadataPublicationLock {
                 deadline,
             )?;
             return self.capture_locked_from_bodies(
-                captured.bodies,
+                &captured.bodies,
                 captured.reservation,
                 epoch,
                 deadline,
@@ -438,25 +438,25 @@ impl MetadataPublicationLock {
         }
         let memory = self.reserve_capture_memory(source, deadline)?;
         let (fs, bodies) = copy_control_files(source, deadline)?;
-        self.capture_locked_from_parts(fs, bodies, memory, epoch, deadline)
+        self.capture_locked_from_parts(fs, &bodies, memory, epoch, deadline)
     }
 
     fn capture_locked_from_bodies(
         &self,
-        bodies: BTreeMap<String, Vec<u8>>,
+        bodies: &BTreeMap<String, Vec<u8>>,
         mut memory: Arc<ResourceReservation>,
         epoch: u64,
         deadline: &OperationDeadline,
     ) -> MidgeResult<Arc<CapturedMetadataCut>> {
-        let fs = copy_bodies_to_mock_fs(&bodies)?;
-        self.ensure_capture_workspace(&mut memory, &bodies, deadline)?;
+        let fs = copy_bodies_to_mock_fs(bodies)?;
+        self.ensure_capture_workspace(&mut memory, bodies, deadline)?;
         self.capture_locked_from_parts(fs, bodies, memory, epoch, deadline)
     }
 
     fn capture_locked_from_parts(
         &self,
         fs: Arc<dyn Fs>,
-        bodies: BTreeMap<String, Vec<u8>>,
+        bodies: &BTreeMap<String, Vec<u8>>,
         memory: Arc<ResourceReservation>,
         epoch: u64,
         deadline: &OperationDeadline,
@@ -471,13 +471,13 @@ impl MetadataPublicationLock {
             .get_or_init(|| ResourceBudget::new(MAX_CAPTURED_CUTS).with_contention_errors())
             .reserve(1, "owned metadata cut slot")?;
         let mut memory = memory;
-        self.ensure_capture_workspace(&mut memory, &bodies, deadline)?;
+        self.ensure_capture_workspace(&mut memory, bodies, deadline)?;
         let mut manifest = if bodies
             .get(files::FORMAT)
             .is_some_and(|format| format == b"midge-format-version=10\n")
         {
             use crate::metadata::local_authority::{LocalMetadataAuthority, Stream};
-            let stream = LocalMetadataAuthority::read_cloud_stream(&bodies, Stream::Manifest)?;
+            let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Manifest)?;
             ManifestPersistence::decode_format_10_stream(
                 stream.base,
                 stream.checkpoint,
@@ -516,7 +516,7 @@ impl MetadataPublicationLock {
             writer_epoch: epoch,
             session: registry.session.clone(),
             ordinal: registry.next,
-            digest: digest_bodies(&bodies),
+            digest: digest_bodies(bodies),
             covers,
         };
         registry.next = registry
@@ -857,7 +857,7 @@ fn copy_control_files(
                     truncate: false,
                 },
             )
-            .and_then(|mut file| file.append(bytes.clone().into()))
+            .and_then(|mut file| file.append(bytes.clone()))
             .map_err(FsError::into_midge)?;
         bodies.insert((*name).into(), bytes.to_vec());
     }
