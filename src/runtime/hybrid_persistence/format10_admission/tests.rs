@@ -27,7 +27,7 @@ fn plan(publication_id: Uuid) -> Vec<CloudMetadataObject> {
 }
 
 #[test]
-fn should_reserve_before_payload_and_advance_durable_slot_to_finished() -> MidgeResult<()> {
+fn should_persist_the_reservation_lifecycle_for_a_cloud_publication() -> MidgeResult<()> {
     // Arrange
     let cloud = CloudStorage::with_mock();
     let publication_id = Uuid::new_v4();
@@ -52,7 +52,7 @@ fn should_reserve_before_payload_and_advance_durable_slot_to_finished() -> Midge
 }
 
 #[test]
-fn should_keep_all_three_slots_occupied_until_finished_and_exact_body_cleanup() -> MidgeResult<()> {
+fn should_keep_slots_occupied_until_exact_cleanup_of_a_finished_stage() -> MidgeResult<()> {
     // Arrange
     let cloud = CloudStorage::with_mock();
     let deadline = deadline();
@@ -94,7 +94,7 @@ fn should_keep_all_three_slots_occupied_until_finished_and_exact_body_cleanup() 
 }
 
 #[test]
-fn should_accept_migration_without_cut_proof_and_reject_over_budget_wire() {
+fn should_enforce_migration_admission_budget_when_cut_proof_is_absent() {
     // Arrange
     let publication_id = Uuid::new_v4();
     let objects = plan(publication_id);

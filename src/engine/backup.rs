@@ -1355,7 +1355,7 @@ mod tests {
     }
 
     #[test]
-    fn should_backup_and_restore_active_cloudsim_format_10_closure() -> MidgeResult<()> {
+    fn should_restore_active_cloudsim_format_10_from_backup() -> MidgeResult<()> {
         use crate::engine::{OpenOptions, TransactionMode};
         use std::time::Duration;
 
