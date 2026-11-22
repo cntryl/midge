@@ -1980,7 +1980,7 @@ mod tests {
 
     #[cfg(feature = "failpoints")]
     #[test]
-    fn should_preserve_and_resume_intent_state_after_interrupted_v10_append() {
+    fn should_resume_intent_state_after_interrupted_v10_append() {
         // Arrange
         let _test_guard = crate::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
