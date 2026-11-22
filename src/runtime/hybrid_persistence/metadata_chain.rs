@@ -373,6 +373,7 @@ pub(super) fn publish_with_cut(
         &encoded,
         context.deadline,
         reservation.as_ref(),
+        "manifest",
     )?;
     let object = CloudMetadataObject {
         file_name: CHAIN_FILE_NAME.into(),
@@ -384,12 +385,13 @@ pub(super) fn publish_with_cut(
     Ok(history)
 }
 
-fn publish_bytes(
+pub(super) fn publish_bytes(
     cloud: &CloudStorage,
     key: &str,
     bytes: &[u8],
     deadline: &OperationDeadline,
     reservation: Option<&std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
+    object_context: &str,
 ) -> MidgeResult<()> {
     let mut io = BlockingCloud::new(cloud, deadline);
     if let Some(reservation) = reservation {
@@ -404,15 +406,17 @@ fn publish_bytes(
         }
         let timeout = deadline
             .clamp_nonzero(cloud.callback_timeout())
-            .ok_or_else(|| MidgeError::Timeout("cloud manifest PUT deadline exhausted".into()))?;
+            .ok_or_else(|| {
+                MidgeError::Timeout(format!("cloud {object_context} PUT deadline exhausted"))
+            })?;
         cloud.submit_write_receipt_request(request, bytes.to_vec(), tx);
         let outcome = rx.recv_timeout(timeout);
         let terminal_failure = match outcome {
             Ok(Ok(Some(receipt))) if receipt.matches(bytes) => return Ok(()),
             Ok(Ok(Some(_))) => {
-                return Err(MidgeError::Corruption(
-                    "cloud manifest receipt differs".into(),
-                ));
+                return Err(MidgeError::Corruption(format!(
+                    "cloud {object_context} receipt differs"
+                )));
             }
             Ok(Ok(None) | Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
@@ -425,20 +429,20 @@ fn publish_bytes(
             Some(actual) if actual == bytes => return Ok(()),
             None if terminal_failure && attempt + 1 < MAX_MANIFEST_PUT_ATTEMPTS => {}
             None if !terminal_failure => {
-                return Err(MidgeError::Timeout(
-                    "cloud manifest PUT outcome remained unresolved after readback".into(),
-                ));
+                return Err(MidgeError::Timeout(format!(
+                    "cloud {object_context} PUT outcome remained unresolved after readback"
+                )));
             }
             Some(_) | None => {
-                return Err(MidgeError::Corruption(
-                    "cloud manifest PUT was not proven by readback".into(),
-                ));
+                return Err(MidgeError::Corruption(format!(
+                    "cloud {object_context} PUT was not proven by readback"
+                )));
             }
         }
     }
-    Err(MidgeError::Corruption(
-        "cloud manifest PUT attempts exhausted".into(),
-    ))
+    Err(MidgeError::Corruption(format!(
+        "cloud {object_context} PUT attempts exhausted"
+    )))
 }
 
 #[cfg(test)]
@@ -570,7 +574,7 @@ mod publish_tests {
         let deadline = OperationDeadline::from_budget(std::time::Duration::from_secs(5));
 
         // Act
-        publish_bytes(&cloud, key, bytes, &deadline, None)?;
+        publish_bytes(&cloud, key, bytes, &deadline, None, "manifest")?;
 
         // Assert: caller reconciliation proves the exact body with one PUT;
         // the conditional mutation is never blindly replayed.

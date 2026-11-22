@@ -3,8 +3,7 @@
 use crate::common::resource_budget::ResourceReservation;
 use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::lease::CloudMetadataObject;
-use crate::storage::cloud::{BlockingCloud, CloudStorage};
-use crate::storage::{StorageBackend, StoragePrecondition, StorageRequest};
+use crate::storage::cloud::CloudStorage;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -132,7 +131,14 @@ pub(crate) fn publish_format10_closure(
         DeadlineScope::new(*deadline).check("FORMAT 10 metadata closure upload")?;
         validate_relative_path(relative_path)?;
         let object_key = format!("metadata/generations/{publication_id}/{relative_path}");
-        publish_bytes(cloud, &object_key, body, deadline, reservation)?;
+        super::metadata_chain::publish_bytes(
+            cloud,
+            &object_key,
+            body,
+            deadline,
+            Some(reservation),
+            "FORMAT 10 metadata",
+        )?;
         objects.push(CloudMetadataObject {
             file_name: relative_path.clone(),
             object_key,
@@ -158,49 +164,13 @@ fn validate_relative_path(path: &str) -> MidgeResult<()> {
     Ok(())
 }
 
-fn publish_bytes(
-    cloud: &CloudStorage,
-    key: &str,
-    bytes: &[u8],
-    deadline: &OperationDeadline,
-    reservation: &Arc<ResourceReservation>,
-) -> MidgeResult<()> {
-    let timeout = deadline
-        .clamp_nonzero(cloud.callback_timeout())
-        .ok_or_else(|| MidgeError::Timeout("FORMAT 10 metadata PUT deadline exhausted".into()))?;
-    let request = StorageRequest::new(key, *deadline, timeout)
-        .with_precondition(StoragePrecondition::IfAbsent)
-        .with_reservation(Arc::clone(reservation));
-    let (tx, rx) = std::sync::mpsc::channel();
-    cloud.submit_write_receipt_request(request, bytes.to_vec(), tx);
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(Some(receipt))) if receipt.matches(bytes) => return Ok(()),
-        Ok(Ok(Some(_))) => {
-            return Err(MidgeError::Corruption(
-                "FORMAT 10 metadata PUT receipt differs".into(),
-            ));
-        }
-        _ => {}
-    }
-
-    let actual = BlockingCloud::new(cloud, deadline)
-        .with_reservation(Arc::clone(reservation))
-        .get_optional(key)?;
-    if actual.as_deref() == Some(bytes) {
-        Ok(())
-    } else {
-        Err(MidgeError::Corruption(
-            "FORMAT 10 metadata PUT was not proven by exact readback".into(),
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::io::{Fs, MockFs, OpenOptions};
     use crate::lease::SharedGenerationId;
     use crate::metadata::{codec, Manifest};
+    use crate::storage::cloud::BlockingCloud;
     use std::time::Duration;
 
     #[test]
@@ -223,8 +193,10 @@ mod tests {
                 create_new: true,
                 truncate: false,
             },
-        )?
-        .append(bytes::Bytes::from_static(b"midge-format-version=10\n"))?;
+        )
+        .map_err(crate::io::FsError::into_midge)?
+        .append(bytes::Bytes::from_static(b"midge-format-version=10\n"))
+        .map_err(crate::io::FsError::into_midge)?;
         let publication_lock = crate::runtime::MetadataPublicationLock::default();
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
         let captured =
@@ -241,11 +213,20 @@ mod tests {
             &captured.bodies,
             &captured.reservation,
         )?;
+        let (same_horizon, same_objects) = publish_format10_closure(
+            &cloud,
+            &deadline,
+            publication_id,
+            &captured.bodies,
+            &captured.reservation,
+        )?;
 
         // Assert
         assert_eq!(horizon, 0);
         assert_eq!(horizon, captured.horizon);
+        assert_eq!(same_horizon, horizon);
         assert_eq!(objects.len(), captured.bodies.len());
+        assert_eq!(same_objects, objects);
         assert!(objects.iter().all(|object| {
             object.object_key
                 == format!("metadata/generations/{publication_id}/{}", object.file_name)

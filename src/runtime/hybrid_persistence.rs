@@ -18,6 +18,7 @@ use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use std::sync::Arc;
 
 mod catalog;
+mod format10_closure;
 pub(crate) mod metadata_chain;
 mod metadata_cuts;
 mod metadata_retention;
