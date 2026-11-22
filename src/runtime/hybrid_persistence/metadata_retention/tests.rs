@@ -117,7 +117,7 @@ impl Fixture {
     }
 }
 
-fn format_10_generation(fixture: &Fixture) -> CloudMetadataGeneration {
+fn format_10_generation(fixture: &Fixture, finish: bool) -> CloudMetadataGeneration {
     use crate::lease::SharedGenerationId;
 
     let directory = tempfile::tempdir_in(fixture.directory.path()).unwrap();
@@ -154,9 +154,11 @@ fn format_10_generation(fixture: &Fixture) -> CloudMetadataGeneration {
         &captured.reservation,
     )
     .unwrap();
-    Format10AdmissionStore::new(&fixture.cloud, &deadline)
-        .finish(publication_id)
-        .unwrap();
+    if finish {
+        Format10AdmissionStore::new(&fixture.cloud, &deadline)
+            .finish(publication_id)
+            .unwrap();
+    }
     CloudMetadataGeneration {
         id: SharedGenerationId::FIRST,
         manifest_horizon,
@@ -504,14 +506,14 @@ fn should_continue_bounded_pages_when_one_old_ordinal_has_many_orphan_attempts()
 fn should_reclaim_only_finished_unselected_format_10_stages() {
     // Arrange
     let fixture = Fixture::new();
-    let selected = format_10_generation(&fixture);
+    let selected = format_10_generation(&fixture, true);
     publish_format_10_head(&fixture, &selected);
     let selected_keys = selected
         .objects
         .iter()
         .map(|object| object.object_key.clone())
         .collect::<Vec<_>>();
-    let orphan = format_10_generation(&fixture);
+    let orphan = format_10_generation(&fixture, true);
     let pending_id = uuid::Uuid::new_v4();
     let pending = selected
         .objects
@@ -586,9 +588,9 @@ fn should_reclaim_only_finished_unselected_format_10_stages() {
 fn should_retain_format_10_candidate_when_pointer_changes_before_delete() {
     // Arrange
     let fixture = Fixture::new();
-    let selected = format_10_generation(&fixture);
+    let selected = format_10_generation(&fixture, true);
     publish_format_10_head(&fixture, &selected);
-    let orphan = format_10_generation(&fixture);
+    let orphan = format_10_generation(&fixture, true);
     let mut successor = selected.clone();
     successor.id = crate::lease::SharedGenerationId::new(2).unwrap();
     let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
@@ -613,4 +615,40 @@ fn should_retain_format_10_candidate_when_pointer_changes_before_delete() {
         .objects
         .iter()
         .all(|object| object_is_present(&fixture, &object.object_key)));
+}
+
+#[test]
+fn should_reclaim_uploaded_format_10_stage_after_writer_takeover() {
+    // Arrange
+    let fixture = Fixture::new();
+    let selected = format_10_generation(&fixture, true);
+    publish_format_10_head(&fixture, &selected);
+    let orphan = format_10_generation(&fixture, false);
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    fixture.store.release_if_owner("writer", 1).unwrap();
+    let successor = fixture.store.acquire_leadership("successor").unwrap();
+
+    // Act
+    let _turn = fixture.lock.lock();
+    reclaim_finished_format10_stages(
+        &fixture.context_at_epoch(&deadline, "successor", successor.epoch),
+        &selected,
+    )
+    .unwrap();
+
+    // Assert
+    assert!(orphan
+        .objects
+        .iter()
+        .all(|object| !object_is_present(&fixture, &object.object_key)));
+    assert_eq!(
+        Format10AdmissionStore::new(&fixture.cloud, &deadline)
+            .list_slots()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .count(),
+        1
+    );
+    read_committed_metadata_bodies_within(&fixture.cloud, &selected, &deadline).unwrap();
 }
