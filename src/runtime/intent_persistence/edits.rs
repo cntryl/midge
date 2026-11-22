@@ -440,8 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn should_decode_complete_intent_log_with_committed_sequence_and_checksum_for_upgrade(
-    ) -> MidgeResult<()> {
+    fn should_decode_complete_intent_log_with_committed_identity_for_upgrade() -> MidgeResult<()> {
         // Arrange
         let log = log_with_edits(2)?;
         let bytes = std::fs::read(&log.path)?;
