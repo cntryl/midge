@@ -167,8 +167,11 @@ pub(crate) fn publish_format10_closure(
 pub(super) fn finish_format10_stage(
     cloud: &CloudStorage,
     deadline: &OperationDeadline,
-    publication_id: uuid::Uuid,
+    publication_id: Option<uuid::Uuid>,
 ) {
+    let Some(publication_id) = publication_id else {
+        return;
+    };
     if let Err(error) = Format10AdmissionStore::new(cloud, deadline).finish(publication_id) {
         tracing::warn!(%error, %publication_id, "retaining unsettled FORMAT 10 stage reservation");
     }

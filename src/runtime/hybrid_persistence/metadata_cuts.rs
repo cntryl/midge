@@ -1,5 +1,6 @@
 //! Optimistic metadata publication of locally ordered, immutable control cuts.
 
+use super::format10_closure::finish_format10_stage;
 use super::metadata_snapshot::{
     capture_local_metadata, validate_manifest_successor, MetadataMirrorCache,
 };
@@ -89,26 +90,14 @@ pub(crate) fn mirror_captured_control_metadata_within(
                 // A native validated checksum receipt, or the store's exact
                 // pinned readback, proves this cut selected even when a later
                 // cut has already advanced the pointer before this returns.
-                if let Some(publication_id) = publication_id {
-                    super::format10_closure::finish_format10_stage(
-                        context.cloud,
-                        context.deadline,
-                        publication_id,
-                    );
-                }
+                finish_format10_stage(context.cloud, context.deadline, publication_id);
                 install_cache(&context, staged)?;
                 cut.mark_committed();
                 collect_if_idle(&context, Some(&generation));
                 return Ok(());
             }
             Err(LeaseError::AcquisitionFailed(_)) => {
-                if let Some(publication_id) = publication_id {
-                    super::format10_closure::finish_format10_stage(
-                        context.cloud,
-                        context.deadline,
-                        publication_id,
-                    );
-                }
+                finish_format10_stage(context.cloud, context.deadline, publication_id);
                 fresh = true;
             }
             Err(
@@ -119,13 +108,7 @@ pub(crate) fn mirror_captured_control_metadata_within(
                 // Unknown effects remain owned unless an exact later selected
                 // body proves coverage. Do not retry their write blindly.
                 resolve_uncertain(&context, cut, error, &mut validate_lease)?;
-                if let Some(publication_id) = publication_id {
-                    super::format10_closure::finish_format10_stage(
-                        context.cloud,
-                        context.deadline,
-                        publication_id,
-                    );
-                }
+                finish_format10_stage(context.cloud, context.deadline, publication_id);
                 return Ok(());
             }
             Err(error) => return Err(error.into_validation_error("captured metadata publication")),

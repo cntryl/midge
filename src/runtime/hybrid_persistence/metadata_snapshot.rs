@@ -860,7 +860,11 @@ fn mirror_format10_under_lock(
         objects,
     };
     commit_metadata_generation(context, previous, generation.clone())?;
-    super::format10_closure::finish_format10_stage(context.cloud, context.deadline, publication_id);
+    super::format10_closure::finish_format10_stage(
+        context.cloud,
+        context.deadline,
+        Some(publication_id),
+    );
     *cache = Some(MetadataMirrorCache::new(
         generation,
         context.authority.writer_epoch,
