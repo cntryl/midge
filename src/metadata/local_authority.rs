@@ -20,6 +20,7 @@ pub(crate) const MAX_HEAD_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_OBJECTS: usize = 16;
 pub(crate) const MAX_CLOSURE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_OBJECT_BYTES: u64 = MAX_CLOSURE_BYTES;
+type StreamSegments = Vec<(u64, u64, Vec<u8>)>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Stream {
@@ -350,9 +351,9 @@ impl LocalMetadataAuthority {
             stream,
             object: next.clone(),
         });
-        pending_head.predecessor_head = self.head_digest;
+        pending_head.predecessor_head = self.head_digest();
         pending_head.sequence = pending_sequence;
-        self.publish_candidate(pending_head)?;
+        self.publish_candidate(&pending_head)?;
 
         let mut candidate = self.head.clone();
         let selected = stream_head_mut(&mut candidate, stream);
@@ -362,7 +363,7 @@ impl LocalMetadataAuthority {
             Stream::Manifest => candidate.highest_manifest_id = last_id,
             Stream::Intent => candidate.highest_intent_sequence = last_id,
         }
-        candidate.predecessor_head = self.head_digest;
+        candidate.predecessor_head = self.head_digest();
         candidate.sequence = object_sequence;
         validate_head(&candidate)?;
 
@@ -382,7 +383,7 @@ impl LocalMetadataAuthority {
             ))
         });
 
-        self.publish_candidate(candidate)
+        self.publish_candidate(&candidate)
     }
 
     pub(crate) fn prepare_for_write(&mut self) -> MidgeResult<()> {
@@ -439,7 +440,7 @@ impl LocalMetadataAuthority {
             generation,
             previous_generation: Some(self.head.generation.clone()),
             source_digest: self.head.source_digest,
-            predecessor_head: self.head_digest,
+            predecessor_head: self.head_digest(),
             manifest: StreamHead {
                 base: manifest,
                 segments: Vec::new(),
@@ -452,7 +453,7 @@ impl LocalMetadataAuthority {
             highest_manifest_id: checkpoint_edit_id,
             highest_intent_sequence: self.head.highest_intent_sequence,
         };
-        self.publish_candidate(candidate)
+        self.publish_candidate(&candidate)
     }
 
     /// Replace the intent chain with a new complete base while retaining manifest history.
@@ -493,7 +494,7 @@ impl LocalMetadataAuthority {
             generation,
             previous_generation: Some(self.head.generation.clone()),
             source_digest: self.head.source_digest,
-            predecessor_head: self.head_digest,
+            predecessor_head: self.head_digest(),
             manifest,
             intent: StreamHead {
                 base: intent,
@@ -506,7 +507,7 @@ impl LocalMetadataAuthority {
             highest_manifest_id: self.head.highest_manifest_id,
             highest_intent_sequence: sequence,
         };
-        self.publish_candidate(candidate)
+        self.publish_candidate(&candidate)
     }
 
     fn create_generation(&self, generation: &str) -> MidgeResult<()> {
@@ -549,9 +550,9 @@ impl LocalMetadataAuthority {
             .ok_or_else(|| MidgeError::ResourceLimit("FORMAT 10 head sequence exhausted".into()))
     }
 
-    fn publish_candidate(&mut self, candidate: HeadBody) -> MidgeResult<()> {
-        validate_head(&candidate)?;
-        let bytes = encode_head(&candidate)?;
+    fn publish_candidate(&mut self, candidate: &HeadBody) -> MidgeResult<()> {
+        validate_head(candidate)?;
+        let bytes = encode_head(candidate)?;
         let prior_bytes = encode_head(&self.head)?;
         if let Err(error) = staging::stage_bytes_typed(
             &self.fs,
@@ -578,7 +579,7 @@ impl LocalMetadataAuthority {
                             "FORMAT 10 head",
                         )
                         .map_or(true, |again| again.as_ref() != bytes.as_slice())
-                        || verify_head_objects(self.fs.as_ref(), &candidate).is_err()
+                        || verify_head_objects(self.fs.as_ref(), candidate).is_err()
                     {
                         self.fenced = true;
                         return Err(MidgeError::RecoveryFailed(format!(
@@ -676,9 +677,9 @@ impl LocalMetadataAuthority {
         }
         let mut candidate = self.head.clone();
         candidate.pending_objects.clear();
-        candidate.predecessor_head = self.head_digest;
+        candidate.predecessor_head = self.head_digest();
         candidate.sequence = self.next_head_sequence()?;
-        self.publish_candidate(candidate)
+        self.publish_candidate(&candidate)
     }
 
     fn cleanup_unselected_generation(&self, sequence: u64) -> MidgeResult<()> {
@@ -763,10 +764,7 @@ impl LocalMetadataAuthority {
     }
 
     /// Return the selected base payload and each selected logical append.
-    pub(crate) fn read_stream(
-        &self,
-        stream: Stream,
-    ) -> MidgeResult<(Vec<u8>, Vec<(u64, u64, Vec<u8>)>)> {
+    pub(crate) fn read_stream(&self, stream: Stream) -> MidgeResult<(Vec<u8>, StreamSegments)> {
         let selected = stream_head(&self.head, stream);
         let base = read_object_payload(
             self.fs.as_ref(),
@@ -1136,14 +1134,7 @@ fn validate_head(head: &HeadBody) -> MidgeResult<()> {
             "FORMAT 10 upgrade candidate is missing its source digest".into(),
         ));
     }
-    if let Some(previous) = head.previous_generation.as_deref() {
-        validate_identifier(previous)?;
-        if previous == head.generation {
-            return Err(MidgeError::Corruption(
-                "FORMAT 10 previous generation equals selected generation".into(),
-            ));
-        }
-    }
+    validate_previous_generation(head)?;
     let object_count = 2_usize
         .checked_add(head.manifest.segments.len())
         .and_then(|n| n.checked_add(head.intent.segments.len()))
@@ -1154,6 +1145,29 @@ fn validate_head(head: &HeadBody) -> MidgeResult<()> {
             "FORMAT 10 closure exceeds 16 objects".into(),
         ));
     }
+    let mut total = validate_selected_streams(head)?;
+    total = validate_pending_objects(head, total)?;
+    if total > MAX_CLOSURE_BYTES {
+        return Err(MidgeError::ResourceLimit(
+            "FORMAT 10 closure and pending object exceed 64 MiB".into(),
+        ));
+    }
+    validate_high_water_marks(head)
+}
+
+fn validate_previous_generation(head: &HeadBody) -> MidgeResult<()> {
+    if let Some(previous) = head.previous_generation.as_deref() {
+        validate_identifier(previous)?;
+        if previous == head.generation {
+            return Err(MidgeError::Corruption(
+                "FORMAT 10 previous generation equals selected generation".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_selected_streams(head: &HeadBody) -> MidgeResult<u64> {
     let mut total = 0_u64;
     for (stream, selected) in [
         (Stream::Manifest, &head.manifest),
@@ -1188,11 +1202,10 @@ fn validate_head(head: &HeadBody) -> MidgeResult<()> {
             })?;
         }
     }
-    if total > MAX_CLOSURE_BYTES {
-        return Err(MidgeError::ResourceLimit(
-            "FORMAT 10 closure exceeds 64 MiB".into(),
-        ));
-    }
+    Ok(total)
+}
+
+fn validate_pending_objects(head: &HeadBody, mut total: u64) -> MidgeResult<u64> {
     if head.pending_objects.len() > 1 {
         return Err(MidgeError::Corruption(
             "FORMAT 10 head contains multiple pending objects".into(),
@@ -1225,11 +1238,10 @@ fn validate_head(head: &HeadBody) -> MidgeResult<()> {
             .checked_add(pending.object.len)
             .ok_or_else(|| MidgeError::ResourceLimit("FORMAT 10 closure size overflow".into()))?;
     }
-    if total > MAX_CLOSURE_BYTES {
-        return Err(MidgeError::ResourceLimit(
-            "FORMAT 10 closure and pending object exceed 64 MiB".into(),
-        ));
-    }
+    Ok(total)
+}
+
+fn validate_high_water_marks(head: &HeadBody) -> MidgeResult<()> {
     if head.highest_manifest_id
         != head
             .manifest

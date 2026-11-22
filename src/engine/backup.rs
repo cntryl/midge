@@ -119,24 +119,12 @@ impl Engine {
         }
         let database_format_version =
             crate::metadata::format::validate_format_marker(self.root.as_ref(), &source)?;
-        if database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
-            return Err(MidgeError::NotSupported(
-                "backup capture does not support this database format".into(),
-            ));
-        }
-        if database_format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1
-            && self.simulated_cloud_mode
-        {
-            return Err(MidgeError::NotSupported(
-                "FORMAT 10 backup capture is not available for simulated cloud storage".into(),
-            ));
-        }
-        let pinned =
-            if database_format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
-                pin_format_10_files(&source, parent)?
-            } else {
-                pin_durable_files(&source, self.simulated_cloud_mode, parent)?
-            };
+        let pinned = pin_files_for_format(
+            &source,
+            self.simulated_cloud_mode,
+            parent,
+            database_format_version,
+        )?;
         if !self.is_primary_lease_healthy() {
             return Err(MidgeError::Fenced(
                 "primary lease became unhealthy during backup capture".to_string(),
@@ -285,6 +273,29 @@ impl Engine {
         paths::publish(staging, &target)?;
         sync_directory(parent)?;
         Ok(manifest)
+    }
+}
+
+fn pin_files_for_format(
+    source: &Path,
+    simulated_cloud: bool,
+    scratch_dir: &Path,
+    database_format_version: u32,
+) -> MidgeResult<Vec<PinnedFile>> {
+    if database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
+        return Err(MidgeError::NotSupported(
+            "backup capture does not support this database format".into(),
+        ));
+    }
+    if database_format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
+        if simulated_cloud {
+            return Err(MidgeError::NotSupported(
+                "FORMAT 10 backup capture is not available for simulated cloud storage".into(),
+            ));
+        }
+        pin_format_10_files(source, scratch_dir)
+    } else {
+        pin_durable_files(source, simulated_cloud, scratch_dir)
     }
 }
 

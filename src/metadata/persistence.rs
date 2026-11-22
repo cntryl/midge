@@ -4,6 +4,7 @@
 //! recovery of LSM structure across restarts.
 
 use crate::common::{DeadlineScope, MidgeError, MidgeResult};
+use crate::io::traits::FsPath;
 use crate::io::FsError;
 use crate::metadata::Manifest;
 #[cfg(test)]
@@ -232,8 +233,6 @@ impl ManifestPersistence {
         if crate::metadata::format::is_format_10(fs.as_ref())? {
             return Self::load_format_10(fs, scope);
         }
-        use crate::io::traits::FsPath;
-
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
         let manifest_path = FsPath::new(Self::MANIFEST_FILE);
         let mut manifest = if fs

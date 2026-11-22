@@ -43,6 +43,11 @@ pub(crate) enum RecoveryWal {
     Deferred(crate::runtime::wal_history::WalHistory),
 }
 
+struct RecoveryWalInput {
+    wal: RecoveryWal,
+    fence: Option<crate::runtime::wal_history::WalHistoryFence>,
+}
+
 struct RecoveredStartup {
     opened_in_salvage_mode: bool,
     manifest: Manifest,
@@ -169,10 +174,10 @@ impl RuntimeState {
     ) -> MidgeResult<Self> {
         check_scope(scope, "recovery filesystem")?;
         Self::ensure_directories(root.as_ref(), memory_mode)?;
-        let format_version = if !memory_mode {
-            crate::metadata::ensure_or_create_format_marker(&root, db_path)?
-        } else {
+        let format_version = if memory_mode {
             crate::metadata::format::CURRENT_FORMAT_VERSION
+        } else {
+            crate::metadata::ensure_or_create_format_marker(&root, db_path)?
         };
         check_scope(scope, "recovery directories")?;
         let fs = match scope {
@@ -183,8 +188,10 @@ impl RuntimeState {
             db_path,
             memory_mode,
             recovery_policy,
-            wal,
-            wal_fence,
+            RecoveryWalInput {
+                wal,
+                fence: wal_fence,
+            },
             fs,
             format_version,
             scope,
@@ -195,12 +202,12 @@ impl RuntimeState {
         db_path: &std::path::Path,
         memory_mode: bool,
         recovery_policy: crate::config::RecoveryPolicy,
-        wal: RecoveryWal,
-        wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
+        wal_input: RecoveryWalInput,
         fs: Arc<dyn Fs>,
         format_version: u32,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
+        let RecoveryWalInput { wal, fence } = wal_input;
         let persistence = RuntimePersistence::from_memory_mode(memory_mode);
         let RecoveredStartup {
             opened_in_salvage_mode,
@@ -212,7 +219,7 @@ impl RuntimeState {
             persistence,
             recovery_policy,
             wal,
-            wal_fence,
+            fence,
             &fs,
             scope,
         )?;
@@ -299,10 +306,15 @@ impl RuntimeState {
             active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pending_compaction_waits: std::collections::BTreeMap::new(),
         };
+        Self::finish_recovery_state(&mut state, scope)?;
+        Ok(state)
+    }
+
+    fn finish_recovery_state(state: &mut Self, scope: Option<&DeadlineScope>) -> MidgeResult<()> {
         check_scope(scope, "recovery state construction")?;
         state.record_recovery_metrics();
         state.reinitialize_active_memtable_segment_tracking();
-        Ok(state)
+        Ok(())
     }
 
     fn load_startup_recovery(
