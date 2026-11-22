@@ -197,7 +197,7 @@ fn should_reserve_different_slots_for_concurrent_publications() -> MidgeResult<(
 }
 
 #[test]
-fn should_return_only_one_new_reservation_for_a_repeated_publication_uuid() -> MidgeResult<()> {
+fn should_return_only_one_new_reservation_for_a_repeated_publication_uuid() {
     // Arrange
     let cloud = std::sync::Arc::new(CloudStorage::with_mock());
     let publication_id = Uuid::new_v4();
@@ -223,5 +223,4 @@ fn should_return_only_one_new_reservation_for_a_repeated_publication_uuid() -> M
             .count(),
         1
     );
-    Ok(())
 }
