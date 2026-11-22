@@ -392,6 +392,7 @@ fn read_format_10_bodies(
             "cloud FORMAT 10 HEAD differs from the selected manifest horizon".into(),
         ));
     }
+    crate::runtime::IntentPersistence::validate_cloud_format_10_bodies(&bodies)?;
     Ok(bodies)
 }
 
@@ -400,7 +401,19 @@ pub(crate) fn decode_generation_manifest(
     bodies: &BTreeMap<String, Vec<u8>>,
     deadline: &OperationDeadline,
 ) -> MidgeResult<Manifest> {
-    let manifest = decode_manifest_bodies(bodies, deadline)?;
+    let manifest = if generation.uses_format_10() {
+        use crate::metadata::local_authority::{LocalMetadataAuthority, Stream};
+        let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Manifest)?;
+        let scope = DeadlineScope::new(*deadline);
+        ManifestPersistence::decode_format_10_stream(
+            stream.base,
+            stream.checkpoint,
+            stream.segments,
+            Some(&scope),
+        )?
+    } else {
+        decode_manifest_bodies(bodies, deadline)?
+    };
     if manifest.edit_checkpoint_id != generation.manifest_horizon {
         return Err(MidgeError::Corruption(format!(
             "committed manifest horizon {} differs from shared pointer horizon {}",

@@ -82,11 +82,53 @@ pub(crate) struct LocalMetadataAuthority {
     fenced: bool,
 }
 
+pub(crate) struct CloudMetadataStream<'a> {
+    pub(crate) checkpoint: u64,
+    pub(crate) base: &'a [u8],
+    pub(crate) segments: Vec<(u64, u64, &'a [u8])>,
+}
+
 impl LocalMetadataAuthority {
     /// Verify the exact committed cloud closure before using any of its bytes.
     pub(crate) fn validate_cloud_bodies(
         bodies: &std::collections::BTreeMap<String, Vec<u8>>,
     ) -> MidgeResult<u64> {
+        Self::verified_cloud_head(bodies).map(|head| head.highest_manifest_id)
+    }
+
+    pub(crate) fn read_cloud_stream(
+        bodies: &std::collections::BTreeMap<String, Vec<u8>>,
+        stream: Stream,
+    ) -> MidgeResult<CloudMetadataStream<'_>> {
+        let head = Self::verified_cloud_head(bodies)?;
+        let selected = stream_head(&head, stream);
+        let payload = |object: &ObjectRef| {
+            bodies
+                .get(&object_path(&head.generation, &object.name))
+                .map(|bytes| &bytes[62..bytes.len() - 4])
+                .ok_or_else(|| {
+                    MidgeError::Corruption("verified cloud metadata body is missing".into())
+                })
+        };
+        let base = payload(&selected.base)?;
+        let segments = selected
+            .segments
+            .iter()
+            .map(|object| Ok((object.first_id, object.last_id, payload(object)?)))
+            .collect::<MidgeResult<Vec<_>>>()?;
+        Ok(CloudMetadataStream {
+            checkpoint: match stream {
+                Stream::Manifest => head.manifest_base_edit_id,
+                Stream::Intent => head.intent_base_sequence,
+            },
+            base,
+            segments,
+        })
+    }
+
+    fn verified_cloud_head(
+        bodies: &std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> MidgeResult<HeadBody> {
         if bodies.get(super::files::FORMAT).map(Vec::as_slice) != Some(b"midge-format-version=10\n")
         {
             return Err(MidgeError::CompatibilityError(
@@ -116,7 +158,7 @@ impl LocalMetadataAuthority {
                 verify_object_bytes(stream, object, bytes)?;
             }
         }
-        Ok(head.highest_manifest_id)
+        Ok(head)
     }
 
     /// Validate a selected local head without retaining an open writer owner.
@@ -938,7 +980,7 @@ fn write_base(
     Ok(reference)
 }
 
-fn sync_directory_chain(fs: &dyn Fs, directory: &str) -> MidgeResult<()> {
+pub(crate) fn sync_directory_chain(fs: &dyn Fs, directory: &str) -> MidgeResult<()> {
     let mut path = std::path::PathBuf::new();
     let mut components = Vec::new();
     for component in std::path::Path::new(directory).components() {

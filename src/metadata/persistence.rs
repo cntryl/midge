@@ -309,10 +309,24 @@ impl ManifestPersistence {
         )?;
         let (base, segments) =
             authority.read_stream(crate::metadata::local_authority::Stream::Manifest)?;
-        let mut manifest: Manifest = super::codec::decode(super::codec::MANIFEST, &base)?;
-        if manifest.edit_checkpoint_id
-            != authority.base_id(crate::metadata::local_authority::Stream::Manifest)
-        {
+        Self::decode_format_10_stream(
+            &base,
+            authority.base_id(crate::metadata::local_authority::Stream::Manifest),
+            segments
+                .iter()
+                .map(|(first, last, body)| (*first, *last, body.as_slice())),
+            scope,
+        )
+    }
+
+    pub(crate) fn decode_format_10_stream<'a>(
+        base: &[u8],
+        checkpoint: u64,
+        segments: impl IntoIterator<Item = (u64, u64, &'a [u8])>,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Manifest> {
+        let mut manifest = Self::decode_manifest(base)?;
+        if manifest.edit_checkpoint_id != checkpoint {
             return Err(MidgeError::Corruption(
                 "FORMAT 10 manifest base checkpoint identity disagrees with HEAD".into(),
             ));
@@ -324,7 +338,7 @@ impl ManifestPersistence {
                     "FORMAT 10 manifest segment must contain one edit identity".into(),
                 ));
             }
-            let edit: crate::metadata::journal::ManifestEdit = serde_json::from_slice(&payload)
+            let edit: crate::metadata::journal::ManifestEdit = serde_json::from_slice(payload)
                 .map_err(|error| {
                     MidgeError::Corruption(format!("invalid FORMAT 10 manifest edit: {error}"))
                 })?;

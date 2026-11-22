@@ -67,20 +67,10 @@ impl IntentPersistence {
                     )?;
                     let (base, segments) =
                         authority.read_stream(crate::metadata::local_authority::Stream::Intent)?;
-                    let mut latest: Vec<IntentLogEntry> =
-                        serde_json::from_slice(&base).map_err(|error| {
-                            MidgeError::Corruption(format!(
-                                "invalid FORMAT 10 intent base: {error}"
-                            ))
-                        })?;
-                    for (_, _, payload) in segments {
-                        latest = serde_json::from_slice(&payload).map_err(|error| {
-                            MidgeError::Corruption(format!(
-                                "invalid FORMAT 10 intent segment: {error}"
-                            ))
-                        })?;
-                    }
-                    Ok(latest)
+                    Self::decode_format_10_stream(
+                        &base,
+                        segments.iter().map(|(_, _, payload)| payload.as_slice()),
+                    )
                 },
             )?
         } else {
@@ -88,6 +78,33 @@ impl IntentPersistence {
         };
         Self::validate_persisted_sst_names(&intents).map_err(MidgeError::RecoveryFailed)?;
         Ok(intents)
+    }
+
+    pub(crate) fn validate_cloud_format_10_bodies(
+        bodies: &std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> MidgeResult<()> {
+        use crate::metadata::local_authority::{LocalMetadataAuthority, Stream};
+        let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Intent)?;
+        let intents = Self::decode_format_10_stream(
+            stream.base,
+            stream.segments.into_iter().map(|(_, _, payload)| payload),
+        )?;
+        Self::validate_persisted_sst_names(&intents).map_err(MidgeError::RecoveryFailed)
+    }
+
+    fn decode_format_10_stream<'a>(
+        base: &[u8],
+        segments: impl IntoIterator<Item = &'a [u8]>,
+    ) -> MidgeResult<Vec<IntentLogEntry>> {
+        let mut latest = serde_json::from_slice(base).map_err(|error| {
+            MidgeError::Corruption(format!("invalid FORMAT 10 intent base: {error}"))
+        })?;
+        for payload in segments {
+            latest = serde_json::from_slice(payload).map_err(|error| {
+                MidgeError::Corruption(format!("invalid FORMAT 10 intent segment: {error}"))
+            })?;
+        }
+        Ok(latest)
     }
 
     /// Validate every byte of the captured FORMAT 9 intent history before upgrade.

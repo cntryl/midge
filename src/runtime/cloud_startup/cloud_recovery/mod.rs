@@ -213,34 +213,10 @@ impl CloudStartupRecovery {
         let metadata_objects =
             Self::read_committed_cloud_metadata_within(cloud, &generation, scope)?;
 
-        let mut removed_stale_local_metadata = false;
-        for file_name in crate::metadata::files::CLOUD_MIRRORED {
-            scope.check("cloud metadata staging")?;
-            let Some(data) = metadata_objects.get(*file_name) else {
-                match staging_fs.remove_file(&crate::io::traits::FsPath::new(*file_name)) {
-                    Ok(()) => removed_stale_local_metadata = true,
-                    Err(FsError::NotFound(_)) => {}
-                    Err(error) => return Err(FsError::into_midge(error)),
-                }
-                continue;
-            };
-            let temp_path = crate::io::traits::FsPath::new(format!("{file_name}.tmp"));
-            let target_path = crate::io::traits::FsPath::new(*file_name);
-            crate::io::staging::stage_bytes_typed(
-                &staging_fs,
-                &temp_path,
-                &target_path,
-                data,
-                || scope.check("cloud metadata staged rename"),
-            )?;
-        }
-        if removed_stale_local_metadata {
-            staging_fs
-                .sync_dir(
-                    &crate::io::traits::FsPath::new(""),
-                    crate::io::Durability::Durable,
-                )
-                .map_err(FsError::into_midge)?;
+        if generation.uses_format_10() {
+            stage_format_10_cache(&staging_fs, &metadata_objects, scope)?;
+        } else {
+            stage_legacy_metadata_cache(&staging_fs, &metadata_objects, scope)?;
         }
 
         crate::metadata::validate_format_marker(staging_fs.as_ref(), db_path)
@@ -878,4 +854,76 @@ impl CloudStartupRecovery {
         }
         proofs.into_values().collect()
     }
+}
+
+fn stage_legacy_metadata_cache(
+    fs: &Arc<dyn crate::io::Fs>,
+    objects: &std::collections::BTreeMap<String, Vec<u8>>,
+    scope: &DeadlineScope,
+) -> MidgeResult<()> {
+    let mut removed = false;
+    for path in crate::metadata::files::CLOUD_MIRRORED {
+        scope.check("cloud metadata staging")?;
+        if let Some(bytes) = objects.get(*path) {
+            stage_cache_file(fs, path, bytes, scope)?;
+        } else {
+            match fs.remove_file(&crate::io::FsPath::new(*path)) {
+                Ok(()) => removed = true,
+                Err(FsError::NotFound(_)) => {}
+                Err(error) => return Err(error.into_midge()),
+            }
+        }
+    }
+    if removed {
+        fs.sync_dir(&crate::io::FsPath::new(""), crate::io::Durability::Durable)
+            .map_err(FsError::into_midge)?;
+    }
+    Ok(())
+}
+
+fn stage_format_10_cache(
+    fs: &Arc<dyn crate::io::Fs>,
+    objects: &std::collections::BTreeMap<String, Vec<u8>>,
+    scope: &DeadlineScope,
+) -> MidgeResult<()> {
+    use crate::metadata::files::FORMAT;
+    use crate::metadata::local_authority::{sync_directory_chain, HEAD_PATH};
+    for (path, bytes) in objects {
+        if path == FORMAT || path == HEAD_PATH {
+            continue;
+        }
+        scope.check("cloud FORMAT 10 body hydration")?;
+        let (directory, _) = path.rsplit_once('/').ok_or_else(|| {
+            MidgeError::Corruption("cloud FORMAT 10 body has no parent directory".into())
+        })?;
+        fs.create_dir_all(&crate::io::FsPath::new(directory))
+            .map_err(FsError::into_midge)?;
+        sync_directory_chain(fs.as_ref(), directory)?;
+        stage_cache_file(fs, path, bytes, scope)?;
+    }
+    // Selected bodies and their directories become durable before the cache
+    // HEAD can refer to them. The remote pointer remains the authority if
+    // either selector write to the derived cache is interrupted.
+    for path in [HEAD_PATH, FORMAT] {
+        let bytes = objects
+            .get(path)
+            .ok_or_else(|| MidgeError::Corruption(format!("cloud metadata lacks '{path}'")))?;
+        stage_cache_file(fs, path, bytes, scope)?;
+    }
+    Ok(())
+}
+
+fn stage_cache_file(
+    fs: &Arc<dyn crate::io::Fs>,
+    path: &str,
+    bytes: &[u8],
+    scope: &DeadlineScope,
+) -> MidgeResult<()> {
+    crate::io::staging::stage_bytes_typed(
+        fs,
+        &crate::io::FsPath::new(format!("{path}.tmp")),
+        &crate::io::FsPath::new(path),
+        bytes,
+        || scope.check("cloud metadata staged rename"),
+    )
 }
