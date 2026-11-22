@@ -285,6 +285,15 @@ impl EventLoop {
         trace_shutdown_phase("wal-preflight-worker-join", join_deadline, || {
             self.join_cloud_wal_prune_worker();
         });
+        if let Err(error) =
+            trace_shutdown_phase("committed-ddl-mirror-drain", join_deadline, || {
+                self.drain_committed_ddl_mirror_within(cloud_shutdown_deadline)
+            })
+        {
+            if shutdown_error.is_none() {
+                *shutdown_error = Some(error);
+            }
+        }
         if cloud_async {
             self.drain_hybrid_storage_events_within(cloud_shutdown_deadline);
         }

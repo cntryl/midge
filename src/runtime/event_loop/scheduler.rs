@@ -31,7 +31,7 @@ impl EventLoop {
             return self.has_actionable_verification_work();
         }
 
-        if self.has_ready_reserved_compaction() {
+        if self.has_ready_reserved_compaction() || self.committed_ddl_mirror_is_ready() {
             return true;
         }
         if self.flush_mirror_retry_timeout() == Some(Duration::ZERO) {
@@ -282,6 +282,7 @@ impl EventLoop {
         self.drain_cloud_wal_upload_backlog();
         self.tick_hybrid_storage();
         self.drain_hybrid_storage_events();
+        self.progress_committed_ddl_mirror();
         self.resume_reserved_compaction_if_ready();
         self.drain_cloud_wal_upload_backlog();
         let hybrid_storage = self.actors.cloud_coordinator.hybrid_storage.clone();

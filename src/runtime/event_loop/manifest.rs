@@ -243,7 +243,7 @@ impl ManifestCoordinator {
                 "failpoint: create metadata mirror failed after local commit".to_string()
             ))
         );
-        event_loop.mirror_metadata_after_local_commit_within("create column family", deadline)
+        event_loop.mirror_committed_ddl_within("create column family", deadline)
     }
 
     pub(super) fn drop_column_family(
@@ -346,6 +346,11 @@ impl ManifestCoordinator {
         event_loop.publish_snapshot();
         event_loop.publish_family_catalog();
         event_loop.wake_write_stall_waiters();
+        let mirror_was_running = event_loop
+            .actors
+            .cloud_coordinator
+            .metadata_mirror
+            .is_running();
         let _ = event_loop.retry_gc_within(deadline);
 
         // The DDL registry/local journal authority switch has already
@@ -354,11 +359,12 @@ impl ManifestCoordinator {
         // runtime state. Surface it through degraded health instead.
         // Reclamation above can already own a captured cut containing this
         // committed drop. No control-file edit follows that capture here.
-        let mirrored_by_reclamation = event_loop
-            .actors
-            .cloud_coordinator
-            .metadata_mirror
-            .is_running();
+        let mirrored_by_reclamation = !mirror_was_running
+            && event_loop
+                .actors
+                .cloud_coordinator
+                .metadata_mirror
+                .is_running();
         if let Err(error) = if mirrored_by_reclamation {
             Ok(())
         } else {
@@ -394,7 +400,7 @@ impl ManifestCoordinator {
                 "failpoint: drop metadata mirror failed after local commit".to_string()
             ))
         );
-        event_loop.mirror_metadata_after_local_commit_within("drop column family", deadline)
+        event_loop.mirror_committed_ddl_within("drop column family", deadline)
     }
 
     fn cancel_column_family_pending_work(

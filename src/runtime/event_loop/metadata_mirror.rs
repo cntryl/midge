@@ -31,6 +31,7 @@ pub(super) struct MetadataMirrorPipeline {
     pub(super) pending_compactions:
         std::collections::VecDeque<(crate::compaction::CompactionPlan, Option<OperationDeadline>)>,
     pub(super) pending_flush: Option<u64>,
+    committed_ddl_pending: bool,
     retention_due: std::time::Instant,
     retention_interval: std::time::Duration,
     orphan_cursor: crate::runtime::hybrid_persistence::InventoryCursor,
@@ -45,6 +46,7 @@ impl Default for MetadataMirrorPipeline {
             running: None,
             pending_compactions: std::collections::VecDeque::default(),
             pending_flush: None,
+            committed_ddl_pending: false,
             retention_due: std::time::Instant::now() + retention_interval,
             retention_interval,
             orphan_cursor: crate::runtime::hybrid_persistence::InventoryCursor::default(),
@@ -75,6 +77,90 @@ impl Drop for MetadataMirrorPipeline {
 }
 
 impl EventLoop {
+    fn metadata_mirror_has_owner(&self) -> bool {
+        self.publication.publication_gate.is_active()
+            || self.actors.cloud_coordinator.metadata_mirror.is_running()
+    }
+
+    pub(super) fn mirror_committed_ddl_within(
+        &mut self,
+        context: &str,
+        deadline: &OperationDeadline,
+    ) -> MidgeResult<()> {
+        if self
+            .actors
+            .cloud_coordinator
+            .cloud_metadata_storage
+            .is_none()
+        {
+            return Ok(());
+        }
+        if self.metadata_mirror_has_owner() {
+            self.actors
+                .cloud_coordinator
+                .metadata_mirror
+                .committed_ddl_pending = true;
+            return Ok(());
+        }
+        self.mirror_metadata_after_local_commit_within(context, deadline)?;
+        self.actors
+            .cloud_coordinator
+            .metadata_mirror
+            .committed_ddl_pending = false;
+        Ok(())
+    }
+
+    pub(super) fn committed_ddl_mirror_is_ready(&self) -> bool {
+        self.actors
+            .cloud_coordinator
+            .metadata_mirror
+            .committed_ddl_pending
+            && !self.metadata_mirror_has_owner()
+    }
+
+    pub(super) fn progress_committed_ddl_mirror(&mut self) {
+        if self.committed_ddl_mirror_is_ready() {
+            let deadline = self.event_loop_cloud_deadline();
+            if let Err(error) = self.start_deferred_ddl_mirror(&deadline) {
+                self.state.mark_persistence_anomaly();
+                self.publish_snapshot();
+                tracing::warn!(%error, "deferred metadata mirror failed after committed column-family change");
+            }
+        }
+    }
+
+    fn start_deferred_ddl_mirror(&mut self, deadline: &OperationDeadline) -> MidgeResult<()> {
+        // Consume before starting the new cut. A DDL committed after this
+        // capture re-arms independently of this job's completion.
+        self.actors
+            .cloud_coordinator
+            .metadata_mirror
+            .committed_ddl_pending = false;
+        self.mirror_metadata_after_local_commit_within("deferred column-family changes", deadline)
+    }
+
+    pub(super) fn drain_committed_ddl_mirror_within(
+        &mut self,
+        deadline: &OperationDeadline,
+    ) -> MidgeResult<()> {
+        if !self
+            .actors
+            .cloud_coordinator
+            .metadata_mirror
+            .committed_ddl_pending
+        {
+            return Ok(());
+        }
+        self.drain_metadata_mirror_within(deadline)?;
+        if self.metadata_mirror_has_owner() {
+            return Err(MidgeError::Busy(
+                "deferred DDL mirror waits for publication owner".into(),
+            ));
+        }
+        self.start_deferred_ddl_mirror(deadline)?;
+        self.drain_metadata_mirror_within(deadline)
+    }
+
     #[cfg(test)]
     pub(super) fn mirror_metadata_to_authoritative_cloud(&self) -> crate::common::MidgeResult<()> {
         self.mirror_metadata_to_authoritative_cloud_within(&self.event_loop_cloud_deadline())
