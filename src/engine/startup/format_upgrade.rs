@@ -15,10 +15,22 @@ use std::{sync::Arc, time::Duration};
 const FORMAT_9: &[u8] = b"midge-format-version=9\n";
 const FORMAT_10: &[u8] = b"midge-format-version=10\n";
 
-pub(in crate::engine) fn upgrade_local(
+pub(in crate::engine) fn upgrade(
     opts: &crate::engine::OpenOptions,
     timeout: Duration,
 ) -> MidgeResult<()> {
+    match opts.storage() {
+        Storage::Local { .. } => upgrade_local(opts, timeout),
+        Storage::Cloud { .. } | Storage::CloudSimulated { .. } => {
+            super::format_upgrade_cloud::upgrade_cloud(opts, timeout)
+        }
+        Storage::InMemory => Err(MidgeError::CompatibilityError(
+            "FORMAT migration requires an existing persistent database".into(),
+        )),
+    }
+}
+
+fn upgrade_local(opts: &crate::engine::OpenOptions, timeout: Duration) -> MidgeResult<()> {
     let Storage::Local { path } = opts.storage() else {
         return Err(MidgeError::CompatibilityError(
             "this FORMAT 9 upgrade entry point requires a local database".into(),

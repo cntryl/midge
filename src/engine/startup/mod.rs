@@ -12,6 +12,7 @@ mod deadline;
 use crate::runtime::cloud_startup::CloudStartupRecovery;
 mod epoch_floor;
 pub(super) mod format_upgrade;
+mod format_upgrade_cloud;
 mod recovery;
 mod storage;
 mod storage_root;
