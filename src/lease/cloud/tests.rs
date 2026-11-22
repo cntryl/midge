@@ -2699,7 +2699,15 @@ fn assert_active_gate_is_durable(lease: &CloudStorageLease, store: &Arc<dyn Lead
         .expect("read active lease wire")
         .expect("active lease exists");
     assert!(wire.len() <= MAX_LEASE_DOCUMENT_BYTES);
-    assert!(expired_backup_lease_document(wire.as_bytes()).is_err());
+    let backup = expired_backup_lease_document(wire.as_bytes())
+        .expect("active FORMAT 10 gate is safe to preserve in a backup");
+    let backup = parse_lease_document(std::str::from_utf8(&backup).expect("utf8 backup lease"))
+        .expect("backup lease remains parseable");
+    assert_eq!(
+        backup.migration_gate,
+        Some(crate::lease::CloudFormatMigrationGate::Active { target_format: 10 })
+    );
+    assert_eq!(backup.expires_at, BACKUP_EXPIRED_TIMESTAMP);
 }
 
 #[test]

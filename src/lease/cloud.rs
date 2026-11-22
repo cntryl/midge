@@ -1409,9 +1409,15 @@ pub(crate) fn expired_backup_lease_document(content: &[u8]) -> Result<Vec<u8>, L
                 .to_string(),
         )
     })?;
-    if document.version == LeaseDocumentVersion::V5 {
+    if document.version == LeaseDocumentVersion::V5
+        && !matches!(
+            document.migration_gate.as_ref(),
+            Some(CloudFormatMigrationGate::Active { target_format: 10 })
+        )
+    {
         return Err(LeaseError::Indeterminate(
-            "FORMAT 10 cloud lease gate cannot be rewritten into a backup before gate-aware capture is supported".into(),
+            "pending or unsupported cloud format migration gate cannot be rewritten into a backup"
+                .into(),
         ));
     }
     document.expires_at = BACKUP_EXPIRED_TIMESTAMP.to_string();
@@ -1863,6 +1869,42 @@ fn provider_read_authority_sentinel(
             "cloud metadata authority sentinel GET: {error}"
         ))),
     }
+}
+
+/// Read the read-only backup authority proof without acquiring or rewriting a lease.
+pub(crate) fn read_active_format_10_backup_generation(
+    cloud: &CloudStorage,
+    deadline: &crate::common::OperationDeadline,
+) -> Result<CloudMetadataGeneration, LeaseError> {
+    let remaining = |context: &str| {
+        deadline
+            .clamp_nonzero(cloud.callback_timeout())
+            .ok_or_else(|| LeaseError::Timeout(format!("{context} exceeded backup deadline")))
+    };
+    let document = provider_read_doc_with_timeout(cloud, remaining("lease read")?)?
+        .ok_or_else(|| LeaseError::Indeterminate("backup cloud lease is missing".into()))?;
+    if document.version != LeaseDocumentVersion::V5
+        || !matches!(
+            document.migration_gate.as_ref(),
+            Some(CloudFormatMigrationGate::Active { target_format: 10 })
+        )
+    {
+        return Err(LeaseError::Indeterminate(
+            "backup cloud lease does not carry the active FORMAT 10 gate".into(),
+        ));
+    }
+    if provider_read_authority_sentinel(cloud, remaining("authority sentinel read")?)?
+        != AuthoritySentinelState::Active
+    {
+        return Err(LeaseError::Indeterminate(
+            "backup cloud metadata authority sentinel is not active".into(),
+        ));
+    }
+    metadata_pointer::offline_active_format10_generation(
+        cloud,
+        &document,
+        remaining("metadata pointer read")?,
+    )
 }
 
 fn parse_authority_sentinel(bytes: &[u8]) -> Result<AuthoritySentinelState, LeaseError> {

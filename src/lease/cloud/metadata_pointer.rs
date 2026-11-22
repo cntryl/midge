@@ -42,6 +42,36 @@ impl MetadataPointer {
     }
 }
 
+pub(super) fn offline_active_format10_generation(
+    cloud: &CloudStorage,
+    document: &LeaseDocument,
+    timeout: Duration,
+) -> Result<CloudMetadataGeneration, LeaseError> {
+    let (pointer, _) = read_pointer(cloud, timeout)?.ok_or_else(|| {
+        LeaseError::Indeterminate("active cloud metadata pointer is missing in backup".into())
+    })?;
+    if pointer.writer_epoch != document.epoch.unwrap_or_default()
+        || pointer.holder_id != document.holder_id
+        || Some(pointer.owner_token.as_str()) != document.owner_token.as_deref()
+    {
+        return Err(LeaseError::Indeterminate(
+            "backup cloud metadata pointer disagrees with its active lease owner".into(),
+        ));
+    }
+    let generation = pointer.committed.ok_or_else(|| {
+        LeaseError::Indeterminate(
+            "active cloud metadata pointer has no committed generation".into(),
+        )
+    })?;
+    validate_metadata_generation(&generation)?;
+    if !generation.uses_format_10() {
+        return Err(LeaseError::Indeterminate(
+            "active FORMAT 10 lease selects a non-FORMAT 10 metadata generation".into(),
+        ));
+    }
+    Ok(generation)
+}
+
 impl ProviderLeaderStore {
     pub(super) fn migration_selected_generation(
         &self,
