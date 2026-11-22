@@ -1826,7 +1826,10 @@ mod tests {
 
         // Assert
         assert!(append.is_err());
-        assert!(reopened.selected_ids(Stream::Manifest).is_empty());
+        assert_eq!(
+            reopened.selected_ids(Stream::Manifest),
+            [] as [(u64, u64); 0]
+        );
         assert_eq!(reopened.head.sequence, 2);
         assert_eq!(reopened.head.pending_objects.len(), 1);
     }

@@ -59,41 +59,7 @@ impl MigrationFixture {
             &source,
             &OperationDeadline::from_budget(Duration::from_secs(2)),
         )?;
-        let local_root: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
-        crate::metadata::format::ensure_or_create_format_marker(
-            &local_root,
-            std::path::Path::new("."),
-        )?;
-        crate::metadata::local_authority::LocalMetadataAuthority::stage_upgrade_candidate(
-            Arc::clone(&local_root),
-            [7; 32],
-            source_bodies
-                .get(crate::metadata::files::MANIFEST_SNAPSHOT)
-                .expect("source manifest"),
-            0,
-            b"[]",
-            0,
-            0,
-        )?;
-        let mut candidate_bodies = std::collections::BTreeMap::from([(
-            crate::metadata::files::FORMAT.to_string(),
-            FORMAT_10_MARKER.to_vec(),
-        )]);
-        for file_name in
-            crate::metadata::local_authority::LocalMetadataAuthority::selected_relative_paths_from(
-                local_root.as_ref(),
-            )?
-        {
-            let bytes =
-                crate::io::read_all(local_root.as_ref(), &crate::io::FsPath::new(&file_name))
-                    .map_err(crate::io::FsError::into_midge)?;
-            candidate_bodies.insert(file_name, bytes.to_vec());
-        }
-        crate::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(
-            &candidate_bodies,
-        )?;
-        let candidate = generation(2, &candidate_bodies);
-        upload_generation(&cloud, &candidate, &candidate_bodies)?;
+        let candidate = stage_candidate(&cloud, &source_bodies)?;
         let migration_id = "81900000-0000-4000-8000-000000000001".to_string();
         let pending = CloudFormatMigrationPending {
             migration_id: migration_id.clone(),
@@ -177,6 +143,36 @@ impl MigrationFixture {
                 || key == crate::wal::cloud_catalog::MIRROR_OBJECT_KEY
         }));
     }
+}
+
+fn stage_candidate(
+    cloud: &CloudStorage,
+    source: &BTreeMap<String, Vec<u8>>,
+) -> MidgeResult<CloudMetadataGeneration> {
+    use crate::metadata::{files, local_authority::LocalMetadataAuthority};
+    let local: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+    crate::metadata::format::ensure_or_create_format_marker(&local, std::path::Path::new("."))?;
+    let selected = LocalMetadataAuthority::stage_upgrade_candidate(
+        Arc::clone(&local),
+        [7; 32],
+        source
+            .get(files::MANIFEST_SNAPSHOT)
+            .expect("source manifest"),
+        0,
+        b"[]",
+        0,
+        0,
+    )?;
+    let mut bodies = BTreeMap::from([(files::FORMAT.to_owned(), FORMAT_10_MARKER.to_vec())]);
+    for name in selected.selected_relative_paths() {
+        let bytes = crate::io::read_all(local.as_ref(), &crate::io::FsPath::new(&name))
+            .map_err(crate::io::FsError::into_midge)?;
+        bodies.insert(name, bytes.to_vec());
+    }
+    LocalMetadataAuthority::validate_cloud_bodies(&bodies)?;
+    let candidate = generation(2, &bodies);
+    upload_generation(cloud, &candidate, &bodies)?;
+    Ok(candidate)
 }
 
 fn generation(
@@ -427,7 +423,7 @@ fn force_unexpected_pointer_selection(
     let deadline = OperationDeadline::from_budget(Duration::from_secs(2));
     let wire = BlockingCloud::new(cloud, &deadline)
         .get_optional("metadata/committed-pointer.v1")?
-        .ok_or_else(|| MidgeError::NotFound)?;
+        .ok_or(MidgeError::NotFound)?;
     let mut pointer: TestPointer = crate::metadata::codec::decode(4, &wire)
         .map_err(|error| MidgeError::Corruption(error.to_string()))?;
     let mut unexpected = candidate.clone();

@@ -42,7 +42,7 @@ fn should_recover_format_10_after_provider_upgrade_and_cache_loss() {
     ];
 
     // Act
-    for provider in providers {
+    for provider in &providers {
         check_format_10_provider_upgrade(label, provider);
     }
 
@@ -50,9 +50,9 @@ fn should_recover_format_10_after_provider_upgrade_and_cache_loss() {
     // The helper verifies both writes and the selected format after cache loss.
 }
 
-fn check_format_10_provider_upgrade(label: &str, provider: CloudProviderConfig) {
+fn check_format_10_provider_upgrade(label: &str, provider: &CloudProviderConfig) {
     let namespace = format!("engine/{label}/{}/", uuid::Uuid::new_v4());
-    ensure_sqrzl_namespace(&provider)
+    ensure_sqrzl_namespace(provider)
         .unwrap_or_else(|error| panic!("{label}: preparing {provider:?}: {error}"));
     let root = tempfile::tempdir().expect("provider cache directories");
     let options = |cache: &str| {
