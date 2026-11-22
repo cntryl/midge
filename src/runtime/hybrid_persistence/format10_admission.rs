@@ -180,8 +180,10 @@ impl<'a> Format10AdmissionStore<'a> {
                     };
                 }
                 Err(error) if error.is_precondition_failed() => match self.read_raw(&key)? {
-                    Some((actual, identity)) if actual == bytes => {
-                        return decode_record(slot, &actual, identity);
+                    Some((actual, _identity)) if actual == bytes => {
+                        return Err(MidgeError::Busy(
+                            "FORMAT 10 publication already has an admission record".into(),
+                        ));
                     }
                     Some(_) => occupied += 1,
                     None => return Err(error.into_midge()),
@@ -190,9 +192,11 @@ impl<'a> Format10AdmissionStore<'a> {
                     // This request could still land after this read. An
                     // unrelated occupant is therefore not grounds to try a
                     // different slot and risk a duplicate reservation.
-                    if let Some((actual, identity)) = self.read_raw(&key)? {
+                    if let Some((actual, _identity)) = self.read_raw(&key)? {
                         if actual == bytes {
-                            return decode_record(slot, &actual, identity);
+                            return Err(MidgeError::Busy(
+                                "FORMAT 10 publication already has an admission record".into(),
+                            ));
                         }
                     }
                     return Err(error.into_midge());

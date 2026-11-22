@@ -195,3 +195,35 @@ fn should_reserve_different_slots_for_concurrent_publications() -> MidgeResult<(
     assert_eq!(slots.len(), FORMAT10_ADMISSION_SLOT_COUNT);
     Ok(())
 }
+
+#[test]
+fn should_return_only_one_new_reservation_for_a_repeated_publication_uuid() -> MidgeResult<()> {
+    // Arrange
+    let cloud = std::sync::Arc::new(CloudStorage::with_mock());
+    let publication_id = Uuid::new_v4();
+
+    // Act
+    let attempts = [0_u8, 1].map(|_| {
+        let cloud = std::sync::Arc::clone(&cloud);
+        std::thread::spawn(move || {
+            let deadline = deadline();
+            Format10AdmissionStore::new(&cloud, &deadline).reserve(
+                publication_id,
+                4,
+                &plan(publication_id),
+            )
+        })
+    });
+    let results = attempts.map(|attempt| attempt.join().expect("reservation thread"));
+
+    // Assert
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(MidgeError::Busy(_))))
+            .count(),
+        1
+    );
+    Ok(())
+}
