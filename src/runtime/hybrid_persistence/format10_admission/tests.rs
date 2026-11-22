@@ -47,7 +47,7 @@ fn should_persist_the_reservation_lifecycle_for_a_cloud_publication() -> MidgeRe
     assert_eq!(slots.iter().flatten().count(), 1);
     assert_eq!(uploaded.phase, AdmissionPhase::Uploaded);
     assert_eq!(finished.phase, AdmissionPhase::Finished);
-    assert!(finished.identity != uploaded.identity);
+    assert_ne!(finished.identity, uploaded.identity);
     Ok(())
 }
 
@@ -140,7 +140,7 @@ fn should_enforce_migration_admission_budget_when_cut_proof_is_absent() {
     assert!(oversized_result.is_err());
     assert!(noncanonical_result.is_err());
     assert!(parsed_zero_epoch.is_err());
-    assert!(validate_slot(FORMAT10_ADMISSION_SLOT_COUNT as u8).is_err());
+    assert!(validate_slot(u8::try_from(FORMAT10_ADMISSION_SLOT_COUNT).unwrap()).is_err());
 }
 
 #[test]

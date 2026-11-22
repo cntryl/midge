@@ -1208,7 +1208,7 @@ mod tests {
                 &deadline,
             )?;
         let local_root: Arc<dyn crate::io::Fs> = Arc::new(
-            crate::io::RealFs::open_existing(&source).map_err(crate::io::FsError::into_midge)?,
+            crate::io::RealFs::open_existing(source).map_err(crate::io::FsError::into_midge)?,
         );
         Ok(CloudSimMigrationOwner {
             cloud,
@@ -1229,9 +1229,10 @@ mod tests {
         use crate::storage::cloud::BlockingCloud;
         let local_root = &owner.local_root;
         let manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
-            &local_root,
+            local_root,
             crate::config::RecoveryPolicy::Strict,
         )?;
+        let checkpoint_id = manifest.edit_checkpoint_id;
         let manifest = crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &manifest)
             .map_err(|error| MidgeError::Internal(error.to_string()))?;
         let raw_intents = crate::io::read_all(
@@ -1249,17 +1250,13 @@ mod tests {
             Arc::clone(local_root),
             [9; 32],
             &manifest,
-            crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
-                &local_root,
-                crate::config::RecoveryPolicy::Strict,
-            )?
-            .edit_checkpoint_id,
+            checkpoint_id,
             &intent_bytes,
             intent_state.sequence,
             intent_state.checksum,
         )?;
         crate::io::staging::stage_bytes_typed(
-            &local_root,
+            local_root,
             &crate::io::FsPath::new("FORMAT.tmp"),
             &crate::io::FsPath::new(crate::metadata::files::FORMAT),
             b"midge-format-version=10\n",
@@ -1399,7 +1396,10 @@ mod tests {
         assert!(inventory
             .objects
             .iter()
-            .any(|object| { object.path.starts_with("wal/") && object.path.ends_with(".wal") }));
+            .any(|object| object.path.starts_with("wal/")
+                && Path::new(&object.path)
+                    .extension()
+                    .is_some_and(|ext| ext == "wal")));
         let lease_path = artifact.join("objects/cloud_store/midge_primary_lease.json");
         let lease_bytes = fs::read(&lease_path)?;
         assert!(lease_bytes.starts_with(b"lease_version: 5\n"));
