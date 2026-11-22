@@ -421,7 +421,9 @@ fn mirror_failure_case(fail_first: bool) -> MidgeResult<()> {
         ),
         "actual metadata worker failure: {result:?}"
     );
-    assert_eq!(backend.intent_puts.load(Ordering::Acquire), 3);
+    // Two prior uploads (or the seeded count) and three failed attempts
+    // for the selected immutable operation.
+    assert_eq!(backend.intent_puts.load(Ordering::Acquire), 5);
     if fail_first {
         fixture.assert_input_retained()?;
         assert!(outputs

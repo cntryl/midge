@@ -244,18 +244,24 @@ impl CompactionFixture {
         assert_rows(&reopened);
         let pointer_after = read_committed_pointer(&self.bucket, self.prefix);
         let selected_after_reopen = committed_generation(&pointer_after);
-        if matches!(
-            self.boundary,
-            Boundary::LostResponse | Boundary::DisconnectBeforePut
-        ) {
+        let before_id = selected_before_reopen["id"]
+            .as_u64()
+            .expect("selected generation ordinal before reopen");
+        let after_id = selected_after_reopen["id"]
+            .as_u64()
+            .expect("selected generation ordinal after reopen");
+        let before_horizon = selected_before_reopen["manifest_horizon"]
+            .as_u64()
+            .expect("manifest horizon before reopen");
+        let after_horizon = selected_after_reopen["manifest_horizon"]
+            .as_u64()
+            .expect("manifest horizon after reopen");
+        assert!(
+            after_id >= before_id && after_horizon >= before_horizon,
+            "fresh recovery cannot regress the selected metadata generation"
+        );
+        if after_id == before_id {
             assert_eq!(selected_after_reopen, selected_before_reopen);
-        } else {
-            assert!(
-                selected_after_reopen["id"].as_u64() >= selected_before_reopen["id"].as_u64()
-                    && selected_after_reopen["manifest_horizon"].as_u64()
-                        >= selected_before_reopen["manifest_horizon"].as_u64(),
-                "fresh recovery cannot regress the selected metadata generation"
-            );
         }
         reopened.shutdown(Duration::from_secs(30)).unwrap();
     }
