@@ -227,37 +227,55 @@ pointer cutover:
    selected yet.
 3. Conditionally replace the lease document with a new, strictly versioned
    lease protocol (proposed version 5), preserving holder, owner and epoch,
-   and recording a durable upgrade state: migration ID, exact v9 predecessor
-   pointer identity, v10 candidate identity, source digest and target
-   protocol. The new implementation's renewal, release, acquisition and
-   epoch-validation paths must preserve and understand this state. The
-   released v0.5.3 parser recognizes lease versions 3 and 4. Verify that it
-   rejects version 5 as malformed before writing a lease document or
-   activating lease validity. That rejection must prevent its later
-   DDL-registry and WAL-catalog mutations.
-4. CAS the committed metadata pointer from the exact v9 predecessor to the
-   verified v10 candidate under the still-valid v5 lease and owner. The
+   and recording a pending upgrade with the migration ID, exact selected v9
+   generation identity, exact staged v10 generation identity, source digest
+   and target protocol. The pending state binds immutable generation
+   identities. Pointer ownership and the provider's CAS token can change on
+   takeover. The released v0.5.3 parser recognizes lease versions 3 and 4.
+   Verify that it rejects version 5 as malformed before writing a lease
+   document or activating lease validity. That rejection must prevent its
+   later DDL-registry and WAL-catalog mutations.
+4. Compare the current pointer's selected generation to the exact v9
+   predecessor. CAS to the verified v10 candidate using the current
+   pointer's conditional token under the still-valid v5 lease and owner. The
    candidate pointer selection is the cloud metadata switch. Retain the v5
    compatibility gate permanently so older binaries fail during acquisition
    before their startup mutations.
-5. Hydrate the local cache from the exact selected v10 generation and verify
-   it before startup recovery proceeds. Cache files are derived state. A
-   restart after partial hydration repeats this step.
+5. Verify the selected v10 candidate and conditionally transition the lease
+   from pending to active FORMAT 10 under the current holder, owner and
+   epoch. Active state keeps the v5 gate permanently and permits normal v10
+   pointer advancement. Hydrate the local cache from the exact selected v10
+   generation and verify it before startup recovery proceeds. Cache files
+   are derived state. A restart after partial hydration repeats this step.
 
-The v5 gate and pointer CAS are separate durable operations. A crash after
-installing the gate and before CAS leaves v9 selected and blocks old v9
-binaries. The new binary must resume from the persisted migration state. This
-can temporarily prevent database opening. The v9 generation remains intact.
-If pointer CAS has an unknown result, exact readback of the candidate means
-committed. Exact readback of the predecessor permits retry from the durable
-migration state. Any other selected pointer fences the attempt. If readback
-is unavailable, preserve all generations and return an unknown outcome.
+Every lease rewrite preserves the compatibility version and migration state,
+including renewal, normal release, cleanup of an ambiguous lease operation,
+and expired-owner takeover. Release conditionally expires the lease document
+in place. Takeover increments the epoch, acquires the lease with CAS, and
+claims the metadata pointer while preserving the selected generation. A
+stale owner cannot change the gate or publish through the new owner's
+pointer token. Initial gate installation and upgrade completion are the only
+migration-state transitions. A missing initialized lease or pointer fails
+closed.
 
-Cloud open also needs a new early compatibility check: after acquiring the
-lease, inspect the selected metadata generation and gate state before DDL
-registry fencing or WAL-catalog fencing. FORMAT validation during later cache
-hydration is too late. FORMAT 10 with no resumable migration record or with a
-missing v10 head is an error, never a request to bootstrap empty metadata.
+After acquiring the lease and claiming the pointer, resolve the gate and
+selected generation before DDL-registry fencing, WAL-catalog fencing, or any
+normal metadata publication:
+
+| Lease state | Selected generation | Startup action |
+| --- | --- | --- |
+| v4 | Valid FORMAT 9 | Open FORMAT 9 or start an explicit upgrade. |
+| v5 pending | Exact v9 predecessor | Verify the persisted candidate and resume its CAS using the current owner's pointer token. |
+| v5 pending | Exact v10 candidate | Verify the selected closure and finalize the lease state. |
+| v5 active FORMAT 10 | Valid FORMAT 10 | Open the selected closure and hydrate the cache. |
+| v4 | FORMAT 10 | Fail closed and preserve the metadata. |
+| v5 pending or active | Any other selection | Fail closed and preserve the gate and metadata. |
+
+The pending-state rows also govern readback after a lost pointer CAS
+response. If readback is unavailable, preserve the generations and report
+an unknown outcome. Resolve an uncertain lease-state write by reading the
+lease again and checking the current owner, epoch and migration state before
+proceeding. A new owner runs the same startup checks after takeover.
 
 ## Compatibility and backup rules
 
@@ -296,7 +314,8 @@ missing v10 head is an error, never a request to bootstrap empty metadata.
 | Cloud candidate upload fails before lease v5 gate | v9 pointer, v4 lease | Old release may continue. Candidate objects are unselected. Revalidate exact v9 source before retry. |
 | Cloud lease v5 gate durable, before pointer CAS | v9 pointer, v5 gate | Old release cannot acquire. New binary resumes exact migration. Do not roll back the gate implicitly. |
 | Cloud pointer CAS loses response | v9 or v10 pointer, v5 gate | Exact readback resolves candidate success or predecessor retry. Other/unknown state remains fenced. |
-| Cloud pointer selected, cache hydration interrupted | v10 pointer, v5 gate | Rehydrate exact selected closure on next new-binary startup. |
+| Cloud pointer selected, lease finalization interrupted | v10 pointer, v5 pending or active | Read the current gate. Verify the exact candidate and finalize if pending, then hydrate. |
+| Cloud cache hydration interrupted | v10 pointer, v5 active | Rehydrate exact selected closure on next new-binary startup. |
 | Append segment durable, before head publication | Previous head | Segment is an orphan, not committed. Retry under writer authority. Do not replay it by listing. |
 | Head publication outcome uncertain | Previous or candidate head | Exact head readback resolves. Otherwise unknown outcome and retain both. |
 | Selected segment/head corruption | Corrupt selected head | Fail closed. No fallback to predecessor or FORMAT 9. |
@@ -330,9 +349,13 @@ independent boundary evidence before migrating any v9 suffix.
 4. **Cloud gate and pointer migration.** Implement lease v5 upgrade/resume and
    cloud pointer CAS, early compatibility validation before DDL/WAL fencing,
    exact lost-CAS readback, cache hydration after interruption and cache-loss
-   recovery. Use the released v0.5.3 binary against the migrated fixture.
-   assert acquisition rejects before remote DDL registry or WAL catalog
-   changes. Exercise both simulated cloud and provider-backed topology.
+   recovery. Inject renewal, release, and expired-owner takeover before the
+   pointer switch and before lease finalization. Assert the persisted gate
+   survives, the new owner resumes the exact candidate, and the stale owner
+   cannot publish or clear the gate. Use the released v0.5.3 binary against
+   both pending and active fixtures and assert acquisition rejects before
+   remote DDL registry or WAL catalog changes. Exercise both simulated cloud
+   and provider-backed topology.
 5. **Backup, restore and qualification.** Capture/restore selected v10
    closures, preserve pre-upgrade backups, test rollback by restoring that
    backup after v10 writes, then run the crash campaign and provider
@@ -340,9 +363,5 @@ independent boundary evidence before migrating any v9 suffix.
    local, CloudSim, cloud cache-loss, old-binary exclusion and backup/restore
    gates pass.
 
-This document does not claim implementation, test, crash-campaign or provider
-qualification. The hardest unresolved implementation invariant is ensuring
-the cloud lease-v5 compatibility gate remains durable and resumable across
-lease heartbeat/release/takeover while the committed pointer is still FORMAT
-9, without allowing a v0.5.3 startup to pass lease acquisition and mutate DDL
-or WAL authority.
+Implementation, crash-campaign and provider qualification are tracked in
+#1093.
