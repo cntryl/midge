@@ -48,6 +48,9 @@ pub struct GcActor {
     /// be retried. Reclamation is a database obligation after it is queued;
     /// it must not depend on another caller submitting unrelated work.
     manifest_reclamation_retry: crate::runtime::retry_schedule::RetrySchedule,
+    /// Consecutive retries deferred behind another publication owner. Reset
+    /// when a reclamation attempt actually starts.
+    manifest_reclamation_contention_deferrals: u32,
     /// Failed asynchronous cloud deletes. The worker owns this queue until the
     /// event loop imports it for a delayed retry, so a failed provider request
     /// cannot be lost when the worker exits.
@@ -84,6 +87,7 @@ impl GcActor {
             manifest_reclamation_retry: crate::runtime::retry_schedule::RetrySchedule::new(
                 retry_policy.manifest_reclamation,
             ),
+            manifest_reclamation_contention_deferrals: 0,
             failed_cloud_deletes: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             completed_sst_deletes: Arc::new(parking_lot::Mutex::new(VecDeque::new())),
             inflight_sst_deletes: Arc::new(parking_lot::Mutex::new(HashSet::new())),
@@ -589,6 +593,17 @@ impl GcActor {
     /// a new retry before returning; success drains the queue.
     pub fn begin_manifest_reclamation_attempt(&mut self) {
         self.manifest_reclamation_retry.clear();
+        self.manifest_reclamation_contention_deferrals = 0;
+    }
+
+    /// Re-arm the retry because another publication owner is active, and
+    /// return how many consecutive deferrals this makes.
+    pub fn defer_manifest_reclamation_for_contention(&mut self) -> u32 {
+        self.manifest_reclamation_retry.defer();
+        self.manifest_reclamation_contention_deferrals = self
+            .manifest_reclamation_contention_deferrals
+            .saturating_add(1);
+        self.manifest_reclamation_contention_deferrals
     }
 
     /// Retain the queued reclamation and arrange another callerless attempt.

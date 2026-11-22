@@ -2,6 +2,9 @@ use super::{EventLoop, HandleOutcome};
 #[cfg(test)]
 use crate::runtime::RuntimeResponse;
 
+/// About one minute of deferrals at the production one-second retry interval.
+const CONTENTION_WARN_DEFERRALS: u32 = 60;
+
 pub(super) struct GcCoordinator;
 
 impl GcCoordinator {
@@ -17,17 +20,10 @@ impl GcCoordinator {
             return HandleOutcome::Continue;
         }
         if event_loop.publication.publication_gate.is_active() {
-            event_loop
-                .actors
-                .gc_actor
-                .defer_manifest_reclamation_retry();
+            Self::defer_for_contention(event_loop);
             return HandleOutcome::Continue;
         }
         let hybrid_storage = event_loop.actors.cloud_coordinator.hybrid_storage.clone();
-        event_loop
-            .actors
-            .gc_actor
-            .begin_manifest_reclamation_attempt();
         match event_loop.state.reclaim_dropped_column_families() {
             Ok(names) => event_loop.actors.gc_actor.queue_manifest_reclamation(names),
             Err(error) => {
@@ -39,6 +35,24 @@ impl GcCoordinator {
                 return HandleOutcome::Continue;
             }
         }
+        // A running mirror holds no publication gate, so it is checked
+        // explicitly. Discovery above still queues newly dropped names; the
+        // queue is retained, and checkpointing and mirror admission wait for
+        // the running mirror. Failures after this check are handled below.
+        if event_loop.actors.gc_actor.has_manifest_reclamation()
+            && event_loop
+                .actors
+                .cloud_coordinator
+                .metadata_mirror
+                .is_running()
+        {
+            Self::defer_for_contention(event_loop);
+            return HandleOutcome::Continue;
+        }
+        event_loop
+            .actors
+            .gc_actor
+            .begin_manifest_reclamation_attempt();
         if event_loop.actors.gc_actor.has_manifest_reclamation() {
             // Everything queued before the cut is captured is covered by this
             // publication; anything queued while it runs is not.
@@ -61,16 +75,6 @@ impl GcCoordinator {
             if matches!(published, Ok(true)) {
                 return HandleOutcome::Continue;
             }
-            if let Err(crate::common::MidgeError::Busy(reason)) = &published {
-                // Contention with another mirror is retried, not a failure:
-                // keep the queue and arm the retry without marking an anomaly.
-                tracing::debug!(%reason, "reclamation mirror deferred behind another publication");
-                event_loop
-                    .actors
-                    .gc_actor
-                    .defer_manifest_reclamation_retry();
-                return HandleOutcome::Continue;
-            }
             if published.is_err() {
                 Self::finish_manifest_reclamation(event_loop, published.map(|_| ()), &covered);
                 return HandleOutcome::Continue;
@@ -82,6 +86,24 @@ impl GcCoordinator {
             .gc_actor
             .retry_pending(&mut event_loop.state, hybrid_storage);
         HandleOutcome::Continue
+    }
+
+    fn defer_for_contention(event_loop: &mut EventLoop) {
+        let deferrals = event_loop
+            .actors
+            .gc_actor
+            .defer_manifest_reclamation_for_contention();
+        if deferrals == CONTENTION_WARN_DEFERRALS {
+            tracing::warn!(
+                deferrals,
+                "dropped column-family reclamation still deferred behind another metadata publication"
+            );
+        } else {
+            tracing::debug!(
+                deferrals,
+                "reclamation retry deferred behind another publication"
+            );
+        }
     }
 
     pub(super) fn finish_manifest_reclamation(
