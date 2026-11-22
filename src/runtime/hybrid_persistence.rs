@@ -18,10 +18,12 @@ use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use std::sync::Arc;
 
 mod catalog;
+pub(crate) mod format10_admission;
 mod format10_closure;
 pub(crate) mod metadata_chain;
 mod metadata_cuts;
 mod metadata_retention;
+pub(crate) use format10_admission::Format10AdmissionStore;
 pub(crate) use format10_closure::{capture_selected_format10_closure, publish_format10_closure};
 pub(crate) use metadata_cuts::mirror_captured_control_metadata_within;
 pub(crate) mod metadata_snapshot;
