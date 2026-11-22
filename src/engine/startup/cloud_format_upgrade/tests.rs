@@ -226,12 +226,11 @@ fn should_resume_pending_cloud_migration_from_exact_v9_predecessor() -> MidgeRes
     // Arrange
     let fixture = MigrationFixture::new(true)?;
 
-    // Act: startup reconciliation selects the immutable candidate, activates
-    // the permanent v5 gate, then rejects public FORMAT 10 runtime use.
+    // Act
     let result = fixture.reconcile();
 
     // Assert
-    assert!(matches!(result, Err(MidgeError::NotSupported(_))));
+    result?;
     assert_eq!(fixture.selected()?.as_ref(), Some(&fixture.candidate));
     assert_eq!(
         fixture.gate()?,
@@ -267,7 +266,7 @@ fn should_finalize_pending_gate_when_exact_candidate_is_already_selected() -> Mi
     let result = fixture.reconcile();
 
     // Assert
-    assert!(matches!(result, Err(MidgeError::NotSupported(_))));
+    result?;
     assert_eq!(
         fixture.gate()?,
         Some(CloudFormatMigrationGate::Active { target_format: 10 })
@@ -312,6 +311,42 @@ fn should_reject_missing_candidate_descriptor_before_startup_catalog_mutation() 
         Some(CloudFormatMigrationGate::Pending(fixture.pending.clone()))
     );
     fixture.assert_no_startup_catalog_mutations();
+    Ok(())
+}
+
+#[cfg(feature = "failpoints")]
+#[test]
+fn should_refuse_migration_descriptor_when_successful_put_has_no_readback() -> MidgeResult<()> {
+    // Arrange
+    let fixture = MigrationFixture::new(false)?;
+    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    fail::cfg(
+        "midge::cloud::inject_missing_format_descriptor_readback",
+        "return",
+    )
+    .map_err(MidgeError::Internal)?;
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(2));
+
+    // Act
+    let result = stage_candidate_descriptor(
+        &fixture.cloud,
+        &fixture.pending,
+        &fixture.candidate,
+        &deadline,
+    );
+    drop(scenario);
+
+    // Assert
+    assert!(
+        matches!(result, Err(MidgeError::RecoveryFailed(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        read_candidate_descriptor(&fixture.cloud, &fixture.pending, &deadline)?,
+        fixture.candidate,
+        "the provider accepted the PUT even though the attempt could not verify it"
+    );
     Ok(())
 }
 

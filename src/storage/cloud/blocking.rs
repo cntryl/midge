@@ -152,9 +152,23 @@ impl<'a> BlockingCloud<'a> {
         })
     }
 
+    fn range_identity(&self, key: &str) -> MidgeResult<Option<ObjectMetadata>> {
+        let deadline = self.begin("range HEAD", key)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cloud.heads.head_for_range(
+            &self.cloud.full_path(key),
+            CloudRequestOptions::default().with_deadline(deadline),
+            tx,
+        );
+        self.wait(&rx, &deadline, "range HEAD", key, |event| match event {
+            CloudEvent::Head { result, .. } => Some(result),
+            _ => None,
+        })
+    }
+
     /// Read a bounded immutable body under the exact identity supplied by HEAD.
     pub(crate) fn get_exact_len(&self, key: &str, len: u64) -> MidgeResult<Option<Vec<u8>>> {
-        let Some(identity) = self.head_optional(key)? else {
+        let Some(identity) = self.range_identity(key)? else {
             return Ok(None);
         };
         if identity.size != len || len == 0 {
@@ -162,12 +176,32 @@ impl<'a> BlockingCloud<'a> {
                 "cloud object '{key}' differs from its selected length {len}"
             )));
         }
+        self.get_identity_range(key, identity)
+    }
+
+    pub(crate) fn get_bounded(&self, key: &str, max_len: u64) -> MidgeResult<Option<Vec<u8>>> {
+        let Some(identity) = self.range_identity(key)? else {
+            return Ok(None);
+        };
+        if identity.size == 0 || identity.size > max_len {
+            return Err(MidgeError::Corruption(format!(
+                "cloud object '{key}' is outside its allowed range of 1 to {max_len} bytes"
+            )));
+        }
+        self.get_identity_range(key, identity)
+    }
+
+    fn get_identity_range(
+        &self,
+        key: &str,
+        identity: ObjectMetadata,
+    ) -> MidgeResult<Option<Vec<u8>>> {
         let deadline = self.begin("range", key)?;
         let (tx, rx) = std::sync::mpsc::channel();
         self.cloud.reads.read(
             &self.cloud.full_path(key),
             CloudReadOptions::default()
-                .with_range(0..len, identity)
+                .with_range(0..identity.size, identity)
                 .with_request_options(
                     CloudRequestOptions::default()
                         .with_deadline(deadline)

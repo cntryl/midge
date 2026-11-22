@@ -9,7 +9,9 @@ use crate::lease::{
     CloudFormatMigrationGate, CloudFormatMigrationPending, CloudMetadataGeneration,
     CloudMetadataGenerationIdentity, CloudMetadataHead, LeaderStore, SharedGenerationId,
 };
-use crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within;
+use crate::runtime::hybrid_persistence::{
+    decode_generation_manifest, metadata_chain, read_committed_metadata_bodies_within,
+};
 use crate::storage::cloud::{BlockingCloud, CloudEvent, CloudStorage};
 use crate::storage::StoragePrecondition;
 use serde::{Deserialize, Serialize};
@@ -113,7 +115,7 @@ fn stage_immutable_generation_descriptor(
         )));
     }
     let blocking = BlockingCloud::new(cloud, deadline);
-    if let Some(existing) = blocking.get_optional(key)? {
+    if let Some(existing) = blocking.get_bounded(key, MAX_CANDIDATE_DESCRIPTOR_BYTES as u64)? {
         return compare_generation_descriptor(&existing, &wire, generation, description);
     }
 
@@ -152,13 +154,20 @@ fn stage_immutable_generation_descriptor(
         )));
     }
 
-    match blocking.get_optional(key)? {
+    let readback = if crate::failpoints::is_active(
+        "midge::cloud::inject_missing_format_descriptor_readback",
+    ) {
+        None
+    } else {
+        blocking.get_exact_len(key, wire.len() as u64)?
+    };
+    match readback {
         Some(existing) => compare_generation_descriptor(&existing, &wire, generation, description),
-        None => write_result.map_err(|error| {
+        None => Err(write_result.err().unwrap_or_else(|| {
             MidgeError::RecoveryFailed(format!(
-                "{description} descriptor was not durably readable after write: {error}"
+                "{description} descriptor was not durably readable after write"
             ))
-        }),
+        })),
     }
 }
 
@@ -223,6 +232,11 @@ pub(super) fn reconcile_cloud_format_gate(
     match gate {
         None => match selected {
             None => Ok(CloudFormatGateResolution::Format9),
+            Some(generation) if metadata_chain::is_chain(&generation) => {
+                // A v9 chain never represents a v10 selector. Ordinary v9
+                // hydration checks its reconstructed marker and semantics.
+                Ok(CloudFormatGateResolution::Format9)
+            }
             Some(generation) => {
                 let marker = read_generation_format(cloud, &generation, deadline)?;
                 if marker != crate::metadata::format::current_format_marker_bytes() {
@@ -252,6 +266,7 @@ pub(super) fn reconcile_cloud_format_gate(
                     "active FORMAT 10 gate does not select a FORMAT 10 generation".into(),
                 ));
             }
+            decode_generation_manifest(&generation, &bodies, deadline)?;
             Ok(CloudFormatGateResolution::Format10Selected)
         }
         Some(CloudFormatMigrationGate::Active { .. }) => Err(MidgeError::LeaseIndeterminate(
@@ -298,6 +313,7 @@ fn reconcile_pending(
             "pending FORMAT 10 candidate descriptor does not select a FORMAT 10 marker".into(),
         ));
     }
+    decode_generation_manifest(&candidate, &candidate_bodies, deadline)?;
     if !selected_state {
         let source = selected.as_ref().ok_or_else(|| {
             MidgeError::LeaseIndeterminate("pending cloud source pointer disappeared".into())
@@ -371,7 +387,10 @@ fn read_candidate_descriptor(
         ));
     }
     let bytes = BlockingCloud::new(cloud, deadline)
-        .get_optional(&pending.candidate.descriptor_key)?
+        .get_bounded(
+            &pending.candidate.descriptor_key,
+            MAX_CANDIDATE_DESCRIPTOR_BYTES as u64,
+        )?
         .ok_or_else(|| {
             MidgeError::RecoveryFailed("pending cloud candidate descriptor is missing".into())
         })?;
@@ -387,7 +406,7 @@ fn read_source_descriptor(
 ) -> MidgeResult<CloudMetadataGeneration> {
     let key = CloudFormatMigrationPending::source_descriptor_key(&pending.migration_id);
     let bytes = BlockingCloud::new(cloud, deadline)
-        .get_optional(&key)?
+        .get_bounded(&key, MAX_CANDIDATE_DESCRIPTOR_BYTES as u64)?
         .ok_or_else(|| {
             MidgeError::RecoveryFailed("pending cloud source descriptor is missing".into())
         })?;
@@ -402,8 +421,8 @@ fn read_source_descriptor(
 
 fn read_selected_generation(
     store: &dyn LeaderStore,
-    _holder_id: &str,
-    _epoch: u64,
+    holder_id: &str,
+    epoch: u64,
     cloud: &CloudStorage,
     deadline: &OperationDeadline,
 ) -> MidgeResult<Option<CloudMetadataGeneration>> {
@@ -413,7 +432,7 @@ fn read_selected_generation(
         .read_committed_metadata(remaining(cloud, deadline)?)
         .map_err(map_lease_error)?;
     match store
-        .read_committed_metadata_for_writer(_holder_id, _epoch, remaining(cloud, deadline)?)
+        .read_committed_metadata_for_writer(holder_id, epoch, remaining(cloud, deadline)?)
         .map_err(map_lease_error)?
     {
         CloudMetadataHead::Committed(generation) => Ok(Some(generation)),
@@ -487,8 +506,15 @@ fn read_generation_format(
         .iter()
         .find(|object| object.file_name == crate::metadata::files::FORMAT)
         .ok_or_else(|| MidgeError::Corruption("cloud FORMAT marker reference is missing".into()))?;
+    if object.len != FORMAT_10_MARKER.len() as u64
+        && object.len != FORMAT_10_MARKER.len() as u64 - 1
+    {
+        return Err(MidgeError::Corruption(
+            "cloud FORMAT marker length is invalid".into(),
+        ));
+    }
     let body = BlockingCloud::new(cloud, deadline)
-        .get_optional(&object.object_key)?
+        .get_exact_len(&object.object_key, object.len)?
         .ok_or_else(|| {
             MidgeError::RecoveryFailed("cloud FORMAT marker object is missing".into())
         })?;
