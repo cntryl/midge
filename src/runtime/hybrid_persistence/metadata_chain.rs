@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 const CHAIN_KIND: u8 = 5;
+const MAX_MANIFEST_PUT_ATTEMPTS: u8 = 3;
 const CHECKPOINT_EDIT_BYTES: u64 = 16 * 1024;
 type DecodedChain = (
     BTreeMap<String, Vec<u8>>,
@@ -365,12 +366,13 @@ pub(super) fn publish_with_cut(
         ));
     }
     let key = format!("manifest/{:020}/{}", id.get(), version.operation_id);
+    let reservation = cut.map(crate::runtime::CapturedMetadataCut::memory_reservation);
     publish_bytes(
         context.cloud,
         &key,
         &encoded,
         context.deadline,
-        cut.map(crate::runtime::CapturedMetadataCut::memory_reservation),
+        reservation.as_ref(),
     )?;
     let object = CloudMetadataObject {
         file_name: CHAIN_FILE_NAME.into(),
@@ -387,42 +389,56 @@ fn publish_bytes(
     key: &str,
     bytes: &[u8],
     deadline: &OperationDeadline,
-    reservation: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
+    reservation: Option<&std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
 ) -> MidgeResult<()> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let mut request = StorageRequest::new(key, *deadline, cloud.callback_timeout())
-        .with_precondition(StoragePrecondition::IfAbsent);
-    if let Some(reservation) = &reservation {
-        request = request.with_reservation(std::sync::Arc::clone(reservation));
-    }
-    cloud.submit_write_receipt_request(request, bytes.to_vec(), tx);
-    let timeout = deadline
-        .clamp_nonzero(cloud.callback_timeout())
-        .ok_or_else(|| MidgeError::Timeout("cloud manifest PUT deadline exhausted".into()))?;
-    let outcome = rx.recv_timeout(timeout);
-    match outcome {
-        Ok(Ok(Some(receipt))) if receipt.matches(bytes) => return Ok(()),
-        Ok(Ok(Some(_))) => {
-            return Err(MidgeError::Corruption(
-                "cloud manifest receipt differs".into(),
-            ))
-        }
-        _ => {}
-    }
-    // A missing receipt or a lost conditional PUT response needs exact bytes
-    // under the operation's stable immutable key before pointer publication.
     let mut io = BlockingCloud::new(cloud, deadline);
     if let Some(reservation) = reservation {
-        io = io.with_reservation(reservation);
+        io = io.with_reservation(std::sync::Arc::clone(reservation));
     }
-    let actual = io.get_optional(key)?;
-    if actual.as_deref() == Some(bytes) {
-        Ok(())
-    } else {
-        Err(MidgeError::Corruption(
-            "cloud manifest PUT was not proven by readback".into(),
-        ))
+    for attempt in 0..MAX_MANIFEST_PUT_ATTEMPTS {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut request = StorageRequest::new(key, *deadline, cloud.callback_timeout())
+            .with_precondition(StoragePrecondition::IfAbsent);
+        if let Some(reservation) = reservation {
+            request = request.with_reservation(std::sync::Arc::clone(reservation));
+        }
+        let timeout = deadline
+            .clamp_nonzero(cloud.callback_timeout())
+            .ok_or_else(|| MidgeError::Timeout("cloud manifest PUT deadline exhausted".into()))?;
+        cloud.submit_write_receipt_request(request, bytes.to_vec(), tx);
+        let outcome = rx.recv_timeout(timeout);
+        let terminal_failure = match outcome {
+            Ok(Ok(Some(receipt))) if receipt.matches(bytes) => return Ok(()),
+            Ok(Ok(Some(_))) => {
+                return Err(MidgeError::Corruption(
+                    "cloud manifest receipt differs".into(),
+                ));
+            }
+            Ok(Ok(None) | Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => true,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
+        };
+        // A missing receipt or a lost conditional PUT response needs exact
+        // bytes under the immutable key before pointer publication. Only a
+        // proven absence permits retrying the same IfAbsent write.
+        let actual = io.get_optional(key)?;
+        match actual.as_deref() {
+            Some(actual) if actual == bytes => return Ok(()),
+            None if terminal_failure && attempt + 1 < MAX_MANIFEST_PUT_ATTEMPTS => {}
+            None if !terminal_failure => {
+                return Err(MidgeError::Timeout(
+                    "cloud manifest PUT outcome remained unresolved after readback".into(),
+                ));
+            }
+            Some(_) | None => {
+                return Err(MidgeError::Corruption(
+                    "cloud manifest PUT was not proven by readback".into(),
+                ));
+            }
+        }
     }
+    Err(MidgeError::Corruption(
+        "cloud manifest PUT attempts exhausted".into(),
+    ))
 }
 
 #[cfg(test)]
