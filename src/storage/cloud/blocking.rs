@@ -266,7 +266,7 @@ impl<'a> BlockingCloud<'a> {
     /// PUT has a positive terminal reply. Readback alone can prove bytes, but
     /// cannot prove that a timed-out request will never create them again.
     pub(crate) fn put_immutable_terminal(&self, key: &str, bytes: &[u8]) -> MidgeResult<()> {
-        use crate::storage::{StoragePrecondition, StorageRequest};
+        use crate::storage::{StorageBackend, StoragePrecondition, StorageRequest};
         let deadline = self.begin("immutable put", key)?;
         let timeout = self.remaining(&deadline, "immutable put", key)?;
         let mut request = StorageRequest::new(key, deadline, timeout)
