@@ -1565,15 +1565,118 @@ fn recovery_error(context: &str, error: FsError) -> MidgeError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::RealFs;
+    use crate::io::traits::{DirEntry, Metadata};
+    use crate::io::{Durability, File, FsPath, FsResult, OpenOptions, ReadFs, RealFs};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct FailHeadDirectorySyncFs {
+        inner: RealFs,
+        armed: AtomicBool,
+        head_replaced: AtomicBool,
+    }
+
+    impl ReadFs for FailHeadDirectorySyncFs {
+        fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+            self.inner.open_read(path)
+        }
+
+        fn exists(&self, path: &FsPath) -> FsResult<bool> {
+            self.inner.exists(path)
+        }
+
+        fn metadata(&self, path: &FsPath) -> FsResult<Metadata> {
+            self.inner.metadata(path)
+        }
+
+        fn list_dir(&self, path: &FsPath) -> FsResult<Vec<DirEntry>> {
+            self.inner.list_dir(path)
+        }
+    }
+
+    impl Fs for FailHeadDirectorySyncFs {
+        fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn File + '_>> {
+            self.inner.open(path, options)
+        }
+
+        fn remove_file(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn create_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn remove_dir_all(&self, path: &FsPath) -> FsResult<()> {
+            self.inner.remove_dir_all(path)
+        }
+
+        fn sync_dir(&self, path: &FsPath, durability: Durability) -> FsResult<()> {
+            if self.head_replaced.load(Ordering::SeqCst) && path.0 == "metadata" {
+                return Err(crate::io::FsError::Io(
+                    "injected HEAD directory sync failure".into(),
+                ));
+            }
+            self.inner.sync_dir(path, durability)
+        }
+
+        fn rename_atomic(&self, from: &FsPath, to: &FsPath) -> FsResult<()> {
+            self.inner.rename_atomic(from, to)?;
+            if self.armed.load(Ordering::SeqCst) && to.0 == HEAD_PATH {
+                self.head_replaced.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
 
     fn real_fs(path: &std::path::Path) -> Arc<dyn Fs> {
         Arc::new(RealFs::new(path).expect("real filesystem"))
     }
 
     #[test]
+    fn should_fence_writer_when_replaced_head_cannot_be_resynced() {
+        // Arrange
+        #[cfg(feature = "failpoints")]
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let directory = tempfile::tempdir().expect("temporary database");
+        let failing_fs = Arc::new(FailHeadDirectorySyncFs {
+            inner: RealFs::new(directory.path()).expect("real filesystem"),
+            armed: AtomicBool::new(false),
+            head_replaced: AtomicBool::new(false),
+        });
+        let fs: Arc<dyn Fs> = failing_fs.clone();
+        let mut authority = LocalMetadataAuthority::initialize(
+            Arc::clone(&fs),
+            "generation-outcome",
+            b"manifest checkpoint",
+            b"intent checkpoint",
+        )
+        .expect("initialize authority");
+        failing_fs.armed.store(true, Ordering::SeqCst);
+
+        // Act
+        let first = authority.append(Stream::Manifest, 1, 1, b"uncertain selector");
+        let second = authority.append(Stream::Manifest, 1, 1, b"must not proceed");
+        let selected_head = LocalMetadataAuthority::open(fs).expect("read visible selector");
+
+        // Assert
+        assert!(first.is_err(), "directory resync failure must be reported");
+        assert!(
+            matches!(second, Err(MidgeError::RecoveryFailed(_))),
+            "an unresolved selector outcome must fence later writes"
+        );
+        assert_eq!(selected_head.head.sequence, 2);
+        assert_eq!(
+            selected_head.selected_ids(Stream::Manifest),
+            Vec::<(u64, u64)>::new()
+        );
+        assert_eq!(selected_head.head.pending_objects.len(), 1);
+    }
+
+    #[test]
     fn should_reopen_only_head_selected_local_metadata_segments() {
         // Arrange
+        #[cfg(feature = "failpoints")]
+        let _test_guard = crate::failpoints::test_failpoint_guard();
         let directory = tempfile::tempdir().expect("temporary database");
         let fs = real_fs(directory.path());
         let mut authority = LocalMetadataAuthority::initialize(
@@ -1602,6 +1705,8 @@ mod tests {
     #[test]
     fn should_reject_selected_object_corruption_without_falling_back_to_prior_head() {
         // Arrange
+        #[cfg(feature = "failpoints")]
+        let _test_guard = crate::failpoints::test_failpoint_guard();
         let directory = tempfile::tempdir().expect("temporary database");
         let fs = real_fs(directory.path());
         let mut authority = LocalMetadataAuthority::initialize(
@@ -1632,10 +1737,76 @@ mod tests {
         );
     }
 
+    #[test]
+    fn should_reject_zero_extended_selected_history_damage_at_every_wire_region() {
+        // Arrange
+        #[cfg(feature = "failpoints")]
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let regions = ["header", "body", "crc"];
+        for selected_position in [0, 2] {
+            for region in regions {
+                let (directory, fs) = v10_database();
+                let store = crate::metadata::store::ManifestStore::new_with_format(
+                    Arc::clone(&fs),
+                    crate::metadata::accounting::Owner::new(),
+                    crate::metadata::accounting::Medium::Persistent,
+                    crate::metadata::format::CURRENT_FORMAT_VERSION + 1,
+                );
+                for id in 2..=4 {
+                    store
+                        .append(&crate::metadata::ManifestEdit::CreateColumnFamily {
+                            id,
+                            name: format!("family-{id}"),
+                            created_at: u64::from(id),
+                        })
+                        .expect("append selected history");
+                }
+                let authority =
+                    LocalMetadataAuthority::open(Arc::clone(&fs)).expect("open selected history");
+                let selected = authority.head.manifest.segments[selected_position].clone();
+                let selected_path = directory
+                    .path()
+                    .join(object_path(&authority.head.generation, &selected.name));
+                let original = std::fs::read(&selected_path).expect("read selected segment");
+                assert_eq!(u64::try_from(original.len()).unwrap(), selected.len);
+                let cut = match region {
+                    "header" => 12,
+                    "body" => 62 + (original.len() - 66) / 2,
+                    "crc" => original.len() - 2,
+                    _ => unreachable!("known wire region"),
+                };
+                let mut damaged = original[..cut].to_vec();
+                damaged.resize(original.len(), 0);
+                std::fs::write(&selected_path, damaged).expect("write zero-extended damage");
+                assert_eq!(
+                    std::fs::metadata(&selected_path)
+                        .expect("stat damaged object")
+                        .len(),
+                    selected.len,
+                    "damage retains the advertised object extent"
+                );
+
+                // Act
+                let loaded = crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
+                    &fs,
+                    crate::config::RecoveryPolicy::Strict,
+                );
+
+                // Assert
+                assert!(
+                    matches!(loaded, Err(MidgeError::Corruption(_))),
+                    "selected {region} damage at history position {selected_position} must fail closed"
+                );
+            }
+        }
+    }
+
     #[cfg(feature = "failpoints")]
     #[test]
     fn should_keep_previous_head_selected_when_append_stops_after_object_sync() {
         // Arrange
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
         let directory = tempfile::tempdir().expect("temporary database");
         let fs = real_fs(directory.path());
         let mut authority = LocalMetadataAuthority::initialize(
@@ -1650,6 +1821,7 @@ mod tests {
         // Act
         let append = authority.append(Stream::Manifest, 1, 1, b"not selected");
         fail::remove("midge::format10::after_object_sync");
+        scenario.teardown();
         let reopened = LocalMetadataAuthority::open(fs).expect("reopen previous head");
 
         // Assert
@@ -1659,9 +1831,89 @@ mod tests {
         assert_eq!(reopened.head.pending_objects.len(), 1);
     }
 
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_allow_new_append_after_unselected_immutable_is_cleaned() {
+        // Arrange
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        let (_directory, fs) = v10_database();
+        let store = crate::metadata::store::ManifestStore::new_with_format(
+            Arc::clone(&fs),
+            crate::metadata::accounting::Owner::new(),
+            crate::metadata::accounting::Medium::Persistent,
+            crate::metadata::format::CURRENT_FORMAT_VERSION + 1,
+        );
+        store
+            .append(&crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: 2,
+                name: "selected-before-cut".into(),
+                created_at: 1,
+            })
+            .expect("append initial selected edit");
+        fail::cfg("midge::format10::after_object_sync", "return").expect("configure failpoint");
+
+        // Act
+        let interrupted = store.append(&crate::metadata::ManifestEdit::CreateColumnFamily {
+            id: 3,
+            name: "unselected-after-cut".into(),
+            created_at: 2,
+        });
+        fail::remove("midge::format10::after_object_sync");
+        scenario.teardown();
+        let reopened_before_retry =
+            crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
+                &fs,
+                crate::config::RecoveryPolicy::Strict,
+            )
+            .expect("read selected history after interruption");
+        let retry = store.append(&crate::metadata::ManifestEdit::CreateColumnFamily {
+            id: 4,
+            name: "selected-after-retry".into(),
+            created_at: 3,
+        });
+        let reopened_after_retry =
+            crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
+                &fs,
+                crate::config::RecoveryPolicy::Strict,
+            )
+            .expect("read selected history after retry");
+
+        // Assert
+        assert!(interrupted.is_err());
+        assert!(
+            retry.is_ok(),
+            "a proven unselected object must not block a later append"
+        );
+        assert_eq!(reopened_before_retry.edit_checkpoint_id, 1);
+        assert!(reopened_before_retry
+            .column_families
+            .iter()
+            .any(|family| family.id == 2));
+        assert!(!reopened_before_retry
+            .column_families
+            .iter()
+            .any(|family| family.id == 3));
+        assert_eq!(reopened_after_retry.edit_checkpoint_id, 2);
+        assert!(reopened_after_retry
+            .column_families
+            .iter()
+            .any(|family| family.id == 2));
+        assert!(reopened_after_retry
+            .column_families
+            .iter()
+            .any(|family| family.id == 4));
+        assert!(!reopened_after_retry
+            .column_families
+            .iter()
+            .any(|family| family.id == 3));
+    }
+
     #[test]
     fn should_reject_head_that_exceeds_encoded_limit() {
         // Arrange
+        #[cfg(feature = "failpoints")]
+        let _test_guard = crate::failpoints::test_failpoint_guard();
         let directory = tempfile::tempdir().expect("temporary database");
         let fs = real_fs(directory.path());
         let authority = LocalMetadataAuthority::initialize(
@@ -1704,6 +1956,8 @@ mod tests {
     #[test]
     fn should_rebuild_digest_bound_candidate_after_interrupted_source_change() {
         // Arrange
+        #[cfg(feature = "failpoints")]
+        let _test_guard = crate::failpoints::test_failpoint_guard();
         let directory = tempfile::tempdir().expect("temporary database");
         let fs = real_fs(directory.path());
         crate::metadata::ensure_or_create_format_marker(&fs, directory.path())
@@ -1760,6 +2014,8 @@ mod tests {
     #[test]
     fn should_route_metadata_writes_through_selected_head() {
         // Arrange
+        #[cfg(feature = "failpoints")]
+        let _test_guard = crate::failpoints::test_failpoint_guard();
         let (directory, fs) = v10_database();
         let store = crate::metadata::store::ManifestStore::new_with_format(
             Arc::clone(&fs),
@@ -1809,8 +2065,99 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_state_invalid_manifest_batch_before_format_10_publication() {
+        // Arrange
+        #[cfg(feature = "failpoints")]
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let (_directory, fs) = v10_database();
+        let store = crate::metadata::store::ManifestStore::new_with_format(
+            Arc::clone(&fs),
+            crate::metadata::accounting::Owner::new(),
+            crate::metadata::accounting::Medium::Persistent,
+            crate::metadata::format::CURRENT_FORMAT_VERSION + 1,
+        );
+        let invalid = [
+            crate::metadata::ManifestEdit::CreateColumnFamily {
+                id: 2,
+                name: "must-not-commit".into(),
+                created_at: 1,
+            },
+            crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                cf_id: 999,
+                freeze_sequence: 1,
+            },
+        ];
+
+        // Act
+        let rejected = store.append_batch(&invalid);
+        let after_rejection =
+            LocalMetadataAuthority::open(Arc::clone(&fs)).expect("open after rejected batch");
+        let persisted = crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
+            &fs,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .expect("persisted source remains readable");
+        // Assert
+        assert!(
+            rejected.is_err(),
+            "state-invalid batch was acknowledged: {rejected:?}"
+        );
+        assert_eq!(after_rejection.high_water(Stream::Manifest), 0);
+        assert_eq!(persisted.edit_checkpoint_id, 0);
+        assert!(!persisted
+            .column_families
+            .iter()
+            .any(|family| family.name == "must-not-commit"));
+    }
+
+    #[test]
+    fn should_apply_manifest_batch_as_one_format_10_edit() {
+        // Arrange
+        #[cfg(feature = "failpoints")]
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let (_directory, fs) = v10_database();
+        let store = crate::metadata::store::ManifestStore::new_with_format(
+            Arc::clone(&fs),
+            crate::metadata::accounting::Owner::new(),
+            crate::metadata::accounting::Medium::Persistent,
+            crate::metadata::format::CURRENT_FORMAT_VERSION + 1,
+        );
+
+        // Act
+        let accepted = store
+            .append_batch(&[
+                crate::metadata::ManifestEdit::CreateColumnFamily {
+                    id: 2,
+                    name: "batch-a".into(),
+                    created_at: 2,
+                },
+                crate::metadata::ManifestEdit::CreateColumnFamily {
+                    id: 3,
+                    name: "batch-b".into(),
+                    created_at: 3,
+                },
+            ])
+            .expect("append valid batch");
+        let authority = LocalMetadataAuthority::open(Arc::clone(&fs)).expect("open selected batch");
+        let reopened = crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
+            &fs,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .expect("load committed batch");
+
+        // Assert
+        assert_eq!(accepted, 1, "a batch consumes one edit ID");
+        assert_eq!(authority.high_water(Stream::Manifest), 1);
+        assert_eq!(reopened.edit_checkpoint_id, 1);
+        assert!(reopened.column_families.iter().any(|family| family.id == 2));
+        assert!(reopened.column_families.iter().any(|family| family.id == 3));
+    }
+
+    #[test]
     fn should_checkpoint_manifest_to_a_new_generation_before_closure_limit() {
         // Arrange
+        #[cfg(feature = "failpoints")]
+        let _test_guard = crate::failpoints::test_failpoint_guard();
         let (directory, fs) = v10_database();
         let original = LocalMetadataAuthority::open(Arc::clone(&fs)).expect("open initial head");
         let original_generation = original.head.generation.clone();
@@ -1851,6 +2198,8 @@ mod tests {
     #[test]
     fn should_leave_manifest_edit_unselected_when_immutable_publication_is_interrupted() {
         // Arrange
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
         let (_directory, fs) = v10_database();
         let store = crate::metadata::store::ManifestStore::new_with_format(
             Arc::clone(&fs),
@@ -1867,6 +2216,7 @@ mod tests {
             created_at: 2,
         });
         fail::remove("midge::format10::after_object_sync");
+        scenario.teardown();
         let manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
             &fs,
             crate::config::RecoveryPolicy::Strict,
@@ -1883,6 +2233,8 @@ mod tests {
     #[test]
     fn should_keep_old_generation_selected_when_checkpoint_is_interrupted() {
         // Arrange
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
         let (_directory, fs) = v10_database();
         let mut authority = LocalMetadataAuthority::open(Arc::clone(&fs)).expect("open head");
         let original = authority.head.clone();
@@ -1897,6 +2249,7 @@ mod tests {
         // Act
         let result = authority.checkpoint_manifest(&base, 0);
         fail::remove("midge::format10::after_checkpoint_objects_sync");
+        scenario.teardown();
         let reopened = LocalMetadataAuthority::open(fs).expect("reopen old head");
 
         // Assert

@@ -519,6 +519,10 @@ fn append_format_10(
             .high_water(crate::metadata::local_authority::Stream::Manifest)
             .checked_add(1)
             .ok_or_else(|| MidgeError::ResourceLimit("manifest edit ID exhausted".into()))?;
+        let mut manifest = ManifestPersistence::load_format_10(fs, None)?;
+        manifest.apply_edit(edit)?;
+        manifest.edit_checkpoint_id = edit_id;
+        manifest.validate_persisted()?;
         let payload = serde_json::to_vec(edit).map_err(|error| {
             MidgeError::Internal(format!("encode FORMAT 10 manifest edit: {error}"))
         })?;
@@ -527,10 +531,6 @@ fn append_format_10(
         }
         let stream = crate::metadata::local_authority::Stream::Manifest;
         if authority.append_would_exceed_limits(stream, edit_id, edit_id, &payload)? {
-            let mut manifest = ManifestPersistence::load_format_10(fs, None)?;
-            manifest.apply_edit(edit)?;
-            manifest.edit_checkpoint_id = edit_id;
-            manifest.validate_persisted()?;
             let base = super::codec::encode(super::codec::MANIFEST, &manifest)?;
             authority.checkpoint_manifest(&base, edit_id)?;
         } else {
