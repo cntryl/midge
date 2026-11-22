@@ -13,8 +13,16 @@ const WAIT: Duration = Duration::from_secs(60);
 #[derive(Clone, Copy, Debug, Serialize)]
 pub(super) enum Boundary {
     BeforePut,
+    DisconnectBeforePut,
     AfterPut,
     LostResponse,
+    LostResponseAndReadback,
+}
+
+#[derive(Clone, Copy)]
+enum Target {
+    Wal,
+    IntentClearManifest,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -50,6 +58,8 @@ pub(super) struct Control {
     gate: Mutex<GateState>,
     changed: Condvar,
     deny_lease_writes: AtomicBool,
+    deny_manifest_readbacks: AtomicBool,
+    target: Target,
     observations: Mutex<Vec<Observation>>,
 }
 
@@ -71,7 +81,7 @@ impl Control {
             .unwrap();
         let reached = state.reached.clone();
         drop(state);
-        reached.expect("selected WAL boundary must be reached")
+        reached.expect("selected provider request boundary must be reached")
     }
 
     fn hold(&self, observation: &Observation) -> io::Result<()> {
@@ -114,9 +124,17 @@ impl Control {
         self.observations.lock().unwrap().clone()
     }
 
+    pub fn has_reached_boundary(&self) -> bool {
+        self.gate.lock().unwrap().reached.is_some()
+    }
+
     fn claim(&self, method: &str, path: &str) -> bool {
         let mut state = self.gate.lock().unwrap();
-        if matches!(state.claim, Claim::Armed) && method == "PUT" && is_wal_path(path) {
+        let selected = match self.target {
+            Target::Wal => method == "PUT" && is_wal_path(path),
+            Target::IntentClearManifest => method == "PUT" && path.contains("/manifest/"),
+        };
+        if matches!(state.claim, Claim::Armed) && selected {
             state.claim = Claim::Claimed;
             true
         } else {
@@ -131,6 +149,15 @@ impl Control {
         observation: &mut Observation,
         gated: bool,
     ) -> io::Result<()> {
+        if self.deny_manifest_readbacks.load(Ordering::Acquire)
+            && observation.method == "GET"
+            && observation.path.contains("/manifest/")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "immutable manifest readback deliberately disconnected",
+            ));
+        }
         if self.deny_lease_writes.load(Ordering::Acquire)
             && observation.method == "PUT"
             && observation.path.ends_with("/midge_primary_lease.json")
@@ -140,8 +167,19 @@ impl Control {
                 "predecessor lease request disconnected before forwarding",
             ));
         }
-        if gated && matches!(self.boundary, Boundary::BeforePut) {
+        if gated
+            && matches!(
+                self.boundary,
+                Boundary::BeforePut | Boundary::DisconnectBeforePut
+            )
+        {
             self.hold(observation)?;
+        }
+        if gated && matches!(self.boundary, Boundary::DisconnectBeforePut) {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "immutable manifest PUT deliberately disconnected before forwarding",
+            ));
         }
         // Submission remains observable even when the upstream result is
         // ambiguous. A transport error must not hide a forbidden mutation.
@@ -159,7 +197,15 @@ impl Control {
         if gated && !matches!(self.boundary, Boundary::BeforePut) {
             self.hold(observation)?;
         }
-        if gated && matches!(self.boundary, Boundary::LostResponse) {
+        if gated
+            && matches!(
+                self.boundary,
+                Boundary::LostResponse | Boundary::LostResponseAndReadback
+            )
+        {
+            if matches!(self.boundary, Boundary::LostResponseAndReadback) {
+                self.deny_manifest_readbacks.store(true, Ordering::Release);
+            }
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
                 "successful upstream response deliberately disconnected",
@@ -204,6 +250,14 @@ pub(super) struct Proxy {
 
 impl Proxy {
     pub fn start(upstream: SocketAddr, boundary: Boundary) -> Self {
+        Self::start_for(upstream, boundary, Target::Wal)
+    }
+
+    pub fn start_intent_clear_manifest(upstream: SocketAddr, boundary: Boundary) -> Self {
+        Self::start_for(upstream, boundary, Target::IntentClearManifest)
+    }
+
+    fn start_for(upstream: SocketAddr, boundary: Boundary, target: Target) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
@@ -213,6 +267,8 @@ impl Proxy {
             gate: Mutex::new(GateState::default()),
             changed: Condvar::new(),
             deny_lease_writes: AtomicBool::new(false),
+            deny_manifest_readbacks: AtomicBool::new(false),
+            target,
             observations: Mutex::new(Vec::new()),
         });
         let stopping = Arc::new(AtomicBool::new(false));
@@ -244,6 +300,12 @@ impl Proxy {
             worker: Some(worker),
             requests,
         }
+    }
+
+    pub fn allow_pointer_readbacks(&self) {
+        self.control
+            .deny_manifest_readbacks
+            .store(false, Ordering::Release);
     }
 }
 
