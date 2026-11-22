@@ -367,7 +367,7 @@ mod tests {
         let failpoint = fail::FailScenario::setup();
         fail::cfg("midge::format10::before_marker_switch", "return")
             .expect("inject pre-switch interruption");
-        let interrupted = Engine::upgrade_format_9(opts.clone(), timeout);
+        let interrupted = Engine::upgrade_format_9(&opts, timeout);
         failpoint.teardown();
         drop(failpoint_guard);
         assert!(interrupted.is_err());
@@ -379,7 +379,7 @@ mod tests {
         let original = std::fs::read(directory.path().join(files::MANIFEST_SNAPSHOT))?;
 
         // Act: retry against the new source and open through normal startup.
-        Engine::upgrade_format_9(opts.clone(), timeout)?;
+        Engine::upgrade_format_9(&opts, timeout)?;
         let mut reopened = Engine::open(opts)?;
 
         // Assert

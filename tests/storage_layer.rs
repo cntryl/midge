@@ -1880,7 +1880,7 @@ mod compatibility_fixtures {
             .expect("strict local upgrade options");
 
         // Act
-        Engine::upgrade_format_9(opts.clone(), Duration::from_secs(10))
+        Engine::upgrade_format_9(&opts, Duration::from_secs(10))
             .expect("upgrade published FORMAT 9 metadata");
 
         // Assert
@@ -1918,7 +1918,7 @@ mod compatibility_fixtures {
         let restore = output.path().join("restored");
         let timeout = Duration::from_secs(10);
         let opts = OpenOptions::local(source.path()).build().unwrap();
-        Engine::upgrade_format_9(opts.clone(), timeout).expect("upgrade published fixture");
+        Engine::upgrade_format_9(&opts, timeout).expect("upgrade published fixture");
         let mut engine = Engine::open(opts).expect("open FORMAT 10 source");
 
         // Act
@@ -1942,6 +1942,48 @@ mod compatibility_fixtures {
         assert_published_v0_5_3_fixture_state(&restored);
         restored.shutdown(timeout).expect("shut down restored data");
         engine.shutdown(timeout).expect("shut down source");
+    }
+
+    #[test]
+    fn should_recover_published_cloudsim_data_after_format_10_upgrade() {
+        // Arrange
+        let source = copy_fixture_dir("v0_5_3_published_cloud");
+        let cloud_options = |path: &Path| {
+            OpenOptions::cloud_simulated(path, "midge-fixtures", "published-v0.5.3")
+                .recovery_policy(RecoveryPolicy::Strict)
+                .build()
+                .expect("strict CloudSim options")
+        };
+        let fresh_cache = |prior: &Path| {
+            let temp = tempfile::tempdir().expect("new cloud cache");
+            copy_dir_recursive(&prior.join("cloud_store"), &temp.path().join("cloud_store"))
+                .expect("retain only the simulated provider data");
+            temp
+        };
+        let timeout = Duration::from_secs(30);
+
+        // Act
+        Engine::upgrade_format_9(&cloud_options(source.path()), timeout)
+            .expect("upgrade published cloud metadata");
+        let first = fresh_cache(source.path());
+        let mut engine = Engine::open(cloud_options(first.path())).expect("recover upgraded cloud");
+        assert_published_v0_5_3_fixture_state(&engine);
+        write_published_fixture_upgrade_values(&engine, true);
+        engine.shutdown(timeout).expect("shut down upgraded cloud");
+        let second = fresh_cache(first.path());
+        let mut reopened =
+            Engine::open(cloud_options(second.path())).expect("recover post-upgrade provider data");
+
+        // Assert
+        assert_eq!(
+            fs::read(second.path().join("FORMAT")).expect("hydrated FORMAT"),
+            b"midge-format-version=10\n"
+        );
+        assert_published_v0_5_3_fixture_state(&reopened);
+        assert_published_fixture_upgrade_values(&reopened);
+        reopened
+            .shutdown(timeout)
+            .expect("shut down upgraded recovery");
     }
 
     #[test]

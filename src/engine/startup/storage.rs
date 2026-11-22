@@ -116,18 +116,14 @@ pub(super) fn reconcile_cloud_format_before_mutations(
         || crate::common::OperationDeadline::from_budget(timeout.saturating_mul(16)),
         DeadlineScope::deadline,
     );
-    match super::cloud_format_upgrade::reconcile_cloud_format_gate(
+    super::cloud_format_upgrade::reconcile_cloud_format_gate(
         metadata_storage,
         store,
         holder_id,
         epoch,
         &deadline,
-    )? {
-        super::cloud_format_upgrade::CloudFormatGateResolution::Format9 => Ok(()),
-        super::cloud_format_upgrade::CloudFormatGateResolution::Format10Selected => {
-            Err(super::cloud_format_upgrade::unsupported_v10_runtime())
-        }
-    }
+    )
+    .map(|_| ())
 }
 
 fn hydrate_metadata(
@@ -189,12 +185,7 @@ fn load_cloud_wal_history(
         || Arc::clone(&path.root),
         |scope| crate::io::scope_fs(Arc::clone(&path.root), scope.clone()),
     );
-    let format_version = crate::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
-    if format_version > crate::metadata::format::CURRENT_FORMAT_VERSION {
-        return Err(MidgeError::CompatibilityError(
-            "FORMAT 10 is not available for cloud-backed databases yet".into(),
-        ));
-    }
+    crate::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
     let wal = crate::io::subdirectory(Arc::clone(root), crate::wal::WAL_DIR);
     Ok(
         match crate::runtime::wal_history::WalHistory::load_with_fence(
@@ -949,13 +940,6 @@ impl RuntimeStorageMaterialization {
         startup_lease: &StartupLease,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
-        if !matches!(opts.storage(), Storage::Local { .. } | Storage::InMemory)
-            && crate::metadata::format::is_format_10(storage_path.root.as_ref())?
-        {
-            return Err(MidgeError::CompatibilityError(
-                "FORMAT 10 is not available for cloud-backed databases yet".into(),
-            ));
-        }
         let cloud_runtime_policy = opts.cloud_runtime_policy();
 
         match opts.storage() {

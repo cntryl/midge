@@ -255,8 +255,8 @@ impl Engine {
     /// Returns an error if the database cannot be fenced for maintenance,
     /// its legacy metadata has an ambiguous boundary, or the new metadata
     /// and marker cannot be durably selected.
-    pub fn upgrade_format_9(opts: OpenOptions, timeout: Duration) -> MidgeResult<()> {
-        startup::format_upgrade::upgrade(&opts, timeout)
+    pub fn upgrade_format_9(opts: &OpenOptions, timeout: Duration) -> MidgeResult<()> {
+        startup::format_upgrade::upgrade(opts, timeout)
     }
 
     /// Get an existing column family by name.

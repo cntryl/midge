@@ -2479,7 +2479,7 @@ fn acquired_v4_store_with_v9_source() -> (
 }
 
 #[test]
-fn should_preserve_v5_gate_across_rewrites_and_allow_only_exact_candidate_cutover() {
+fn should_enforce_exact_candidate_cutover_after_v5_lease_takeover() {
     // Arrange
     let (cloud, lease, _guard, source) = acquired_v4_store_with_v9_source();
     let candidate = cloud_format_10_candidate();
@@ -2646,10 +2646,14 @@ fn should_reject_malformed_v5_cloud_migration_gate() {
     };
     let wire = format_lease_document(&document);
 
-    // Act / Assert: malformed v5 control state is never interpreted as a
+    // Act
+    let current = parse_lease_document(&wire);
+    let versioned = parse_v3_lease_document(&wire);
+
+    // Assert: malformed v5 control state is never interpreted as a
     // legacy lease or as an ungated format-4 lease.
-    assert!(parse_lease_document(&wire).is_none());
-    assert!(parse_v3_lease_document(&wire).is_none());
+    assert!(current.is_none());
+    assert!(versioned.is_none());
 }
 
 #[test]

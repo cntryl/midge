@@ -1,9 +1,8 @@
 //! Early cloud FORMAT 10 migration reconciliation.
 //!
 //! This runs after lease acquisition and before any provider DDL or WAL
-//! catalog mutation. FORMAT 10 authority publication can be reconciled here,
-//! but ordinary opens remain disabled until the runtime can consume its full
-//! selected closure.
+//! catalog mutation. Pending FORMAT 10 publication is reconciled against the
+//! exact selected closure before runtime recovery proceeds.
 
 use crate::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::lease::{
@@ -531,10 +530,4 @@ fn map_lease_error(error: crate::lease::LeaseError) -> MidgeError {
             MidgeError::RecoveryFailed(format!("cloud FORMAT gate reconciliation failed: {other}"))
         }
     }
-}
-
-pub(super) fn unsupported_v10_runtime() -> MidgeError {
-    MidgeError::NotSupported(
-        "cloud FORMAT 10 metadata is selected, but this runtime cannot yet read, hydrate, or publish the v10 closure".into(),
-    )
 }
