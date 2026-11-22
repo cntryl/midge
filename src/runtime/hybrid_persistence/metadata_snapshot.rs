@@ -46,7 +46,7 @@ pub(crate) struct MetadataMirrorCache {
     pub(super) writer_epoch: u64,
     pub(super) manifest: Manifest,
     pub(super) fingerprints: BTreeMap<String, FileFingerprint>,
-    pub(super) cut: Option<crate::runtime::metadata_publication::MetadataCutProof>,
+    pub(super) cut: Option<crate::runtime::MetadataCutProof>,
     pub(super) terminal_witnesses:
         Option<Arc<crate::runtime::metadata_publication::SelectedTerminalWitnesses>>,
 }
@@ -367,6 +367,9 @@ fn read_format_10_bodies(
     }
     let mut bodies = BTreeMap::new();
     for object in &generation.objects {
+        if object.file_name == crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME {
+            continue;
+        }
         let data = io
             .get_exact_len(&object.object_key, object.len)?
             .ok_or_else(|| {
@@ -457,6 +460,14 @@ pub(crate) struct CloudMetadataMirrorContext<'a> {
 pub(super) fn capture_local_metadata(
     context: &CloudMetadataMirrorContext<'_>,
 ) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
+    if crate::metadata::format::is_format_10(context.fs)? {
+        return Ok(super::capture_selected_format10_closure(
+            context.fs,
+            context.publication_lock,
+            context.deadline,
+        )?
+        .bodies);
+    }
     let mut local = BTreeMap::new();
     for name in files::CLOUD_MIRRORED {
         if context.deadline.is_expired() {

@@ -39,7 +39,14 @@ pub(crate) fn mirror_captured_control_metadata_within(
     };
     let local = capture_local_metadata(&context)?;
     cut.proof.validate(&local)?;
-    let candidate = super::metadata_snapshot::decode_manifest_bodies(&local, context.deadline)?;
+    let candidate = if local
+        .get(crate::metadata::files::FORMAT)
+        .is_some_and(|format| format == b"midge-format-version=10\n")
+    {
+        decode_format10_cut_manifest(&local, context.deadline)?
+    } else {
+        super::metadata_snapshot::decode_manifest_bodies(&local, context.deadline)?
+    };
     let mut fresh = false;
     loop {
         validate_publication_authority(&context, &mut validate_lease)?;
@@ -227,7 +234,7 @@ fn load_selected_cut(
     generation: CloudMetadataGeneration,
     memory: std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
 ) -> MidgeResult<SelectedCut> {
-    let (bodies, cut) = if super::metadata_chain::is_chain(&generation) {
+    let (bodies, chain_cut) = if super::metadata_chain::is_chain(&generation) {
         super::metadata_chain::read_with_cut_reserved(
             context.cloud,
             &generation,
@@ -244,6 +251,11 @@ fn load_selected_cut(
             )?,
             None,
         )
+    };
+    let cut = if generation.uses_format_10() {
+        read_format10_cut_proof(context, &generation, &bodies, &memory)?
+    } else {
+        chain_cut
     };
     let decode_memory = context.publication_lock.reserve_selected_decode_workspace(
         &memory,
@@ -266,6 +278,38 @@ fn load_selected_cut(
         _memory: Some(memory),
         _decode_memory: decode_memory,
     })
+}
+
+fn read_format10_cut_proof(
+    context: &CloudMetadataMirrorContext<'_>,
+    generation: &CloudMetadataGeneration,
+    bodies: &BTreeMap<String, Vec<u8>>,
+    memory: &std::sync::Arc<crate::common::resource_budget::ResourceReservation>,
+) -> MidgeResult<Option<crate::runtime::MetadataCutProof>> {
+    let Some(object) = generation
+        .objects
+        .iter()
+        .find(|object| object.file_name == crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME)
+    else {
+        return Ok(None);
+    };
+    if object.len > crate::runtime::MetadataCutProof::MAX_CLOUD_OBJECT_BYTES as u64 {
+        return Err(MidgeError::ResourceLimit(
+            "cloud metadata cut proof exceeds its byte bound".into(),
+        ));
+    }
+    let bytes = crate::storage::cloud::BlockingCloud::new(context.cloud, context.deadline)
+        .with_reservation(std::sync::Arc::clone(memory))
+        .get_exact_len(&object.object_key, object.len)?
+        .ok_or_else(|| {
+            MidgeError::Corruption("committed FORMAT 10 metadata cut proof is missing".into())
+        })?;
+    if crc32c::crc32c(&bytes) != object.crc32c {
+        return Err(MidgeError::Corruption(
+            "committed FORMAT 10 metadata cut proof mismatches its checksum".into(),
+        ));
+    }
+    crate::runtime::MetadataCutProof::decode_cloud_body(&bytes, bodies).map(Some)
 }
 
 fn covered(selected: &SelectedCut, cut: &CapturedMetadataCut) -> MidgeResult<bool> {
@@ -306,21 +350,79 @@ fn stage_cut(
         .ok_or_else(|| {
             MidgeError::ResourceLimit("shared metadata generation ordinal exhausted".into())
         })?;
-    let objects = super::metadata_chain::publish_with_cut(
-        context,
-        local,
-        selected.generation.as_ref(),
-        selected.bodies.as_ref(),
-        selected.cache.as_ref().map(|cache| &cache.fingerprints),
-        id,
-        Some(cut),
-    )?;
+    let objects = if local
+        .get(crate::metadata::files::FORMAT)
+        .is_some_and(|format| format == b"midge-format-version=10\n")
+    {
+        let (horizon, mut objects) = super::publish_format10_closure(
+            context.cloud,
+            context.deadline,
+            uuid::Uuid::new_v4(),
+            local,
+            &cut.memory_reservation(),
+        )?;
+        if horizon != candidate.edit_checkpoint_id {
+            return Err(MidgeError::Corruption(
+                "captured FORMAT 10 manifest horizon changed before publication".into(),
+            ));
+        }
+        let publication_id = objects
+            .first()
+            .and_then(|object| object.object_key.strip_prefix("metadata/generations/"))
+            .and_then(|suffix| suffix.split_once('/'))
+            .map(|(id, _)| id.to_owned())
+            .ok_or_else(|| MidgeError::Internal("FORMAT 10 publication key is malformed".into()))?;
+        let proof_body = cut.proof.cloud_body()?;
+        let proof_key = format!(
+            "metadata/generations/{publication_id}/{}",
+            crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME
+        );
+        super::metadata_chain::publish_bytes(
+            context.cloud,
+            &proof_key,
+            &proof_body,
+            context.deadline,
+            Some(&cut.memory_reservation()),
+            "FORMAT 10 metadata cut proof",
+        )?;
+        objects.push(crate::lease::CloudMetadataObject {
+            file_name: crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME.into(),
+            object_key: proof_key,
+            len: u64::try_from(proof_body.len()).unwrap_or(u64::MAX),
+            crc32c: crc32c::crc32c(&proof_body),
+        });
+        objects
+    } else {
+        super::metadata_chain::publish_with_cut(
+            context,
+            local,
+            selected.generation.as_ref(),
+            selected.bodies.as_ref(),
+            selected.cache.as_ref().map(|cache| &cache.fingerprints),
+            id,
+            Some(cut),
+        )?
+    };
     crate::failpoints::fail_point!("midge::cloud::after_metadata_chain_upload_before_pointer_cas");
     Ok(CloudMetadataGeneration {
         id,
         manifest_horizon: candidate.edit_checkpoint_id,
         objects,
     })
+}
+
+fn decode_format10_cut_manifest(
+    bodies: &BTreeMap<String, Vec<u8>>,
+    deadline: &OperationDeadline,
+) -> MidgeResult<crate::metadata::Manifest> {
+    use crate::metadata::local_authority::{LocalMetadataAuthority, Stream};
+    let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Manifest)?;
+    crate::metadata::ManifestPersistence::decode_format_10_stream(
+        stream.base,
+        stream.checkpoint,
+        stream.segments,
+        Some(&crate::common::DeadlineScope::new(*deadline)),
+    )
 }
 
 fn install_cache(

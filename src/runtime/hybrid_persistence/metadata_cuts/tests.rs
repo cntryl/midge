@@ -479,6 +479,74 @@ fn should_resolve_successful_unknown_pointer_cas_in_small_pool_without_second_bo
     );
 }
 
+#[test]
+fn should_capture_and_select_format10_cut_proof_with_its_exact_closure() -> MidgeResult<()> {
+    // Arrange
+    let fixture = Fixture::new(CloudStorage::with_mock());
+    let manifest =
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &Manifest::default())?;
+    crate::metadata::local_authority::LocalMetadataAuthority::initialize(
+        Arc::clone(&fixture.fs),
+        "cut-proof-generation",
+        &manifest,
+        b"[]",
+    )?;
+    crate::io::staging::stage_bytes_typed(
+        &fixture.fs,
+        &FsPath::new("FORMAT.tmp"),
+        &FsPath::new(files::FORMAT),
+        b"midge-format-version=10\n",
+        || Ok(()),
+    )?;
+    let cut = fixture.cut();
+
+    // Act
+    fixture.mirror(&cut)?;
+    fixture.lock.lock().cached = None;
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    let context = CloudMetadataMirrorContext {
+        cloud: &fixture.cloud,
+        fs: fixture.fs.as_ref(),
+        publication_lock: &fixture.lock,
+        lock_wait_budget: Duration::from_secs(5),
+        deadline: &deadline,
+        authority: super::super::CloudMetadataMirrorAuthority {
+            store: fixture.store.as_ref(),
+            holder_id: "writer",
+            writer_epoch: 1,
+        },
+    };
+    let reopened = super::selected_cut(&context, true)?;
+    assert!(reopened
+        .cache
+        .as_ref()
+        .and_then(|cache| cache.cut.as_ref())
+        .is_some_and(|proof| proof.covers(&cut.proof)));
+    let (generation, bodies) = fixture.selected_bodies();
+
+    // Assert
+    assert!(generation.uses_format_10());
+    assert_eq!(bodies.len(), 4);
+    let object = generation
+        .objects
+        .iter()
+        .find(|object| object.file_name == crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME)
+        .expect("selected FORMAT 10 pointer includes its cut proof");
+    let proof_bytes = crate::storage::cloud::BlockingCloud::new(
+        &fixture.cloud,
+        &OperationDeadline::from_budget(Duration::from_secs(5)),
+    )
+    .get_exact_len(&object.object_key, object.len)?
+    .expect("selected cut proof body");
+    let proof = crate::runtime::MetadataCutProof::decode_cloud_body(&proof_bytes, &bodies)?;
+    assert!(proof.covers(&cut.proof));
+    assert!(generation.objects.iter().all(|item| {
+        item.object_key.starts_with("metadata/generations/")
+            && item.object_key.ends_with(&item.file_name)
+    }));
+    Ok(())
+}
+
 impl Fixture {
     fn new(cloud: CloudStorage) -> Self {
         let directory = tempfile::tempdir().unwrap();

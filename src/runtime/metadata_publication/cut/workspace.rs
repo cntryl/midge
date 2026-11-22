@@ -19,6 +19,27 @@ impl MetadataPublicationLock {
         deadline: &OperationDeadline,
     ) -> MidgeResult<Option<ResourceReservation>> {
         self.prune_released_cut_receipts();
+        let encoded = bodies.values().try_fold(0_usize, |sum, body| {
+            sum.checked_add(body.len()).ok_or_else(overflow)
+        })?;
+        if bodies
+            .get(files::FORMAT)
+            .is_some_and(|format| format == b"midge-format-version=10\n")
+        {
+            // FORMAT 10 replays the HEAD-selected full stream snapshots. The
+            // v9 journal shape estimator does not describe those JSON bodies;
+            // reserve a conservative multiple of every validated selected
+            // byte before stream decoding.
+            let required = encoded
+                .checked_mul(16)
+                .and_then(|v| v.checked_add(4096))
+                .ok_or_else(overflow)?;
+            return grow_reservation(
+                memory,
+                required,
+                "selected FORMAT 10 typed decode workspace",
+            );
+        }
         let snapshot = bodies.get(files::MANIFEST_SNAPSHOT).ok_or_else(|| {
             MidgeError::Corruption("selected metadata lacks manifest snapshot".into())
         })?;
@@ -26,9 +47,6 @@ impl MetadataPublicationLock {
         let manifest = crate::metadata::codec::manifest_workspace::decoded_workspace_bound(
             snapshot, journal, deadline,
         )?;
-        let encoded = bodies.values().try_fold(0_usize, |sum, body| {
-            sum.checked_add(body.len()).ok_or_else(overflow)
-        })?;
         let required = encoded
             .checked_mul(4)
             .and_then(|bytes| bytes.checked_add(manifest.bytes))
@@ -57,6 +75,41 @@ impl MetadataPublicationLock {
         bodies: &BTreeMap<String, Vec<u8>>,
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
+        if bodies
+            .get(files::FORMAT)
+            .is_some_and(|format| format == b"midge-format-version=10\n")
+        {
+            let encoded = bodies.values().try_fold(0_usize, |sum, body| {
+                sum.checked_add(body.len()).ok_or_else(overflow)
+            })?;
+            let required = encoded
+                .checked_mul(32)
+                .and_then(|v| v.checked_add(4096))
+                .ok_or_else(overflow)?;
+            let limit = self
+                .capture_memory
+                .get()
+                .expect("capture pool admitted source")
+                .limit();
+            if required > limit {
+                return Err(MidgeError::ResourceLimit(format!(
+                    "FORMAT 10 metadata typed workspace requires {required} bytes beyond its configured maintenance pool of {limit} bytes"
+                )));
+            }
+            if required > memory.bytes() {
+                Arc::get_mut(memory)
+                    .ok_or_else(|| {
+                        MidgeError::Internal(
+                            "metadata preflight workspace was already shared".into(),
+                        )
+                    })?
+                    .resize(
+                        required,
+                        "FORMAT 10 stream decode and publication workspace",
+                    )?;
+            }
+            return Ok(());
+        }
         let snapshot = bodies
             .get(files::MANIFEST_SNAPSHOT)
             .ok_or_else(|| MidgeError::Corruption("metadata cut lacks manifest snapshot".into()))?;
@@ -94,6 +147,25 @@ impl MetadataPublicationLock {
         }
         Ok(())
     }
+}
+
+fn grow_reservation(
+    memory: &Arc<ResourceReservation>,
+    required: usize,
+    purpose: &'static str,
+) -> MidgeResult<Option<ResourceReservation>> {
+    let limit = memory.limit();
+    if required > limit {
+        return Err(MidgeError::ResourceLimit(format!(
+            "{purpose} requires {required} bytes beyond its configured maintenance pool of {limit} bytes"
+        )));
+    }
+    if required <= memory.bytes() {
+        return Ok(None);
+    }
+    memory
+        .reserve_related(required - memory.bytes(), purpose)
+        .map(Some)
 }
 
 fn required_private_workspace(

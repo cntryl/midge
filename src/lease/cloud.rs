@@ -1700,7 +1700,7 @@ pub(crate) fn validate_metadata_generation(
     Ok(())
 }
 
-fn validate_immutable_body_key(object: &super::CloudMetadataObject) -> Result<(), LeaseError> {
+fn validate_immutable_body_key(object: &super::CloudMetadataObject) -> Result<String, LeaseError> {
     let invalid_key = || {
         LeaseError::Internal(format!(
             "cloud metadata '{}' has an invalid immutable object key",
@@ -1724,7 +1724,7 @@ fn validate_immutable_body_key(object: &super::CloudMetadataObject) -> Result<()
             object.file_name
         )));
     }
-    Ok(())
+    Ok(generation_id.to_owned())
 }
 
 fn validate_format_10_generation(generation: &CloudMetadataGeneration) -> Result<(), LeaseError> {
@@ -1733,7 +1733,7 @@ fn validate_format_10_generation(generation: &CloudMetadataGeneration) -> Result
         closure_path_parts, HEAD_PATH, MAX_CLOSURE_BYTES, MAX_HEAD_BYTES, MAX_OBJECTS,
     };
 
-    if generation.objects.len() > MAX_OBJECTS + 2 {
+    if generation.objects.len() > MAX_OBJECTS + 3 {
         return Err(LeaseError::Indeterminate(
             "cloud FORMAT 10 metadata exceeds its object bound".into(),
         ));
@@ -1741,10 +1741,18 @@ fn validate_format_10_generation(generation: &CloudMetadataGeneration) -> Result
     let mut seen = std::collections::HashSet::new();
     let mut total = 0_u64;
     let mut selected_generation = None;
+    let mut publication_uuid: Option<String> = None;
     let mut have_manifest_base = false;
     let mut have_intent_base = false;
+    let mut have_cut_proof = false;
     for object in &generation.objects {
-        validate_immutable_body_key(object)?;
+        let object_publication = validate_immutable_body_key(object)?;
+        if publication_uuid.get_or_insert_with(|| object_publication.clone()) != &object_publication
+        {
+            return Err(LeaseError::Indeterminate(
+                "cloud FORMAT 10 descriptor mixes immutable publication UUIDs".into(),
+            ));
+        }
         let name = object.file_name.as_str();
         if object.len == 0 || !seen.insert(name) {
             return Err(LeaseError::Indeterminate(
@@ -1754,6 +1762,18 @@ fn validate_format_10_generation(generation: &CloudMetadataGeneration) -> Result
         match name {
             FORMAT if object.len == b"midge-format-version=10\n".len() as u64 => continue,
             HEAD_PATH if object.len <= MAX_HEAD_BYTES as u64 => continue,
+            crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME
+                if object.len
+                    <= crate::runtime::MetadataCutProof::MAX_CLOUD_OBJECT_BYTES as u64 =>
+            {
+                if have_cut_proof {
+                    return Err(LeaseError::Indeterminate(
+                        "cloud FORMAT 10 descriptor repeats its cut proof".into(),
+                    ));
+                }
+                have_cut_proof = true;
+                continue;
+            }
             _ => {}
         }
         let (path_generation, body) = closure_path_parts(name)
