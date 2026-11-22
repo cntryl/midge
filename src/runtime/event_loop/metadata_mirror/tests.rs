@@ -656,3 +656,200 @@ fn should_retain_two_later_dropped_family_ssts_when_first_reclamation_mirror_com
 ) -> MidgeResult<()> {
     assert_reclamation_mirror_releases_only_covered_names(2)
 }
+
+/// Drops one family so its reclamation is queued while a held mirror owns
+/// publication, and returns the event loop with that mirror still in flight.
+fn queue_reclamation_behind_held_mirror(
+    event_loop: &mut EventLoop,
+    held: &HeldMirror,
+) -> MidgeResult<String> {
+    let (_sender, messages) = crossbeam::channel::unbounded();
+    let created = event_loop.routing.router.register(92000, "create");
+    ManifestCoordinator::create_column_family(event_loop, &messages, 92000, "busy-drop");
+    assert!(matches!(
+        created.try_recv(),
+        Ok(RuntimeResponse::ColumnFamilyCreated { .. })
+    ));
+    let cf_id = event_loop
+        .state
+        .manifest
+        .get_column_family_by_name("busy-drop")
+        .unwrap()
+        .id;
+    let sst = seed_manifest_sst(event_loop, cf_id, 1)?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let _response = event_loop.routing.router.register(92001, "drop");
+    ManifestCoordinator::drop_column_family(event_loop, &messages, 92001, cf_id, false);
+    held.await_entry();
+    Ok(sst)
+}
+
+#[test]
+fn should_defer_reclamation_without_anomaly_when_retry_meets_a_running_mirror() -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    let sst = queue_reclamation_behind_held_mirror(&mut event_loop, &held)?;
+    assert!(event_loop
+        .actors
+        .cloud_coordinator
+        .metadata_mirror
+        .is_running());
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(10));
+
+    // Act: the retry encounters the running mirror.
+    crate::runtime::event_loop::gc::GcCoordinator::retry_within(&mut event_loop, &deadline);
+
+    // Assert: contention is a deferral, not a persistence anomaly.
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    assert!(event_loop.actors.gc_actor.has_manifest_reclamation());
+    held.release.try_send(()).unwrap();
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+    crate::runtime::event_loop::gc::GcCoordinator::retry_within(&mut event_loop, &deadline);
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+    wait_until("reclamation to delete the dropped family's SST", || {
+        !sst_is_resident(&event_loop, &sst)
+    });
+    assert_eq!(queued_reclamation(&event_loop), Vec::<String>::new());
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    assert_eq!(
+        event_loop.state.health(),
+        crate::config::EngineHealth::Healthy
+    );
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_mark_persistence_anomaly_when_reclamation_mirror_start_fails_for_a_real_reason(
+) -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange: a queued name, no mirror running, and a failing local persist.
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let sst = seed_manifest_sst(&mut event_loop, 0, 8)?;
+    event_loop.actors.gc_actor.queue_manifest_reclamation([sst]);
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(10));
+    fail::cfg("midge::manifest::persist", "return").unwrap();
+
+    // Act
+    crate::runtime::event_loop::gc::GcCoordinator::retry_within(&mut event_loop, &deadline);
+
+    // Assert
+    assert!(event_loop.state.persistence_anomaly_detected());
+    assert_eq!(
+        event_loop.state.health(),
+        crate::config::EngineHealth::Degraded
+    );
+    fail::remove("midge::manifest::persist");
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_defer_reclamation_without_anomaly_when_retry_meets_a_running_retention_mirror(
+) -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    // Arrange: a queued reclamation name while a Retention mirror (not a
+    // Reclamation one) is in flight.
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let sst = seed_manifest_sst(&mut event_loop, 0, 7)?;
+    event_loop
+        .state
+        .manifest
+        .test_mut()
+        .files
+        .retain(|file| file.name != sst);
+    event_loop.pipeline.inline_flush_worker = false;
+    event_loop
+        .actors
+        .gc_actor
+        .queue_manifest_reclamation([sst.clone()]);
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(10));
+    assert!(event_loop.start_metadata_mirror(MirrorContinuation::Retention, deadline)?);
+    held.await_entry();
+
+    // Act
+    crate::runtime::event_loop::gc::GcCoordinator::retry_within(&mut event_loop, &deadline);
+
+    // Assert: deferred quietly with the queue and the file retained.
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    assert_eq!(queued_reclamation(&event_loop), vec![sst.clone()]);
+    assert!(sst_is_resident(&event_loop, &sst));
+    held.release.try_send(()).unwrap();
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+    crate::runtime::event_loop::gc::GcCoordinator::retry_within(&mut event_loop, &deadline);
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+    assert_eq!(queued_reclamation(&event_loop), Vec::<String>::new());
+    assert!(!event_loop.state.persistence_anomaly_detected());
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
+fn should_mark_reclamation_anomaly_when_metadata_cut_admission_fails() -> MidgeResult<()> {
+    // Arrange: retain a captured flush intent and remove it without publishing
+    // the terminal receipt. No event-loop mirror owns publication.
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let sst = seed_manifest_sst(&mut event_loop, 0, 8)?;
+    event_loop
+        .state
+        .manifest
+        .test_mut()
+        .files
+        .retain(|file| file.name != sst);
+    let flush_name = seed_manifest_sst(&mut event_loop, 0, 9)?;
+    let flush_file = event_loop
+        .state
+        .manifest
+        .files
+        .iter()
+        .find(|file| file.name == flush_name)
+        .unwrap();
+    let flush_file = crate::runtime::FileMeta::from(flush_file);
+    event_loop
+        .state
+        .record_flush_publication_intent(0, 9, &flush_file)?;
+    crate::runtime::actors::ManifestActor::persist(&mut event_loop.state)?;
+    event_loop
+        .actors
+        .gc_actor
+        .queue_manifest_reclamation([sst.clone()]);
+    event_loop.pipeline.inline_flush_worker = false;
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(10));
+    let lock = &event_loop.publication.metadata_publication_lock;
+    let cut = lock.capture_control_cut(
+        &event_loop.state.fs,
+        event_loop.state.writer_epoch,
+        &deadline,
+    )?;
+    event_loop
+        .state
+        .clear_flush_publication_intent(&flush_name)?;
+    assert!(matches!(
+        lock.capture_control_cut(&event_loop.state.fs, event_loop.state.writer_epoch, &deadline),
+        Err(MidgeError::Busy(message)) if message.contains("without selected ManifestPublished proof")
+    ));
+
+    // Act
+    crate::runtime::event_loop::gc::GcCoordinator::retry_within(&mut event_loop, &deadline);
+
+    // Assert
+    assert!(event_loop.state.persistence_anomaly_detected());
+    assert!(sst_is_resident(&event_loop, &sst));
+    assert_eq!(queued_reclamation(&event_loop), vec![sst]);
+    drop(cut);
+    Ok(())
+}
