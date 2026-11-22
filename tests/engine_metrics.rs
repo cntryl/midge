@@ -3,7 +3,9 @@
 //! This binary never initializes global telemetry: the documented runtime
 //! metrics snapshot must work without it, and must describe one engine.
 
-use cntryl_midge::{Engine, OpenOptions, TransactionMode, WriteOptions};
+use cntryl_midge::{
+    Engine, OpenOptions, TransactionMode, WalSyncPhaseMetricsSnapshot, WriteOptions,
+};
 use std::time::Duration;
 
 fn open(path: &std::path::Path) -> Engine {
@@ -49,6 +51,7 @@ fn should_report_compactions_run_per_engine_when_telemetry_not_initialized() {
     let b_metrics = b.metrics().get_runtime_metrics().expect("engine B metrics");
 
     // Assert
+    let _: WalSyncPhaseMetricsSnapshot = a_metrics.wal_sync_phases;
     assert!(a_metrics.compactions_run > 0, "{a_metrics:?}");
     assert_eq!(b_metrics.compactions_run, 0, "engine B did not compact");
     assert!(a_metrics.wal_fsync_count > 0, "sync commits fsync the WAL");
