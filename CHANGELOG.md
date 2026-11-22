@@ -9,6 +9,31 @@ Compatibility expectations for pre-1.0 releases are defined in [docs/development
 
 ## [Unreleased]
 
+## [0.6.0] - Unreleased
+
+### Added
+
+- `Engine::upgrade_format_9(&options, timeout)` explicitly upgrades a
+  strictly valid FORMAT 9 database to the crash-safe FORMAT 10 metadata
+  authority. Existing databases are not upgraded automatically, and new
+  databases continue to use FORMAT 9.
+- Export a snapshot of WAL sync phase metrics for commit-path observability
+  (#1101).
+
+### Fixed
+
+- Harden cloud metadata publication, writer-lease transitions, and WAL
+  recovery under retries, timeouts, failover, and concurrent cleanup
+  (#1068–#1104).
+
+### Compatibility and rollback
+
+- FORMAT 9 remains the default and is still supported. FORMAT 10 is selected
+  only by the explicit upgrade API; SST V5 and the cloud WAL catalog format
+  remain unchanged.
+- After a database is upgraded to FORMAT 10, v0.5.3 cannot open it. Rollback
+  requires restoring a verified pre-upgrade backup or an application export.
+
 ## [0.5.3] - Unreleased
 
 ### Added
