@@ -166,6 +166,23 @@ impl LocalMetadataAuthority {
         load_selected_head(fs).map(|_| ())
     }
 
+    /// Prove that the currently visible selector survives a crash before a
+    /// runtime reload can clear a fence from an ambiguous HEAD replacement.
+    pub(crate) fn sync_selected_head(fs: &Arc<dyn Fs>) -> MidgeResult<()> {
+        crate::metadata::journal::with_manifest_writer_lock(fs, || {
+            let (_, before) = load_selected_head(fs.as_ref())?;
+            fs.sync_dir(&FsPath::new("metadata"), Durability::Durable)
+                .map_err(|error| recovery_error("resolve FORMAT 10 HEAD directory sync", error))?;
+            let (_, after) = load_selected_head(fs.as_ref())?;
+            if before != after {
+                return Err(MidgeError::Fenced(
+                    "FORMAT 10 HEAD changed while establishing a durable selector".into(),
+                ));
+            }
+            Ok(())
+        })
+    }
+
     /// Load the selected head and verify every selected immutable object.
     pub(crate) fn open(fs: Arc<dyn Fs>) -> MidgeResult<Self> {
         let (head, head_digest) = load_selected_head(fs.as_ref())?;
@@ -1668,7 +1685,11 @@ mod tests {
         // Act
         let first = authority.append(Stream::Manifest, 1, 1, b"uncertain selector");
         let second = authority.append(Stream::Manifest, 1, 1, b"must not proceed");
-        let selected_head = LocalMetadataAuthority::open(fs).expect("read visible selector");
+        let selected_head =
+            LocalMetadataAuthority::open(Arc::clone(&fs)).expect("read visible selector");
+        let unresolved = LocalMetadataAuthority::sync_selected_head(&fs);
+        failing_fs.head_replaced.store(false, Ordering::SeqCst);
+        let resolved = LocalMetadataAuthority::sync_selected_head(&fs);
 
         // Assert
         assert!(first.is_err(), "directory resync failure must be reported");
@@ -1682,6 +1703,11 @@ mod tests {
             Vec::<(u64, u64)>::new()
         );
         assert_eq!(selected_head.head.pending_objects.len(), 1);
+        assert!(matches!(unresolved, Err(MidgeError::RecoveryFailed(_))));
+        assert!(
+            resolved.is_ok(),
+            "the exact head can resume after durable resync"
+        );
     }
 
     #[test]
