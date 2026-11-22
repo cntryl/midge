@@ -1,0 +1,45 @@
+{
+  "package": {
+    "name": "cntryl-midge",
+    "version": "0.5.3",
+    "registry": "crates.io",
+    "crate_sha256": "32be5a029183a4f3fcb76dc47289d3abb416b750383980c9cae2ad0025b6ffcf"
+  },
+  "database_format": 9,
+  "backend": "filesystem-backed CloudSimulated",
+  "cloud_location": {
+    "bucket": "midge-fixtures",
+    "prefix": "published-v0.5.3"
+  },
+  "generation": {
+    "api": "Engine::open(OpenOptions::cloud_simulated), Transaction::commit(WriteOptions::cloud_strict), Engine::flush_cf",
+    "families": ["default", "archive"],
+    "expected": {
+      "default.fixture/current": "v2-current",
+      "default.fixture/deleted": null,
+      "default.fixture/wal-only": "published-unflushed",
+      "archive.archive/alpha": "archived-value"
+    },
+    "history": "Both families were flushed after the value and tombstone writes. The process exited after the WAL-only commit was acknowledged, before another flush or engine shutdown."
+  },
+  "selected_cloud_closure": [
+    "cloud_store/metadata/authority-initialized.v1",
+    "cloud_store/metadata/committed-pointer.v1",
+    "cloud_store/metadata/ddl.registry.json",
+    "cloud_store/midge_primary_lease.json (expires naturally after the producer exits; required to preserve authority state)",
+    "cloud_store/manifest/00000000000000000001 through 00000000000000000008",
+    "cloud_store/sst/000000_00_00000000000000000001.sst",
+    "cloud_store/sst/000001_00_00000000000000000001.sst",
+    "cloud_store/wal/publication-catalog.v1.json",
+    "cloud_store/wal/publication-catalog.v1.mirror.json",
+    "cloud_store/wal/epochs/00000000000000000001/00000000000000000006.wal"
+  ],
+  "local_recovery_artifacts": [
+    "FORMAT",
+    "intent_log.json",
+    "manifest.snapshot.json",
+    "wal/00000000000000000006.wal",
+    "wal/00000000000000000007.wal",
+    "wal/LEDGER"
+  ]
+}
