@@ -716,6 +716,12 @@ impl CloudFormatMigrationPending {
     pub fn candidate_descriptor_key(migration_id: &str) -> String {
         format!("metadata/migrations/{migration_id}/candidate.json")
     }
+
+    /// Canonical immutable v9 source descriptor key for this migration ID.
+    #[must_use]
+    pub fn source_descriptor_key(migration_id: &str) -> String {
+        format!("metadata/migrations/{migration_id}/source.json")
+    }
 }
 
 impl CloudMetadataGeneration {

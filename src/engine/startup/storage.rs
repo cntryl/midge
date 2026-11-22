@@ -104,6 +104,32 @@ fn check_startup_scope(scope: Option<&DeadlineScope>, context: &str) -> MidgeRes
     scope.map_or(Ok(()), |scope| scope.check(context))
 }
 
+pub(super) fn reconcile_cloud_format_before_mutations(
+    metadata_storage: &crate::storage::cloud::CloudStorage,
+    store: &dyn crate::lease::LeaderStore,
+    holder_id: &str,
+    epoch: u64,
+    timeout: std::time::Duration,
+    scope: Option<&DeadlineScope>,
+) -> MidgeResult<()> {
+    let deadline = scope.map_or_else(
+        || crate::common::OperationDeadline::from_budget(timeout.saturating_mul(16)),
+        DeadlineScope::deadline,
+    );
+    match super::cloud_format_upgrade::reconcile_cloud_format_gate(
+        metadata_storage,
+        store,
+        holder_id,
+        epoch,
+        &deadline,
+    )? {
+        super::cloud_format_upgrade::CloudFormatGateResolution::Format9 => Ok(()),
+        super::cloud_format_upgrade::CloudFormatGateResolution::Format10Selected => {
+            Err(super::cloud_format_upgrade::unsupported_v10_runtime())
+        }
+    }
+}
+
 fn hydrate_metadata(
     storage: &crate::storage::cloud::CloudStorage,
     authority: &dyn crate::lease::LeaderStore,
@@ -1027,6 +1053,20 @@ impl RuntimeStorageMaterialization {
         )?;
         let store = location.open()?;
         let cloud = Self::build_simulated_cloud_stores(opts, &store);
+        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+            Arc::clone(&store),
+            opts.storage_io_timeout(),
+        ));
+        reconcile_cloud_format_before_mutations(
+            &metadata_storage,
+            startup_lease.leader_store.as_deref().ok_or_else(|| {
+                MidgeError::Internal("cloud FORMAT gate requires a leader store".into())
+            })?,
+            &startup_lease.lease.holder_id(),
+            startup_lease.writer_epoch,
+            opts.storage_io_timeout(),
+            scope,
+        )?;
         let backend: Arc<dyn crate::storage::StorageBackend> = Arc::clone(&store) as _;
         let (sst_read_fs, remote_block_cache) =
             remote_sst_read_fs(opts, storage_path, Arc::clone(&backend), scope);
@@ -1037,10 +1077,6 @@ impl RuntimeStorageMaterialization {
         fence_cloud_ddl_scoped(opts, &cloud.hybrid_storage, startup_lease, scope)?;
         let wal_catalog = startup_lease.prepare_wal_catalog_within(&cloud.hybrid_storage, scope)?;
 
-        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
-            Arc::clone(&store),
-            opts.storage_io_timeout(),
-        ));
         let authority = provider_ddl_authority(startup_lease)?;
         let hydrated_generation = Self::bootstrap_provider_metadata_scoped(
             &metadata_storage,
@@ -1198,6 +1234,16 @@ impl RuntimeStorageMaterialization {
 
         let (hybrid_storage, rx) =
             Self::build_hybrid_storage(opts, &wal_storage, &sst_storage, &metadata_storage);
+        reconcile_cloud_format_before_mutations(
+            &metadata_storage,
+            startup_lease.leader_store.as_deref().ok_or_else(|| {
+                MidgeError::Internal("cloud FORMAT gate requires a leader store".into())
+            })?,
+            &startup_lease.lease.holder_id(),
+            startup_lease.writer_epoch,
+            opts.storage_io_timeout(),
+            scope,
+        )?;
         fence_cloud_ddl_scoped(opts, &hybrid_storage, startup_lease, scope)?;
         let (sst_read_fs, remote_block_cache) =
             Self::build_provider_sst_read_fs(opts, storage_path, &sst_storage);
