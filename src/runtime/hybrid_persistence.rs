@@ -21,6 +21,7 @@ mod catalog;
 pub(crate) mod metadata_chain;
 mod metadata_cuts;
 mod metadata_retention;
+pub(crate) use format10_closure::{capture_selected_format10_closure, publish_format10_closure};
 pub(crate) use metadata_cuts::mirror_captured_control_metadata_within;
 pub(crate) mod metadata_snapshot;
 mod orphan_sweep;

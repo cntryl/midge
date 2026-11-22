@@ -30,6 +30,17 @@ pub(crate) fn with_manifest_writer_lock_within<T>(
     scope: &crate::common::DeadlineScope,
     operation: impl FnOnce() -> MidgeResult<T>,
 ) -> MidgeResult<T> {
+    with_manifest_writer_view_lock_within(fs.as_ref(), scope, operation)
+}
+
+/// Run an operation under the shared manifest writer lock through a borrowed
+/// filesystem view. This is used by captures whose caller owns the view but
+/// must not extend its lifetime into another worker.
+pub(crate) fn with_manifest_writer_view_lock_within<T>(
+    fs: &dyn crate::io::traits::Fs,
+    scope: &crate::common::DeadlineScope,
+    operation: impl FnOnce() -> MidgeResult<T>,
+) -> MidgeResult<T> {
     crate::failpoints::with_read_gate(|| {
         scope.check("manifest writer lock")?;
         let stripe_count = u64::try_from(MANIFEST_WRITER_LOCK_STRIPES).unwrap_or(64);

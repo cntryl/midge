@@ -680,6 +680,9 @@ fn mirror_under_lock(
             ))
         }
     };
+    if crate::metadata::format::is_format_10(context.fs)? {
+        return mirror_format10_under_lock(context, cache, previous, validate_lease);
+    }
     let local = capture_local_metadata(context)?;
     let candidate = decode_manifest_bodies(&local, context.deadline)?;
     let cached = cache.as_ref().filter(|cached| {
@@ -741,6 +744,100 @@ fn mirror_under_lock(
         context.authority.writer_epoch,
         candidate,
         &local,
+    ));
+    Ok(())
+}
+
+fn mirror_format10_under_lock(
+    context: &CloudMetadataMirrorContext<'_>,
+    cache: &mut Option<MetadataMirrorCache>,
+    previous: Option<CloudMetadataGeneration>,
+    validate_lease: &mut impl FnMut(&OperationDeadline) -> MidgeResult<()>,
+) -> MidgeResult<()> {
+    let captured = super::capture_selected_format10_closure(
+        context.fs,
+        context.publication_lock,
+        context.deadline,
+    )?;
+    let stream = crate::metadata::local_authority::LocalMetadataAuthority::read_cloud_stream(
+        &captured.bodies,
+        crate::metadata::local_authority::Stream::Manifest,
+    )?;
+    let scope = DeadlineScope::new(*context.deadline);
+    let candidate = ManifestPersistence::decode_format_10_stream(
+        stream.base,
+        stream.checkpoint,
+        stream
+            .segments
+            .iter()
+            .map(|(first, last, payload)| (*first, *last, *payload)),
+        Some(&scope),
+    )?;
+    let cached = cache.as_ref().filter(|cached| {
+        previous
+            .as_ref()
+            .is_some_and(|generation| cached.matches(generation, context.authority.writer_epoch))
+    });
+    let old_bodies = previous
+        .as_ref()
+        .filter(|_| cached.is_none())
+        .map(|generation| {
+            read_committed_metadata_bodies_within(context.cloud, generation, context.deadline)
+        })
+        .transpose()?;
+    if let Some(previous) = previous.as_ref() {
+        if validate_cached_successor(
+            context,
+            previous,
+            &candidate,
+            &captured.bodies,
+            cached,
+            old_bodies.as_ref(),
+        )? {
+            verify_unchanged_publication(context, previous)?;
+            *cache = Some(MetadataMirrorCache::new(
+                previous.clone(),
+                context.authority.writer_epoch,
+                candidate,
+                &captured.bodies,
+            ));
+            return Ok(());
+        }
+    }
+
+    let id = previous
+        .as_ref()
+        .map_or(Some(SharedGenerationId::FIRST), |generation| {
+            generation.id.checked_next()
+        })
+        .ok_or_else(|| {
+            MidgeError::ResourceLimit("shared metadata generation ordinal exhausted".into())
+        })?;
+    let publication_id = uuid::Uuid::new_v4();
+    let (horizon, objects) = super::publish_format10_closure(
+        context.cloud,
+        context.deadline,
+        publication_id,
+        &captured.bodies,
+        &captured.reservation,
+    )?;
+    if horizon != candidate.edit_checkpoint_id {
+        return Err(MidgeError::Corruption(
+            "captured FORMAT 10 HEAD differs from its decoded manifest horizon".into(),
+        ));
+    }
+    validate_lease(context.deadline)?;
+    let generation = CloudMetadataGeneration {
+        id,
+        manifest_horizon: horizon,
+        objects,
+    };
+    commit_metadata_generation(context, previous.as_ref(), generation.clone())?;
+    *cache = Some(MetadataMirrorCache::new(
+        generation,
+        context.authority.writer_epoch,
+        candidate,
+        &captured.bodies,
     ));
     Ok(())
 }
