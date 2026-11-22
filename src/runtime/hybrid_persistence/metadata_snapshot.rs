@@ -46,7 +46,7 @@ pub(crate) struct MetadataMirrorCache {
     pub(super) writer_epoch: u64,
     pub(super) manifest: Manifest,
     pub(super) fingerprints: BTreeMap<String, FileFingerprint>,
-    pub(super) cut: Option<crate::runtime::metadata_publication::MetadataCutProof>,
+    pub(super) cut: Option<crate::runtime::MetadataCutProof>,
     pub(super) terminal_witnesses:
         Option<Arc<crate::runtime::metadata_publication::SelectedTerminalWitnesses>>,
 }
@@ -267,6 +267,9 @@ pub(super) fn read_committed_metadata_bodies_reserved_within(
             "committed metadata has zero generation ordinal".into(),
         ));
     }
+    if generation.uses_format_10() {
+        return read_format_10_bodies(cloud, generation, deadline, reservation);
+    }
     if super::metadata_chain::is_chain(generation) {
         let bodies = if let Some(reservation) = reservation {
             super::metadata_chain::read_with_cut_reserved(
@@ -350,12 +353,70 @@ pub(super) fn read_committed_metadata_bodies_reserved_within(
     Ok(bodies)
 }
 
+fn read_format_10_bodies(
+    cloud: &CloudStorage,
+    generation: &CloudMetadataGeneration,
+    deadline: &OperationDeadline,
+    reservation: Option<Arc<ResourceReservation>>,
+) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
+    crate::lease::cloud::validate_metadata_generation(generation)
+        .map_err(|error| MidgeError::Corruption(error.to_string()))?;
+    let mut io = BlockingCloud::new(cloud, deadline);
+    if let Some(reservation) = reservation {
+        io = io.with_reservation(reservation);
+    }
+    let mut bodies = BTreeMap::new();
+    for object in &generation.objects {
+        if object.file_name == crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME {
+            continue;
+        }
+        let data = io
+            .get_exact_len(&object.object_key, object.len)?
+            .ok_or_else(|| {
+                MidgeError::Corruption(format!(
+                    "committed cloud FORMAT 10 object '{}' is missing",
+                    object.file_name
+                ))
+            })?;
+        if u64::try_from(data.len()).unwrap_or(u64::MAX) != object.len
+            || crc32c::crc32c(&data) != object.crc32c
+        {
+            return Err(MidgeError::Corruption(format!(
+                "committed cloud FORMAT 10 object '{}' mismatches its identity",
+                object.file_name
+            )));
+        }
+        bodies.insert(object.file_name.clone(), data);
+    }
+    let horizon =
+        crate::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(&bodies)?;
+    if horizon != generation.manifest_horizon {
+        return Err(MidgeError::Corruption(
+            "cloud FORMAT 10 HEAD differs from the selected manifest horizon".into(),
+        ));
+    }
+    crate::runtime::IntentPersistence::validate_cloud_format_10_bodies(&bodies)?;
+    Ok(bodies)
+}
+
 pub(crate) fn decode_generation_manifest(
     generation: &CloudMetadataGeneration,
     bodies: &BTreeMap<String, Vec<u8>>,
     deadline: &OperationDeadline,
 ) -> MidgeResult<Manifest> {
-    let manifest = decode_manifest_bodies(bodies, deadline)?;
+    let manifest = if generation.uses_format_10() {
+        use crate::metadata::local_authority::{LocalMetadataAuthority, Stream};
+        let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Manifest)?;
+        let scope = DeadlineScope::new(*deadline);
+        ManifestPersistence::decode_format_10_stream(
+            stream.base,
+            stream.checkpoint,
+            stream.segments,
+            Some(&scope),
+        )?
+    } else {
+        decode_manifest_bodies(bodies, deadline)?
+    };
     if manifest.edit_checkpoint_id != generation.manifest_horizon {
         return Err(MidgeError::Corruption(format!(
             "committed manifest horizon {} differs from shared pointer horizon {}",
@@ -399,6 +460,14 @@ pub(crate) struct CloudMetadataMirrorContext<'a> {
 pub(super) fn capture_local_metadata(
     context: &CloudMetadataMirrorContext<'_>,
 ) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
+    if crate::metadata::format::is_format_10(context.fs)? {
+        return Ok(super::capture_selected_format10_closure(
+            context.fs,
+            context.publication_lock,
+            context.deadline,
+        )?
+        .bodies);
+    }
     let mut local = BTreeMap::new();
     for name in files::CLOUD_MIRRORED {
         if context.deadline.is_expired() {
@@ -553,6 +622,14 @@ pub(crate) fn mirror_control_metadata_within(
     context: CloudMetadataMirrorContext<'_>,
     mut validate_lease: impl FnMut(&OperationDeadline) -> MidgeResult<()>,
 ) -> MidgeResult<()> {
+    let format_10 = crate::metadata::format::is_format_10(context.fs)?;
+    let _format_10_writer = format_10
+        .then(|| {
+            context
+                .publication_lock
+                .lock_format_10_writer(context.deadline.remaining())
+        })
+        .transpose()?;
     let timeout = if context.lock_wait_budget.is_zero() {
         if context.deadline.is_expired() {
             return Err(MidgeError::Timeout(
@@ -577,7 +654,7 @@ pub(crate) fn mirror_control_metadata_within(
     let mut guard = context.publication_lock.lock_for(timeout).ok_or_else(|| {
         MidgeError::Timeout("metadata mirror timed out acquiring publication lock".into())
     })?;
-    mirror_under_lock(&context, &mut guard.cached, &mut validate_lease)?;
+    mirror_under_lock(&context, format_10, &mut guard.cached, &mut validate_lease)?;
     if let Some(cached) = &guard.cached {
         let generation = cached.generation.clone();
         super::metadata_retention::collect_after_commit(
@@ -591,6 +668,7 @@ pub(crate) fn mirror_control_metadata_within(
 
 fn mirror_under_lock(
     context: &CloudMetadataMirrorContext<'_>,
+    format_10: bool,
     cache: &mut Option<MetadataMirrorCache>,
     validate_lease: &mut impl FnMut(&OperationDeadline) -> MidgeResult<()>,
 ) -> MidgeResult<()> {
@@ -622,6 +700,9 @@ fn mirror_under_lock(
             ))
         }
     };
+    if format_10 {
+        return mirror_format10_under_lock(context, cache, previous.as_ref(), validate_lease);
+    }
     let local = capture_local_metadata(context)?;
     let candidate = decode_manifest_bodies(&local, context.deadline)?;
     let cached = cache.as_ref().filter(|cached| {
@@ -647,7 +728,7 @@ fn mirror_under_lock(
         )? {
             verify_unchanged_publication(context, previous)?;
             *cache = Some(MetadataMirrorCache::new(
-                previous.clone(),
+                (*previous).clone(),
                 context.authority.writer_epoch,
                 candidate,
                 &local,
@@ -687,6 +768,112 @@ fn mirror_under_lock(
     Ok(())
 }
 
+fn mirror_format10_under_lock(
+    context: &CloudMetadataMirrorContext<'_>,
+    cache: &mut Option<MetadataMirrorCache>,
+    previous: Option<&CloudMetadataGeneration>,
+    validate_lease: &mut impl FnMut(&OperationDeadline) -> MidgeResult<()>,
+) -> MidgeResult<()> {
+    let captured = super::capture_selected_format10_closure(
+        context.fs,
+        context.publication_lock,
+        context.deadline,
+    )?;
+    let stream = crate::metadata::local_authority::LocalMetadataAuthority::read_cloud_stream(
+        &captured.bodies,
+        crate::metadata::local_authority::Stream::Manifest,
+    )?;
+    let scope = DeadlineScope::new(*context.deadline);
+    let candidate = ManifestPersistence::decode_format_10_stream(
+        stream.base,
+        stream.checkpoint,
+        stream
+            .segments
+            .iter()
+            .map(|(first, last, payload)| (*first, *last, *payload)),
+        Some(&scope),
+    )?;
+    if candidate.edit_checkpoint_id != captured.horizon {
+        return Err(MidgeError::Corruption(
+            "captured FORMAT 10 HEAD differs from its decoded manifest horizon".into(),
+        ));
+    }
+    let cached = cache.as_ref().filter(|cached| {
+        previous
+            .is_some_and(|generation| cached.matches(generation, context.authority.writer_epoch))
+    });
+    let old_bodies = previous
+        .filter(|_| cached.is_none())
+        .map(|generation| {
+            read_committed_metadata_bodies_within(context.cloud, generation, context.deadline)
+        })
+        .transpose()?;
+    if let Some(previous) = previous {
+        if validate_cached_successor(
+            context,
+            previous,
+            &candidate,
+            &captured.bodies,
+            cached,
+            old_bodies.as_ref(),
+        )? {
+            verify_unchanged_publication(context, previous)?;
+            *cache = Some(MetadataMirrorCache::new(
+                previous.clone(),
+                context.authority.writer_epoch,
+                candidate,
+                &captured.bodies,
+            ));
+            return Ok(());
+        }
+    }
+
+    let id = previous
+        .map_or(Some(SharedGenerationId::FIRST), |generation| {
+            generation.id.checked_next()
+        })
+        .ok_or_else(|| {
+            MidgeError::ResourceLimit("shared metadata generation ordinal exhausted".into())
+        })?;
+    let publication_id = uuid::Uuid::new_v4();
+    if let Some(previous) = previous {
+        super::metadata_retention::reclaim_finished_format10_stages(context, previous)?;
+    }
+    let (horizon, objects) = super::publish_format10_closure(
+        context.cloud,
+        context.deadline,
+        publication_id,
+        context.authority.writer_epoch,
+        &captured.bodies,
+        None,
+        &captured.reservation,
+    )?;
+    if horizon != candidate.edit_checkpoint_id {
+        return Err(MidgeError::Corruption(
+            "captured FORMAT 10 HEAD differs from its decoded manifest horizon".into(),
+        ));
+    }
+    validate_lease(context.deadline)?;
+    let generation = CloudMetadataGeneration {
+        id,
+        manifest_horizon: horizon,
+        objects,
+    };
+    commit_metadata_generation(context, previous, generation.clone())?;
+    super::format10_closure::finish_format10_stage(
+        context.cloud,
+        context.deadline,
+        Some(publication_id),
+    );
+    *cache = Some(MetadataMirrorCache::new(
+        generation,
+        context.authority.writer_epoch,
+        candidate,
+        &captured.bodies,
+    ));
+    Ok(())
+}
+
 fn validate_cached_successor(
     context: &CloudMetadataMirrorContext<'_>,
     previous: &CloudMetadataGeneration,
@@ -712,6 +899,72 @@ fn validate_cached_successor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_reject_unreferenced_cloud_object_when_descriptor_exceeds_selected_head(
+    ) -> MidgeResult<()> {
+        // Arrange: upload a real v10 closure and verify it through the same
+        // bounded, identity-aware reader used during provider recovery.
+        use crate::lease::CloudMetadataObject;
+        use crate::metadata::{codec, local_authority::LocalMetadataAuthority};
+        use crate::storage::StoragePrecondition;
+
+        let root: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+        let manifest = codec::encode(codec::MANIFEST, &Manifest::default())?;
+        let local =
+            LocalMetadataAuthority::initialize(Arc::clone(&root), "test-cut", &manifest, b"[]")?;
+        let cloud = CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            "format-ten".into(),
+        );
+        let deadline = OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let io = BlockingCloud::new(&cloud, &deadline);
+        let operation_id = uuid::Uuid::new_v4();
+        let put = |file_name: String, data: Vec<u8>| {
+            let object = CloudMetadataObject {
+                object_key: format!("metadata/generations/{operation_id}/{file_name}"),
+                file_name,
+                len: data.len() as u64,
+                crc32c: crc32c::crc32c(&data),
+            };
+            io.put_with_precondition(&object.object_key, data, &StoragePrecondition::IfAbsent)?;
+            Ok::<_, MidgeError>(object)
+        };
+        let mut objects = vec![put(
+            files::FORMAT.into(),
+            b"midge-format-version=10\n".to_vec(),
+        )?];
+        let selected = LocalMetadataAuthority::selected_relative_paths_from(root.as_ref())?;
+        assert_eq!(selected, local.selected_relative_paths());
+        for name in selected {
+            let bytes = crate::io::read_all(root.as_ref(), &FsPath::new(&name))
+                .map_err(crate::io::FsError::into_midge)?;
+            objects.push(put(name, bytes.to_vec())?);
+        }
+        let mut descriptor = CloudMetadataGeneration {
+            id: SharedGenerationId::FIRST,
+            manifest_horizon: 0,
+            objects,
+        };
+        assert_eq!(
+            read_committed_metadata_bodies_within(&cloud, &descriptor, &deadline)?.len(),
+            4
+        );
+        descriptor.objects.push(put(
+            "metadata/generations/test-cut/manifest/00000000000000000002-00000000000000000001-00000000000000000001.seg".into(),
+            b"unselected metadata".to_vec(),
+        )?);
+
+        // Act
+        let result = read_committed_metadata_bodies_within(&cloud, &descriptor, &deadline);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(MidgeError::Corruption(message)) if message.contains("objects selected by HEAD")
+        ));
+        Ok(())
+    }
     use crate::io::Fs;
     use crate::lease::fs_leader_store::FsLeaderStore;
 
@@ -842,6 +1095,64 @@ mod tests {
         // Assert
         assert_eq!(fixture.generation(), previous);
         assert_eq!(previous.id, SharedGenerationId::FIRST);
+    }
+
+    #[test]
+    fn should_publish_only_the_selected_format10_closure_before_pointer_cas() -> MidgeResult<()> {
+        // Arrange: replace the local metadata authority with a validated
+        // FORMAT 10 HEAD and immutable manifest/intent bases.
+        let fixture = Fixture::new();
+        let manifest =
+            crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &Manifest::default())?;
+        crate::metadata::local_authority::LocalMetadataAuthority::initialize(
+            Arc::clone(&fixture.fs),
+            "runtime-selected-generation",
+            &manifest,
+            b"[]",
+        )?;
+        crate::io::staging::stage_bytes_typed(
+            &fixture.fs,
+            &FsPath::new("FORMAT.tmp"),
+            &FsPath::new(files::FORMAT),
+            b"midge-format-version=10\n",
+            || Ok(()),
+        )?;
+
+        // Act: exercise the production mirror, conditional pointer CAS and
+        // committed-body reader.
+        fixture.mirror()?;
+        let selected = fixture.generation();
+        let bodies = read_committed_metadata_bodies_within(
+            &fixture.cloud,
+            &selected,
+            &OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+        )?;
+
+        // Assert: exactly FORMAT, HEAD and the two HEAD-selected bases were
+        // uploaded and selected. A second mirror reuses the same pointer.
+        assert!(selected.uses_format_10());
+        assert_eq!(selected.manifest_horizon, 0);
+        assert_eq!(selected.objects.len(), 4);
+        assert_eq!(bodies.len(), 4);
+        assert_eq!(bodies[files::FORMAT], b"midge-format-version=10\n".to_vec());
+        assert!(bodies.contains_key("metadata/HEAD"));
+        assert!(
+            bodies.contains_key("metadata/generations/runtime-selected-generation/manifest/base")
+        );
+        assert!(bodies.contains_key("metadata/generations/runtime-selected-generation/intent/base"));
+        for object in &selected.objects {
+            let (publication, suffix) = object
+                .object_key
+                .strip_prefix("metadata/generations/")
+                .and_then(|path| path.split_once('/'))
+                .expect("canonical immutable key");
+            assert!(uuid::Uuid::parse_str(publication)
+                .is_ok_and(|parsed| parsed.to_string() == publication));
+            assert_eq!(suffix, object.file_name);
+        }
+        fixture.mirror()?;
+        assert_eq!(fixture.generation(), selected);
+        Ok(())
     }
 
     #[test]

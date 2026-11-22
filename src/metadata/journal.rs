@@ -30,6 +30,17 @@ pub(crate) fn with_manifest_writer_lock_within<T>(
     scope: &crate::common::DeadlineScope,
     operation: impl FnOnce() -> MidgeResult<T>,
 ) -> MidgeResult<T> {
+    with_manifest_writer_view_lock_within(fs.as_ref(), scope, operation)
+}
+
+/// Run an operation under the shared manifest writer lock through a borrowed
+/// filesystem view. This is used by captures whose caller owns the view but
+/// must not extend its lifetime into another worker.
+pub(crate) fn with_manifest_writer_view_lock_within<T>(
+    fs: &dyn crate::io::traits::Fs,
+    scope: &crate::common::DeadlineScope,
+    operation: impl FnOnce() -> MidgeResult<T>,
+) -> MidgeResult<T> {
     crate::failpoints::with_read_gate(|| {
         scope.check("manifest writer lock")?;
         let stripe_count = u64::try_from(MANIFEST_WRITER_LOCK_STRIPES).unwrap_or(64);
@@ -291,11 +302,11 @@ pub(crate) use recovery::{
     replay_identified_edits_after_with_fs_unlocked_within,
     salvage_edits_after_with_fs_unlocked_within,
 };
-pub(crate) use replay::replay_identified_edits_from_bytes;
 #[cfg(test)]
 use replay::{
     open_journal_for_replay, read_journal_record, replay_journal_with_state, JournalRecordStatus,
 };
+pub(crate) use replay::{replay_clean_edits_for_upgrade, replay_identified_edits_from_bytes};
 
 /// Append `edit` through a `RealFs` rooted at `db_path`.
 #[cfg(test)]

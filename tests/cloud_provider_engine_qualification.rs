@@ -12,7 +12,8 @@ mod streamed_cloud_compaction_crash;
 use cntryl_midge::MidgeError;
 use cntryl_midge::{
     Bytes, CloudProviderConfig, CloudStorageLocation, CloudStorageTopology, ColumnFamilyHandle,
-    Engine, MemoryBudget, OciCredentialSource, OpenOptions, TransactionMode, WriteOptions,
+    Engine, MemoryBudget, OciCredentialSource, OpenOptions, RecoveryPolicy, TransactionMode,
+    WriteOptions,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -27,6 +28,111 @@ mod startup_deadline;
 #[cfg(feature = "failpoints")]
 #[path = "cloud_provider_engine_qualification/authority_publication.rs"]
 mod authority_publication;
+
+#[test]
+fn should_recover_upgraded_format_10_from_a_fresh_provider_cache() {
+    // Arrange
+    let label = "sqrzl-format-10-upgrade";
+    require_sqrzl(label);
+    let providers = [
+        CloudProviderConfig::sqrzl_s3("midge-sqrzl-format-10-s3"),
+        CloudProviderConfig::sqrzl_azure("midge-sqrzl-format-10-azure"),
+        CloudProviderConfig::sqrzl_gcs_json("midge-sqrzl-format-10-gcs-json"),
+        CloudProviderConfig::sqrzl_gcs("midge-sqrzl-format-10-gcs-xml"),
+    ];
+
+    // Act
+    for provider in &providers {
+        check_format_10_provider_upgrade(label, provider);
+    }
+
+    // Assert
+    // The helper verifies both writes and the selected format after cache loss.
+}
+
+fn check_format_10_provider_upgrade(label: &str, provider: &CloudProviderConfig) {
+    let namespace = format!("engine/{label}/{}/", uuid::Uuid::new_v4());
+    ensure_sqrzl_namespace(provider)
+        .unwrap_or_else(|error| panic!("{label}: preparing {provider:?}: {error}"));
+    let root = tempfile::tempdir().expect("provider cache directories");
+    let options = |cache: &str| {
+        OpenOptions::cloud(
+            root.path().join(cache),
+            CloudStorageLocation::new(provider.clone(), namespace.clone()),
+        )
+        .recovery_policy(RecoveryPolicy::Strict)
+        .build()
+        .expect("provider upgrade options")
+    };
+    let timeout = Duration::from_secs(45);
+    let mut legacy = Engine::open(options("legacy")).expect("open FORMAT 9");
+    let family = legacy
+        .create_column_family("archives")
+        .expect("create family");
+    put_upgrade_value(&legacy, &family, b"legacy");
+    legacy.shutdown(timeout).expect("close FORMAT 9");
+
+    begin_provider_format_10_upgrade(&options("upgrade"), timeout);
+    let mut current = Engine::open(options("current"))
+        .unwrap_or_else(|error| panic!("{label}: opening {provider:?}: {error}"));
+    let family = current
+        .get_column_family("archives")
+        .expect("upgraded family");
+    put_upgrade_value(&current, &family, b"current");
+    current.shutdown(timeout).expect("close upgraded database");
+
+    let mut recovered = Engine::open(options("recovered")).expect("recover upgraded database");
+    let family = recovered
+        .get_column_family("archives")
+        .expect("recovered family");
+    let read = recovered
+        .begin_tx(family.id(), TransactionMode::ReadOnly)
+        .expect("begin read");
+    for key in [b"legacy".as_slice(), b"current".as_slice()] {
+        assert_eq!(
+            read.get(key).expect("read acknowledged value"),
+            Some(Bytes::from_static(key))
+        );
+    }
+    drop(read);
+    assert_eq!(
+        std::fs::read(root.path().join("recovered/FORMAT")).expect("hydrated FORMAT marker"),
+        b"midge-format-version=10\n"
+    );
+    recovered
+        .shutdown(timeout)
+        .expect("close recovered database");
+}
+
+fn begin_provider_format_10_upgrade(options: &OpenOptions, timeout: Duration) {
+    #[cfg(feature = "failpoints")]
+    {
+        let _guard = sqrzl_compaction_failpoint_test_lock();
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("midge::format10::after_pending_cloud_gate", "return")
+            .expect("interrupt migration after the compatibility gate becomes durable");
+        let result = Engine::upgrade_format_9(options, timeout);
+        drop(scenario);
+        assert!(matches!(result, Err(MidgeError::Internal(message))
+            if message == "interrupted after durable pending FORMAT 10 gate"));
+        // The next ordinary startup must resume the explicit migration.
+    }
+    #[cfg(not(feature = "failpoints"))]
+    Engine::upgrade_format_9(options, timeout).expect("upgrade provider metadata");
+}
+
+fn put_upgrade_value(engine: &Engine, family: &ColumnFamilyHandle, key: &'static [u8]) {
+    let mut write = engine
+        .begin_tx(family.id(), TransactionMode::ReadWrite)
+        .expect("begin write");
+    write
+        .put(key.to_vec(), key.to_vec(), None)
+        .expect("put upgrade value");
+    write
+        .commit(WriteOptions::cloud_strict())
+        .expect("commit upgrade value");
+    engine.flush_cf(family).expect("flush upgrade value");
+}
 
 #[test]
 fn should_recover_engine_from_sqrzl_s3_after_local_cache_loss() {

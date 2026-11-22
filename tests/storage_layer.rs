@@ -1829,6 +1829,21 @@ mod compatibility_fixtures {
         }
     }
 
+    fn assert_published_fixture_upgrade_values_absent(engine: &Engine) {
+        for (family, key) in [
+            ("default", b"fixture/after-upgrade".as_slice()),
+            ("archive", b"archive/after-upgrade".as_slice()),
+        ] {
+            let cf = engine
+                .get_column_family(family)
+                .expect("published fixture family");
+            let read = engine
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                .expect("begin restored fixture read");
+            assert_eq!(read.get(key).expect("read restored key"), None);
+        }
+    }
+
     #[test]
     fn should_reopen_published_v0_5_3_fixtures_given_strict_recovery_and_new_writes() {
         for (fixture, cloud) in [
@@ -1859,6 +1874,180 @@ mod compatibility_fixtures {
                 .shutdown(Duration::from_secs(10))
                 .expect("shutdown after second fixture reopen");
         }
+    }
+
+    #[test]
+    fn should_preserve_published_format_9_state_when_upgrading_local_metadata() {
+        // Arrange
+        let temp = copy_fixture_dir("v0_5_3_published_local");
+        let names = [
+            "manifest.snapshot.json",
+            "manifest.journal",
+            "intent_log.json",
+            "wal/LEDGER",
+            "wal/00000000000000000002.wal",
+        ];
+        let source =
+            names.map(|name| fs::read(temp.path().join(name)).expect("read legacy source"));
+        let opts = OpenOptions::local(temp.path())
+            .recovery_policy(RecoveryPolicy::Strict)
+            .build()
+            .expect("strict local upgrade options");
+
+        // Act
+        Engine::upgrade_format_9(&opts, Duration::from_secs(10))
+            .expect("upgrade published FORMAT 9 metadata");
+
+        // Assert
+        assert_eq!(
+            fs::read(temp.path().join("FORMAT")).expect("read selected format"),
+            b"midge-format-version=10\n"
+        );
+        for (name, original) in names.into_iter().zip(source) {
+            assert_eq!(
+                fs::read(temp.path().join(name)).expect("read preserved legacy bytes"),
+                original,
+                "upgrade mutated {name}"
+            );
+        }
+        let mut engine = Engine::open(opts.clone()).expect("open upgraded published fixture");
+        assert_published_v0_5_3_fixture_state(&engine);
+        write_published_fixture_upgrade_values(&engine, false);
+        engine
+            .shutdown(Duration::from_secs(10))
+            .expect("shutdown after FORMAT 10 writes");
+        let mut reopened = Engine::open(opts).expect("reopen upgraded fixture");
+        assert_published_v0_5_3_fixture_state(&reopened);
+        assert_published_fixture_upgrade_values(&reopened);
+        reopened
+            .shutdown(Duration::from_secs(10))
+            .expect("shutdown reopened upgrade fixture");
+    }
+
+    #[test]
+    fn should_restore_published_data_from_format_10_backup() {
+        // Arrange
+        let source = copy_fixture_dir("v0_5_3_published_local");
+        let output = tempfile::tempdir().expect("backup and restore parent");
+        let artifact = output.path().join("artifact");
+        let restore = output.path().join("restored");
+        let timeout = Duration::from_secs(10);
+        let opts = OpenOptions::local(source.path()).build().unwrap();
+        Engine::upgrade_format_9(&opts, timeout).expect("upgrade published fixture");
+        let mut engine = Engine::open(opts).expect("open FORMAT 10 source");
+
+        // Act
+        let inventory = engine
+            .backup_to(&artifact, timeout)
+            .expect("backup upgraded source");
+        write_published_fixture_upgrade_values(&engine, false);
+        engine
+            .shutdown(timeout)
+            .expect("shut down source after post-backup v10 writes");
+        let restore_opts = OpenOptions::local(restore).build().unwrap();
+        Engine::restore_backup(&artifact, restore_opts.clone()).expect("restore FORMAT 10 backup");
+        let mut restored = Engine::open(restore_opts).expect("open restored FORMAT 10 data");
+
+        // Assert
+        assert_eq!(inventory.database_format_version, 10);
+        assert!(inventory
+            .objects
+            .iter()
+            .any(|object| object.path == "wal/LEDGER"));
+        assert!(inventory
+            .objects
+            .iter()
+            .any(|object| object.path.starts_with("sst/")));
+        assert_published_v0_5_3_fixture_state(&restored);
+        assert_published_fixture_upgrade_values_absent(&restored);
+        restored.shutdown(timeout).expect("shut down restored data");
+    }
+
+    #[test]
+    fn should_recover_published_cloudsim_data_after_format_10_upgrade() {
+        // Arrange
+        let source = copy_fixture_dir("v0_5_3_published_cloud");
+        let cloud_options = |path: &Path| {
+            OpenOptions::cloud_simulated(path, "midge-fixtures", "published-v0.5.3")
+                .recovery_policy(RecoveryPolicy::Strict)
+                .build()
+                .expect("strict CloudSim options")
+        };
+        let fresh_cache = |prior: &Path| {
+            let temp = tempfile::tempdir().expect("new cloud cache");
+            copy_dir_recursive(&prior.join("cloud_store"), &temp.path().join("cloud_store"))
+                .expect("retain only the simulated provider data");
+            temp
+        };
+        let timeout = Duration::from_secs(30);
+
+        // Act
+        Engine::upgrade_format_9(&cloud_options(source.path()), timeout)
+            .expect("upgrade published cloud metadata");
+        let first = fresh_cache(source.path());
+        let mut engine = Engine::open(cloud_options(first.path())).expect("recover upgraded cloud");
+        assert_published_v0_5_3_fixture_state(&engine);
+        // Six flushes require reusing the three durable cloud staging slots.
+        for _ in 0..3 {
+            write_published_fixture_upgrade_values(&engine, true);
+        }
+        engine.shutdown(timeout).expect("shut down upgraded cloud");
+        let second = fresh_cache(first.path());
+        let mut reopened =
+            Engine::open(cloud_options(second.path())).expect("recover post-upgrade provider data");
+
+        // Assert
+        assert_eq!(
+            fs::read(second.path().join("FORMAT")).expect("hydrated FORMAT"),
+            b"midge-format-version=10\n"
+        );
+        assert_published_v0_5_3_fixture_state(&reopened);
+        assert_published_fixture_upgrade_values(&reopened);
+        reopened
+            .shutdown(timeout)
+            .expect("shut down upgraded recovery");
+    }
+
+    #[test]
+    fn should_restore_format_9_from_backup_after_format_10_writes() {
+        // Arrange
+        let source = copy_fixture_dir("v0_5_3_published_local");
+        let destination = tempfile::tempdir().expect("backup and restore workspace");
+        let artifact = destination.path().join("legacy-backup");
+        let options = OpenOptions::local(source.path())
+            .build()
+            .expect("source options");
+        let restored_root = destination.path().join("restored");
+        let restored_options = OpenOptions::local(&restored_root)
+            .build()
+            .expect("restore options");
+        let timeout = Duration::from_secs(30);
+        let mut original = Engine::open(options.clone()).expect("open original FORMAT 9");
+        original
+            .backup_to(&artifact, timeout)
+            .expect("capture rollback backup");
+        original
+            .shutdown(timeout)
+            .expect("release the original writer lease");
+
+        // Act
+        Engine::upgrade_format_9(&options, timeout).expect("upgrade after backup");
+        let mut upgraded = Engine::open(options).expect("open upgraded source");
+        write_published_fixture_upgrade_values(&upgraded, false);
+        upgraded
+            .shutdown(timeout)
+            .expect("close after FORMAT 10 writes");
+        Engine::restore_backup(&artifact, restored_options.clone()).expect("restore FORMAT 9");
+        let mut restored = Engine::open(restored_options).expect("reopen restored FORMAT 9");
+
+        // Assert
+        assert_eq!(
+            fs::read(restored_root.join("FORMAT")).expect("restored marker"),
+            b"midge-format-version=9\n"
+        );
+        assert_published_v0_5_3_fixture_state(&restored);
+        assert_published_fixture_upgrade_values_absent(&restored);
+        restored.shutdown(timeout).expect("close restored FORMAT 9");
     }
 
     #[test]
@@ -2093,15 +2282,37 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_future_v10_fixture_given_unsupported_version_when_reopening() {
+    fn should_reject_v10_fixture_without_selected_head_when_reopening() {
         // Arrange
         let temp = copy_fixture_dir("future_v10");
 
         // Act
         let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())
-            .expect_err("future fixture should fail verify");
-        assert_compatibility_error(verify_error);
+            .expect_err("FORMAT 10 fixture without HEAD should fail verify");
+        assert!(verify_error.to_string().contains("FORMAT 10 head"));
 
+        let Err(open_error) = Engine::open(
+            OpenOptions::local(temp.path())
+                .recovery_policy(RecoveryPolicy::Strict)
+                .build()
+                .expect("build options"),
+        ) else {
+            panic!("FORMAT 10 fixture without HEAD should fail open");
+        };
+        // Assert
+        assert!(open_error.to_string().contains("FORMAT 10 head"));
+    }
+
+    #[test]
+    fn should_reject_future_v11_fixture_when_reopening() {
+        // Arrange
+        let temp = copy_fixture_dir("future_v10");
+        std::fs::write(temp.path().join("FORMAT"), b"midge-format-version=11\n")
+            .expect("write future FORMAT 11 marker");
+
+        // Act
+        let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())
+            .expect_err("future fixture should fail verify");
         let Err(open_error) = Engine::open(
             OpenOptions::local(temp.path())
                 .recovery_policy(RecoveryPolicy::Strict)
@@ -2110,7 +2321,9 @@ mod compatibility_fixtures {
         ) else {
             panic!("future fixture should fail open");
         };
+
         // Assert
+        assert_compatibility_error(verify_error);
         assert_compatibility_error(open_error);
     }
 }

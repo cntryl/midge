@@ -61,6 +61,7 @@ pub(crate) struct ManifestStore {
     // A frontier fallback may refresh `known` after a failed snapshot. Only
     // a successful checkpoint can release publication backpressure.
     checkpoint_retry_required: AtomicBool,
+    format_version: u32,
     accounting: Owner,
     medium: Medium,
 }
@@ -74,6 +75,10 @@ impl std::fmt::Debug for ManifestStore {
 }
 
 impl ManifestStore {
+    pub(crate) fn uses_format_10(&self) -> bool {
+        self.format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1
+    }
+
     /// Cheap, already checkpointed flushes can retain the original forced
     /// path. Append still checks file lengths under the writer lock and the
     /// following snapshot reconciles any intervening edits. Unknown, stale
@@ -144,12 +149,27 @@ impl ManifestStore {
     }
 
     pub(crate) fn new_with_accounting(fs: Arc<dyn Fs>, accounting: Owner, medium: Medium) -> Self {
+        Self::new_with_format(
+            fs,
+            accounting,
+            medium,
+            crate::metadata::format::CURRENT_FORMAT_VERSION,
+        )
+    }
+
+    pub(crate) fn new_with_format(
+        fs: Arc<dyn Fs>,
+        accounting: Owner,
+        medium: Medium,
+        format_version: u32,
+    ) -> Self {
         Self {
             fs,
             accounting,
             medium,
             known: parking_lot::Mutex::new(None),
             checkpoint_retry_required: AtomicBool::new(false),
+            format_version,
         }
     }
 
@@ -191,17 +211,21 @@ impl ManifestStore {
             .accounting
             .begin(OperationKind::JournalAppend, origin, self.medium);
         let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
-        let result = edit.validate_for_append().and_then(|()| {
-            self.write_next_with_fs(&fs, |fs, edit_id| {
-                journal::append_validated_edit_with_id_observed(
-                    fs,
-                    edit,
-                    edit_id,
-                    Some(&operation),
-                    write_started,
-                )
+        let result = if self.format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
+            append_format_10(&fs, edit, write_started)
+        } else {
+            edit.validate_for_append().and_then(|()| {
+                self.write_next_with_fs(&fs, |fs, edit_id| {
+                    journal::append_validated_edit_with_id_observed(
+                        fs,
+                        edit,
+                        edit_id,
+                        Some(&operation),
+                        write_started,
+                    )
+                })
             })
-        });
+        };
         operation.finish(result.is_ok());
         result
     }
@@ -215,9 +239,11 @@ impl ManifestStore {
             .accounting
             .begin(OperationKind::JournalAppend, origin, self.medium);
         let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
-        let result = ManifestEdit::Batch(edits.to_vec())
-            .validate_for_append()
-            .and_then(|()| {
+        let batch = ManifestEdit::Batch(edits.to_vec());
+        let result = if self.format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
+            append_format_10(&fs, &batch, None)
+        } else {
+            batch.validate_for_append().and_then(|()| {
                 self.write_next_with_fs(&fs, |fs, edit_id| {
                     journal::append_validated_edit_batch_with_id_observed(
                         fs,
@@ -227,7 +253,8 @@ impl ManifestStore {
                         None,
                     )
                 })
-            });
+            })
+        };
         operation.finish(result.is_ok());
         result
     }
@@ -237,6 +264,9 @@ impl ManifestStore {
         origin: Origin,
         manifest: &Manifest,
     ) -> MidgeResult<WrittenCheckpoint> {
+        if self.format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
+            return self.checkpoint_format_10(origin, manifest);
+        }
         let operation = self
             .accounting
             .begin(OperationKind::Checkpoint, origin, self.medium);
@@ -276,6 +306,9 @@ impl ManifestStore {
         origin: Origin,
         manifest: &Manifest,
     ) -> MidgeResult<WrittenCheckpoint> {
+        if self.format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
+            return self.checkpoint_format_10(origin, manifest);
+        }
         manifest.validate_persisted()?;
         let bytes = super::codec::encode(super::codec::MANIFEST, manifest)?;
         crate::failpoints::fail_point!("midge::manifest::after_captured_checkpoint_encoded");
@@ -285,6 +318,42 @@ impl ManifestStore {
         let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
         let result = journal::with_manifest_writer_lock(&fs, || {
             self.install_captured_snapshot(&fs, manifest.edit_checkpoint_id, &bytes, &operation)
+        });
+        self.checkpoint_retry_required
+            .store(result.is_err(), Ordering::Release);
+        operation.finish(result.is_ok());
+        result
+    }
+
+    fn checkpoint_format_10(
+        &self,
+        origin: Origin,
+        caller_manifest: &Manifest,
+    ) -> MidgeResult<WrittenCheckpoint> {
+        caller_manifest.validate_persisted()?;
+        let operation = self
+            .accounting
+            .begin(OperationKind::Checkpoint, origin, self.medium);
+        let fs = account_fs(Arc::clone(&self.fs), operation.ledger());
+        let result = journal::with_manifest_writer_lock(&fs, || {
+            let mut authority =
+                crate::metadata::local_authority::LocalMetadataAuthority::open(Arc::clone(&fs))?;
+            let current = ManifestPersistence::load_format_10(&fs, None)?;
+            let caller_was_current =
+                current.edit_checkpoint_id == caller_manifest.edit_checkpoint_id;
+            if caller_manifest.edit_checkpoint_id > current.edit_checkpoint_id {
+                return Err(MidgeError::Corruption(
+                    "FORMAT 10 checkpoint caller is ahead of selected manifest history".into(),
+                ));
+            }
+            let bytes = super::codec::encode(super::codec::MANIFEST, &current)?;
+            authority.checkpoint_manifest(&bytes, current.edit_checkpoint_id)?;
+            operation.snapshot_durable(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            operation.checkpoint_complete();
+            Ok(WrittenCheckpoint {
+                edit_checkpoint_id: current.edit_checkpoint_id,
+                caller_was_current,
+            })
         });
         self.checkpoint_retry_required
             .store(result.is_err(), Ordering::Release);
@@ -435,6 +504,40 @@ impl ManifestStore {
             Err(error) => Err(error.into_midge()),
         }
     }
+}
+
+fn append_format_10(
+    fs: &Arc<dyn Fs>,
+    edit: &ManifestEdit,
+    write_started: Option<&std::cell::Cell<bool>>,
+) -> MidgeResult<u64> {
+    edit.validate_for_append()?;
+    journal::with_manifest_writer_lock(fs, || {
+        let mut authority =
+            crate::metadata::local_authority::LocalMetadataAuthority::open(Arc::clone(fs))?;
+        let edit_id = authority
+            .high_water(crate::metadata::local_authority::Stream::Manifest)
+            .checked_add(1)
+            .ok_or_else(|| MidgeError::ResourceLimit("manifest edit ID exhausted".into()))?;
+        let mut manifest = ManifestPersistence::load_format_10(fs, None)?;
+        manifest.apply_edit(edit)?;
+        manifest.edit_checkpoint_id = edit_id;
+        manifest.validate_persisted()?;
+        let payload = serde_json::to_vec(edit).map_err(|error| {
+            MidgeError::Internal(format!("encode FORMAT 10 manifest edit: {error}"))
+        })?;
+        if let Some(write_started) = write_started {
+            write_started.set(true);
+        }
+        let stream = crate::metadata::local_authority::Stream::Manifest;
+        if authority.append_would_exceed_limits(stream, edit_id, edit_id, &payload)? {
+            let base = super::codec::encode(super::codec::MANIFEST, &manifest)?;
+            authority.checkpoint_manifest(&base, edit_id)?;
+        } else {
+            authority.append(stream, edit_id, edit_id, &payload)?;
+        }
+        Ok(edit_id)
+    })
 }
 
 #[cfg(test)]

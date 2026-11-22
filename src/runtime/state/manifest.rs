@@ -105,17 +105,23 @@ impl RuntimeState {
         // Strict: only startup may salvage-heal (see RuntimeState::load_manifest).
         // Load both before assigning either: a manifest fresher than its
         // intents is as unsafe to publish from as two stale files.
-        let loaded = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
-            &self.fs,
-            crate::config::RecoveryPolicy::Strict,
-        )
-        .and_then(|manifest| {
+        let loaded = (|| {
+            if self.manifest_store.uses_format_10() {
+                crate::metadata::local_authority::LocalMetadataAuthority::sync_selected_head(
+                    &self.fs,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            let manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+                &self.fs,
+                crate::config::RecoveryPolicy::Strict,
+            )?;
             crate::runtime::IntentPersistence::load_with_fs_and_policy(
                 &self.fs,
                 crate::config::RecoveryPolicy::Strict,
             )
             .map(|intents| (manifest, intents))
-        });
+        })();
         match loaded {
             Ok((manifest, intents)) => {
                 self.manifest.replace(manifest);
@@ -162,17 +168,26 @@ impl RuntimeState {
     }
 
     pub(super) fn persist_intent_entries(
-        &self,
+        &mut self,
         intents: &[crate::runtime::IntentLogEntry],
     ) -> MidgeResult<()> {
         self.ensure_metadata_current()?;
         if !self.is_memory_mode() {
-            if let Err(message) = crate::runtime::IntentPersistence::save_with_fs(&self.fs, intents)
-            {
+            let format_10 = self.manifest_store.uses_format_10();
+            if let Err(error) = crate::runtime::IntentPersistence::save_for_selected_format(
+                &self.fs, intents, format_10,
+            ) {
+                if format_10 {
+                    self.fence_metadata_until_reloaded();
+                }
                 // The root carries the startup deadline: an expired budget is
                 // a timeout, not an internal failure of the save.
                 self.check_startup_scope("intent log save")?;
-                return Err(crate::common::MidgeError::Internal(message));
+                return Err(if format_10 {
+                    error
+                } else {
+                    crate::common::MidgeError::Internal(error.to_string())
+                });
             }
         }
         Ok(())

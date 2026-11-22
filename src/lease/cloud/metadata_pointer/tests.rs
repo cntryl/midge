@@ -31,6 +31,7 @@ fn document(epoch: u64) -> LeaseDocument {
         acquired_at: chrono::Utc::now().to_rfc3339(),
         expires_at: (chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     }
 }
 
@@ -65,6 +66,9 @@ fn should_preserve_predecessor_history_when_successor_claims_metadata_pointer() 
     first
         .claim_metadata_pointer(&cloud, &document(7), Duration::from_secs(5))
         .unwrap();
+    // This fixture exercises pointer claims directly, bypassing bootstrapped
+    // lease acquisition and its validated legacy compatibility state.
+    first.cache_migration_gate("holder-7", 7, None);
     provider_activate_authority_sentinel(&cloud, Duration::from_secs(5)).unwrap();
     let committed = generation(1);
     first

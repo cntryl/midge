@@ -9,6 +9,34 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[test]
+fn should_refuse_v10_maintenance_mirror_when_metadata_reload_is_required() -> MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(StorageBudgetPolicy::default())?;
+    let format_10 = crate::metadata::format::CURRENT_FORMAT_VERSION + 1;
+    event_loop.state.manifest_store =
+        Arc::new(crate::metadata::store::ManifestStore::new_with_format(
+            Arc::clone(&event_loop.state.fs),
+            crate::metadata::accounting::Owner::new(),
+            crate::metadata::accounting::Medium::Persistent,
+            format_10,
+        ));
+    event_loop.state.fence_metadata_until_reloaded();
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+
+    // Act
+    let result = event_loop.start_metadata_mirror(MirrorContinuation::Retention, deadline);
+
+    // Assert
+    assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+    assert!(!event_loop
+        .actors
+        .cloud_coordinator
+        .metadata_mirror
+        .is_running());
+    Ok(())
+}
+
 struct HeldMirror {
     release: crossbeam::channel::Sender<()>,
     entered: crossbeam::channel::Receiver<()>,
@@ -683,6 +711,39 @@ fn queue_reclamation_behind_held_mirror(
     ManifestCoordinator::drop_column_family(event_loop, &messages, 92001, cf_id, false);
     held.await_entry();
     Ok(sst)
+}
+
+#[test]
+fn should_defer_backup_capture_when_a_metadata_mirror_owns_publication() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    queue_reclamation_behind_held_mirror(&mut event_loop, &held)?;
+    let request_id = 92002;
+    let response = event_loop.routing.router.register(request_id, "backup");
+
+    // Act
+    event_loop.begin_backup_capture(request_id);
+    let reply = response.try_recv();
+    held.release.try_send(()).unwrap();
+
+    // Assert
+    assert!(matches!(
+        reply,
+        Ok(RuntimeResponse::Error {
+            error: MidgeError::Busy(_),
+            ..
+        })
+    ));
+    assert!(!event_loop.publication.verification_barrier.is_active());
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(10));
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+    scenario.teardown();
+    Ok(())
 }
 
 #[test]

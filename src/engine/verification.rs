@@ -81,6 +81,9 @@ impl StorageVerifier {
         .ok_or_else(|| {
             MidgeError::Corruption("simulated cloud WAL publication catalog is missing".into())
         })?;
+        if crate::metadata::format::is_format_10(root.as_ref())? {
+            Self::verify_simulated_cloud_format_10_metadata(&root, &store)?;
+        }
         let store: Arc<dyn crate::storage::StorageBackend> = store;
         Self::verify_simulated_cloud_wal_catalog(&store)?;
         let sst_fs: Arc<dyn Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
@@ -89,6 +92,76 @@ impl StorageVerifier {
             OFFLINE_OBJECT_TIMEOUT,
         ));
         verify_storage_root(&root, path, None, Some(&sst_fs), None)
+    }
+
+    fn verify_simulated_cloud_format_10_metadata(
+        root: &Arc<dyn Fs>,
+        store: &Arc<dyn crate::storage::inventory::ObjectStore>,
+    ) -> MidgeResult<()> {
+        let cloud = crate::storage::cloud::CloudStorage::from_object_store(
+            Arc::clone(store),
+            OFFLINE_OBJECT_TIMEOUT,
+        );
+        let deadline = crate::common::OperationDeadline::from_budget(OFFLINE_OBJECT_TIMEOUT);
+        let selected =
+            crate::lease::cloud::read_active_format_10_backup_generation(&cloud, &deadline)
+                .map_err(|error| {
+                    MidgeError::Corruption(format!("invalid CloudSim FORMAT 10 gate: {error}"))
+                })?;
+        let cloud_bodies =
+            crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
+                &cloud, &selected, &deadline,
+            )?;
+        crate::runtime::hybrid_persistence::decode_generation_manifest(
+            &selected,
+            &cloud_bodies,
+            &deadline,
+        )?;
+        crate::runtime::IntentPersistence::validate_cloud_format_10_bodies(&cloud_bodies)?;
+
+        let mut local_bodies = std::collections::BTreeMap::from([(
+            crate::metadata::files::FORMAT.to_string(),
+            b"midge-format-version=10\n".to_vec(),
+        )]);
+        for path in
+            crate::metadata::local_authority::LocalMetadataAuthority::selected_relative_paths_from(
+                root.as_ref(),
+            )?
+        {
+            let bytes = crate::io::read_all(root.as_ref(), &FsPath::new(&path))
+                .map_err(FsError::into_midge)?;
+            local_bodies.insert(path, bytes.to_vec());
+        }
+        crate::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(
+            &local_bodies,
+        )?;
+        if local_bodies != cloud_bodies {
+            let differences = local_bodies
+                .keys()
+                .chain(cloud_bodies.keys())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .filter(|key| local_bodies.get(*key) != cloud_bodies.get(*key))
+                .cloned()
+                .collect::<Vec<_>>();
+            return Err(MidgeError::Corruption(
+                format!("CloudSim local FORMAT 10 HEAD closure differs from the selected cloud generation at {differences:?}"),
+            ));
+        }
+
+        let rechecked =
+            crate::lease::cloud::read_active_format_10_backup_generation(&cloud, &deadline)
+                .map_err(|error| {
+                    MidgeError::Corruption(format!(
+                        "CloudSim FORMAT 10 gate changed during verification: {error}"
+                    ))
+                })?;
+        if rechecked != selected {
+            return Err(MidgeError::Corruption(
+                "CloudSim selected metadata pointer changed during backup verification".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Read one whole object from an offline store; `None` when absent.

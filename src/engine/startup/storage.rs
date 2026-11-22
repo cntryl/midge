@@ -104,6 +104,28 @@ fn check_startup_scope(scope: Option<&DeadlineScope>, context: &str) -> MidgeRes
     scope.map_or(Ok(()), |scope| scope.check(context))
 }
 
+pub(super) fn reconcile_cloud_format_before_mutations(
+    metadata_storage: &crate::storage::cloud::CloudStorage,
+    store: &dyn crate::lease::LeaderStore,
+    holder_id: &str,
+    epoch: u64,
+    timeout: std::time::Duration,
+    scope: Option<&DeadlineScope>,
+) -> MidgeResult<()> {
+    let deadline = scope.map_or_else(
+        || crate::common::OperationDeadline::from_budget(timeout.saturating_mul(16)),
+        DeadlineScope::deadline,
+    );
+    super::cloud_format_upgrade::reconcile_cloud_format_gate(
+        metadata_storage,
+        store,
+        holder_id,
+        epoch,
+        &deadline,
+    )
+    .map(|_| ())
+}
+
 fn hydrate_metadata(
     storage: &crate::storage::cloud::CloudStorage,
     authority: &dyn crate::lease::LeaderStore,
@@ -313,6 +335,23 @@ fn provider_ddl_authority(lease: &StartupLease) -> MidgeResult<DdlLeaseAuthority
 }
 
 impl StartupLease {
+    fn reconcile_cloud_format(
+        &self,
+        storage: &crate::storage::cloud::CloudStorage,
+        timeout: std::time::Duration,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<()> {
+        let authority = provider_ddl_authority(self)?;
+        reconcile_cloud_format_before_mutations(
+            storage,
+            authority.store.as_ref(),
+            &authority.holder_id,
+            authority.writer_epoch,
+            timeout,
+            scope,
+        )
+    }
+
     fn wal_history_fence(
         &self,
         timeout: std::time::Duration,
@@ -1001,6 +1040,20 @@ impl RuntimeStorageMaterialization {
         cloud
     }
 
+    fn simulated_metadata_storage(
+        opts: &OpenOptions,
+        store: &Arc<dyn crate::storage::inventory::ObjectStore>,
+        startup_lease: &StartupLease,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Arc<crate::storage::cloud::CloudStorage>> {
+        let storage = crate::storage::cloud::CloudStorage::from_object_store(
+            Arc::clone(store),
+            opts.storage_io_timeout(),
+        );
+        startup_lease.reconcile_cloud_format(&storage, opts.storage_io_timeout(), scope)?;
+        Ok(Arc::new(storage))
+    }
+
     fn materialize_simulated_cloud(
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
@@ -1015,6 +1068,8 @@ impl RuntimeStorageMaterialization {
         )?;
         let store = location.open()?;
         let cloud = Self::build_simulated_cloud_stores(opts, &store);
+        let metadata_storage =
+            Self::simulated_metadata_storage(opts, &store, startup_lease, scope)?;
         let backend: Arc<dyn crate::storage::StorageBackend> = Arc::clone(&store) as _;
         let (sst_read_fs, remote_block_cache) =
             remote_sst_read_fs(opts, storage_path, Arc::clone(&backend), scope);
@@ -1025,10 +1080,6 @@ impl RuntimeStorageMaterialization {
         fence_cloud_ddl_scoped(opts, &cloud.hybrid_storage, startup_lease, scope)?;
         let wal_catalog = startup_lease.prepare_wal_catalog_within(&cloud.hybrid_storage, scope)?;
 
-        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
-            Arc::clone(&store),
-            opts.storage_io_timeout(),
-        ));
         let authority = provider_ddl_authority(startup_lease)?;
         let hydrated_generation = Self::bootstrap_provider_metadata_scoped(
             &metadata_storage,
@@ -1186,6 +1237,11 @@ impl RuntimeStorageMaterialization {
 
         let (hybrid_storage, rx) =
             Self::build_hybrid_storage(opts, &wal_storage, &sst_storage, &metadata_storage);
+        startup_lease.reconcile_cloud_format(
+            &metadata_storage,
+            opts.storage_io_timeout(),
+            scope,
+        )?;
         fence_cloud_ddl_scoped(opts, &hybrid_storage, startup_lease, scope)?;
         let (sst_read_fs, remote_block_cache) =
             Self::build_provider_sst_read_fs(opts, storage_path, &sst_storage);

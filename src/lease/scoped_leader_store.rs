@@ -5,7 +5,10 @@ use super::traits::{
     LeaderRecord,
 };
 use super::{ActiveWriterEffect, WriterEffectGroup, WriterEffectGroupContext, WriterEffectGroups};
-use super::{CloudMetadataGeneration, CloudMetadataHead, LeaderStore, LeaseError};
+use super::{
+    CloudFormatMigrationGate, CloudFormatMigrationPending, CloudMetadataGeneration,
+    CloudMetadataHead, LeaderStore, LeaseError,
+};
 use crate::common::DeadlineScope;
 use std::sync::Arc;
 use std::time::Duration;
@@ -133,6 +136,57 @@ impl LeaderStore for StartupLeaderStore {
     fn read_committed_metadata(&self, timeout: Duration) -> Result<CloudMetadataHead, LeaseError> {
         self.within(timeout, "committed metadata read", |timeout| {
             self.inner.read_committed_metadata(timeout)
+        })
+    }
+
+    fn read_committed_metadata_for_writer(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<CloudMetadataHead, LeaseError> {
+        self.within_operation(timeout, "writer's committed metadata read", |timeout| {
+            self.inner
+                .read_committed_metadata_for_writer(holder_id, epoch, timeout)
+        })
+    }
+
+    fn read_format_migration_gate(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<Option<CloudFormatMigrationGate>, LeaseError> {
+        self.within_operation(timeout, "FORMAT migration gate read", |timeout| {
+            self.inner
+                .read_format_migration_gate(holder_id, epoch, timeout)
+        })
+    }
+
+    fn install_format_10_pending(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        pending: CloudFormatMigrationPending,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.within_operation(timeout, "FORMAT migration gate installation", |timeout| {
+            self.inner
+                .install_format_10_pending(holder_id, epoch, pending, timeout)
+        })
+    }
+
+    fn activate_format_10_gate(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        migration_id: &str,
+        candidate: &CloudMetadataGeneration,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.within_operation(timeout, "FORMAT migration gate activation", |timeout| {
+            self.inner
+                .activate_format_10_gate(holder_id, epoch, migration_id, candidate, timeout)
         })
     }
 

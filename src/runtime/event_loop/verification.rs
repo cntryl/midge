@@ -95,14 +95,17 @@ impl EventLoop {
     }
 
     pub(super) fn begin_backup_capture(&mut self, request_id: u64) -> HandleOutcome {
-        if self
-            .actors
-            .cloud_coordinator
-            .cloud_wal_prune_worker
-            .is_some()
+        let cloud = &self.actors.cloud_coordinator;
+        // A mirror releases the local manifest gate after capturing its cut,
+        // then may still advance the provider pointer independently.
+        if cloud.metadata_mirror.is_running()
             || self
-                .actors
-                .cloud_coordinator
+                .publication
+                .metadata_publication_lock
+                .pending_captures()
+                != 0
+            || cloud.cloud_wal_prune_worker.is_some()
+            || cloud
                 .hybrid_storage
                 .as_ref()
                 .is_some_and(|storage| storage.pending_upload_count() > 0)

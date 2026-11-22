@@ -187,6 +187,13 @@ impl GcActor {
         sst_names: &[String],
         hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
     ) {
+        if hybrid_storage.is_some()
+            && state.manifest_store.uses_format_10()
+            && state.ensure_metadata_current().is_err()
+        {
+            self.defer_ssts_for_metadata(sst_names);
+            return;
+        }
         let publication_lock = self.publication_lock.clone();
         let Some(_turn) = publication_lock.lock_for(Duration::ZERO) else {
             self.defer_ssts_for_metadata(sst_names);

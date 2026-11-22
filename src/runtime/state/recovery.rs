@@ -43,6 +43,11 @@ pub(crate) enum RecoveryWal {
     Deferred(crate::runtime::wal_history::WalHistory),
 }
 
+struct RecoveryWalInput {
+    wal: RecoveryWal,
+    fence: Option<crate::runtime::wal_history::WalHistoryFence>,
+}
+
 struct RecoveredStartup {
     opened_in_salvage_mode: bool,
     manifest: Manifest,
@@ -169,9 +174,11 @@ impl RuntimeState {
     ) -> MidgeResult<Self> {
         check_scope(scope, "recovery filesystem")?;
         Self::ensure_directories(root.as_ref(), memory_mode)?;
-        if !memory_mode {
-            crate::metadata::ensure_or_create_format_marker(&root, db_path)?;
-        }
+        let format_version = if memory_mode {
+            crate::metadata::format::CURRENT_FORMAT_VERSION
+        } else {
+            crate::metadata::ensure_or_create_format_marker(&root, db_path)?
+        };
         check_scope(scope, "recovery directories")?;
         let fs = match scope {
             Some(scope) => crate::io::scope_fs(root, scope.clone()),
@@ -181,9 +188,12 @@ impl RuntimeState {
             db_path,
             memory_mode,
             recovery_policy,
-            wal,
-            wal_fence,
+            RecoveryWalInput {
+                wal,
+                fence: wal_fence,
+            },
             fs,
+            format_version,
             scope,
         )
     }
@@ -192,11 +202,12 @@ impl RuntimeState {
         db_path: &std::path::Path,
         memory_mode: bool,
         recovery_policy: crate::config::RecoveryPolicy,
-        wal: RecoveryWal,
-        wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
+        wal_input: RecoveryWalInput,
         fs: Arc<dyn Fs>,
+        format_version: u32,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
+        let RecoveryWalInput { wal, fence } = wal_input;
         let persistence = RuntimePersistence::from_memory_mode(memory_mode);
         let RecoveredStartup {
             opened_in_salvage_mode,
@@ -208,7 +219,7 @@ impl RuntimeState {
             persistence,
             recovery_policy,
             wal,
-            wal_fence,
+            fence,
             &fs,
             scope,
         )?;
@@ -239,10 +250,11 @@ impl RuntimeState {
             manifest: super::ManifestRuntimeState::new(manifest),
             fs: fs.clone(),
             startup_scope: scope.cloned(),
-            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new_with_accounting(
+            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new_with_format(
                 fs,
                 accounting,
                 accounting_medium,
+                format_version,
             )),
             sst_names,
             recovery_sst_fs: None,
@@ -294,10 +306,15 @@ impl RuntimeState {
             active_compactions: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             pending_compaction_waits: std::collections::BTreeMap::new(),
         };
+        Self::finish_recovery_state(&mut state, scope)?;
+        Ok(state)
+    }
+
+    fn finish_recovery_state(state: &mut Self, scope: Option<&DeadlineScope>) -> MidgeResult<()> {
         check_scope(scope, "recovery state construction")?;
         state.record_recovery_metrics();
         state.reinitialize_active_memtable_segment_tracking();
-        Ok(state)
+        Ok(())
     }
 
     fn load_startup_recovery(
@@ -1357,8 +1374,15 @@ impl RuntimeState {
         // New intents will be written during normal operation
         self.check_startup_scope("intent log clear")?;
         if !self.is_memory_mode() {
-            if let Err(error) = crate::runtime::IntentPersistence::save_with_fs_typed(&self.fs, &[])
-            {
+            if let Err(error) = crate::runtime::IntentPersistence::save_for_selected_format(
+                &self.fs,
+                &[],
+                self.manifest_store.uses_format_10(),
+            ) {
+                if self.manifest_store.uses_format_10() {
+                    self.fence_metadata_until_reloaded();
+                    return Err(error);
+                }
                 if matches!(error, MidgeError::Timeout(_)) {
                     return Err(error);
                 }

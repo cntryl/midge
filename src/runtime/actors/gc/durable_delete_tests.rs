@@ -18,6 +18,38 @@ struct Fixture {
     publication_lock: crate::runtime::MetadataPublicationLock,
 }
 
+#[test]
+fn should_defer_cloud_sst_deletion_when_v10_metadata_reload_is_required() {
+    // Arrange
+    let mut fixture = Fixture::new();
+    let format_10 = crate::metadata::format::CURRENT_FORMAT_VERSION + 1;
+    fixture.state.manifest_store =
+        Arc::new(crate::metadata::store::ManifestStore::new_with_format(
+            Arc::clone(&fixture.state.fs),
+            crate::metadata::accounting::Owner::new(),
+            crate::metadata::accounting::Medium::Persistent,
+            format_10,
+        ));
+    fixture.state.fence_metadata_until_reloaded();
+    let mut actor = GcActor::new();
+
+    // Act
+    actor.delete_ssts(
+        &mut fixture.state,
+        std::slice::from_ref(&fixture.file.name),
+        Some(Arc::clone(&fixture.storage)),
+    );
+
+    // Assert: the remote object and local source remain available.
+    actor.shutdown_workers();
+    assert_eq!(fixture.remote().as_deref(), Some(b"original".as_slice()));
+    assert!(fixture
+        .state
+        .host_sst_dir()
+        .join(&fixture.file.name)
+        .exists());
+}
+
 impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();

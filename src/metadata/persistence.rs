@@ -4,6 +4,7 @@
 //! recovery of LSM structure across restarts.
 
 use crate::common::{DeadlineScope, MidgeError, MidgeResult};
+use crate::io::traits::FsPath;
 use crate::io::FsError;
 use crate::metadata::Manifest;
 #[cfg(test)]
@@ -135,8 +136,7 @@ impl ManifestPersistence {
         let data = file
             .read_at(0, len)
             .map_err(|error| recovery_io_error(error, &format!("failed to read {context}")))?;
-        let manifest: Manifest = super::codec::decode(super::codec::MANIFEST, &data)?;
-        manifest.validate_persisted()?;
+        let manifest = Self::decode_manifest(&data)?;
         let elapsed = start.elapsed();
         tracing::info!(
             path = ?path,
@@ -145,6 +145,38 @@ impl ManifestPersistence {
             elapsed_ms = elapsed.as_secs_f64() * 1000.0,
             "binary manifest loaded"
         );
+        Ok(manifest)
+    }
+
+    fn decode_manifest(bytes: &[u8]) -> MidgeResult<Manifest> {
+        let manifest: Manifest = super::codec::decode(super::codec::MANIFEST, bytes)?;
+        manifest.validate_persisted()?;
+        Ok(manifest)
+    }
+
+    /// Validate and apply the exact captured FORMAT 9 snapshot and journal.
+    pub(crate) fn decode_for_upgrade(
+        snapshot: Option<&[u8]>,
+        journal: &[u8],
+        scope: &DeadlineScope,
+    ) -> MidgeResult<Manifest> {
+        scope.check("FORMAT 9 manifest validation")?;
+        let mut manifest = snapshot
+            .map(Self::decode_manifest)
+            .transpose()?
+            .unwrap_or_default();
+        let edits = super::journal::replay_clean_edits_for_upgrade(
+            journal,
+            manifest.edit_checkpoint_id,
+            scope,
+        )?;
+        for (edit_id, edit) in edits {
+            scope.check("FORMAT 9 manifest application")?;
+            manifest.apply_edit(&edit)?;
+            manifest.edit_checkpoint_id = manifest.edit_checkpoint_id.max(edit_id);
+        }
+        Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
+        scope.check("FORMAT 9 manifest validation")?;
         Ok(manifest)
     }
 
@@ -198,8 +230,9 @@ impl ManifestPersistence {
         recovery_policy: crate::config::RecoveryPolicy,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Manifest> {
-        use crate::io::traits::FsPath;
-
+        if crate::metadata::format::is_format_10(fs.as_ref())? {
+            return Self::load_format_10(fs, scope);
+        }
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
         let manifest_path = FsPath::new(Self::MANIFEST_FILE);
         let mut manifest = if fs
@@ -264,6 +297,56 @@ impl ManifestPersistence {
 
         Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
         check_scope(scope, "manifest validation")?;
+        Ok(manifest)
+    }
+
+    pub(crate) fn load_format_10(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Manifest> {
+        let authority = crate::metadata::local_authority::LocalMetadataAuthority::open(
+            std::sync::Arc::clone(fs),
+        )?;
+        let (base, segments) =
+            authority.read_stream(crate::metadata::local_authority::Stream::Manifest)?;
+        Self::decode_format_10_stream(
+            &base,
+            authority.base_id(crate::metadata::local_authority::Stream::Manifest),
+            segments
+                .iter()
+                .map(|(first, last, body)| (*first, *last, body.as_slice())),
+            scope,
+        )
+    }
+
+    pub(crate) fn decode_format_10_stream<'a>(
+        base: &[u8],
+        checkpoint: u64,
+        segments: impl IntoIterator<Item = (u64, u64, &'a [u8])>,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Manifest> {
+        let mut manifest = Self::decode_manifest(base)?;
+        if manifest.edit_checkpoint_id != checkpoint {
+            return Err(MidgeError::Corruption(
+                "FORMAT 10 manifest base checkpoint identity disagrees with HEAD".into(),
+            ));
+        }
+        for (first_id, last_id, payload) in segments {
+            check_scope(scope, "FORMAT 10 manifest segment replay")?;
+            if first_id != last_id {
+                return Err(MidgeError::Corruption(
+                    "FORMAT 10 manifest segment must contain one edit identity".into(),
+                ));
+            }
+            let edit: crate::metadata::journal::ManifestEdit = serde_json::from_slice(payload)
+                .map_err(|error| {
+                    MidgeError::Corruption(format!("invalid FORMAT 10 manifest edit: {error}"))
+                })?;
+            edit.validate_for_append()?;
+            manifest.apply_edit(&edit)?;
+            manifest.edit_checkpoint_id = last_id;
+        }
+        Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
         Ok(manifest)
     }
 

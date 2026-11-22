@@ -75,6 +75,37 @@ fn deserialize_cut_witnesses<'de, D: serde::Deserializer<'de>>(
 }
 
 impl MetadataCutProof {
+    pub(crate) const CLOUD_OBJECT_NAME: &'static str = "metadata/cut-proof";
+    pub(crate) const MAX_CLOUD_OBJECT_BYTES: usize = 64 * 1024;
+
+    pub(crate) fn decode_cloud_body(
+        bytes: &[u8],
+        bodies: &BTreeMap<String, Vec<u8>>,
+    ) -> MidgeResult<Self> {
+        if bytes.len() > Self::MAX_CLOUD_OBJECT_BYTES {
+            return Err(MidgeError::ResourceLimit(
+                "cloud metadata cut proof exceeds its byte bound".into(),
+            ));
+        }
+        let proof: Self = serde_json::from_slice(bytes).map_err(|error| {
+            MidgeError::Corruption(format!("cloud metadata cut proof is invalid: {error}"))
+        })?;
+        proof.validate(bodies)?;
+        Ok(proof)
+    }
+
+    pub(crate) fn cloud_body(&self) -> MidgeResult<Vec<u8>> {
+        let bytes = serde_json::to_vec(self).map_err(|error| {
+            MidgeError::Corruption(format!("metadata cut proof serialization failed: {error}"))
+        })?;
+        if bytes.len() > Self::MAX_CLOUD_OBJECT_BYTES {
+            return Err(MidgeError::ResourceLimit(
+                "cloud metadata cut proof exceeds its byte bound".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub(crate) fn covers(&self, earlier: &Self) -> bool {
         self.writer_epoch == earlier.writer_epoch
             && self.session == earlier.session
@@ -374,6 +405,19 @@ impl MetadataPublicationLock {
         let _local = self.lock_for(deadline.remaining()).ok_or_else(|| {
             MidgeError::Timeout("metadata cut capture waits for local turn".into())
         })?;
+        if crate::metadata::format::is_format_10(fs.as_ref())? {
+            let captured = crate::runtime::hybrid_persistence::capture_selected_format10_closure(
+                fs.as_ref(),
+                self,
+                deadline,
+            )?;
+            return self.capture_locked_from_bodies(
+                &captured.bodies,
+                captured.reservation,
+                epoch,
+                deadline,
+            );
+        }
         crate::metadata::journal::with_manifest_writer_lock_within(
             fs,
             &DeadlineScope::new(*deadline),
@@ -392,21 +436,64 @@ impl MetadataPublicationLock {
                 "metadata cut requires an active epoch".into(),
             ));
         }
+        let memory = self.reserve_capture_memory(source, deadline)?;
+        let (fs, bodies) = copy_control_files(source, deadline)?;
+        self.capture_locked_from_parts(fs, &bodies, memory, epoch, deadline)
+    }
+
+    fn capture_locked_from_bodies(
+        &self,
+        bodies: &BTreeMap<String, Vec<u8>>,
+        mut memory: Arc<ResourceReservation>,
+        epoch: u64,
+        deadline: &OperationDeadline,
+    ) -> MidgeResult<Arc<CapturedMetadataCut>> {
+        let fs = copy_bodies_to_mock_fs(bodies)?;
+        self.ensure_capture_workspace(&mut memory, bodies, deadline)?;
+        self.capture_locked_from_parts(fs, bodies, memory, epoch, deadline)
+    }
+
+    fn capture_locked_from_parts(
+        &self,
+        fs: Arc<dyn Fs>,
+        bodies: &BTreeMap<String, Vec<u8>>,
+        memory: Arc<ResourceReservation>,
+        epoch: u64,
+        deadline: &OperationDeadline,
+    ) -> MidgeResult<Arc<CapturedMetadataCut>> {
+        if epoch == 0 {
+            return Err(MidgeError::Fenced(
+                "metadata cut requires an active epoch".into(),
+            ));
+        }
         let slot = self
             .capture_slots
             .get_or_init(|| ResourceBudget::new(MAX_CAPTURED_CUTS).with_contention_errors())
             .reserve(1, "owned metadata cut slot")?;
-        let mut memory = self.reserve_capture_memory(source, deadline)?;
-        let (fs, bodies) = copy_control_files(source, deadline)?;
-        self.ensure_capture_workspace(&mut memory, &bodies, deadline)?;
-        let snapshot = bodies
-            .get(files::MANIFEST_SNAPSHOT)
-            .ok_or_else(|| MidgeError::Corruption("metadata cut lacks manifest snapshot".into()))?;
-        let mut manifest = ManifestPersistence::decode_bodies(
-            snapshot,
-            bodies.get(files::JOURNAL).map(Vec::as_slice),
-            &DeadlineScope::new(*deadline),
-        )?;
+        let mut memory = memory;
+        self.ensure_capture_workspace(&mut memory, bodies, deadline)?;
+        let mut manifest = if bodies
+            .get(files::FORMAT)
+            .is_some_and(|format| format == b"midge-format-version=10\n")
+        {
+            use crate::metadata::local_authority::{LocalMetadataAuthority, Stream};
+            let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Manifest)?;
+            ManifestPersistence::decode_format_10_stream(
+                stream.base,
+                stream.checkpoint,
+                stream.segments,
+                Some(&DeadlineScope::new(*deadline)),
+            )?
+        } else {
+            let snapshot = bodies.get(files::MANIFEST_SNAPSHOT).ok_or_else(|| {
+                MidgeError::Corruption("metadata cut lacks manifest snapshot".into())
+            })?;
+            ManifestPersistence::decode_bodies(
+                snapshot,
+                bodies.get(files::JOURNAL).map(Vec::as_slice),
+                &DeadlineScope::new(*deadline),
+            )?
+        };
         crate::runtime::hybrid_persistence::metadata_snapshot::reduce_to_authority(&mut manifest);
         let publication_intents = publication_intents(&fs)?;
         let mut registry = self.cuts.lock();
@@ -429,7 +516,7 @@ impl MetadataPublicationLock {
             writer_epoch: epoch,
             session: registry.session.clone(),
             ordinal: registry.next,
-            digest: digest_bodies(&bodies),
+            digest: digest_bodies(bodies),
             covers,
         };
         registry.next = registry
@@ -782,12 +869,39 @@ fn copy_control_files(
     Ok((target, bodies))
 }
 
+fn copy_bodies_to_mock_fs(bodies: &BTreeMap<String, Vec<u8>>) -> MidgeResult<Arc<dyn Fs>> {
+    let target: Arc<dyn Fs> = Arc::new(MockFs::new());
+    for (name, bytes) in bodies {
+        target
+            .open(
+                &FsPath::new(name),
+                OpenOptions {
+                    mode: crate::io::OpenMode::ReadWrite,
+                    create: true,
+                    create_new: true,
+                    truncate: false,
+                },
+            )
+            .and_then(|mut file| file.append(bytes.clone().into()))
+            .map_err(FsError::into_midge)?;
+    }
+    Ok(target)
+}
+
 fn digest_bodies(bodies: &BTreeMap<String, Vec<u8>>) -> [u8; 32] {
     let mut digest = Sha256::new();
-    for name in files::CLOUD_MIRRORED {
+    let names: Vec<&str> = if bodies
+        .get(files::FORMAT)
+        .is_some_and(|format| format == b"midge-format-version=10\n")
+    {
+        bodies.keys().map(String::as_str).collect()
+    } else {
+        files::CLOUD_MIRRORED.to_vec()
+    };
+    for name in names {
         digest.update((name.len() as u64).to_be_bytes());
         digest.update(name.as_bytes());
-        if let Some(bytes) = bodies.get(*name) {
+        if let Some(bytes) = bodies.get(name) {
             digest.update([1]);
             digest.update((bytes.len() as u64).to_be_bytes());
             digest.update(bytes);

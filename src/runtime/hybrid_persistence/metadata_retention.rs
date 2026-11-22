@@ -1,5 +1,6 @@
 //! Reclaim only manifest versions that can no longer become selected history.
 
+use super::format10_admission::{AdmissionPhase, Format10AdmissionStore};
 use super::metadata_snapshot::CloudMetadataMirrorContext;
 use crate::common::{MidgeError, MidgeResult};
 use crate::lease::{CloudMetadataGeneration, CloudMetadataHead};
@@ -73,6 +74,7 @@ pub(crate) struct MetadataRetentionState {
     last_run: Option<Instant>,
     cursor: u64,
     continuation: Option<String>,
+    format_10_last_run: Option<Instant>,
     pub(crate) totals: RetentionCounters,
     pub(crate) interval: Duration,
 }
@@ -83,6 +85,7 @@ impl Default for MetadataRetentionState {
             last_run: None,
             cursor: 0,
             continuation: None,
+            format_10_last_run: None,
             totals: RetentionCounters::default(),
             interval: INTERVAL,
         }
@@ -116,6 +119,17 @@ impl MetadataRetentionState {
         }
         Some(cutoff)
     }
+
+    fn begin_format_10(&mut self) -> bool {
+        if self
+            .format_10_last_run
+            .is_some_and(|last| last.elapsed() < self.interval)
+        {
+            return false;
+        }
+        self.format_10_last_run = Some(Instant::now());
+        true
+    }
 }
 
 /// The caller holds the publication lock. Readers hold that same lock from
@@ -126,9 +140,18 @@ pub(super) fn collect_after_commit(
     generation: &CloudMetadataGeneration,
     state: &mut MetadataRetentionState,
 ) {
-    if context.publication_lock.pending_captures() != 0
-        || !super::metadata_chain::is_chain(generation)
-    {
+    if context.publication_lock.pending_captures() != 0 {
+        return;
+    }
+    if generation.uses_format_10() {
+        if state.begin_format_10() {
+            if let Err(error) = reclaim_finished_format10_stages(context, generation) {
+                tracing::debug!(%error, "retaining unsettled FORMAT 10 stages");
+            }
+        }
+        return;
+    }
+    if !super::metadata_chain::is_chain(generation) {
         return;
     }
     let Some(cutoff) = state.begin(generation.id.get()) else {
@@ -187,6 +210,79 @@ pub(super) fn collect_after_commit(
         retained = state.totals.retained,
         "cloud manifest retention counters"
     );
+}
+
+/// Reclaim only terminal reservation members. The caller holds the local
+/// publication lock, and runtime staging serializes FORMAT 10 through CAS.
+/// This keeps captured provider reads and pointer selection clear of cleanup.
+pub(super) fn reclaim_finished_format10_stages(
+    context: &CloudMetadataMirrorContext<'_>,
+    generation: &CloudMetadataGeneration,
+) -> MidgeResult<()> {
+    let admission = Format10AdmissionStore::new(context.cloud, context.deadline);
+    let protected = generation
+        .objects
+        .iter()
+        .map(|object| object.object_key.as_str())
+        .collect::<BTreeSet<_>>();
+    let io = BlockingCloud::new(context.cloud, context.deadline);
+    for mut record in admission.list_slots()?.into_iter().flatten() {
+        if record.writer_epoch > context.authority.writer_epoch
+            || record
+                .objects
+                .iter()
+                .any(|object| protected.contains(object.object_key.as_str()))
+        {
+            continue;
+        }
+        if record.phase == AdmissionPhase::Uploaded
+            && record.writer_epoch < context.authority.writer_epoch
+        {
+            // The successor has claimed the pointer. This stage's bodies
+            // settled, and any delayed predecessor CAS can no longer select
+            // them. Startup resolves pending migration before runtime GC.
+            validate_current(context, generation)?;
+            record = admission.finish(record.publication_id)?;
+        }
+        if record.phase != AdmissionPhase::Finished {
+            continue;
+        }
+        validate_current(context, generation)?;
+        let mut removed = BTreeSet::new();
+        for object in &record.objects {
+            if let Some(identity) = io.range_identity(&object.object_key)? {
+                remove_format_10_member(context, generation, object, identity)?;
+            }
+            removed.insert(object.object_key.clone());
+        }
+        validate_current(context, generation)?;
+        admission.delete_finished(&record, &removed)?;
+    }
+    Ok(())
+}
+
+fn remove_format_10_member(
+    context: &CloudMetadataMirrorContext<'_>,
+    generation: &CloudMetadataGeneration,
+    object: &crate::lease::CloudMetadataObject,
+    identity: StorageObjectMetadata,
+) -> MidgeResult<()> {
+    let key = &object.object_key;
+    if identity.size != object.len
+        || crc32c::crc32c(&read_identity(context, key, &identity)?) != object.crc32c
+    {
+        return Err(MidgeError::Corruption(
+            "reserved FORMAT 10 object changed before cleanup".into(),
+        ));
+    }
+    validate_current(context, generation)?;
+    crate::failpoints::fail_point!("midge::cloud::before_metadata_retention_delete");
+    if !delete_identity(context, key, identity)? {
+        return Err(MidgeError::OutcomeUnknown(
+            "reserved FORMAT 10 body deletion remains unproven".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn reclaim_candidate(

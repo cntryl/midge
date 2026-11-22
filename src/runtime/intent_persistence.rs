@@ -15,6 +15,12 @@ pub struct IntentPersistence;
 mod edits;
 pub(crate) use edits::IntentDecodeWorkspace;
 
+pub(crate) struct IntentUpgradeState {
+    pub(crate) entries: Vec<IntentLogEntry>,
+    pub(crate) sequence: u64,
+    pub(crate) checksum: u32,
+}
+
 impl IntentPersistence {
     const INTENT_FILE: &'static str = crate::metadata::files::INTENT_LOG;
     const INTENT_FILE_TEMP: &'static str = "intent_log.json.tmp";
@@ -52,9 +58,63 @@ impl IntentPersistence {
         // Byte corruption remains an error in both modes. Only a genuine
         // partial final append can retain the preceding durable state.
         let _ = recovery_policy;
-        let intents = edits::load(fs)?;
+        let intents = if crate::metadata::format::is_format_10(fs.as_ref())? {
+            crate::metadata::journal::with_manifest_writer_lock(
+                fs,
+                || -> MidgeResult<Vec<IntentLogEntry>> {
+                    let authority = crate::metadata::local_authority::LocalMetadataAuthority::open(
+                        std::sync::Arc::clone(fs),
+                    )?;
+                    let (base, segments) =
+                        authority.read_stream(crate::metadata::local_authority::Stream::Intent)?;
+                    Self::decode_format_10_stream(
+                        &base,
+                        segments.iter().map(|(_, _, payload)| payload.as_slice()),
+                    )
+                },
+            )?
+        } else {
+            edits::load(fs)?
+        };
         Self::validate_persisted_sst_names(&intents).map_err(MidgeError::RecoveryFailed)?;
         Ok(intents)
+    }
+
+    pub(crate) fn validate_cloud_format_10_bodies(
+        bodies: &std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> MidgeResult<()> {
+        use crate::metadata::local_authority::{LocalMetadataAuthority, Stream};
+        let stream = LocalMetadataAuthority::read_cloud_stream(bodies, Stream::Intent)?;
+        let intents = Self::decode_format_10_stream(
+            stream.base,
+            stream.segments.into_iter().map(|(_, _, payload)| payload),
+        )?;
+        Self::validate_persisted_sst_names(&intents).map_err(MidgeError::RecoveryFailed)
+    }
+
+    fn decode_format_10_stream<'a>(
+        base: &[u8],
+        segments: impl IntoIterator<Item = &'a [u8]>,
+    ) -> MidgeResult<Vec<IntentLogEntry>> {
+        let mut latest = serde_json::from_slice(base).map_err(|error| {
+            MidgeError::Corruption(format!("invalid FORMAT 10 intent base: {error}"))
+        })?;
+        for payload in segments {
+            latest = serde_json::from_slice(payload).map_err(|error| {
+                MidgeError::Corruption(format!("invalid FORMAT 10 intent segment: {error}"))
+            })?;
+        }
+        Ok(latest)
+    }
+
+    /// Validate every byte of the captured FORMAT 9 intent history before upgrade.
+    pub(crate) fn decode_for_upgrade(
+        bytes: bytes::Bytes,
+        scope: &crate::common::DeadlineScope,
+    ) -> MidgeResult<IntentUpgradeState> {
+        let state = edits::decode_for_upgrade(bytes, scope)?;
+        Self::validate_persisted_sst_names(&state.entries).map_err(MidgeError::RecoveryFailed)?;
+        Ok(state)
     }
 
     fn validate_persisted_sst_names(intents: &[IntentLogEntry]) -> Result<(), String> {
@@ -129,7 +189,40 @@ impl IntentPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         intents: &[IntentLogEntry],
     ) -> MidgeResult<()> {
+        let format_10 = crate::metadata::format::is_format_10(fs.as_ref())?;
+        Self::save_for_selected_format(fs, intents, format_10)
+    }
+
+    pub(crate) fn save_for_selected_format(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        intents: &[IntentLogEntry],
+        format_10: bool,
+    ) -> MidgeResult<()> {
         Self::validate_persisted_sst_names(intents).map_err(MidgeError::RecoveryFailed)?;
+        if format_10 {
+            return crate::metadata::journal::with_manifest_writer_lock(fs, || {
+                crate::failpoints::fail_point!("midge::intent::before_save");
+                crate::failpoints::fail_point!("midge::intent::inject_no_space_on_save", |_| Err(
+                    MidgeError::NoSpace("failpoint: no space while saving intent log".into())
+                ));
+                let mut authority = crate::metadata::local_authority::LocalMetadataAuthority::open(
+                    std::sync::Arc::clone(fs),
+                )?;
+                let sequence = authority
+                    .high_water(crate::metadata::local_authority::Stream::Intent)
+                    .checked_add(1)
+                    .ok_or_else(|| MidgeError::ResourceLimit("intent sequence exhausted".into()))?;
+                let payload = serde_json::to_vec(intents).map_err(|error| {
+                    MidgeError::Internal(format!("encode FORMAT 10 intent state: {error}"))
+                })?;
+                let stream = crate::metadata::local_authority::Stream::Intent;
+                if authority.append_would_exceed_limits(stream, sequence, sequence, &payload)? {
+                    authority.compact_intent(&payload, sequence, crc32c::crc32c(&payload))
+                } else {
+                    authority.append(stream, sequence, sequence, &payload)
+                }
+            });
+        }
         edits::save(fs, intents)
     }
 

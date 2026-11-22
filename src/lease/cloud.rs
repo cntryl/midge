@@ -9,8 +9,9 @@
 
 use super::clock::LeaseClock;
 use super::traits::{
-    CloudMetadataGeneration, CloudMetadataHead, LeaderAcquisition, LeaderRecord, LeaderStore,
-    LeaseError, LeaseGuard, LeaseValidity, PrimaryLease,
+    CloudFormatMigrationGate, CloudFormatMigrationPending, CloudMetadataGeneration,
+    CloudMetadataGenerationIdentity, CloudMetadataHead, LeaderAcquisition, LeaderRecord,
+    LeaderStore, LeaseError, LeaseGuard, LeaseValidity, PrimaryLease,
 };
 use crate::storage::cloud::{CloudError, CloudEvent, CloudOutcome, CloudStorage, ObjectMetadata};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -52,6 +53,15 @@ struct ProviderLeaderStore {
     clock_skew_tolerance: Mutex<Duration>,
     clock: LeaseClock,
     metadata_pointer_cache: Mutex<Option<metadata_pointer::CachedPointer>>,
+    migration_gate_cache: Mutex<Option<CachedMigrationGate>>,
+}
+
+#[derive(Clone)]
+struct CachedMigrationGate {
+    holder_id: String,
+    owner_token: String,
+    epoch: u64,
+    gate: Option<CloudFormatMigrationGate>,
 }
 
 struct LeaseDeadlines {
@@ -99,7 +109,50 @@ impl ProviderLeaderStore {
             clock_skew_tolerance: Mutex::new(clock_skew_tolerance),
             clock,
             metadata_pointer_cache: Mutex::new(None),
+            migration_gate_cache: Mutex::new(None),
         }
+    }
+
+    fn cache_migration_gate(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        gate: Option<CloudFormatMigrationGate>,
+    ) {
+        *self
+            .migration_gate_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(CachedMigrationGate {
+            holder_id: holder_id.to_string(),
+            owner_token: self.owner_token.clone(),
+            epoch,
+            gate,
+        });
+    }
+
+    fn invalidate_migration_gate(&self) {
+        *self
+            .migration_gate_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    fn with_cached_migration_gate<T>(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        operation: impl FnOnce(Option<&CloudFormatMigrationGate>) -> T,
+    ) -> Option<T> {
+        self.migration_gate_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .filter(|cache| {
+                cache.holder_id == holder_id
+                    && cache.owner_token == self.owner_token
+                    && cache.epoch == epoch
+            })
+            .map(|cache| operation(cache.gate.as_ref()))
     }
 }
 
@@ -114,7 +167,12 @@ impl ProviderLeaderStore {
             None => (None, None),
         };
         if existing.as_ref().is_some_and(|document| {
-            document.version != LeaseDocumentVersion::V4 || document.committed_metadata.is_some()
+            !matches!(
+                document.version,
+                LeaseDocumentVersion::V4 | LeaseDocumentVersion::V5
+            ) || document.committed_metadata.is_some()
+                || (document.version == LeaseDocumentVersion::V5
+                    && document.migration_gate.is_none())
         }) {
             return Err(legacy_metadata_migration_error());
         }
@@ -168,14 +226,27 @@ impl ProviderLeaderStore {
             now,
             expires_at,
         } = self.lease_deadlines()?;
+        let version = existing
+            .as_ref()
+            .map_or(LeaseDocumentVersion::V4, |document| {
+                if document.version == LeaseDocumentVersion::V5 {
+                    LeaseDocumentVersion::V5
+                } else {
+                    LeaseDocumentVersion::V4
+                }
+            });
+        let migration_gate = existing
+            .as_ref()
+            .and_then(|document| document.migration_gate.clone());
         let document = LeaseDocument {
-            version: LeaseDocumentVersion::V4,
+            version,
             epoch: Some(epoch),
             holder_id: holder_id.to_string(),
             owner_token: Some(self.owner_token.clone()),
             acquired_at: now.to_rfc3339(),
             expires_at: expires_at.to_rfc3339(),
             committed_metadata: None,
+            migration_gate,
         };
         let headers = match metadata {
             Some(metadata) => mutation_precondition_headers(&metadata).ok_or_else(|| {
@@ -226,7 +297,247 @@ impl ProviderLeaderStore {
                 .check("cloud metadata pointer claim acceptance")
                 .map_err(super::traits::scope_lease_error)?;
         }
-        self.validity.activate(epoch, valid_until)
+        self.validity.activate(epoch, valid_until)?;
+        self.cache_migration_gate(&document.holder_id, epoch, document.migration_gate.clone());
+        Ok(())
+    }
+}
+
+impl ProviderLeaderStore {
+    fn read_migration_lease(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        deadline: &crate::common::OperationDeadline,
+    ) -> Result<(LeaseDocument, ObjectMetadata), LeaseError> {
+        let remaining = deadline
+            .remaining()
+            .min(self.validity.remaining(epoch)?)
+            .min(self.cloud.callback_timeout());
+        let (document, metadata) = provider_read_doc_with_metadata(&self.cloud, remaining)?
+            .ok_or_else(|| LeaseError::RenewalFailed("cloud lease document disappeared".into()))?;
+        if !owns_document(&document, holder_id, &self.owner_token, epoch) {
+            return Err(LeaseError::RenewalFailed(
+                "cloud lease owner changed during FORMAT migration".into(),
+            ));
+        }
+        if document.is_expired_with_tolerance(self.clock_skew_tolerance(), self.clock.now())? {
+            return Err(LeaseError::RenewalFailed(
+                "cloud lease expired during FORMAT migration".into(),
+            ));
+        }
+        self.validity.remaining(epoch)?;
+        Ok((document, metadata))
+    }
+
+    fn write_migration_gate(
+        &self,
+        expected: &LeaseDocument,
+        metadata: &ObjectMetadata,
+        replacement: &LeaseDocument,
+        holder_id: &str,
+        epoch: u64,
+        deadline: &crate::common::OperationDeadline,
+    ) -> Result<(), LeaseError> {
+        let encoded = format_lease_document(replacement);
+        if encoded.len() > MAX_LEASE_DOCUMENT_BYTES {
+            return Err(LeaseError::Indeterminate(
+                "cloud FORMAT migration gate exceeds the 4096-byte lease limit".into(),
+            ));
+        }
+        let headers = mutation_precondition_headers(metadata).ok_or_else(|| {
+            LeaseError::Indeterminate(
+                "cloud lease migration transition has no conditional token".into(),
+            )
+        })?;
+        self.invalidate_migration_gate();
+        let write_timeout = deadline
+            .remaining()
+            .min(self.validity.remaining(epoch)?)
+            .min(self.cloud.callback_timeout());
+        if write_timeout.is_zero() {
+            return Err(LeaseError::Timeout(
+                "cloud lease migration transition has no remaining budget".into(),
+            ));
+        }
+        let write_result =
+            provider_write_doc_with_timeout(&self.cloud, replacement, headers, write_timeout);
+        if matches!(&write_result, Err(LeaseError::AcquisitionFailed(_))) {
+            return write_result;
+        }
+        let readback_timeout = deadline
+            .remaining()
+            .min(self.validity.remaining(epoch).unwrap_or(Duration::ZERO))
+            .min(self.cloud.callback_timeout());
+        let readback = provider_read_doc_with_timeout(&self.cloud, readback_timeout);
+        if let Ok(Some(actual)) = &readback {
+            let gate_matches = actual.version == replacement.version
+                && actual.migration_gate == replacement.migration_gate;
+            if gate_matches
+                && owns_document(actual, holder_id, &self.owner_token, epoch)
+                && actual.committed_metadata == replacement.committed_metadata
+            {
+                self.validity.remaining(epoch)?;
+                self.cache_migration_gate(holder_id, epoch, replacement.migration_gate.clone());
+                return Ok(());
+            }
+        }
+        match write_result {
+            Ok(()) => Err(LeaseError::Indeterminate(
+                "cloud lease migration transition changed before exact owner/gate readback".into(),
+            )),
+            Err(write_error) => Err(LeaseError::Indeterminate(format!(
+                "cloud lease migration transition outcome is unknown (expected prior {:?}, current owner {:?}): {write_error}; readback: {}",
+                expected.epoch,
+                readback.as_ref().ok().and_then(|value| value.as_ref()).and_then(|doc| doc.epoch),
+                readback.err().map_or_else(|| "state did not match".into(), |error| error.to_string())
+            ))),
+        }
+    }
+
+    fn read_format_migration_gate_inner(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<Option<CloudFormatMigrationGate>, LeaseError> {
+        let deadline = crate::common::OperationDeadline::from_budget(timeout);
+        let (document, _) = self.read_migration_lease(holder_id, epoch, &deadline)?;
+        match document.version {
+            LeaseDocumentVersion::V4 if document.migration_gate.is_none() => {
+                self.cache_migration_gate(holder_id, epoch, None);
+                Ok(None)
+            }
+            LeaseDocumentVersion::V5 => {
+                self.cache_migration_gate(holder_id, epoch, document.migration_gate.clone());
+                Ok(document.migration_gate)
+            }
+            _ => Err(LeaseError::Indeterminate(
+                "cloud lease protocol does not support FORMAT migration gates".into(),
+            )),
+        }
+    }
+
+    fn install_format_10_pending_inner(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        pending: CloudFormatMigrationPending,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        validate_migration_gate(&CloudFormatMigrationGate::Pending(pending.clone()))?;
+        let deadline = crate::common::OperationDeadline::from_budget(timeout);
+        let (current, metadata) = self.read_migration_lease(holder_id, epoch, &deadline)?;
+        if current.version != LeaseDocumentVersion::V4
+            || current.committed_metadata.is_some()
+            || current.migration_gate.is_some()
+        {
+            return Err(LeaseError::RenewalFailed(
+                "pending FORMAT migration can only be installed over an ungated v4 lease".into(),
+            ));
+        }
+        let selected = self.migration_selected_generation(holder_id, epoch, &deadline)?;
+        let expected_source = selected
+            .as_ref()
+            .map(CloudMetadataGenerationIdentity::from_generation)
+            .ok_or_else(|| {
+                LeaseError::Indeterminate(
+                    "pending FORMAT migration requires a selected v9 predecessor".into(),
+                )
+            })?;
+        if expected_source != pending.source {
+            return Err(LeaseError::AcquisitionFailed(
+                "selected cloud metadata is not the exact FORMAT migration predecessor".into(),
+            ));
+        }
+        let replacement = LeaseDocument {
+            version: LeaseDocumentVersion::V5,
+            migration_gate: Some(CloudFormatMigrationGate::Pending(pending)),
+            ..current.clone()
+        };
+        self.write_migration_gate(
+            &current,
+            &metadata,
+            &replacement,
+            holder_id,
+            epoch,
+            &deadline,
+        )?;
+        let selected_after = match self.migration_selected_generation(holder_id, epoch, &deadline) {
+            Ok(selected) => selected,
+            Err(error) => {
+                self.invalidate_migration_gate();
+                return Err(error);
+            }
+        };
+        if selected_after.as_ref() != selected.as_ref() {
+            self.invalidate_migration_gate();
+            return Err(LeaseError::Indeterminate(
+                "cloud pointer changed while installing the pending FORMAT migration gate".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn activate_format_10_gate_inner(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        migration_id: &str,
+        candidate: &CloudMetadataGeneration,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        let deadline = crate::common::OperationDeadline::from_budget(timeout);
+        let (current, metadata) = self.read_migration_lease(holder_id, epoch, &deadline)?;
+        let Some(CloudFormatMigrationGate::Pending(pending)) = current.migration_gate.as_ref()
+        else {
+            return Err(LeaseError::RenewalFailed(
+                "FORMAT 10 gate finalization requires a pending lease state".into(),
+            ));
+        };
+        if current.version != LeaseDocumentVersion::V5 || pending.migration_id != migration_id {
+            return Err(LeaseError::RenewalFailed(
+                "pending FORMAT migration identity changed before finalization".into(),
+            ));
+        }
+        let candidate_identity = CloudMetadataGenerationIdentity::from_generation(candidate);
+        if candidate_identity != pending.candidate.generation {
+            return Err(LeaseError::AcquisitionFailed(
+                "candidate descriptor differs from the exact pending FORMAT migration".into(),
+            ));
+        }
+        let selected = self.migration_selected_generation(holder_id, epoch, &deadline)?;
+        if selected.as_ref() != Some(candidate) {
+            return Err(LeaseError::AcquisitionFailed(
+                "cloud pointer does not select the exact pending FORMAT 10 candidate".into(),
+            ));
+        }
+        let replacement = LeaseDocument {
+            migration_gate: Some(CloudFormatMigrationGate::Active { target_format: 10 }),
+            ..current.clone()
+        };
+        self.write_migration_gate(
+            &current,
+            &metadata,
+            &replacement,
+            holder_id,
+            epoch,
+            &deadline,
+        )?;
+        let selected_after = match self.migration_selected_generation(holder_id, epoch, &deadline) {
+            Ok(selected) => selected,
+            Err(error) => {
+                self.invalidate_migration_gate();
+                return Err(error);
+            }
+        };
+        if selected_after.as_ref() != Some(candidate) {
+            self.invalidate_migration_gate();
+            return Err(LeaseError::Indeterminate(
+                "cloud pointer changed while finalizing the FORMAT 10 gate".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -275,6 +586,36 @@ impl LeaderStore for ProviderLeaderStore {
                 acquired_at: document.acquired_at,
             }),
         )
+    }
+
+    fn read_format_migration_gate(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        timeout: Duration,
+    ) -> Result<Option<CloudFormatMigrationGate>, LeaseError> {
+        self.read_format_migration_gate_inner(holder_id, epoch, timeout)
+    }
+
+    fn install_format_10_pending(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        pending: CloudFormatMigrationPending,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.install_format_10_pending_inner(holder_id, epoch, pending, timeout)
+    }
+
+    fn activate_format_10_gate(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        migration_id: &str,
+        candidate: &CloudMetadataGeneration,
+        timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        self.activate_format_10_gate_inner(holder_id, epoch, migration_id, candidate, timeout)
     }
 
     fn read_committed_metadata(&self, timeout: Duration) -> Result<CloudMetadataHead, LeaseError> {
@@ -326,7 +667,7 @@ impl LeaderStore for ProviderLeaderStore {
         let read_timeout = timeout.min(self.validity.remaining(expected_epoch)?);
         match provider_read_doc_with_timeout(&self.cloud, read_timeout)? {
             Some(document)
-                if document.version == LeaseDocumentVersion::V4
+                if matches!(document.version, LeaseDocumentVersion::V4 | LeaseDocumentVersion::V5)
                     && owns_document(
                         &document,
                         expected_holder_id,
@@ -339,6 +680,11 @@ impl LeaderStore for ProviderLeaderStore {
                         "cloud lease expired before epoch validation".to_string(),
                     ));
                 }
+                self.cache_migration_gate(
+                    expected_holder_id,
+                    expected_epoch,
+                    document.migration_gate.clone(),
+                );
                 self.validity.remaining(expected_epoch).map(|_| ())
             }
             Some(document) => Err(LeaseError::RenewalFailed(format!(
@@ -416,8 +762,10 @@ impl LeaderStore for ProviderLeaderStore {
                 .ok_or_else(|| {
                     LeaseError::RenewalFailed("cloud lease document disappeared".to_string())
                 })?;
-            if existing.version != LeaseDocumentVersion::V4
-                || !owns_document(&existing, holder_id, &self.owner_token, expected_epoch)
+            if !matches!(
+                existing.version,
+                LeaseDocumentVersion::V4 | LeaseDocumentVersion::V5
+            ) || !owns_document(&existing, holder_id, &self.owner_token, expected_epoch)
             {
                 return Err(LeaseError::RenewalFailed(format!(
                     "cloud lease ownership changed (holder: {}, epoch: {:?})",
@@ -461,6 +809,8 @@ impl LeaderStore for ProviderLeaderStore {
             }
             match provider_write_doc_with_timeout(&self.cloud, &document, headers, write_timeout) {
                 Ok(()) => {
+                    // Renewal preserves the gate. An older renewal response
+                    // cannot overwrite a concurrently confirmed transition.
                     if let Err(error) = self.validity.advance(expected_epoch, valid_until) {
                         let _ = self.release_leadership(holder_id, expected_epoch);
                         return Err(error);
@@ -517,7 +867,10 @@ impl LeaderStore for ProviderLeaderStore {
             else {
                 return Ok(());
             };
-            if current.version != LeaseDocumentVersion::V4 {
+            if !matches!(
+                current.version,
+                LeaseDocumentVersion::V4 | LeaseDocumentVersion::V5
+            ) {
                 tracing::warn!(%holder_id, "skipping cloud lease release after legacy document replacement");
                 return Ok(());
             }
@@ -539,7 +892,10 @@ impl LeaderStore for ProviderLeaderStore {
                 ));
             }
             match provider_write_doc_with_timeout(&self.cloud, &released, headers, remaining) {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.invalidate_migration_gate();
+                    return Ok(());
+                }
                 Err(LeaseError::AcquisitionFailed(_)) => {
                     // This PUT was definitely rejected. Re-read the current
                     // epoch and preserve its committed pointer.
@@ -939,6 +1295,7 @@ enum LeaseDocumentVersion {
     Legacy,
     V3,
     V4,
+    V5,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -950,6 +1307,7 @@ struct LeaseDocument {
     acquired_at: String,
     expires_at: String,
     committed_metadata: Option<CloudMetadataGeneration>,
+    migration_gate: Option<CloudFormatMigrationGate>,
 }
 
 impl LeaseDocument {
@@ -1007,6 +1365,22 @@ fn format_lease_document(doc: &LeaseDocument) -> String {
                 doc.expires_at,
             )
         }
+        LeaseDocumentVersion::V5 => {
+            let gate = serde_json::to_string(
+                doc.migration_gate
+                    .as_ref()
+                    .expect("V5 lease has a migration gate"),
+            )
+            .expect("migration gate has infallible JSON serialization");
+            format!(
+                "lease_version: 5\nfencing_epoch: {}\nholder: {}\nowner: {}\nacquired: {}\nexpires: {}\nupgrade: {gate}\n",
+                doc.epoch.expect("V5 lease has an epoch"),
+                doc.holder_id,
+                doc.owner_token.as_deref().expect("V5 lease has an owner token"),
+                doc.acquired_at,
+                doc.expires_at,
+            )
+        }
         LeaseDocumentVersion::V4 => format!(
             "lease_version: 4\nfencing_epoch: {}\nholder: {}\nowner: {}\nacquired: {}\nexpires: {}\n",
             doc.epoch.expect("V4 lease has an epoch"),
@@ -1035,6 +1409,17 @@ pub(crate) fn expired_backup_lease_document(content: &[u8]) -> Result<Vec<u8>, L
                 .to_string(),
         )
     })?;
+    if document.version == LeaseDocumentVersion::V5
+        && !matches!(
+            document.migration_gate.as_ref(),
+            Some(CloudFormatMigrationGate::Active { target_format: 10 })
+        )
+    {
+        return Err(LeaseError::Indeterminate(
+            "pending or unsupported cloud format migration gate cannot be rewritten into a backup"
+                .into(),
+        ));
+    }
     document.expires_at = BACKUP_EXPIRED_TIMESTAMP.to_string();
     Ok(format_lease_document(&document).into_bytes())
 }
@@ -1048,7 +1433,13 @@ fn parse_lease_document(content: &str) -> Option<LeaseDocument> {
         .lines()
         .any(|line| line.starts_with("lease_version:"))
     {
-        return parse_v3_lease_document(content);
+        return match content
+            .lines()
+            .find_map(|line| line.strip_prefix("lease_version: "))?
+        {
+            "5" => parse_v5_lease_document(content),
+            _ => parse_v3_lease_document(content),
+        };
     }
     parse_legacy_lease_document(content)
 }
@@ -1082,6 +1473,7 @@ fn parse_legacy_lease_document(content: &str) -> Option<LeaseDocument> {
         acquired_at: acquired_at?,
         expires_at: expires_at?,
         committed_metadata: None,
+        migration_gate: None,
     })
 }
 
@@ -1141,16 +1533,112 @@ fn parse_v3_lease_document(content: &str) -> Option<LeaseDocument> {
         acquired_at,
         expires_at,
         committed_metadata,
+        migration_gate: None,
     })
 }
 
-pub(super) fn validate_metadata_generation(
+fn parse_v5_lease_document(content: &str) -> Option<LeaseDocument> {
+    if !content.ends_with('\n') || content.contains('\r') {
+        return None;
+    }
+    let mut version = None;
+    let mut epoch = None;
+    let mut holder_id = None;
+    let mut owner_token = None;
+    let mut acquired_at = None;
+    let mut expires_at = None;
+    let mut migration_gate = None;
+    for line in content.lines() {
+        let (name, value) = line.split_once(": ")?;
+        match name {
+            "lease_version" if version.replace(value).is_none() => {}
+            "fencing_epoch" if epoch.replace(value.parse::<u64>().ok()?).is_none() => {}
+            "holder" if holder_id.replace(value.to_string()).is_none() => {}
+            "owner" if owner_token.replace(value.to_string()).is_none() => {}
+            "acquired" if acquired_at.replace(value.to_string()).is_none() => {}
+            "expires" if expires_at.replace(value.to_string()).is_none() => {}
+            "upgrade"
+                if migration_gate
+                    .replace(serde_json::from_str::<CloudFormatMigrationGate>(value).ok()?)
+                    .is_none() => {}
+            _ => return None,
+        }
+    }
+    if version? != "5" {
+        return None;
+    }
+    let epoch = epoch?;
+    let holder_id = holder_id?;
+    let owner_token = owner_token?;
+    let acquired_at = acquired_at?;
+    let expires_at = expires_at?;
+    let migration_gate = migration_gate?;
+    if epoch == 0 || holder_id.is_empty() || owner_token.is_empty() || acquired_at.is_empty() {
+        return None;
+    }
+    validate_migration_gate(&migration_gate).ok()?;
+    Some(LeaseDocument {
+        version: LeaseDocumentVersion::V5,
+        epoch: Some(epoch),
+        holder_id,
+        owner_token: Some(owner_token),
+        acquired_at,
+        expires_at,
+        committed_metadata: None,
+        migration_gate: Some(migration_gate),
+    })
+}
+
+fn validate_migration_gate(gate: &CloudFormatMigrationGate) -> Result<(), LeaseError> {
+    let valid_digest = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    match gate {
+        CloudFormatMigrationGate::Pending(pending) => {
+            let migration_id = uuid::Uuid::parse_str(&pending.migration_id).map_err(|_| {
+                LeaseError::Indeterminate("cloud migration ID is not a UUID".into())
+            })?;
+            if migration_id.to_string() != pending.migration_id
+                || pending.target_format != 10
+                || pending.source.ordinal == 0
+                || pending.candidate.generation.ordinal
+                    != pending.source.ordinal.checked_add(1).ok_or_else(|| {
+                        LeaseError::Indeterminate("cloud migration source ordinal exhausted".into())
+                    })?
+                || !valid_digest(&pending.source.descriptor_sha256)
+                || !valid_digest(&pending.source_sha256)
+                || !valid_digest(&pending.candidate.generation.descriptor_sha256)
+                || pending.candidate.descriptor_key
+                    != CloudFormatMigrationPending::candidate_descriptor_key(&pending.migration_id)
+            {
+                return Err(LeaseError::Indeterminate(
+                    "cloud pending FORMAT migration descriptor is invalid".into(),
+                ));
+            }
+        }
+        CloudFormatMigrationGate::Active { target_format } if *target_format == 10 => {}
+        CloudFormatMigrationGate::Active { .. } => {
+            return Err(LeaseError::Indeterminate(
+                "cloud active FORMAT gate has an unsupported target".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_metadata_generation(
     generation: &CloudMetadataGeneration,
 ) -> Result<(), LeaseError> {
     if generation.id == super::SharedGenerationId::NONE {
         return Err(LeaseError::Internal(
             "committed shared generation has zero ordinal".into(),
         ));
+    }
+    if generation.uses_format_10() {
+        return validate_format_10_generation(generation);
     }
     if generation
         .objects
@@ -1208,36 +1696,107 @@ pub(super) fn validate_metadata_generation(
                 object.file_name
             )));
         }
-        let Some(relative) = object.object_key.strip_prefix(METADATA_GENERATIONS_PREFIX) else {
-            return Err(LeaseError::Internal(format!(
-                "cloud metadata '{}' has an invalid immutable object key",
-                object.file_name
-            )));
-        };
-        let Some((generation_id, file_name)) = relative.split_once('/') else {
-            return Err(LeaseError::Internal(format!(
-                "cloud metadata '{}' has an invalid immutable object key",
-                object.file_name
-            )));
-        };
-        let parsed_id = uuid::Uuid::parse_str(generation_id).map_err(|_| {
-            LeaseError::Internal(format!(
-                "cloud metadata '{}' has an invalid generation ID",
-                object.file_name
-            ))
-        })?;
-        if parsed_id.to_string() != generation_id || file_name != object.file_name {
-            return Err(LeaseError::Internal(format!(
-                "cloud metadata '{}' has a noncanonical immutable object key",
-                object.file_name
-            )));
-        }
+        validate_immutable_body_key(object)?;
     }
     if !seen_files.contains(crate::metadata::files::FORMAT)
         || !seen_files.contains(crate::metadata::files::MANIFEST_SNAPSHOT)
     {
         return Err(LeaseError::Internal(
             "cloud metadata generation lacks FORMAT or manifest snapshot".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_immutable_body_key(object: &super::CloudMetadataObject) -> Result<String, LeaseError> {
+    let invalid_key = || {
+        LeaseError::Internal(format!(
+            "cloud metadata '{}' has an invalid immutable object key",
+            object.file_name
+        ))
+    };
+    let (generation_id, file_name) = object
+        .object_key
+        .strip_prefix(METADATA_GENERATIONS_PREFIX)
+        .and_then(|relative| relative.split_once('/'))
+        .ok_or_else(invalid_key)?;
+    let parsed_id = uuid::Uuid::parse_str(generation_id).map_err(|_| {
+        LeaseError::Internal(format!(
+            "cloud metadata '{}' has an invalid generation ID",
+            object.file_name
+        ))
+    })?;
+    if parsed_id.to_string() != generation_id || file_name != object.file_name {
+        return Err(LeaseError::Internal(format!(
+            "cloud metadata '{}' has a noncanonical immutable object key",
+            object.file_name
+        )));
+    }
+    Ok(generation_id.to_owned())
+}
+
+fn validate_format_10_generation(generation: &CloudMetadataGeneration) -> Result<(), LeaseError> {
+    use crate::metadata::files::FORMAT;
+    use crate::metadata::local_authority::{
+        closure_path_parts, HEAD_PATH, MAX_CLOSURE_BYTES, MAX_HEAD_BYTES, MAX_OBJECTS,
+    };
+
+    if generation.objects.len() > MAX_OBJECTS + 3 {
+        return Err(LeaseError::Indeterminate(
+            "cloud FORMAT 10 metadata exceeds its object bound".into(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0_u64;
+    let mut selected_generation = None;
+    let mut publication_uuid: Option<String> = None;
+    let mut have_manifest_base = false;
+    let mut have_intent_base = false;
+    for object in &generation.objects {
+        let object_publication = validate_immutable_body_key(object)?;
+        if publication_uuid.get_or_insert_with(|| object_publication.clone()) != &object_publication
+        {
+            return Err(LeaseError::Indeterminate(
+                "cloud FORMAT 10 descriptor mixes immutable publication UUIDs".into(),
+            ));
+        }
+        let name = object.file_name.as_str();
+        if object.len == 0 || !seen.insert(name) {
+            return Err(LeaseError::Indeterminate(
+                "cloud FORMAT 10 descriptor contains an empty or duplicate object".into(),
+            ));
+        }
+        total = total.checked_add(object.len).ok_or_else(|| {
+            LeaseError::Indeterminate("cloud FORMAT 10 metadata length overflow".into())
+        })?;
+        match name {
+            FORMAT if object.len == b"midge-format-version=10\n".len() as u64 => continue,
+            HEAD_PATH if object.len <= MAX_HEAD_BYTES as u64 => continue,
+            crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME
+                if object.len
+                    <= crate::runtime::MetadataCutProof::MAX_CLOUD_OBJECT_BYTES as u64 =>
+            {
+                continue;
+            }
+            _ => {}
+        }
+        let (path_generation, body) = closure_path_parts(name)
+            .map_err(|error| LeaseError::Indeterminate(error.to_string()))?;
+        if *selected_generation.get_or_insert(path_generation) != path_generation {
+            return Err(LeaseError::Indeterminate(
+                "cloud FORMAT 10 descriptor mixes metadata generations".into(),
+            ));
+        }
+        have_manifest_base |= body == "manifest/base";
+        have_intent_base |= body == "intent/base";
+    }
+    if total > MAX_CLOSURE_BYTES
+        || !have_manifest_base
+        || !have_intent_base
+        || !seen.contains(FORMAT)
+    {
+        return Err(LeaseError::Indeterminate(
+            "cloud FORMAT 10 descriptor is incomplete or exceeds its read bound".into(),
         ));
     }
     Ok(())
@@ -1310,6 +1869,57 @@ fn provider_read_authority_sentinel(
             "cloud metadata authority sentinel GET: {error}"
         ))),
     }
+}
+
+/// Read the read-only backup authority proof without acquiring or rewriting a lease.
+pub(crate) fn read_active_format_10_backup_generation(
+    cloud: &CloudStorage,
+    deadline: &crate::common::OperationDeadline,
+) -> Result<CloudMetadataGeneration, LeaseError> {
+    read_active_format_10_backup_generation_for_owner(cloud, deadline, None)
+}
+
+pub(crate) fn read_active_format_10_backup_generation_for_owner(
+    cloud: &CloudStorage,
+    deadline: &crate::common::OperationDeadline,
+    expected_owner: Option<(&str, u64)>,
+) -> Result<CloudMetadataGeneration, LeaseError> {
+    let remaining = |context: &str| {
+        deadline
+            .clamp_nonzero(cloud.callback_timeout())
+            .ok_or_else(|| LeaseError::Timeout(format!("{context} exceeded backup deadline")))
+    };
+    let document = provider_read_doc_with_timeout(cloud, remaining("lease read")?)?
+        .ok_or_else(|| LeaseError::Indeterminate("backup cloud lease is missing".into()))?;
+    if document.version != LeaseDocumentVersion::V5
+        || !matches!(
+            document.migration_gate.as_ref(),
+            Some(CloudFormatMigrationGate::Active { target_format: 10 })
+        )
+    {
+        return Err(LeaseError::Indeterminate(
+            "backup cloud lease does not carry the active FORMAT 10 gate".into(),
+        ));
+    }
+    if expected_owner.is_some_and(|(holder, epoch)| {
+        document.holder_id != holder || document.epoch != Some(epoch)
+    }) {
+        return Err(LeaseError::RenewalFailed(
+            "CloudSim backup lease is no longer owned by the capturing engine".into(),
+        ));
+    }
+    if provider_read_authority_sentinel(cloud, remaining("authority sentinel read")?)?
+        != AuthoritySentinelState::Active
+    {
+        return Err(LeaseError::Indeterminate(
+            "backup cloud metadata authority sentinel is not active".into(),
+        ));
+    }
+    metadata_pointer::offline_active_format10_generation(
+        cloud,
+        &document,
+        remaining("metadata pointer read")?,
+    )
 }
 
 fn parse_authority_sentinel(bytes: &[u8]) -> Result<AuthoritySentinelState, LeaseError> {

@@ -9,10 +9,11 @@ use super::{
     classify_lease_read_error, legacy_metadata_migration_error, mutation_precondition_headers,
     provider_read_authority_sentinel, provider_read_doc_with_timeout,
     provider_read_event_with_timeout, validate_metadata_generation, AuthoritySentinelState,
-    CloudEvent, CloudMetadataGeneration, CloudMetadataHead, CloudOutcome, CloudStorage, Duration,
-    LeaseDocument, LeaseDocumentVersion, LeaseError, ObjectMetadata, ProviderLeaderStore,
-    RENEWAL_WRITE_DEADLINE_MARGIN,
+    CloudEvent, CloudMetadataGeneration, CloudMetadataGenerationIdentity, CloudMetadataHead,
+    CloudOutcome, CloudStorage, Duration, LeaseDocument, LeaseDocumentVersion, LeaseError,
+    ObjectMetadata, ProviderLeaderStore, RENEWAL_WRITE_DEADLINE_MARGIN,
 };
+use crate::lease::traits::CloudFormatMigrationGate;
 use crate::storage::{StorageBackend, StoragePrecondition, StorageRequest};
 use serde::{Deserialize, Serialize};
 
@@ -41,7 +42,59 @@ impl MetadataPointer {
     }
 }
 
+pub(super) fn offline_active_format10_generation(
+    cloud: &CloudStorage,
+    document: &LeaseDocument,
+    timeout: Duration,
+) -> Result<CloudMetadataGeneration, LeaseError> {
+    let (pointer, _) = read_pointer(cloud, timeout)?.ok_or_else(|| {
+        LeaseError::Indeterminate("active cloud metadata pointer is missing in backup".into())
+    })?;
+    if pointer.writer_epoch != document.epoch.unwrap_or_default()
+        || pointer.holder_id != document.holder_id
+        || Some(pointer.owner_token.as_str()) != document.owner_token.as_deref()
+    {
+        return Err(LeaseError::Indeterminate(
+            "backup cloud metadata pointer disagrees with its active lease owner".into(),
+        ));
+    }
+    let generation = pointer.committed.ok_or_else(|| {
+        LeaseError::Indeterminate(
+            "active cloud metadata pointer has no committed generation".into(),
+        )
+    })?;
+    validate_metadata_generation(&generation)?;
+    if !generation.uses_format_10() {
+        return Err(LeaseError::Indeterminate(
+            "active FORMAT 10 lease selects a non-FORMAT 10 metadata generation".into(),
+        ));
+    }
+    Ok(generation)
+}
+
 impl ProviderLeaderStore {
+    pub(super) fn migration_selected_generation(
+        &self,
+        holder_id: &str,
+        epoch: u64,
+        deadline: &crate::common::OperationDeadline,
+    ) -> Result<Option<CloudMetadataGeneration>, LeaseError> {
+        let (pointer, _) = read_pointer(
+            &self.cloud,
+            remaining(&self.cloud, deadline)?.min(self.validity.remaining(epoch)?),
+        )?
+        .ok_or_else(|| {
+            LeaseError::Indeterminate("initialized metadata pointer is missing".into())
+        })?;
+        if !pointer.owns(self, holder_id, epoch) {
+            return Err(LeaseError::RenewalFailed(
+                "metadata pointer writer epoch or owner changed during FORMAT migration".into(),
+            ));
+        }
+        self.validity.remaining(epoch)?;
+        Ok(pointer.committed)
+    }
+
     pub(super) fn claim_metadata_pointer(
         &self,
         cloud: &CloudStorage,
@@ -50,7 +103,10 @@ impl ProviderLeaderStore {
     ) -> Result<(), LeaseError> {
         let deadline = crate::common::OperationDeadline::from_budget(timeout);
         let epoch = document.epoch.ok_or(LeaseError::EpochExhausted)?;
-        if document.version != LeaseDocumentVersion::V4 {
+        if !matches!(
+            document.version,
+            LeaseDocumentVersion::V4 | LeaseDocumentVersion::V5
+        ) {
             return Err(legacy_metadata_migration_error());
         }
         loop {
@@ -177,10 +233,12 @@ impl ProviderLeaderStore {
         let pointer = read_pointer(&self.cloud, remaining(&self.cloud, &deadline)?)?;
         let lease =
             provider_read_doc_with_timeout(&self.cloud, remaining(&self.cloud, &deadline)?)?;
-        if lease
-            .as_ref()
-            .is_some_and(|lease| lease.version != LeaseDocumentVersion::V4)
-        {
+        if lease.as_ref().is_some_and(|lease| {
+            !matches!(
+                lease.version,
+                LeaseDocumentVersion::V4 | LeaseDocumentVersion::V5
+            )
+        }) {
             return Err(legacy_metadata_migration_error());
         }
         let sentinel =
@@ -218,6 +276,29 @@ impl ProviderLeaderStore {
         validate_metadata_generation(&generation)?;
         let deadline = crate::common::OperationDeadline::from_budget(timeout);
         let validity = self.validity.remaining(epoch)?;
+        let format_10 = generation.uses_format_10();
+        let gate_allows_publication = self.with_cached_migration_gate(holder_id, epoch, |gate| {
+            match gate {
+                None => !format_10,
+                Some(CloudFormatMigrationGate::Active { target_format: 10 }) => format_10,
+                Some(CloudFormatMigrationGate::Pending(pending)) => {
+                    format_10
+                        && previous.map(CloudMetadataGenerationIdentity::from_generation).as_ref()
+                            == Some(&pending.source)
+                        && CloudMetadataGenerationIdentity::from_generation(&generation)
+                            == pending.candidate.generation
+                }
+                _ => false,
+            }
+        }).ok_or_else(|| {
+            LeaseError::Indeterminate("cloud migration gate snapshot is unknown; refresh the lease before publishing metadata".into())
+        })?;
+        if !gate_allows_publication {
+            return Err(LeaseError::RenewalFailed(
+                "cloud metadata publication is blocked by the lease compatibility gate".into(),
+            ));
+        }
+        self.validity.remaining(epoch)?;
         let budget = validity
             .checked_sub(RENEWAL_WRITE_DEADLINE_MARGIN)
             .filter(|budget| !budget.is_zero())

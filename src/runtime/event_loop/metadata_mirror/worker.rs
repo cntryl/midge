@@ -72,6 +72,9 @@ impl EventLoop {
         continuation: MirrorContinuation,
         deadline: OperationDeadline,
     ) -> MidgeResult<bool> {
+        if self.state.manifest_store.uses_format_10() {
+            self.state.ensure_metadata_current()?;
+        }
         let Some(cloud) = self.actors.cloud_coordinator.cloud_metadata_storage.clone() else {
             return Ok(false);
         };
