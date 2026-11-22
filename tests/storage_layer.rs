@@ -1910,6 +1910,41 @@ mod compatibility_fixtures {
     }
 
     #[test]
+    fn should_restore_published_data_from_format_10_backup() {
+        // Arrange
+        let source = copy_fixture_dir("v0_5_3_published_local");
+        let output = tempfile::tempdir().expect("backup and restore parent");
+        let artifact = output.path().join("artifact");
+        let restore = output.path().join("restored");
+        let timeout = Duration::from_secs(10);
+        let opts = OpenOptions::local(source.path()).build().unwrap();
+        Engine::upgrade_format_9(opts.clone(), timeout).expect("upgrade published fixture");
+        let mut engine = Engine::open(opts).expect("open FORMAT 10 source");
+
+        // Act
+        let inventory = engine
+            .backup_to(&artifact, timeout)
+            .expect("backup upgraded source");
+        let restore_opts = OpenOptions::local(restore).build().unwrap();
+        Engine::restore_backup(&artifact, restore_opts.clone()).expect("restore FORMAT 10 backup");
+        let mut restored = Engine::open(restore_opts).expect("open restored FORMAT 10 data");
+
+        // Assert
+        assert_eq!(inventory.database_format_version, 10);
+        assert!(inventory
+            .objects
+            .iter()
+            .any(|object| object.path == "wal/LEDGER"));
+        assert!(inventory
+            .objects
+            .iter()
+            .any(|object| object.path.starts_with("sst/")));
+        assert_published_v0_5_3_fixture_state(&restored);
+        restored.shutdown(timeout).expect("shut down restored data");
+        engine.shutdown(timeout).expect("shut down source");
+    }
+
+    #[test]
     fn should_reject_populated_release_v3_fixture_given_unsupported_format_when_reopening() {
         // Arrange: format 3 predates the WAL segment ledger (#842).
         let temp = copy_fixture_dir("v3_populated_v4_sst_db");

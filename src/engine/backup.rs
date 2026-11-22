@@ -311,9 +311,7 @@ fn pin_format_10_files(root: &Path, scratch_dir: &Path) -> MidgeResult<Vec<Pinne
             .into_iter()
             .map(PathBuf::from),
     );
-    relative_paths.sort();
-    relative_paths.dedup();
-    relative_paths
+    let mut paths = relative_paths
         .into_iter()
         .map(|relative| {
             validate_relative_path(&relative)?;
@@ -324,40 +322,12 @@ fn pin_format_10_files(root: &Path, scratch_dir: &Path) -> MidgeResult<Vec<Pinne
                     path.display()
                 )));
             }
-            let file = File::open(&path)?;
-            let metadata = file.metadata()?;
-            if !metadata.is_file() {
-                return Err(MidgeError::Corruption(format!(
-                    "backup object '{}' is not a regular file",
-                    path.display()
-                )));
-            }
-            // Each selected immutable object is bounded by the wire protocol.
-            if metadata.len() > 64 * 1024 * 1024 {
-                return Err(MidgeError::Corruption(
-                    "selected FORMAT 10 object exceeds backup size bound".into(),
-                ));
-            }
-            let mut pinned = file;
-            if relative == Path::new("FORMAT") {
-                // FORMAT is replaced in place during activation, so freeze its bytes.
-                let mut frozen = tempfile::tempfile_in(scratch_dir)?;
-                let copied = std::io::copy(&mut pinned, &mut frozen)?;
-                if copied != metadata.len() {
-                    return Err(MidgeError::Corruption(
-                        "FORMAT marker changed during backup capture".into(),
-                    ));
-                }
-                frozen.seek(SeekFrom::Start(0))?;
-                pinned = frozen;
-            }
-            Ok(PinnedFile {
-                relative,
-                size: metadata.len(),
-                file: pinned,
-            })
+            Ok(path)
         })
-        .collect()
+        .collect::<MidgeResult<Vec<_>>>()?;
+    paths.extend(ledger_wal_paths(root)?);
+    collect_files(&root.join("sst"), root, &mut paths)?;
+    pin_paths(root, paths, scratch_dir)
 }
 
 fn pin_durable_files(
@@ -389,6 +359,14 @@ fn pin_durable_files(
     if simulated_cloud {
         collect_files(&root.join("cloud_store"), root, &mut paths)?;
     }
+    pin_paths(root, paths, scratch_dir)
+}
+
+fn pin_paths(
+    root: &Path,
+    mut paths: Vec<PathBuf>,
+    scratch_dir: &Path,
+) -> MidgeResult<Vec<PinnedFile>> {
     paths.sort();
     paths.dedup();
     paths
