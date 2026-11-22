@@ -3,6 +3,7 @@ use crate::runtime::event_loop::manifest::ManifestCoordinator;
 use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use crate::runtime::event_loop::wal::{ApplyTransactionRequest, WalCoordinator};
 use crate::runtime::{ConflictPolicy, RuntimeResponse, TransactionOp};
+use crate::storage::hybrid::policy::StorageBudgetPolicy;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -851,5 +852,126 @@ fn should_mark_reclamation_anomaly_when_metadata_cut_admission_fails() -> MidgeR
     assert!(sst_is_resident(&event_loop, &sst));
     assert_eq!(queued_reclamation(&event_loop), vec![sst]);
     drop(cut);
+    Ok(())
+}
+
+fn read_selected_manifest(event_loop: &EventLoop) -> MidgeResult<crate::metadata::Manifest> {
+    let deadline = event_loop.event_loop_cloud_deadline();
+    let store = event_loop.authority.fencing.leader_store.as_ref().unwrap();
+    let head = store.read_committed_metadata(deadline.remaining())?;
+    let crate::lease::CloudMetadataHead::Committed(generation) = head else {
+        panic!("expected selected metadata generation, got {head:?}");
+    };
+    let cloud = event_loop
+        .actors
+        .cloud_coordinator
+        .cloud_metadata_storage
+        .as_ref()
+        .unwrap();
+    let bodies = crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
+        cloud,
+        &generation,
+        &deadline,
+    )?;
+    crate::metadata::ManifestPersistence::decode_bodies(
+        &bodies[crate::metadata::files::MANIFEST_SNAPSHOT],
+        bodies
+            .get(crate::metadata::files::JOURNAL)
+            .map(Vec::as_slice),
+        &crate::common::DeadlineScope::new(deadline),
+    )
+}
+
+fn progress_after_held_mirror(event_loop: &mut EventLoop, held: &HeldMirror) -> MidgeResult<()> {
+    // A reservation would incidentally publish the DDL and mask a lost retry.
+    event_loop.state.sst_names.prefetch_retry_at = Some(Instant::now() + Duration::from_secs(60));
+    held.release.try_send(()).unwrap();
+    let deadline = event_loop.event_loop_cloud_deadline();
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+    event_loop.progress_pass(&crossbeam::channel::never());
+    event_loop.drain_metadata_mirror_within(&deadline)
+}
+
+#[test]
+fn should_publish_committed_create_when_retention_mirror_finishes() -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let _scenario = fail::FailScenario::setup();
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(StorageBudgetPolicy::default())?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    let deadline = event_loop.event_loop_cloud_deadline();
+    assert!(event_loop.start_metadata_mirror(MirrorContinuation::Retention, deadline)?);
+    held.await_entry();
+    let created = event_loop
+        .routing
+        .router
+        .register(92_010, "create during retention");
+
+    // Act
+    ManifestCoordinator::create_column_family(
+        &mut event_loop,
+        &crossbeam::channel::never(),
+        92_010,
+        "deferred-create",
+    );
+    assert!(matches!(
+        created.try_recv(),
+        Ok(RuntimeResponse::ColumnFamilyCreated { .. })
+    ));
+    progress_after_held_mirror(&mut event_loop, &held)?;
+
+    // Assert
+    assert!(read_selected_manifest(&event_loop)?
+        .get_column_family_by_name("deferred-create")
+        .is_some());
+    assert_eq!(
+        event_loop.state.health(),
+        crate::config::EngineHealth::Healthy
+    );
+    Ok(())
+}
+
+#[test]
+fn should_publish_committed_empty_drop_when_retention_mirror_finishes() -> MidgeResult<()> {
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let _scenario = fail::FailScenario::setup();
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(StorageBudgetPolicy::default())?;
+    let messages = crossbeam::channel::never();
+    let created = event_loop
+        .routing
+        .router
+        .register(92_011, "create empty family");
+    ManifestCoordinator::create_column_family(&mut event_loop, &messages, 92_011, "deferred-drop");
+    let RuntimeResponse::ColumnFamilyCreated { cf_id, .. } = created.try_recv().unwrap() else {
+        panic!("expected empty family to be created");
+    };
+    assert!(read_selected_manifest(&event_loop)?
+        .get_column_family_by_name("deferred-drop")
+        .is_some());
+    event_loop.pipeline.inline_flush_worker = false;
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    let deadline = event_loop.event_loop_cloud_deadline();
+    assert!(event_loop.start_metadata_mirror(MirrorContinuation::Retention, deadline)?);
+    held.await_entry();
+    let dropped = event_loop
+        .routing
+        .router
+        .register(92_012, "drop during retention");
+
+    // Act
+    ManifestCoordinator::drop_column_family(&mut event_loop, &messages, 92_012, cf_id, false);
+    assert!(matches!(dropped.try_recv(), Ok(RuntimeResponse::Ok { .. })));
+    progress_after_held_mirror(&mut event_loop, &held)?;
+
+    // Assert
+    assert!(read_selected_manifest(&event_loop)?
+        .get_column_family_by_name("deferred-drop")
+        .is_none());
+    assert_eq!(
+        event_loop.state.health(),
+        crate::config::EngineHealth::Healthy
+    );
     Ok(())
 }

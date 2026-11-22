@@ -243,7 +243,8 @@ impl EventLoop {
         let join_deadline = cloud_async.then_some(cloud_shutdown_deadline);
         if let Err(error) =
             trace_shutdown_phase("cloud-catalog-publication-drain", join_deadline, || {
-                self.drain_cloud_publication_within(cloud_shutdown_deadline)
+                self.drain_cloud_publication_within(cloud_shutdown_deadline)?;
+                self.drain_committed_ddl_mirror_within(cloud_shutdown_deadline)
             })
         {
             if shutdown_error.is_none() {
