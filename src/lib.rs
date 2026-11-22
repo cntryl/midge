@@ -370,6 +370,7 @@ pub use types::{
     DurabilityFrontiersSnapshot, ReadAmpMetricsSnapshot, RecoveryMetricsSnapshot,
     RuntimeLatencySummaries, RuntimeMetricsSnapshot, SnapshotPinSnapshot, StorageFileLayout,
     StorageLayoutLevel, StorageLayoutSnapshot, StorageVerificationReport,
+    WalSyncPhaseMetricsSnapshot,
 };
 pub use types::{
     HybridStorageBudgetSnapshot, LocalStorageUsage, StorageAdmissionBlock, StorageAdmissionKind,
