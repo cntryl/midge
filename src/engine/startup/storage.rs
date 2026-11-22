@@ -335,6 +335,23 @@ fn provider_ddl_authority(lease: &StartupLease) -> MidgeResult<DdlLeaseAuthority
 }
 
 impl StartupLease {
+    fn reconcile_cloud_format(
+        &self,
+        storage: &crate::storage::cloud::CloudStorage,
+        timeout: std::time::Duration,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<()> {
+        let authority = provider_ddl_authority(self)?;
+        reconcile_cloud_format_before_mutations(
+            storage,
+            authority.store.as_ref(),
+            &authority.holder_id,
+            authority.writer_epoch,
+            timeout,
+            scope,
+        )
+    }
+
     fn wal_history_fence(
         &self,
         timeout: std::time::Duration,
@@ -1023,6 +1040,20 @@ impl RuntimeStorageMaterialization {
         cloud
     }
 
+    fn simulated_metadata_storage(
+        opts: &OpenOptions,
+        store: &Arc<dyn crate::storage::inventory::ObjectStore>,
+        startup_lease: &StartupLease,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Arc<crate::storage::cloud::CloudStorage>> {
+        let storage = crate::storage::cloud::CloudStorage::from_object_store(
+            Arc::clone(store),
+            opts.storage_io_timeout(),
+        );
+        startup_lease.reconcile_cloud_format(&storage, opts.storage_io_timeout(), scope)?;
+        Ok(Arc::new(storage))
+    }
+
     fn materialize_simulated_cloud(
         opts: &OpenOptions,
         storage_path: &StartupStoragePath,
@@ -1037,20 +1068,8 @@ impl RuntimeStorageMaterialization {
         )?;
         let store = location.open()?;
         let cloud = Self::build_simulated_cloud_stores(opts, &store);
-        let metadata_storage = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
-            Arc::clone(&store),
-            opts.storage_io_timeout(),
-        ));
-        reconcile_cloud_format_before_mutations(
-            &metadata_storage,
-            startup_lease.leader_store.as_deref().ok_or_else(|| {
-                MidgeError::Internal("cloud FORMAT gate requires a leader store".into())
-            })?,
-            &startup_lease.lease.holder_id(),
-            startup_lease.writer_epoch,
-            opts.storage_io_timeout(),
-            scope,
-        )?;
+        let metadata_storage =
+            Self::simulated_metadata_storage(opts, &store, startup_lease, scope)?;
         let backend: Arc<dyn crate::storage::StorageBackend> = Arc::clone(&store) as _;
         let (sst_read_fs, remote_block_cache) =
             remote_sst_read_fs(opts, storage_path, Arc::clone(&backend), scope);
@@ -1218,13 +1237,8 @@ impl RuntimeStorageMaterialization {
 
         let (hybrid_storage, rx) =
             Self::build_hybrid_storage(opts, &wal_storage, &sst_storage, &metadata_storage);
-        reconcile_cloud_format_before_mutations(
+        startup_lease.reconcile_cloud_format(
             &metadata_storage,
-            startup_lease.leader_store.as_deref().ok_or_else(|| {
-                MidgeError::Internal("cloud FORMAT gate requires a leader store".into())
-            })?,
-            &startup_lease.lease.holder_id(),
-            startup_lease.writer_epoch,
             opts.storage_io_timeout(),
             scope,
         )?;

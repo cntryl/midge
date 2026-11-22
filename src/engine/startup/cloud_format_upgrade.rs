@@ -248,7 +248,15 @@ pub(super) fn reconcile_cloud_format_gate(
             }
         },
         Some(CloudFormatMigrationGate::Pending(pending)) => {
-            reconcile_pending(cloud, store, holder_id, epoch, selected, &pending, deadline)?;
+            reconcile_pending(
+                cloud,
+                store,
+                holder_id,
+                epoch,
+                selected.as_ref(),
+                &pending,
+                deadline,
+            )?;
             Ok(CloudFormatGateResolution::Format10Selected)
         }
         Some(CloudFormatMigrationGate::Active { target_format: 10 }) => {
@@ -280,11 +288,11 @@ fn reconcile_pending(
     store: &dyn LeaderStore,
     holder_id: &str,
     epoch: u64,
-    selected: Option<CloudMetadataGeneration>,
+    selected: Option<&CloudMetadataGeneration>,
     pending: &CloudFormatMigrationPending,
     deadline: &OperationDeadline,
 ) -> MidgeResult<()> {
-    let selected_state = match selected.as_ref() {
+    let selected_state = match selected {
         Some(source)
             if CloudMetadataGenerationIdentity::from_generation(source) == pending.source =>
         {
@@ -315,7 +323,7 @@ fn reconcile_pending(
     }
     decode_generation_manifest(&candidate, &candidate_bodies, deadline)?;
     if !selected_state {
-        let source = selected.as_ref().ok_or_else(|| {
+        let source = selected.ok_or_else(|| {
             MidgeError::LeaseIndeterminate("pending cloud source pointer disappeared".into())
         })?;
         let recorded_source = read_source_descriptor(cloud, pending, deadline)?;
@@ -324,7 +332,7 @@ fn reconcile_pending(
                 "selected FORMAT 9 source differs from its immutable migration descriptor".into(),
             ));
         }
-        let source_bodies = read_v9_generation(cloud, &source, deadline)?;
+        let source_bodies = read_v9_generation(cloud, source, deadline)?;
         if source_payload_sha256(&source_bodies) != pending.source_sha256 {
             return Err(MidgeError::Corruption(
                 "pending FORMAT 10 source payload digest changed".into(),
@@ -358,7 +366,7 @@ fn reconcile_pending(
         }
         // The exact pointer readback resolves even a lost CAS response.
         let _ = outcome;
-    } else if selected.as_ref() != Some(&candidate) {
+    } else if selected != Some(&candidate) {
         return Err(MidgeError::LeaseIndeterminate(
             "selected FORMAT 10 candidate differs from its immutable descriptor".into(),
         ));

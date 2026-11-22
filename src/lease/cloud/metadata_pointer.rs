@@ -13,6 +13,7 @@ use super::{
     CloudOutcome, CloudStorage, Duration, LeaseDocument, LeaseDocumentVersion, LeaseError,
     ObjectMetadata, ProviderLeaderStore, RENEWAL_WRITE_DEADLINE_MARGIN,
 };
+use crate::lease::traits::CloudFormatMigrationGate;
 use crate::storage::{StorageBackend, StoragePrecondition, StorageRequest};
 use serde::{Deserialize, Serialize};
 
@@ -245,24 +246,23 @@ impl ProviderLeaderStore {
         validate_metadata_generation(&generation)?;
         let deadline = crate::common::OperationDeadline::from_budget(timeout);
         let validity = self.validity.remaining(epoch)?;
-        let gate = self.cached_migration_gate(holder_id, epoch).ok_or_else(|| {
+        let format_10 = generation.uses_format_10();
+        let gate_allows_publication = self.with_cached_migration_gate(holder_id, epoch, |gate| {
+            match gate {
+                None => !format_10,
+                Some(CloudFormatMigrationGate::Active { target_format: 10 }) => format_10,
+                Some(CloudFormatMigrationGate::Pending(pending)) => {
+                    format_10
+                        && previous.map(CloudMetadataGenerationIdentity::from_generation).as_ref()
+                            == Some(&pending.source)
+                        && CloudMetadataGenerationIdentity::from_generation(&generation)
+                            == pending.candidate.generation
+                }
+                _ => false,
+            }
+        }).ok_or_else(|| {
             LeaseError::Indeterminate("cloud migration gate snapshot is unknown; refresh the lease before publishing metadata".into())
         })?;
-        let gate_allows_publication = match gate.as_ref() {
-            None => true,
-            Some(crate::lease::traits::CloudFormatMigrationGate::Active { target_format: 10 }) => {
-                true
-            }
-            Some(crate::lease::traits::CloudFormatMigrationGate::Pending(pending)) => {
-                previous
-                    .map(CloudMetadataGenerationIdentity::from_generation)
-                    .as_ref()
-                    == Some(&pending.source)
-                    && CloudMetadataGenerationIdentity::from_generation(&generation)
-                        == pending.candidate.generation
-            }
-            _ => false,
-        };
         if !gate_allows_publication {
             return Err(LeaseError::RenewalFailed(
                 "cloud metadata publication is blocked by the lease compatibility gate".into(),

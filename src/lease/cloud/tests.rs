@@ -2426,9 +2426,28 @@ fn test_metadata_generation(sequence: u64) -> CloudMetadataGeneration {
 }
 
 fn cloud_format_10_candidate() -> CloudMetadataGeneration {
-    let mut candidate = test_metadata_generation(8);
-    candidate.id = crate::lease::SharedGenerationId::new(2).expect("candidate ordinal");
-    candidate
+    let namespace = uuid::Uuid::new_v4();
+    CloudMetadataGeneration {
+        id: crate::lease::SharedGenerationId::new(2).expect("candidate ordinal"),
+        manifest_horizon: 8,
+        objects: [
+            (
+                crate::metadata::files::FORMAT,
+                b"midge-format-version=10\n".len() as u64,
+            ),
+            (crate::metadata::local_authority::HEAD_PATH, 8),
+            ("metadata/generations/test/manifest/base", 8),
+            ("metadata/generations/test/intent/base", 8),
+        ]
+        .into_iter()
+        .map(|(name, len)| CloudMetadataObject {
+            file_name: name.into(),
+            object_key: format!("metadata/generations/{namespace}/{name}"),
+            len,
+            crc32c: 0,
+        })
+        .collect(),
+    }
 }
 
 fn pending_format_migration(

@@ -137,11 +137,12 @@ impl ProviderLeaderStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
-    fn cached_migration_gate(
+    fn with_cached_migration_gate<T>(
         &self,
         holder_id: &str,
         epoch: u64,
-    ) -> Option<Option<CloudFormatMigrationGate>> {
+        operation: impl FnOnce(Option<&CloudFormatMigrationGate>) -> T,
+    ) -> Option<T> {
         self.migration_gate_cache
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -151,7 +152,7 @@ impl ProviderLeaderStore {
                     && cache.owner_token == self.owner_token
                     && cache.epoch == epoch
             })
-            .map(|cache| cache.gate.clone())
+            .map(|cache| operation(cache.gate.as_ref()))
     }
 }
 
@@ -806,14 +807,10 @@ impl LeaderStore for ProviderLeaderStore {
                     "cloud lease renewal crossed its bounded provider deadline".to_string(),
                 ));
             }
-            self.invalidate_migration_gate();
             match provider_write_doc_with_timeout(&self.cloud, &document, headers, write_timeout) {
                 Ok(()) => {
-                    self.cache_migration_gate(
-                        holder_id,
-                        expected_epoch,
-                        document.migration_gate.clone(),
-                    );
+                    // Renewal preserves the gate. An older renewal response
+                    // cannot overwrite a concurrently confirmed transition.
                     if let Err(error) = self.validity.advance(expected_epoch, valid_until) {
                         let _ = self.release_leadership(holder_id, expected_epoch);
                         return Err(error);
