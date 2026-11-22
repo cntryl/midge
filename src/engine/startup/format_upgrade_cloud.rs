@@ -79,6 +79,9 @@ pub(super) fn upgrade_cloud(opts: &OpenOptions, timeout: Duration) -> MidgeResul
     store
         .install_format_10_pending(&holder, epoch, pending, deadline.remaining())
         .map_err(|error| error.into_validation_error("install pending cloud FORMAT 10 gate"))?;
+    crate::failpoints::fail_point!("midge::format10::after_pending_cloud_gate", |_| Err(
+        MidgeError::Internal("interrupted after durable pending FORMAT 10 gate".into())
+    ));
     if reconcile_cloud_format_gate(&cloud, store, &holder, epoch, &deadline)?
         != CloudFormatGateResolution::Format10Selected
     {
