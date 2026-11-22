@@ -68,6 +68,286 @@ fn should_preserve_acknowledged_history_when_predecessor_wal_resumes_after_takeo
     }
 }
 
+#[test]
+fn should_preserve_authority_when_compaction_manifest_readback_is_interrupted() {
+    // Arrange
+    require_sqrzl("compaction-manifest-readback");
+    // Act
+    eprintln!("controlled compaction manifest schedule: definite absence");
+    run_compaction_manifest_schedule(Boundary::DisconnectBeforePut);
+    eprintln!("controlled compaction manifest schedule: committed lost response");
+    run_compaction_manifest_schedule(Boundary::LostResponse);
+    eprintln!("controlled compaction manifest schedule: unproven readback");
+    run_compaction_manifest_schedule(Boundary::LostResponseAndReadback);
+    // Assert: each schedule checks exact metadata selection and recovered rows.
+}
+
+fn run_compaction_manifest_schedule(boundary: Boundary) {
+    let _scenario = fail::FailScenario::setup();
+    let mut fixture = CompactionFixture::prepare(boundary);
+    fixture.arm_intent_clear_hook();
+    let (result, pointer_before_clear) = fixture.interrupt_intent_clear();
+    assert_manifest_transport(&fixture);
+    fixture.assert_result(result, &pointer_before_clear);
+    fixture.recover_fresh_cache();
+}
+
+struct CompactionFixture {
+    bucket: String,
+    prefix: &'static str,
+    cache: PathBuf,
+    _directory: tempfile::TempDir,
+    initial_pointer: Vec<u8>,
+    boundary: Boundary,
+    proxy: Proxy,
+    recovered: Engine,
+}
+
+impl CompactionFixture {
+    fn prepare(boundary: Boundary) -> Self {
+        // Arrange: create two committed generations, then discard the cache so
+        // the controlled publication starts from provider-backed recovery.
+        let directory = tempfile::tempdir().expect("isolated cache");
+        let bucket = format!("midge-compaction-manifest-{}", uuid::Uuid::new_v4());
+        ensure_sqrzl_s3_bucket(&bucket).expect("isolated remote namespace");
+        let prefix = "db";
+        let cache = directory.path().join("cache");
+        let direct = options(&cache, &bucket, prefix, "http://127.0.0.1:9000");
+        let mut engine = Engine::open(direct.build().unwrap()).expect("initial provider open");
+        for value in ["one", "two", "three", "four", "five"] {
+            write_rows(&engine, &[("a", Some(value)), ("b", Some("stable"))]).unwrap();
+            engine.flush_cf(&default_cf(&engine)).unwrap();
+        }
+        engine.shutdown(Duration::from_secs(10)).unwrap();
+        drop(engine);
+        std::fs::remove_dir_all(&cache).unwrap();
+
+        let pointer_before = read_committed_pointer(&bucket, prefix);
+        let proxy = Proxy::start_intent_clear_manifest("127.0.0.1:9000".parse().unwrap(), boundary);
+        let recovered = Engine::open(
+            options(&cache, &bucket, prefix, &proxy.endpoint)
+                .build()
+                .unwrap(),
+        )
+        .expect("recover committed provider state before compaction");
+        assert_rows(&recovered);
+        Self {
+            bucket,
+            prefix,
+            cache,
+            _directory: directory,
+            initial_pointer: pointer_before,
+            boundary,
+            proxy,
+            recovered,
+        }
+    }
+
+    fn arm_intent_clear_hook(&self) {
+        let control = Arc::clone(&self.proxy.control);
+        fail::cfg_callback("slice6::after_manifest_persist_before_sst_gc", move || {
+            control.arm();
+        })
+        .expect("arm intent-clear publication boundary");
+    }
+
+    fn interrupt_intent_clear(&mut self) -> (Result<(), MidgeError>, Vec<u8>) {
+        // Act: let the actual immutable manifest PUT reach Sqrzl, then drop its
+        // response. One case allows exact-byte readback; the other disconnects it.
+        std::thread::scope(|scope| {
+            let compaction = scope.spawn(|| self.recovered.compact_all());
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !self.proxy.control.has_reached_boundary()
+                && !compaction.is_finished()
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if !self.proxy.control.has_reached_boundary() {
+                let outcome = compaction.join().expect("compaction worker");
+                panic!(
+                    "compaction ended without intent-clear boundary: {outcome:?}; requests={:?}",
+                    self.proxy.control.observations()
+                );
+            }
+            let manifest_put = self.proxy.control.reached();
+            assert_eq!(manifest_put.method, "PUT");
+            assert!(manifest_put.path.contains("/manifest/"));
+            let pointer_before_clear = read_committed_pointer(&self.bucket, self.prefix);
+            assert_ne!(
+                committed_generation(&pointer_before_clear),
+                committed_generation(&self.initial_pointer),
+                "the phase hook follows compaction output selection"
+            );
+            self.proxy.control.release();
+            self.proxy.control.wait_finished();
+            (
+                compaction.join().expect("compaction request"),
+                pointer_before_clear,
+            )
+        })
+    }
+
+    fn assert_result(&mut self, result: Result<(), MidgeError>, pointer_before_clear: &[u8]) {
+        let pointer_after_clear = read_committed_pointer(&self.bucket, self.prefix);
+        assert_eq!(
+            pointer_after_clear != pointer_before_clear,
+            matches!(
+                self.boundary,
+                Boundary::LostResponse | Boundary::DisconnectBeforePut
+            ),
+            "only proven intent-clear metadata may advance the selected pointer"
+        );
+        match self.boundary {
+            Boundary::DisconnectBeforePut => {
+                result.expect("proven absence must retry the exact immutable IfAbsent write");
+            }
+            Boundary::LostResponse => {
+                result.expect("manifest must reconcile by exact-byte readback");
+            }
+            Boundary::LostResponseAndReadback => {
+                let error = result.expect_err("unproven manifest outcome must not report success");
+                assert!(
+                    !matches!(error, MidgeError::Timeout(_)),
+                    "readback interruption should be reported as unresolved: {error:?}"
+                );
+                let compaction = self
+                    .recovered
+                    .compact_all()
+                    .expect_err("unproven manifest publication must fence another compaction");
+                assert!(
+                    matches!(compaction, MidgeError::Fenced(_)),
+                    "unsettled publication must fence compaction: {compaction:?}"
+                );
+                self.proxy.allow_pointer_readbacks();
+            }
+            _ => unreachable!("only manifest interruption schedules are used"),
+        }
+        assert_rows(&self.recovered);
+        if matches!(
+            self.boundary,
+            Boundary::LostResponse | Boundary::DisconnectBeforePut
+        ) {
+            self.recovered
+                .compact_all()
+                .expect("proven intent-clear publication leaves compaction live");
+        }
+    }
+
+    fn recover_fresh_cache(&mut self) {
+        self.recovered.shutdown(Duration::from_secs(30)).unwrap();
+        std::fs::remove_dir_all(&self.cache).unwrap();
+        let selected_before_reopen =
+            committed_generation(&read_committed_pointer(&self.bucket, self.prefix));
+        let mut reopened =
+            open_after_compaction(&self.cache, &self.bucket, self.prefix, &self.proxy.endpoint);
+        assert_rows(&reopened);
+        let pointer_after = read_committed_pointer(&self.bucket, self.prefix);
+        let selected_after_reopen = committed_generation(&pointer_after);
+        let before_id = selected_before_reopen["id"]
+            .as_u64()
+            .expect("selected generation ordinal before reopen");
+        let after_id = selected_after_reopen["id"]
+            .as_u64()
+            .expect("selected generation ordinal after reopen");
+        let before_horizon = selected_before_reopen["manifest_horizon"]
+            .as_u64()
+            .expect("manifest horizon before reopen");
+        let after_horizon = selected_after_reopen["manifest_horizon"]
+            .as_u64()
+            .expect("manifest horizon after reopen");
+        assert!(
+            after_id >= before_id && after_horizon >= before_horizon,
+            "fresh recovery cannot regress the selected metadata generation"
+        );
+        if after_id == before_id {
+            assert_eq!(selected_after_reopen, selected_before_reopen);
+        }
+        reopened.shutdown(Duration::from_secs(30)).unwrap();
+    }
+}
+
+fn assert_manifest_transport(fixture: &CompactionFixture) {
+    let observations = fixture.proxy.control.observations();
+    match fixture.boundary {
+        Boundary::DisconnectBeforePut => {
+            let gated_put = observations
+                .iter()
+                .filter(|event| event.method == "PUT" && event.path.contains("/manifest/"))
+                .find(|event| event.error.is_some())
+                .expect("controlled PUT disconnect");
+            assert!(!gated_put.forwarded, "first PUT must have no remote effect");
+            assert!(
+                observations.iter().any(|event| {
+                    event.method == "PUT"
+                        && event.path == gated_put.path
+                        && event.status == Some(200)
+                }),
+                "same immutable key retry commits"
+            );
+            assert!(
+                observations.iter().any(|event| {
+                    event.method == "GET"
+                        && event.path == gated_put.path
+                        && event.status == Some(404)
+                }),
+                "retry requires provider-shaped definite absence"
+            );
+        }
+        Boundary::LostResponse | Boundary::LostResponseAndReadback => assert_eq!(
+            observations
+                .iter()
+                .find(|event| {
+                    event.method == "PUT"
+                        && event.path.contains("/manifest/")
+                        && event.error.is_some()
+                })
+                .and_then(|event| event.status),
+            Some(200),
+            "Sqrzl must confirm immutable manifest storage before response interruption"
+        ),
+        _ => unreachable!("only manifest interruption schedules are used"),
+    }
+}
+
+fn read_committed_pointer(bucket: &str, prefix: &str) -> Vec<u8> {
+    signed_s3_request(
+        "GET",
+        &format!("/{bucket}/{prefix}/metadata/committed-pointer.v1"),
+        &[],
+    )
+    .expect("read actual committed metadata pointer")
+}
+
+fn committed_generation(pointer_frame: &[u8]) -> serde_json::Value {
+    assert_eq!(&pointer_frame[..9], b"MDGEMD09\x04");
+    let payload_len = u32::from_le_bytes(pointer_frame[9..13].try_into().unwrap()) as usize;
+    let payload: serde_json::Value =
+        rmp_serde::from_slice(&pointer_frame[13..13 + payload_len]).unwrap();
+    payload["committed"].clone()
+}
+
+fn open_after_compaction(cache: &Path, bucket: &str, prefix: &str, endpoint: &str) -> Engine {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        match Engine::open(options(cache, bucket, prefix, endpoint).build().unwrap()) {
+            Ok(engine) => return engine,
+            Err(MidgeError::LeaseHeld(_)) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("fresh recovery after pointer interruption failed: {error}"),
+        }
+    }
+}
+
+fn assert_rows(engine: &Engine) {
+    let tx = engine
+        .begin_tx(default_cf(engine).id(), TransactionMode::ReadOnly)
+        .expect("verification transaction");
+    assert_eq!(tx.get(b"a").unwrap().as_deref(), Some(b"five".as_slice()));
+    assert_eq!(tx.get(b"b").unwrap().as_deref(), Some(b"stable".as_slice()));
+}
+
 fn options(
     cache: &Path,
     bucket: &str,

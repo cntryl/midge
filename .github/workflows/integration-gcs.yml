@@ -42,6 +42,8 @@ jobs:
           - 9001:9001
         env:
           SQRZL_BLOBS_PATH: /app/blobs
+          SQRZL_MAX_INFLIGHT_REQUESTS: "16"
+          SQRZL_MAX_INFLIGHT_BYTES: "2147483648"
           SQRZL_ACCESS_KEY_ID: admin
           SQRZL_SECRET_ACCESS_KEY: easy-peasy
 

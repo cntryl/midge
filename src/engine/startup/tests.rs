@@ -600,9 +600,10 @@ impl ProviderMetadataBootstrapFixture {
     }
 }
 
-struct FailOnceGenerationPutBackend {
+struct FailGenerationPutBackend {
     inner: std::sync::Arc<crate::storage::cloud::MockCloudBackend>,
-    fail_next_generation_put: std::sync::atomic::AtomicBool,
+    fail_generation_puts: std::sync::atomic::AtomicBool,
+    rejected_generation_puts: std::sync::atomic::AtomicUsize,
 }
 
 struct LoseMetadataCommitCallbackBackend {
@@ -670,11 +671,11 @@ impl crate::storage::cloud::CloudHeadCapability for LoseMetadataCommitCallbackBa
 
 impl crate::storage::cloud::CloudBackend for LoseMetadataCommitCallbackBackend {}
 
-impl crate::storage::cloud::CloudReadCapability for FailOnceGenerationPutBackend {
+impl crate::storage::cloud::CloudReadCapability for FailGenerationPutBackend {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
 }
 
-impl crate::storage::cloud::CloudWriteCapability for FailOnceGenerationPutBackend {
+impl crate::storage::cloud::CloudWriteCapability for FailGenerationPutBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -684,14 +685,16 @@ impl crate::storage::cloud::CloudWriteCapability for FailOnceGenerationPutBacken
     ) {
         if key.starts_with("manifest/")
             && self
-                .fail_next_generation_put
-                .swap(false, std::sync::atomic::Ordering::AcqRel)
+                .fail_generation_puts
+                .load(std::sync::atomic::Ordering::Acquire)
         {
+            self.rejected_generation_puts
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
             let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
                 key: key.to_string(),
                 result: crate::storage::cloud::CloudOutcome::Err(
                     crate::storage::cloud::CloudError::Transport(
-                        "injected first generation upload failure".into(),
+                        "injected persistent generation upload failure".into(),
                     ),
                 ),
             });
@@ -701,19 +704,19 @@ impl crate::storage::cloud::CloudWriteCapability for FailOnceGenerationPutBacken
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for FailOnceGenerationPutBackend {
+impl crate::storage::cloud::CloudDeleteCapability for FailGenerationPutBackend {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
 }
 
-impl crate::storage::cloud::CloudListCapability for FailOnceGenerationPutBackend {
+impl crate::storage::cloud::CloudListCapability for FailGenerationPutBackend {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
 }
 
-impl crate::storage::cloud::CloudHeadCapability for FailOnceGenerationPutBackend {
+impl crate::storage::cloud::CloudHeadCapability for FailGenerationPutBackend {
     crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
 }
 
-impl crate::storage::cloud::CloudBackend for FailOnceGenerationPutBackend {}
+impl crate::storage::cloud::CloudBackend for FailGenerationPutBackend {}
 
 #[test]
 fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -> MidgeResult<()> {
@@ -775,10 +778,12 @@ fn should_retry_provider_metadata_bootstrap_with_same_cache_after_failed_generat
 ) -> MidgeResult<()> {
     use crate::lease::PrimaryLease as _;
 
-    // Arrange: the first immutable generation upload fails before lease CAS.
-    let backend = std::sync::Arc::new(FailOnceGenerationPutBackend {
+    // Arrange: the provider rejects every immutable upload in the first
+    // bootstrap attempt, including retries of its conditional PUT.
+    let backend = std::sync::Arc::new(FailGenerationPutBackend {
         inner: std::sync::Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-        fail_next_generation_put: std::sync::atomic::AtomicBool::new(true),
+        fail_generation_puts: std::sync::atomic::AtomicBool::new(true),
+        rejected_generation_puts: std::sync::atomic::AtomicUsize::new(0),
     });
     let mut fixture = ProviderMetadataBootstrapFixture::new(backend.clone())?;
 
@@ -791,11 +796,12 @@ fn should_retry_provider_metadata_bootstrap_with_same_cache_after_failed_generat
         first.is_err(),
         "injected upload failure must abort bootstrap"
     );
-    assert!(
-        !backend
-            .fail_next_generation_put
+    assert_eq!(
+        backend
+            .rejected_generation_puts
             .load(std::sync::atomic::Ordering::Acquire),
-        "the injected failure must have reached a generation upload"
+        3,
+        "bootstrap must exhaust its bounded upload attempts"
     );
     fixture.assert_uncommitted();
     assert!(!fixture
@@ -809,6 +815,9 @@ fn should_retry_provider_metadata_bootstrap_with_same_cache_after_failed_generat
         .join(crate::metadata::files::MANIFEST_SNAPSHOT)
         .exists());
     let first_epoch = fixture.lease.epoch();
+    backend
+        .fail_generation_puts
+        .store(false, std::sync::atomic::Ordering::Release);
     fixture.acquire_successor()?;
     assert!(fixture.lease.epoch() > first_epoch);
     fixture.bootstrap()?;
