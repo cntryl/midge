@@ -242,6 +242,23 @@ impl Engine {
         startup::EngineStartup::open_owned(opts)
     }
 
+    /// Upgrade a closed local FORMAT 9 database to FORMAT 10.
+    ///
+    /// The operation verifies the legacy metadata, retains the FORMAT 9
+    /// source files, and switches the durable format marker after the new
+    /// metadata is complete. Retrying a completed upgrade verifies the
+    /// selected metadata. Cloud-backed databases require cloud migration
+    /// support.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database cannot be fenced for maintenance,
+    /// its legacy metadata has an ambiguous boundary, or the new metadata
+    /// and marker cannot be durably selected.
+    pub fn upgrade_format_9(opts: OpenOptions, timeout: Duration) -> MidgeResult<()> {
+        startup::format_upgrade::upgrade_local(&opts, timeout)
+    }
+
     /// Get an existing column family by name.
     ///
     /// Returns None if the column family doesn't exist.

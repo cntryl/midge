@@ -1,12 +1,152 @@
 //! Exact FORMAT 9 migration inputs captured under the primary writer lease
 //! and manifest writer lock.
 
-use crate::common::{DeadlineScope, MidgeError, MidgeResult};
-use crate::io::{Fs, FsError, FsPath, OpenOptions};
-use crate::metadata::{files, Manifest, ManifestPersistence};
+use super::{epoch_floor::StartupEpochFloor, StartupLease, StartupStoragePath};
+use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use crate::config::Storage;
+use crate::io::{Durability, Fs, FsError, FsPath, OpenOptions};
+use crate::metadata::local_authority::LocalMetadataAuthority;
+use crate::metadata::{codec, files, Manifest, ManifestPersistence};
 use crate::runtime::{IntentLogEntry, IntentPersistence};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
+use std::{sync::Arc, time::Duration};
+
+const FORMAT_9: &[u8] = b"midge-format-version=9\n";
+const FORMAT_10: &[u8] = b"midge-format-version=10\n";
+
+pub(in crate::engine) fn upgrade_local(
+    opts: &crate::engine::OpenOptions,
+    timeout: Duration,
+) -> MidgeResult<()> {
+    let Storage::Local { path } = opts.storage() else {
+        return Err(MidgeError::CompatibilityError(
+            "this FORMAT 9 upgrade entry point requires a local database".into(),
+        ));
+    };
+    let scope = DeadlineScope::new(OperationDeadline::from_budget(timeout));
+    scope.check("FORMAT 9 upgrade startup")?;
+    let root = match opts.injected_filesystem() {
+        Some(root) => root,
+        None => super::existing_host_root(path)?,
+    };
+    crate::metadata::validate_format_marker(root.as_ref(), path)?;
+    let storage_path = StartupStoragePath {
+        db_path: path.clone(),
+        memory_mode: false,
+        root,
+    };
+    let floor = StartupEpochFloor::discover_within(opts, &storage_path, &scope)?;
+    let lease = StartupLease::acquire_within(opts, &storage_path, floor, &scope)?;
+    let store = lease.leader_store.as_deref().ok_or_else(|| {
+        MidgeError::Fenced("FORMAT 9 upgrade requires a fenced local writer effect".into())
+    })?;
+    let root = crate::io::scope_fs(Arc::clone(&storage_path.root), scope.clone());
+    let mut result = None;
+    store
+        .with_writer_epoch(
+            &lease.lease.holder_id(),
+            lease.writer_epoch,
+            scope.deadline().remaining(),
+            &mut || {
+                result = Some(crate::metadata::journal::with_manifest_writer_lock_within(
+                    &root,
+                    &scope,
+                    || select_upgrade(&root, &lease, &scope),
+                ));
+            },
+        )
+        .map_err(|error| error.into_validation_error("FORMAT 9 upgrade writer effect"))?;
+    result.ok_or_else(|| MidgeError::Internal("FORMAT 9 writer effect did not execute".into()))?
+}
+
+fn select_upgrade(
+    root: &Arc<dyn Fs>,
+    lease: &StartupLease,
+    scope: &DeadlineScope,
+) -> MidgeResult<()> {
+    // Establish a durable current marker before discarding any abandoned
+    // candidate, including one left after a failed FORMAT directory sync.
+    sync_root(root.as_ref())?;
+    if marker_bytes(root.as_ref(), scope)?.as_deref() == Some(FORMAT_10) {
+        LocalMetadataAuthority::open(Arc::clone(root))?;
+        return Ok(());
+    }
+    let source_budget = crate::metadata::cloud_manifest::MAX_CHAIN_BYTES;
+    let source = Format9UpgradeSource::capture(root.as_ref(), source_budget, scope)?;
+    let manifest = codec::encode(codec::MANIFEST, &source.manifest)?;
+    let intents = serde_json::to_vec(&source.intents)
+        .map_err(|error| MidgeError::Internal(format!("encode FORMAT 10 intent base: {error}")))?;
+    let candidate = LocalMetadataAuthority::stage_upgrade_candidate(
+        Arc::clone(root),
+        source.digest,
+        &manifest,
+        source.manifest.edit_checkpoint_id,
+        &intents,
+        source.intent_sequence,
+        source.intent_checksum,
+    )?;
+    source.revalidate(root.as_ref(), source_budget, scope)?;
+    let candidate_digest = candidate.head_digest();
+    let result = crate::io::staging::stage_bytes_typed(
+        root,
+        &FsPath::new("FORMAT.tmp"),
+        &FsPath::new(files::FORMAT),
+        FORMAT_10,
+        || {
+            scope.check("publish FORMAT 10 marker")?;
+            lease.ensure_healthy("before FORMAT 10 marker publication")?;
+            crate::failpoints::fail_point!("midge::format10::before_marker_switch", |_| Err(
+                MidgeError::Internal("injected failure before FORMAT 10 marker switch".into())
+            ));
+            Ok(())
+        },
+    );
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => reconcile_marker_switch(root, scope, candidate_digest, error),
+    }
+}
+
+fn reconcile_marker_switch(
+    root: &Arc<dyn Fs>,
+    scope: &DeadlineScope,
+    candidate_digest: [u8; 32],
+    write_error: MidgeError,
+) -> MidgeResult<()> {
+    let selection: MidgeResult<Option<bool>> = (|| {
+        let before = marker_bytes(root.as_ref(), scope)?;
+        sync_root(root.as_ref())?;
+        let after = marker_bytes(root.as_ref(), scope)?;
+        if before != after {
+            return Ok(None);
+        }
+        match after.as_deref() {
+            Some(FORMAT_9) => Ok(Some(false)),
+            Some(FORMAT_10) => {
+                let selected = LocalMetadataAuthority::open(Arc::clone(root))?;
+                Ok((selected.head_digest() == candidate_digest).then_some(true))
+            }
+            _ => Ok(None),
+        }
+    })();
+    match selection {
+        Ok(Some(true)) => Ok(()),
+        Ok(Some(false)) => Err(write_error),
+        Ok(None) | Err(_) => Err(MidgeError::OutcomeUnknown(format!(
+            "could not prove the durable FORMAT marker after publication failed: {write_error}"
+        ))),
+    }
+}
+
+fn sync_root(fs: &dyn Fs) -> MidgeResult<()> {
+    fs.sync_dir(&FsPath::new("."), Durability::Durable)
+        .map_err(FsError::into_midge)
+}
+
+fn marker_bytes(fs: &dyn Fs, scope: &DeadlineScope) -> MidgeResult<Option<Bytes>> {
+    read_body(fs, files::FORMAT, &mut 64, scope)
+}
 
 pub(crate) struct Format9UpgradeSource {
     pub(crate) manifest: Manifest,
@@ -64,9 +204,7 @@ struct Format9Bodies {
 
 impl Format9Bodies {
     fn read(fs: &dyn Fs, mut remaining: u64, scope: &DeadlineScope) -> MidgeResult<Self> {
-        let mut marker_budget = 64;
-        let marker = read_body(fs, files::FORMAT, &mut marker_budget, scope)?;
-        if marker.as_deref() != Some(b"midge-format-version=9\n") {
+        if marker_bytes(fs, scope)?.as_deref() != Some(FORMAT_9) {
             return Err(MidgeError::CompatibilityError(
                 "explicit FORMAT 9 upgrade requires a FORMAT 9 source".into(),
             ));
@@ -148,6 +286,65 @@ mod tests {
     use std::time::Duration;
 
     const SOURCE_BUDGET: u64 = 1024 * 1024;
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_resume_local_upgrade_when_marker_switch_was_interrupted() -> MidgeResult<()> {
+        use crate::{Engine, TransactionMode, WriteOptions};
+
+        // Arrange: close a populated FORMAT 9 database and fail after
+        // staging the new closure but before selecting its FORMAT marker.
+        let directory = tempfile::tempdir()?;
+        let opts = crate::OpenOptions::local(directory.path()).build()?;
+        let timeout = Duration::from_secs(5);
+        let write = |key: &[u8]| -> MidgeResult<()> {
+            let mut engine = Engine::open(opts.clone())?;
+            let cf = engine.get_column_family("default").expect("default family");
+            let mut transaction = engine.begin_tx(cf.id(), TransactionMode::ReadWrite)?;
+            transaction.put(key.to_vec(), b"value".to_vec(), None)?;
+            transaction.commit(WriteOptions::sync())?;
+            engine.flush_cf(&cf)?;
+            engine.shutdown(timeout)
+        };
+        write(b"before-first-attempt")?;
+        let failpoint_guard = crate::failpoints::test_failpoint_guard();
+        let failpoint = fail::FailScenario::setup();
+        fail::cfg("midge::format10::before_marker_switch", "return")
+            .expect("inject pre-switch interruption");
+        let interrupted = Engine::upgrade_format_9(opts.clone(), timeout);
+        failpoint.teardown();
+        drop(failpoint_guard);
+        assert!(interrupted.is_err());
+        assert_eq!(
+            std::fs::read(directory.path().join(files::FORMAT))?,
+            FORMAT_9
+        );
+        write(b"after-interruption")?;
+        let original = std::fs::read(directory.path().join(files::MANIFEST_SNAPSHOT))?;
+
+        // Act: retry against the new source and open through normal startup.
+        Engine::upgrade_format_9(opts.clone(), timeout)?;
+        let mut reopened = Engine::open(opts)?;
+
+        // Assert
+        assert_eq!(
+            std::fs::read(directory.path().join(files::FORMAT))?,
+            FORMAT_10
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join(files::MANIFEST_SNAPSHOT))?,
+            original
+        );
+        let cf = reopened
+            .get_column_family("default")
+            .expect("default family");
+        let read = reopened.begin_tx(cf.id(), TransactionMode::ReadOnly)?;
+        for key in [b"before-first-attempt".as_slice(), b"after-interruption"] {
+            assert_eq!(read.get(key)?.as_deref(), Some(b"value".as_slice()));
+        }
+        drop(read);
+        reopened.shutdown(timeout)
+    }
 
     #[test]
     fn should_reject_upgrade_when_verified_legacy_metadata_advances_after_capture() {
