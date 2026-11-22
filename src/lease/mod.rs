@@ -54,8 +54,9 @@ pub(crate) use traits::LeaderRecord;
 pub(crate) use traits::LeaseError;
 pub(crate) use traits::LeaseValidity;
 pub use traits::{
-    CloudMetadataGeneration, CloudMetadataHead, CloudMetadataObject, LeaderStore, LeaseGuard,
-    PrimaryLease,
+    CloudFormatMigrationCandidate, CloudFormatMigrationGate, CloudFormatMigrationPending,
+    CloudMetadataGeneration, CloudMetadataGenerationIdentity, CloudMetadataHead,
+    CloudMetadataObject, LeaderStore, LeaseGuard, PrimaryLease,
 };
 pub use writer_effect_groups::{
     ActiveWriterEffect, WriterEffectGroup, WriterEffectGroupContext, WriterEffectGroups,

@@ -906,6 +906,7 @@ fn should_not_treat_missing_cas_token_as_confirmed_contention() {
         acquired_at: (now - chrono::Duration::seconds(120)).to_rfc3339(),
         expires_at: (now - chrono::Duration::seconds(60)).to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     };
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(
@@ -1284,6 +1285,7 @@ fn should_reject_simulated_lease_read_through_symlink() {
         acquired_at: now.to_rfc3339(),
         expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     };
     std::fs::write(&outside_path, format_lease_document(&document)).unwrap();
     std::os::unix::fs::symlink(&outside_path, cache_path.join(LEASE_OBJECT_KEY)).unwrap();
@@ -1452,6 +1454,7 @@ fn should_not_delete_new_holder_lease_given_stale_process_release_when_releasing
         acquired_at: now.to_rfc3339(),
         expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     };
     let (tx, rx) = std::sync::mpsc::channel();
     cloud.submit_put(
@@ -1571,6 +1574,7 @@ fn should_validate_provider_epoch_through_leader_store() {
         acquired_at: now.to_rfc3339(),
         expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     };
 
     // Act
@@ -1656,6 +1660,7 @@ fn should_not_overwrite_newer_provider_epoch_on_stale_release() {
         acquired_at: now.to_rfc3339(),
         expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     };
     put_remote_lease(&cloud, format_lease_document(&newer));
 
@@ -1685,6 +1690,7 @@ fn should_increment_remote_epoch_given_expired_provider_lease_when_reacquiring()
             acquired_at: (past - chrono::Duration::seconds(30)).to_rfc3339(),
             expires_at: past.to_rfc3339(),
             committed_metadata: None,
+            migration_gate: None,
         }),
     );
     let lease = Arc::new(CloudStorageLease::new_provider_backed(
@@ -1716,6 +1722,7 @@ fn should_refuse_provider_takeover_given_malformed_expiry() {
         acquired_at: "2026-07-31T12:00:00Z".to_string(),
         expires_at: "not-a-timestamp".to_string(),
         committed_metadata: None,
+        migration_gate: None,
     });
     put_remote_lease(&cloud, document.clone());
     let lease = Arc::new(CloudStorageLease::new_provider_backed(
@@ -1837,6 +1844,7 @@ fn should_report_provider_ownership_change_when_owner_token_changes() {
         acquired_at: now.to_rfc3339(),
         expires_at: (now + chrono::Duration::seconds(60)).to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     };
     put_remote_lease(&cloud, format_lease_document(&successor));
 
@@ -1929,6 +1937,7 @@ fn should_parse_lease_document_roundtrip() {
         acquired_at: "2026-02-07T12:00:00Z".to_string(),
         expires_at: "2026-02-07T12:00:30Z".to_string(),
         committed_metadata: None,
+        migration_gate: None,
     };
 
     // Act
@@ -1956,6 +1965,7 @@ fn should_detect_expired_lease() {
         acquired_at: (past - chrono::Duration::seconds(30)).to_rfc3339(),
         expires_at: past.to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     };
 
     // Act
@@ -1977,6 +1987,7 @@ fn should_delay_takeover_until_clock_skew_tolerance_elapses() {
         acquired_at: (now - chrono::Duration::seconds(30)).to_rfc3339(),
         expires_at: (now - chrono::Duration::seconds(5)).to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     };
 
     // Act
@@ -2009,6 +2020,7 @@ fn should_preserve_lease_when_skew_exceeds_remaining_wall_clock_range() {
         acquired_at: (expiry - chrono::Duration::seconds(30)).to_rfc3339(),
         expires_at: expiry.to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     };
 
     // Act
@@ -2032,6 +2044,7 @@ fn should_detect_active_lease() {
         acquired_at: chrono::Utc::now().to_rfc3339(),
         expires_at: future.to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     };
 
     // Act
@@ -2297,6 +2310,7 @@ fn should_reject_pending_marker_with_committed_lease_pointer() {
         acquired_at: (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339(),
         expires_at: (chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339(),
         committed_metadata: Some(test_metadata_generation(5)),
+        migration_gate: None,
     };
     put_remote_lease(&cloud, format_lease_document(&old));
     let lease = Arc::new(CloudStorageLease::new_provider_backed(
@@ -2362,6 +2376,7 @@ fn should_refuse_v3_lease_when_permanent_authority_sentinel_is_missing() {
             acquired_at: (now - chrono::Duration::seconds(120)).to_rfc3339(),
             expires_at: (now - chrono::Duration::seconds(60)).to_rfc3339(),
             committed_metadata: Some(test_metadata_generation(3)),
+            migration_gate: None,
         }),
     );
     let lease = Arc::new(CloudStorageLease::new_provider_backed(
@@ -2408,6 +2423,363 @@ fn test_metadata_generation(sequence: u64) -> CloudMetadataGeneration {
             },
         ],
     }
+}
+
+fn cloud_format_10_candidate() -> CloudMetadataGeneration {
+    let mut candidate = test_metadata_generation(8);
+    candidate.id = crate::lease::SharedGenerationId::new(2).expect("candidate ordinal");
+    candidate
+}
+
+fn pending_format_migration(
+    source: &CloudMetadataGeneration,
+    candidate: &CloudMetadataGeneration,
+) -> crate::lease::CloudFormatMigrationPending {
+    let migration_id = "81900000-0000-4000-8000-000000000001".to_string();
+    crate::lease::CloudFormatMigrationPending {
+        migration_id: migration_id.clone(),
+        target_format: 10,
+        source: crate::lease::CloudMetadataGenerationIdentity::from_generation(source),
+        candidate: crate::lease::CloudFormatMigrationCandidate {
+            generation: crate::lease::CloudMetadataGenerationIdentity::from_generation(candidate),
+            descriptor_key: crate::lease::CloudFormatMigrationPending::candidate_descriptor_key(
+                &migration_id,
+            ),
+        },
+        source_sha256: "a".repeat(64),
+    }
+}
+
+fn acquired_v4_store_with_v9_source() -> (
+    Arc<crate::storage::cloud::CloudStorage>,
+    Arc<CloudStorageLease>,
+    crate::lease::LeaseGuard,
+    CloudMetadataGeneration,
+) {
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::with_mock());
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        Arc::clone(&cloud),
+    ));
+    let guard = Arc::clone(&lease).try_acquire().expect("acquire v4 lease");
+    let source = test_metadata_generation(7);
+    lease
+        .get_leader_store()
+        .expect("provider leader store")
+        .publish_committed_metadata(
+            &lease.holder_id(),
+            lease.epoch(),
+            None,
+            source.clone(),
+            Duration::from_secs(2),
+        )
+        .expect("publish selected v9 source");
+    (cloud, lease, guard, source)
+}
+
+#[test]
+fn should_preserve_v5_gate_across_rewrites_and_allow_only_exact_candidate_cutover() {
+    // Arrange
+    let (cloud, lease, _guard, source) = acquired_v4_store_with_v9_source();
+    let candidate = cloud_format_10_candidate();
+    let pending = pending_format_migration(&source, &candidate);
+    let store = lease.get_leader_store().expect("provider leader store");
+    let holder = lease.holder_id();
+    let epoch = lease.epoch();
+
+    // Act: install pending state and renew the existing owner.
+    store
+        .install_format_10_pending(&holder, epoch, pending.clone(), Duration::from_secs(2))
+        .expect("install pending FORMAT 10 gate");
+    lease.renew().expect("renew pending v5 lease");
+    assert_pending_gate_is_durable(&lease, &store, &pending, epoch);
+
+    // Act: release and acquire under a new owner, retaining the gate.
+    lease.release().expect("release pending v5 lease");
+    let (successor, _successor_guard) = acquire_successor(&cloud);
+    let successor_store = successor
+        .get_leader_store()
+        .expect("successor provider store");
+    assert_pending_gate_is_durable(&successor, &successor_store, &pending, epoch);
+
+    // Act: switch only to the exact candidate and finalize the gate.
+    publish_exact_candidate_and_activate(
+        &successor,
+        &successor_store,
+        &source,
+        &candidate,
+        &pending,
+    );
+    assert_active_gate_is_durable(&successor, &successor_store);
+    successor.renew().expect("renew active v5 lease");
+    successor.release().expect("release active v5 lease");
+
+    // Assert: permanent active compatibility gate survives another takeover.
+    let (final_owner, _final_guard) = acquire_successor(&cloud);
+    let final_store = final_owner
+        .get_leader_store()
+        .expect("final provider store");
+    assert_active_gate_is_durable(&final_owner, &final_store);
+}
+
+fn assert_pending_gate_is_durable(
+    lease: &CloudStorageLease,
+    store: &Arc<dyn LeaderStore>,
+    pending: &crate::lease::CloudFormatMigrationPending,
+    previous_epoch: u64,
+) {
+    assert!(lease.epoch() >= previous_epoch);
+    assert_eq!(
+        store
+            .read_format_migration_gate(&lease.holder_id(), lease.epoch(), Duration::from_secs(2),)
+            .expect("read pending gate"),
+        Some(crate::lease::CloudFormatMigrationGate::Pending(
+            pending.clone()
+        ))
+    );
+    let wire = lease
+        .leader_store
+        .read_test_coordination_document()
+        .expect("read pending wire")
+        .expect("v5 lease exists");
+    assert!(wire.len() <= MAX_LEASE_DOCUMENT_BYTES);
+    assert!(parse_v3_lease_document(&wire).is_none());
+    assert!(expired_backup_lease_document(wire.as_bytes()).is_err());
+}
+
+fn acquire_successor(
+    cloud: &Arc<crate::storage::cloud::CloudStorage>,
+) -> (Arc<CloudStorageLease>, crate::lease::LeaseGuard) {
+    let successor = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        Arc::clone(cloud),
+    ));
+    let guard = Arc::clone(&successor)
+        .try_acquire()
+        .expect("take over released v5 lease");
+    (successor, guard)
+}
+
+fn publish_exact_candidate_and_activate(
+    lease: &CloudStorageLease,
+    store: &Arc<dyn LeaderStore>,
+    source: &CloudMetadataGeneration,
+    candidate: &CloudMetadataGeneration,
+    pending: &crate::lease::CloudFormatMigrationPending,
+) {
+    let holder = lease.holder_id();
+    let epoch = lease.epoch();
+    let mut changed_candidate = candidate.clone();
+    changed_candidate.manifest_horizon += 1;
+    assert!(store
+        .publish_committed_metadata(
+            &holder,
+            epoch,
+            Some(source),
+            changed_candidate,
+            Duration::from_secs(2),
+        )
+        .is_err());
+    store
+        .publish_committed_metadata(
+            &holder,
+            epoch,
+            Some(source),
+            candidate.clone(),
+            Duration::from_secs(2),
+        )
+        .expect("publish exact staged FORMAT 10 candidate");
+    assert!(store
+        .activate_format_10_gate(
+            &holder,
+            epoch,
+            "81900000-0000-4000-8000-000000000002",
+            candidate,
+            Duration::from_secs(2),
+        )
+        .is_err());
+    store
+        .activate_format_10_gate(
+            &holder,
+            epoch,
+            &pending.migration_id,
+            candidate,
+            Duration::from_secs(2),
+        )
+        .expect("activate exact selected FORMAT 10 candidate");
+}
+
+fn assert_active_gate_is_durable(lease: &CloudStorageLease, store: &Arc<dyn LeaderStore>) {
+    assert_eq!(
+        store
+            .read_format_migration_gate(&lease.holder_id(), lease.epoch(), Duration::from_secs(2),)
+            .expect("read active gate"),
+        Some(crate::lease::CloudFormatMigrationGate::Active { target_format: 10 })
+    );
+    let wire = lease
+        .leader_store
+        .read_test_coordination_document()
+        .expect("read active lease wire")
+        .expect("active lease exists");
+    assert!(wire.len() <= MAX_LEASE_DOCUMENT_BYTES);
+    assert!(expired_backup_lease_document(wire.as_bytes()).is_err());
+}
+
+#[test]
+fn should_reject_malformed_v5_cloud_migration_gate() {
+    // Arrange
+    let source = test_metadata_generation(9);
+    let candidate = cloud_format_10_candidate();
+    let mut pending = pending_format_migration(&source, &candidate);
+    pending.target_format = 9;
+    let document = LeaseDocument {
+        version: LeaseDocumentVersion::V5,
+        epoch: Some(1),
+        holder_id: "node".into(),
+        owner_token: Some("owner".into()),
+        acquired_at: "2026-11-22T00:00:00Z".into(),
+        expires_at: "2026-11-22T00:00:30Z".into(),
+        committed_metadata: None,
+        migration_gate: Some(crate::lease::CloudFormatMigrationGate::Pending(pending)),
+    };
+    let wire = format_lease_document(&document);
+
+    // Act / Assert: malformed v5 control state is never interpreted as a
+    // legacy lease or as an ungated format-4 lease.
+    assert!(parse_lease_document(&wire).is_none());
+    assert!(parse_v3_lease_document(&wire).is_none());
+}
+
+#[test]
+fn should_fail_closed_on_expired_owner_when_installing_pending_cloud_gate() {
+    // Arrange
+    let (_cloud, lease, _guard, source) = acquired_v4_store_with_v9_source();
+    let candidate = cloud_format_10_candidate();
+    let pending = pending_format_migration(&source, &candidate);
+    let holder = lease.holder_id();
+    let epoch = lease.epoch();
+    let mut document = lease
+        .read_lease_file()
+        .expect("read current lease")
+        .expect("lease exists");
+    document.expires_at = "2020-01-01T00:00:00Z".to_string();
+    lease
+        .write_lease_file(&document)
+        .expect("seed expired persisted lease");
+    let store = lease.get_leader_store().expect("provider store");
+
+    // Act
+    let result = store.install_format_10_pending(&holder, epoch, pending, Duration::from_secs(2));
+
+    // Assert: monotonic process validity cannot override an expired or
+    // ambiguous shared lease document.
+    assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+    assert_eq!(
+        lease
+            .read_lease_file()
+            .expect("read unchanged lease")
+            .expect("lease remains")
+            .version,
+        LeaseDocumentVersion::V4
+    );
+}
+
+#[test]
+fn should_return_unknown_gate_write_when_readback_cannot_prove_transition() {
+    // Arrange: arm a provider failure only after the v4 lease and its selected
+    // source generation are established.
+    let backend = Arc::new(ScriptedConditionalPutBackend {
+        inner: crate::storage::cloud::MockCloudBackend::new(),
+        scripted_error: crate::storage::cloud::CloudError::ServerError("503 response lost".into()),
+        apply_before_error: false,
+        scripted_puts_remaining: std::sync::atomic::AtomicUsize::new(0),
+        scripted_target: ScriptedPutTarget::Lease,
+    });
+    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+        backend.clone(),
+        "midge".into(),
+    ));
+    let lease = Arc::new(CloudStorageLease::new_provider_backed(
+        test_config(),
+        temp_cache_path(),
+        Arc::clone(&cloud),
+    ));
+    let _guard = Arc::clone(&lease).try_acquire().expect("acquire v4 lease");
+    let source = test_metadata_generation(7);
+    let store = lease.get_leader_store().expect("provider store");
+    store
+        .publish_committed_metadata(
+            &lease.holder_id(),
+            lease.epoch(),
+            None,
+            source.clone(),
+            Duration::from_secs(2),
+        )
+        .expect("publish source generation");
+    let pending = pending_format_migration(&source, &cloud_format_10_candidate());
+    backend.scripted_puts_remaining.store(1, Ordering::Release);
+
+    // Act
+    let result = store.install_format_10_pending(
+        &lease.holder_id(),
+        lease.epoch(),
+        pending,
+        Duration::from_secs(2),
+    );
+
+    // Assert: a response loss with no matching v5 readback is unknown, not a
+    // successful transition and not permission to clear or replace the v4 doc.
+    assert!(matches!(result, Err(LeaseError::Indeterminate(_))));
+    assert_eq!(
+        store
+            .read_format_migration_gate(&lease.holder_id(), lease.epoch(), Duration::from_secs(2),)
+            .expect("read unchanged gate"),
+        None
+    );
+}
+
+#[test]
+fn should_confirm_applied_pending_gate_given_lease_write_response_is_lost() {
+    // Arrange: every conditional lease PUT applies, then reports a lost
+    // response. Exact readback must settle acquisition and gate installation.
+    let lease = lease_with_applied_conditional_put_error(
+        crate::storage::cloud::CloudError::ServerError("503 after apply".into()),
+    );
+    let _guard = Arc::clone(&lease)
+        .try_acquire()
+        .expect("confirm acquisition");
+    let source = test_metadata_generation(7);
+    let store = lease.get_leader_store().expect("provider store");
+    store
+        .publish_committed_metadata(
+            &lease.holder_id(),
+            lease.epoch(),
+            None,
+            source.clone(),
+            Duration::from_secs(2),
+        )
+        .expect("publish source generation");
+    let pending = pending_format_migration(&source, &cloud_format_10_candidate());
+
+    // Act
+    store
+        .install_format_10_pending(
+            &lease.holder_id(),
+            lease.epoch(),
+            pending.clone(),
+            Duration::from_secs(2),
+        )
+        .expect("confirm applied gate write by exact readback");
+
+    // Assert
+    assert_eq!(
+        store
+            .read_format_migration_gate(&lease.holder_id(), lease.epoch(), Duration::from_secs(2),)
+            .expect("read confirmed pending gate"),
+        Some(crate::lease::CloudFormatMigrationGate::Pending(pending))
+    );
 }
 
 #[test]
@@ -3032,6 +3404,7 @@ fn should_reject_noncanonical_v3_lease_documents() {
         acquired_at: "2026-09-28T12:00:00Z".to_string(),
         expires_at: "2026-09-28T12:00:30Z".to_string(),
         committed_metadata: Some(test_metadata_generation(4)),
+        migration_gate: None,
     };
     let wire = format_lease_document(&document);
 
@@ -3071,6 +3444,7 @@ fn should_reject_lease_with_embedded_committed_metadata_pointer_when_old_layout_
             acquired_at: acquired.to_rfc3339(),
             expires_at: expires.to_rfc3339(),
             committed_metadata: Some(test_metadata_generation(4)),
+            migration_gate: None,
         }
     };
     let live = old_layout(now, now + chrono::Duration::seconds(60));

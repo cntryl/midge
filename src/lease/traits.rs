@@ -1,5 +1,6 @@
 //! Core lease traits and types.
 
+use sha2::Digest;
 use std::fmt;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -642,6 +643,81 @@ pub struct CloudMetadataGeneration {
     pub objects: Vec<CloudMetadataObject>,
 }
 
+/// Compact identity for an immutable cloud metadata generation.
+///
+/// `descriptor_sha256` hashes the canonical JSON encoding of the complete
+/// [`CloudMetadataGeneration`] descriptor, including its ordinal and object
+/// inventory. It is independent of lease ownership and provider CAS tokens.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudMetadataGenerationIdentity {
+    /// Shared publication ordinal.
+    pub ordinal: u64,
+    /// Lowercase SHA-256 digest of the canonical generation descriptor.
+    pub descriptor_sha256: String,
+}
+
+impl CloudMetadataGenerationIdentity {
+    /// Bind an immutable generation to its ordinal and exact descriptor bytes.
+    #[must_use]
+    pub fn from_generation(generation: &CloudMetadataGeneration) -> Self {
+        let descriptor = serde_json::to_vec(generation)
+            .expect("cloud metadata generation has infallible JSON serialization");
+        Self {
+            ordinal: generation.id.get(),
+            descriptor_sha256: hex::encode(sha2::Sha256::digest(descriptor)),
+        }
+    }
+}
+
+/// Immutable identities required to resume a pending FORMAT 9 to FORMAT 10
+/// cloud migration after owner takeover.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudFormatMigrationPending {
+    /// Canonical lowercase UUID identifying this one migration attempt.
+    pub migration_id: String,
+    /// Migration target; currently exactly FORMAT 10.
+    pub target_format: u16,
+    /// Exact FORMAT 9 generation selected before staging the candidate.
+    pub source: CloudMetadataGenerationIdentity,
+    /// Exact FORMAT 10 candidate descriptor and immutable descriptor key.
+    pub candidate: CloudFormatMigrationCandidate,
+    /// SHA-256 digest over the exact validated v9 snapshot, journal and intent
+    /// bytes used to construct the candidate.
+    pub source_sha256: String,
+}
+
+/// Retrievable immutable descriptor identity for a staged FORMAT 10
+/// candidate. The key is namespaced by the migration UUID.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudFormatMigrationCandidate {
+    /// Exact shared generation ordinal and descriptor digest.
+    pub generation: CloudMetadataGenerationIdentity,
+    /// Immutable descriptor object key, exactly
+    /// `metadata/migrations/<migration-id>/candidate.json`.
+    pub descriptor_key: String,
+}
+
+/// Persisted cloud compatibility gate returned to startup after lease claim.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CloudFormatMigrationGate {
+    /// Migration is durable but the metadata pointer may still select v9.
+    Pending(CloudFormatMigrationPending),
+    /// Permanent compatibility gate after the v10 pointer switch.
+    Active { target_format: u16 },
+}
+
+impl CloudFormatMigrationPending {
+    /// Canonical immutable descriptor key for this migration ID.
+    #[must_use]
+    pub fn candidate_descriptor_key(migration_id: &str) -> String {
+        format!("metadata/migrations/{migration_id}/candidate.json")
+    }
+}
+
 impl CloudMetadataGeneration {
     pub(crate) fn uses_format_10(&self) -> bool {
         self.objects
@@ -916,6 +992,47 @@ pub trait LeaderStore: Send + Sync {
         _timeout: Duration,
     ) -> Result<Option<LeaderRecord>, LeaseError> {
         self.read_current()
+    }
+
+    /// Read this writer's persistent cloud FORMAT migration gate.
+    fn read_format_migration_gate(
+        &self,
+        _holder_id: &str,
+        _epoch: u64,
+        _timeout: Duration,
+    ) -> Result<Option<CloudFormatMigrationGate>, LeaseError> {
+        Err(LeaseError::Internal(
+            "leader store does not support cloud FORMAT migration gates".into(),
+        ))
+    }
+
+    /// Conditionally install the pending v9-to-v10 compatibility gate while
+    /// the selected cloud pointer still names the exact v9 predecessor.
+    fn install_format_10_pending(
+        &self,
+        _holder_id: &str,
+        _epoch: u64,
+        _pending: CloudFormatMigrationPending,
+        _timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        Err(LeaseError::Internal(
+            "leader store does not support cloud FORMAT migration gates".into(),
+        ))
+    }
+
+    /// Finalize the pending migration after the current pointer selects the
+    /// exact candidate recorded by its durable pending gate.
+    fn activate_format_10_gate(
+        &self,
+        _holder_id: &str,
+        _epoch: u64,
+        _migration_id: &str,
+        _candidate: &CloudMetadataGeneration,
+        _timeout: Duration,
+    ) -> Result<(), LeaseError> {
+        Err(LeaseError::Internal(
+            "leader store does not support cloud FORMAT migration gates".into(),
+        ))
     }
 
     /// Read the committed cloud control-metadata generation from its authority.

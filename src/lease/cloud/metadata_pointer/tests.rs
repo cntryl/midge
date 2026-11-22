@@ -31,6 +31,7 @@ fn document(epoch: u64) -> LeaseDocument {
         acquired_at: chrono::Utc::now().to_rfc3339(),
         expires_at: (chrono::Utc::now() + chrono::Duration::minutes(1)).to_rfc3339(),
         committed_metadata: None,
+        migration_gate: None,
     }
 }
 
