@@ -119,12 +119,7 @@ impl Engine {
         }
         let database_format_version =
             crate::metadata::format::validate_format_marker(self.root.as_ref(), &source)?;
-        let pinned = pin_files_for_format(
-            &source,
-            self.simulated_cloud_mode,
-            parent,
-            database_format_version,
-        )?;
+        let pinned = self.pin_backup_source(&source, parent, timeout, database_format_version)?;
         if !self.is_primary_lease_healthy() {
             return Err(MidgeError::Fenced(
                 "primary lease became unhealthy during backup capture".to_string(),
@@ -174,6 +169,36 @@ impl Engine {
         paths::publish(staging, &destination)?;
         sync_directory(parent)?;
         Ok(manifest)
+    }
+
+    fn pin_backup_source(
+        &self,
+        source: &Path,
+        scratch_dir: &Path,
+        timeout: Duration,
+        database_format_version: u32,
+    ) -> MidgeResult<Vec<PinnedFile>> {
+        if self.simulated_cloud_mode
+            && database_format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1
+        {
+            let lease = self.lease_state.lease.as_ref().ok_or_else(|| {
+                MidgeError::Fenced("CloudSim backup has no acquired primary lease".into())
+            })?;
+            pin_cloud_simulated_format_10_files(
+                source,
+                scratch_dir,
+                timeout,
+                &lease.holder_id(),
+                lease.epoch(),
+            )
+        } else {
+            pin_files_for_format(
+                source,
+                self.simulated_cloud_mode,
+                scratch_dir,
+                database_format_version,
+            )
+        }
     }
 
     /// Restore a verified backup into a clean local or simulated-cloud target.
@@ -228,13 +253,6 @@ impl Engine {
                 "backup storage kind {:?} cannot restore to {:?}",
                 manifest.storage_kind, kind
             )));
-        }
-        if manifest.database_format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1
-            && kind != BackupStorageKind::Local
-        {
-            return Err(MidgeError::NotSupported(
-                "FORMAT 10 backup restore is only available for local storage".into(),
-            ));
         }
         let target = paths::prepare_target(&artifact, &target)?;
         let parent = target.parent().ok_or_else(|| {
@@ -330,6 +348,76 @@ fn pin_format_10_files(
         collect_files(&root.join("cloud_store"), root, &mut paths)?;
     }
     pin_paths(root, paths, scratch_dir)
+}
+
+fn pin_cloud_simulated_format_10_files(
+    root: &Path,
+    scratch_dir: &Path,
+    timeout: Duration,
+    holder_id: &str,
+    epoch: u64,
+) -> MidgeResult<Vec<PinnedFile>> {
+    let fs_root = std::sync::Arc::new(
+        crate::io::RealFs::open_existing(root).map_err(crate::io::FsError::into_midge)?,
+    );
+    let location =
+        crate::storage::simulated::SimulatedCloud::locate(fs_root.as_ref(), None, timeout)?;
+    let store = location.open_existing()?.ok_or_else(|| {
+        MidgeError::Corruption("simulated cloud FORMAT 10 object store is missing".into())
+    })?;
+    let cloud = crate::storage::cloud::CloudStorage::from_object_store(store, timeout);
+    let deadline = crate::common::OperationDeadline::from_budget(timeout);
+    let owner = Some((holder_id, epoch));
+    let selected = crate::lease::cloud::read_active_format_10_backup_generation_for_owner(
+        &cloud, &deadline, owner,
+    )
+    .map_err(|error| {
+        MidgeError::Corruption(format!(
+            "cannot prove active CloudSim FORMAT 10 selection: {error}"
+        ))
+    })?;
+    let bodies = crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
+        &cloud, &selected, &deadline,
+    )?;
+    crate::runtime::hybrid_persistence::decode_generation_manifest(&selected, &bodies, &deadline)?;
+    crate::runtime::IntentPersistence::validate_cloud_format_10_bodies(&bodies)?;
+    let rechecked = crate::lease::cloud::read_active_format_10_backup_generation_for_owner(
+        &cloud, &deadline, owner,
+    )
+    .map_err(|error| {
+        MidgeError::Corruption(format!(
+            "CloudSim FORMAT 10 selection changed during backup: {error}"
+        ))
+    })?;
+    if rechecked != selected {
+        return Err(MidgeError::Corruption(
+            "CloudSim selected metadata pointer changed during backup capture".into(),
+        ));
+    }
+
+    let mut pinned = bodies
+        .iter()
+        .map(|(relative, body)| pin_bytes(relative, body, scratch_dir))
+        .collect::<MidgeResult<Vec<_>>>()?;
+    let mut paths = ledger_wal_paths(root)?;
+    collect_files(&root.join("sst"), root, &mut paths)?;
+    collect_files(&root.join("cloud_store"), root, &mut paths)?;
+    pinned.extend(pin_paths(root, paths, scratch_dir)?);
+    Ok(pinned)
+}
+
+fn pin_bytes(relative: &str, body: &[u8], scratch_dir: &Path) -> MidgeResult<PinnedFile> {
+    let relative = PathBuf::from(relative);
+    validate_relative_path(&relative)?;
+    let mut file = tempfile::tempfile_in(scratch_dir)?;
+    file.write_all(body)?;
+    file.sync_all()?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(PinnedFile {
+        relative,
+        size: body.len() as u64,
+        file,
+    })
 }
 
 fn pin_durable_files(
@@ -790,6 +878,8 @@ fn sync_directory(path: &Path) -> MidgeResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lease::PrimaryLease;
+    use std::sync::Arc;
 
     #[test]
     fn should_encode_native_nested_backup_path_with_portable_separators() {
@@ -1007,22 +1097,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn should_backup_and_restore_active_cloudsim_format_10_closure() -> MidgeResult<()> {
-        use crate::engine::{OpenOptions, TransactionMode, WriteOptions};
-        use crate::lease::{CloudFormatMigrationGate, CloudFormatMigrationPending, PrimaryLease};
-        use crate::storage::cloud::{BlockingCloud, CloudStorage};
-        use std::sync::Arc;
-        use std::time::Duration;
+    struct CloudSimMigrationOwner {
+        cloud: Arc<crate::storage::cloud::CloudStorage>,
+        lease: Arc<crate::lease::CloudStorageLease>,
+        _guard: crate::lease::LeaseGuard,
+        store: Arc<dyn crate::lease::LeaderStore>,
+        holder: String,
+        epoch: u64,
+        source: crate::lease::CloudMetadataGeneration,
+        deadline: crate::common::OperationDeadline,
+        local_root: Arc<dyn crate::io::Fs>,
+    }
 
-        // Arrange: create a CloudSim database with a live SST, then close it
-        // before selecting a real v10 local and remote metadata closure.
-        let directory = tempfile::tempdir()?;
-        let source = directory.path().join("source");
-        let artifact = directory.path().join("artifact");
-        let target = directory.path().join("restored");
-        let timeout = Duration::from_secs(60);
-        let options = OpenOptions::cloud_simulated(&source, "backup-test", "format10").build()?;
+    fn create_cloudsim_source(
+        source: &Path,
+        timeout: Duration,
+    ) -> MidgeResult<crate::engine::OpenOptions> {
+        use crate::engine::{OpenOptions, TransactionMode, WriteOptions};
+        let options = OpenOptions::cloud_simulated(source, "backup-test", "format10").build()?;
         let mut engine = Engine::open(options.clone())?;
         let default = engine.get_column_family("default").expect("default CF");
         loop {
@@ -1038,13 +1130,31 @@ mod tests {
             }
         }
         engine.flush_cf(&default)?;
+        loop {
+            let result = (|| {
+                let mut transaction = engine.begin_tx(default.id(), TransactionMode::ReadWrite)?;
+                transaction.put(b"wal-key".to_vec(), b"wal-value".to_vec(), None)?;
+                transaction.commit(WriteOptions::cloud_async())
+            })();
+            match result {
+                Ok(()) => break,
+                Err(MidgeError::Busy(_)) => std::thread::yield_now(),
+                Err(error) => return Err(error),
+            }
+        }
         let shutdown = engine.shutdown(timeout);
         drop(engine);
+        expire_released_test_lease(source)?;
+        if let Err(error) = shutdown {
+            assert!(matches!(error, MidgeError::LeaseUnavailable(_)), "{error}");
+        }
+        Ok(options)
+    }
 
-        // Arrange: take over the v4 CloudSim lease and select a proper local
-        // candidate closure before publishing its exact remote counterpart.
-        let cloud_root = source.join("cloud_store");
-        let lease_path = cloud_root.join(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY);
+    fn expire_released_test_lease(source: &Path) -> MidgeResult<()> {
+        let lease_path = source
+            .join("cloud_store")
+            .join(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY);
         let mut lease_wire = fs::read_to_string(&lease_path)?;
         if let Some(line) = lease_wire
             .lines()
@@ -1053,9 +1163,19 @@ mod tests {
             lease_wire = lease_wire.replace(line, "expires: 1970-01-01T00:00:00Z");
             fs::write(&lease_path, lease_wire)?;
         }
-        if let Err(error) = shutdown {
-            assert!(matches!(error, MidgeError::LeaseUnavailable(_)), "{error}");
-        }
+        Ok(())
+    }
+
+    fn acquire_cloudsim_migration_owner(
+        source: &Path,
+        timeout: Duration,
+    ) -> MidgeResult<CloudSimMigrationOwner> {
+        use crate::lease::PrimaryLease;
+        use crate::storage::cloud::CloudStorage;
+
+        // Arrange: take over the v4 CloudSim lease and select a proper local
+        // candidate closure before publishing its exact remote counterpart.
+        let cloud_root = source.join("cloud_store");
         let object_store = Arc::new(crate::storage::filesystem::FileSystem::new(&cloud_root)?);
         let object_store: Arc<dyn crate::storage::inventory::ObjectStore> = object_store;
         let cloud = Arc::new(CloudStorage::from_object_store(
@@ -1070,7 +1190,7 @@ mod tests {
             source.join("lease-cache"),
             Arc::clone(&cloud),
         ));
-        let _lease_guard = Arc::clone(&lease)
+        let lease_guard = Arc::clone(&lease)
             .try_acquire()
             .unwrap_or_else(|error| panic!("direct CloudSim lease acquisition: {error}"));
         let store = lease.get_leader_store().expect("provider-backed store");
@@ -1090,6 +1210,24 @@ mod tests {
         let local_root: Arc<dyn crate::io::Fs> = Arc::new(
             crate::io::RealFs::open_existing(&source).map_err(crate::io::FsError::into_midge)?,
         );
+        Ok(CloudSimMigrationOwner {
+            cloud,
+            lease,
+            _guard: lease_guard,
+            store,
+            holder,
+            epoch,
+            source: source_generation,
+            deadline,
+            local_root,
+        })
+    }
+
+    fn stage_cloudsim_v10_candidate(
+        owner: &CloudSimMigrationOwner,
+    ) -> MidgeResult<crate::lease::CloudMetadataGeneration> {
+        use crate::storage::cloud::BlockingCloud;
+        let local_root = &owner.local_root;
         let manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
             &local_root,
             crate::config::RecoveryPolicy::Strict,
@@ -1103,12 +1241,12 @@ mod tests {
         .map_err(crate::io::FsError::into_midge)?;
         let intent_state = crate::runtime::IntentPersistence::decode_for_upgrade(
             bytes::Bytes::copy_from_slice(&raw_intents),
-            &crate::common::DeadlineScope::new(deadline),
+            &crate::common::DeadlineScope::new(owner.deadline),
         )?;
         let intent_bytes = serde_json::to_vec(&intent_state.entries)
             .map_err(|error| MidgeError::Internal(error.to_string()))?;
         crate::metadata::local_authority::LocalMetadataAuthority::stage_upgrade_candidate(
-            Arc::clone(&local_root),
+            Arc::clone(local_root),
             [9; 32],
             &manifest,
             crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
@@ -1147,7 +1285,7 @@ mod tests {
             )?;
         let generation_uuid = uuid::Uuid::new_v4().to_string();
         let candidate_generation = crate::lease::CloudMetadataGeneration {
-            id: crate::lease::SharedGenerationId::new(source_generation.id.get() + 1)
+            id: crate::lease::SharedGenerationId::new(owner.source.id.get() + 1)
                 .expect("next shared generation ordinal"),
             manifest_horizon,
             objects: candidate_bodies
@@ -1161,49 +1299,76 @@ mod tests {
                 .collect(),
         };
         for object in &candidate_generation.objects {
-            BlockingCloud::new(&cloud, &deadline).put_with_precondition(
+            BlockingCloud::new(&owner.cloud, &owner.deadline).put_with_precondition(
                 &object.object_key,
                 candidate_bodies[&object.file_name].clone(),
                 &crate::storage::StoragePrecondition::IfAbsent,
             )?;
         }
+        Ok(candidate_generation)
+    }
+
+    fn activate_cloudsim_v10_candidate(
+        owner: &CloudSimMigrationOwner,
+        candidate: &crate::lease::CloudMetadataGeneration,
+        timeout: Duration,
+    ) -> MidgeResult<()> {
+        use crate::lease::{CloudFormatMigrationGate, CloudFormatMigrationPending};
         let migration_id = "81900000-0000-4000-8000-000000000003";
         let pending = CloudFormatMigrationPending {
             migration_id: migration_id.to_string(),
             target_format: 10,
-            source: crate::lease::CloudMetadataGenerationIdentity::from_generation(
-                &source_generation,
-            ),
+            source: crate::lease::CloudMetadataGenerationIdentity::from_generation(&owner.source),
             candidate: crate::lease::CloudFormatMigrationCandidate {
                 generation: crate::lease::CloudMetadataGenerationIdentity::from_generation(
-                    &candidate_generation,
+                    candidate,
                 ),
                 descriptor_key: CloudFormatMigrationPending::candidate_descriptor_key(migration_id),
             },
             source_sha256: "a".repeat(64),
         };
-        store.install_format_10_pending(&holder, epoch, pending.clone(), timeout)?;
-        store.publish_committed_metadata(
-            &holder,
-            epoch,
-            Some(&source_generation),
-            candidate_generation.clone(),
+        owner
+            .store
+            .install_format_10_pending(&owner.holder, owner.epoch, pending, timeout)?;
+        owner.store.publish_committed_metadata(
+            &owner.holder,
+            owner.epoch,
+            Some(&owner.source),
+            candidate.clone(),
             timeout,
         )?;
-        store.activate_format_10_gate(
-            &holder,
-            epoch,
+        owner.store.activate_format_10_gate(
+            &owner.holder,
+            owner.epoch,
             migration_id,
-            &candidate_generation,
+            candidate,
             timeout,
         )?;
         assert_eq!(
-            store.read_format_migration_gate(&holder, epoch, timeout)?,
+            owner
+                .store
+                .read_format_migration_gate(&owner.holder, owner.epoch, timeout)?,
             Some(CloudFormatMigrationGate::Active { target_format: 10 })
         );
-        lease.release().expect("release active test lease");
-        drop(_lease_guard);
-        drop(lease);
+        owner.lease.release().expect("release active test lease");
+        Ok(())
+    }
+
+    #[test]
+    fn should_backup_and_restore_active_cloudsim_format_10_closure() -> MidgeResult<()> {
+        use crate::engine::{OpenOptions, TransactionMode};
+        use std::time::Duration;
+
+        // Arrange
+        let directory = tempfile::tempdir()?;
+        let source = directory.path().join("source");
+        let artifact = directory.path().join("artifact");
+        let target = directory.path().join("restored");
+        let timeout = Duration::from_secs(60);
+        let options = create_cloudsim_source(&source, timeout)?;
+        let owner = acquire_cloudsim_migration_owner(&source, timeout)?;
+        let candidate = stage_cloudsim_v10_candidate(&owner)?;
+        activate_cloudsim_v10_candidate(&owner, &candidate, timeout)?;
 
         // Act: open the active-gated CloudSim database, capture it, and restore
         // through the same public backup verifier and startup paths.
@@ -1221,7 +1386,8 @@ mod tests {
         let has = |suffix: &str| inventory.objects.iter().any(|object| object.path == suffix);
         assert!(has("metadata/HEAD"));
         assert!(has("cloud_store/metadata/committed-pointer.v1"));
-        assert!(has("cloud_store/wal/publication-catalog.v1"));
+        assert!(has("cloud_store/wal/publication-catalog.v1.json"));
+        assert!(has("cloud_store/wal/publication-catalog.v1.mirror.json"));
         assert!(inventory.objects.iter().any(|object| {
             object.path.starts_with("cloud_store/metadata/generations/")
                 && object.path.ends_with("/metadata/HEAD")
@@ -1233,7 +1399,7 @@ mod tests {
         assert!(inventory
             .objects
             .iter()
-            .any(|object| object.path.starts_with("cloud_store/wal/segments/")));
+            .any(|object| { object.path.starts_with("wal/") && object.path.ends_with(".wal") }));
         let lease_path = artifact.join("objects/cloud_store/midge_primary_lease.json");
         let lease_bytes = fs::read(&lease_path)?;
         assert!(lease_bytes.starts_with(b"lease_version: 5\n"));
@@ -1245,6 +1411,10 @@ mod tests {
         assert_eq!(
             read.get(b"backup-key")?.as_deref(),
             Some(b"backup-value".as_slice())
+        );
+        assert_eq!(
+            read.get(b"wal-key")?.as_deref(),
+            Some(b"wal-value".as_slice())
         );
         drop(read);
         restored.shutdown(timeout)?;

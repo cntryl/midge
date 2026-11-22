@@ -121,7 +121,7 @@ impl StorageVerifier {
 
         let mut local_bodies = std::collections::BTreeMap::from([(
             crate::metadata::files::FORMAT.to_string(),
-            crate::metadata::format::current_format_marker_bytes(),
+            b"midge-format-version=10\n".to_vec(),
         )]);
         for path in
             crate::metadata::local_authority::LocalMetadataAuthority::selected_relative_paths_from(
@@ -136,9 +136,16 @@ impl StorageVerifier {
             &local_bodies,
         )?;
         if local_bodies != cloud_bodies {
+            let differences = local_bodies
+                .keys()
+                .chain(cloud_bodies.keys())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .filter(|key| local_bodies.get(*key) != cloud_bodies.get(*key))
+                .cloned()
+                .collect::<Vec<_>>();
             return Err(MidgeError::Corruption(
-                "CloudSim local FORMAT 10 HEAD closure differs from the selected cloud generation"
-                    .into(),
+                format!("CloudSim local FORMAT 10 HEAD closure differs from the selected cloud generation at {differences:?}"),
             ));
         }
 

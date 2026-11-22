@@ -1876,6 +1876,14 @@ pub(crate) fn read_active_format_10_backup_generation(
     cloud: &CloudStorage,
     deadline: &crate::common::OperationDeadline,
 ) -> Result<CloudMetadataGeneration, LeaseError> {
+    read_active_format_10_backup_generation_for_owner(cloud, deadline, None)
+}
+
+pub(crate) fn read_active_format_10_backup_generation_for_owner(
+    cloud: &CloudStorage,
+    deadline: &crate::common::OperationDeadline,
+    expected_owner: Option<(&str, u64)>,
+) -> Result<CloudMetadataGeneration, LeaseError> {
     let remaining = |context: &str| {
         deadline
             .clamp_nonzero(cloud.callback_timeout())
@@ -1891,6 +1899,13 @@ pub(crate) fn read_active_format_10_backup_generation(
     {
         return Err(LeaseError::Indeterminate(
             "backup cloud lease does not carry the active FORMAT 10 gate".into(),
+        ));
+    }
+    if expected_owner.is_some_and(|(holder, epoch)| {
+        document.holder_id != holder || document.epoch != Some(epoch)
+    }) {
+        return Err(LeaseError::RenewalFailed(
+            "CloudSim backup lease is no longer owned by the capturing engine".into(),
         ));
     }
     if provider_read_authority_sentinel(cloud, remaining("authority sentinel read")?)?
