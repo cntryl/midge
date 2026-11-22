@@ -72,8 +72,7 @@ fn check_format_10_provider_upgrade(label: &str, provider: &CloudProviderConfig)
     put_upgrade_value(&legacy, &family, b"legacy");
     legacy.shutdown(timeout).expect("close FORMAT 9");
 
-    Engine::upgrade_format_9(&options("upgrade"), timeout)
-        .unwrap_or_else(|error| panic!("{label}: upgrading {provider:?}: {error}"));
+    begin_provider_format_10_upgrade(&options("upgrade"), timeout);
     let mut current = Engine::open(options("current"))
         .unwrap_or_else(|error| panic!("{label}: opening {provider:?}: {error}"));
     let family = current
@@ -103,6 +102,23 @@ fn check_format_10_provider_upgrade(label: &str, provider: &CloudProviderConfig)
     recovered
         .shutdown(timeout)
         .expect("close recovered database");
+}
+
+fn begin_provider_format_10_upgrade(options: &OpenOptions, timeout: Duration) {
+    #[cfg(feature = "failpoints")]
+    {
+        let _guard = sqrzl_compaction_failpoint_test_lock();
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("midge::format10::after_pending_cloud_gate", "return")
+            .expect("interrupt migration after the compatibility gate becomes durable");
+        let result = Engine::upgrade_format_9(options, timeout);
+        drop(scenario);
+        assert!(matches!(result, Err(MidgeError::Internal(message))
+            if message == "interrupted after durable pending FORMAT 10 gate"));
+        // The next ordinary startup must resume the explicit migration.
+    }
+    #[cfg(not(feature = "failpoints"))]
+    Engine::upgrade_format_9(options, timeout).expect("upgrade provider metadata");
 }
 
 fn put_upgrade_value(engine: &Engine, family: &ColumnFamilyHandle, key: &'static [u8]) {
