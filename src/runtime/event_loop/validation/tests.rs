@@ -82,6 +82,14 @@ fn request(request_id: u64, key: &'static [u8], checked: bool) -> ApplyTransacti
 }
 
 fn apply_and_flush(event_loop: &mut EventLoop, request: ApplyTransactionRequest) {
+    apply_and_flush_family(event_loop, request, 0);
+}
+
+fn apply_and_flush_family(
+    event_loop: &mut EventLoop,
+    request: ApplyTransactionRequest,
+    cf_id: u32,
+) {
     let request_id = request.request_id;
     let response = event_loop
         .routing
@@ -96,7 +104,7 @@ fn apply_and_flush(event_loop: &mut EventLoop, request: ApplyTransactionRequest)
         .routing
         .router
         .register(request_id + 100, "validation fixture flush");
-    FlushCoordinator::flush_memtable(event_loop, request_id + 100, 0);
+    FlushCoordinator::flush_memtable(event_loop, request_id + 100, cf_id);
     let flush_result = flush.recv_timeout(Duration::from_secs(10));
     assert!(
         matches!(flush_result, Ok(RuntimeResponse::Ok { .. })),
@@ -264,6 +272,127 @@ fn should_retry_detached_validation_when_intervening_conflicting_write_is_flushe
         matches!(error, MidgeError::WriteConflict(_))
     })?;
     // Assert: the shared schedule requires the original typed conflict.
+    Ok(())
+}
+
+#[test]
+fn should_respond_to_stale_validation_when_compaction_empties_the_dropped_family() -> MidgeResult<()>
+{
+    use crate::runtime::event_loop::manifest::ManifestCoordinator;
+
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let _scenario = fail::FailScenario::setup();
+    // Arrange: a checked transaction pins two SSTs containing only obsolete
+    // tombstones. An unrelated write will invalidate its read cut.
+    let (_directory, mut event_loop, _) = create_counted_event_loop()?;
+    let messages = crossbeam::channel::never();
+    let created = event_loop
+        .routing
+        .router
+        .register(94_700, "family for stale validation");
+    ManifestCoordinator::create_column_family(&mut event_loop, &messages, 94_700, "validated");
+    let RuntimeResponse::ColumnFamilyCreated { cf_id, .. } = created.try_recv().unwrap() else {
+        panic!("create validation family");
+    };
+    for request_id in [94_701, 94_706] {
+        let mut tombstone = request(request_id, b"obsolete", false);
+        tombstone.ops = vec![TransactionOp::Delete {
+            cf_id,
+            key: Bytes::from_static(b"obsolete"),
+        }];
+        apply_and_flush_family(&mut event_loop, tombstone, cf_id);
+    }
+    let sources: Vec<_> = event_loop
+        .state
+        .manifest
+        .files
+        .iter()
+        .filter(|file| file.cf_id == cf_id)
+        .map(|file| file.name.clone())
+        .collect();
+    assert_eq!(sources.len(), 2);
+    let mut checked = request(94_702, b"new-key", true);
+    checked.start_sequence = Some(event_loop.state.applied_sequence);
+    let TransactionOp::Put {
+        cf_id: checked_family,
+        ..
+    } = &mut checked.ops[0]
+    else {
+        panic!("test request is a put");
+    };
+    *checked_family = cf_id;
+    let held = HeldCallback::first("midge::validation::before_snapshot_reads");
+    let committed = event_loop
+        .routing
+        .router
+        .register(94_702, "stale checked commit");
+    WalCoordinator::apply_transaction(&mut event_loop, &messages, checked, None);
+    held.reached
+        .recv_timeout(Duration::from_secs(5))
+        .expect("validation worker held");
+    apply_and_flush(&mut event_loop, request(94_703, b"unrelated", false));
+    compact_validation_tombstones(&mut event_loop, cf_id, sources)?;
+    assert!(!event_loop
+        .state
+        .manifest
+        .files
+        .iter()
+        .any(|file| file.cf_id == cf_id));
+    let dropped = event_loop
+        .routing
+        .router
+        .register(94_704, "drop empty validation family");
+    ManifestCoordinator::drop_column_family(&mut event_loop, &messages, 94_704, cf_id, false);
+    assert!(matches!(dropped.try_recv(), Ok(RuntimeResponse::Ok { .. })));
+    let before = event_loop.state.applied_sequence;
+
+    // Act
+    held.release.send(()).expect("release stale validation");
+    let completion = event_loop
+        .validation_completion_receiver()
+        .expect("validation receiver")
+        .recv_timeout(Duration::from_secs(5))
+        .expect("completed stale validation");
+    event_loop.handle_validation_completion(completion, &messages);
+
+    // Assert
+    let outcome = committed.try_recv();
+    assert!(
+        matches!(&outcome, Ok(RuntimeResponse::Error { error: MidgeError::InvalidArgument(message), .. })
+            if message.contains(&format!("column family {cf_id} does not exist"))),
+        "expected the definite dropped-family error, got {outcome:?}"
+    );
+    assert_eq!(event_loop.state.applied_sequence, before);
+    Ok(())
+}
+
+fn compact_validation_tombstones(
+    event_loop: &mut EventLoop,
+    cf_id: u32,
+    sources: Vec<String>,
+) -> MidgeResult<()> {
+    // The two overlapping sources require a rewrite instead of an identity move.
+    let mut plan = crate::compaction::CompactionPlan::new(cf_id, 0, 1)
+        .with_tombstone_gc_eligibility(true, false);
+    plan.input_files.clone_from(&sources);
+    plan.source_files = sources;
+    let messages = crossbeam::channel::never();
+    let (worker_messages, notifications) = crossbeam::channel::unbounded();
+    event_loop.pipeline.worker_msg_tx = Some(worker_messages);
+    event_loop.launch_compaction(plan)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while event_loop.actors.compaction_actor.active_count() != 0 {
+        assert!(
+            Instant::now() < deadline,
+            "remove-only compaction did not finish"
+        );
+        while let Ok(message) = notifications.try_recv() {
+            event_loop.process_one(message, &messages);
+        }
+        event_loop.progress_pass(&messages);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    event_loop.pipeline.worker_msg_tx = None;
     Ok(())
 }
 

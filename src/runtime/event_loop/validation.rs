@@ -494,8 +494,9 @@ impl EventLoop {
         }
         if job.applied_sequence != self.state.applied_sequence {
             // An SST read, including a negative/error result, has no authority
-            // over writes applied after its captured cut. Retry the new view.
-            self.prepare_detached_validation(job.request);
+            // over writes applied after its captured cut. Re-enter admission
+            // so requests that no longer need detached reads also settle.
+            WalCoordinator::apply_transaction(self, msg_rx, job.request, None);
             return;
         }
         match proof {
