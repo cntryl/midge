@@ -15,6 +15,8 @@ const RETAIN_ORDINALS: u64 = 3;
 pub(crate) const INTERVAL: Duration = Duration::from_secs(30);
 const LIST_BUDGET: usize = 4;
 const CANDIDATE_BUDGET: usize = 8;
+const MAX_RETENTION_CONTINUATION_BYTES: usize = 4096;
+const MAX_FORMAT_10_OBJECT_KEY_BYTES: usize = 512;
 
 /// Idle maintenance observes already selected history. It must not publish a
 /// new cut merely to reclaim old ones, or write-idle history never converges.
@@ -73,6 +75,8 @@ pub(crate) struct MetadataRetentionState {
     last_run: Option<Instant>,
     cursor: u64,
     continuation: Option<String>,
+    format_10_last_run: Option<Instant>,
+    format_10_continuation: Option<String>,
     pub(crate) totals: RetentionCounters,
     pub(crate) interval: Duration,
 }
@@ -83,6 +87,8 @@ impl Default for MetadataRetentionState {
             last_run: None,
             cursor: 0,
             continuation: None,
+            format_10_last_run: None,
+            format_10_continuation: None,
             totals: RetentionCounters::default(),
             interval: INTERVAL,
         }
@@ -116,6 +122,17 @@ impl MetadataRetentionState {
         }
         Some(cutoff)
     }
+
+    fn begin_format_10(&mut self) -> bool {
+        if self
+            .format_10_last_run
+            .is_some_and(|last| last.elapsed() < self.interval)
+        {
+            return false;
+        }
+        self.format_10_last_run = Some(Instant::now());
+        true
+    }
 }
 
 /// The caller holds the publication lock. Readers hold that same lock from
@@ -126,9 +143,14 @@ pub(super) fn collect_after_commit(
     generation: &CloudMetadataGeneration,
     state: &mut MetadataRetentionState,
 ) {
-    if context.publication_lock.pending_captures() != 0
-        || !super::metadata_chain::is_chain(generation)
-    {
+    if context.publication_lock.pending_captures() != 0 {
+        return;
+    }
+    if generation.uses_format_10() {
+        collect_format_10_after_commit(context, generation, state);
+        return;
+    }
+    if !super::metadata_chain::is_chain(generation) {
         return;
     }
     let Some(cutoff) = state.begin(generation.id.get()) else {
@@ -187,6 +209,131 @@ pub(super) fn collect_after_commit(
         retained = state.totals.retained,
         "cloud manifest retention counters"
     );
+}
+
+fn collect_format_10_after_commit(
+    context: &CloudMetadataMirrorContext<'_>,
+    generation: &CloudMetadataGeneration,
+    state: &mut MetadataRetentionState,
+) {
+    if generation.objects.len() > crate::metadata::local_authority::MAX_OBJECTS + 2
+        || !state.begin_format_10()
+    {
+        return;
+    }
+    let protected = generation
+        .objects
+        .iter()
+        .map(|object| object.object_key.as_str())
+        .collect::<BTreeSet<_>>();
+    let io = BlockingCloud::new(context.cloud, context.deadline);
+    let mut candidates = 0;
+    for _ in 0..LIST_BUDGET {
+        if candidates >= CANDIDATE_BUDGET {
+            break;
+        }
+        let page_request = crate::storage::cloud::CloudListPageRequest {
+            continuation: state.format_10_continuation.clone(),
+            max_keys: (CANDIDATE_BUDGET - candidates)
+                .min(crate::storage::cloud::MAX_LIST_PAGE_KEYS),
+        };
+        state.totals.lists += 1;
+        let Ok(Some(page)) = io.list_page("metadata/generations/", page_request) else {
+            state.totals.retained += 1;
+            return;
+        };
+        if page
+            .continuation
+            .as_ref()
+            .is_some_and(|token| token.len() > MAX_RETENTION_CONTINUATION_BYTES)
+        {
+            state.totals.retained += 1;
+            return;
+        }
+        for key in &page.keys {
+            let key = context.cloud.strip_namespace(key);
+            let Some(kind) = format_10_candidate_kind(key) else {
+                continue;
+            };
+            candidates += 1;
+            if protected.contains(key) {
+                state.totals.retained += 1;
+                continue;
+            }
+            state.totals.probes += 1;
+            match reclaim_format_10_candidate(context, generation, key, kind) {
+                Ok(true) => state.totals.deleted += 1,
+                Ok(false) => state.totals.retained += 1,
+                Err(error) => {
+                    state.totals.retained += 1;
+                    tracing::debug!(%error, "retaining uncertain cloud FORMAT 10 body");
+                    return;
+                }
+            }
+        }
+        state.format_10_continuation = page.continuation;
+        if state.format_10_continuation.is_none() {
+            break;
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Format10CandidateKind {
+    Format,
+    Head,
+    Closure,
+}
+
+fn format_10_candidate_kind(key: &str) -> Option<Format10CandidateKind> {
+    use crate::metadata::local_authority::HEAD_PATH;
+
+    if key.len() > MAX_FORMAT_10_OBJECT_KEY_BYTES {
+        return None;
+    }
+    let (publication_id, relative_path) =
+        key.strip_prefix("metadata/generations/")?.split_once('/')?;
+    let parsed_id = uuid::Uuid::parse_str(publication_id).ok()?;
+    if parsed_id.to_string() != publication_id {
+        return None;
+    }
+    match relative_path {
+        crate::metadata::files::FORMAT => Some(Format10CandidateKind::Format),
+        HEAD_PATH => Some(Format10CandidateKind::Head),
+        path if crate::metadata::local_authority::closure_path_parts(path).is_ok() => {
+            Some(Format10CandidateKind::Closure)
+        }
+        _ => None,
+    }
+}
+
+fn reclaim_format_10_candidate(
+    context: &CloudMetadataMirrorContext<'_>,
+    generation: &CloudMetadataGeneration,
+    key: &str,
+    kind: Format10CandidateKind,
+) -> MidgeResult<bool> {
+    use crate::metadata::local_authority::{MAX_CLOSURE_BYTES, MAX_HEAD_BYTES};
+
+    let metadata = range_identity(context, key)?;
+    let limit = match kind {
+        Format10CandidateKind::Format => 64,
+        Format10CandidateKind::Head => MAX_HEAD_BYTES as u64,
+        Format10CandidateKind::Closure => MAX_CLOSURE_BYTES,
+    };
+    if metadata.size == 0 || metadata.size > limit {
+        return Ok(false);
+    }
+    if matches!(kind, Format10CandidateKind::Format)
+        && read_identity(context, key, &metadata)? != b"midge-format-version=10\n"
+    {
+        // The v9 marker shares the outer immutable-body namespace. Preserve it
+        // without changing the legacy retention policy.
+        return Ok(false);
+    }
+    validate_current(context, generation)?;
+    crate::failpoints::fail_point!("midge::cloud::before_metadata_retention_delete");
+    delete_identity(context, key, metadata)
 }
 
 fn reclaim_candidate(

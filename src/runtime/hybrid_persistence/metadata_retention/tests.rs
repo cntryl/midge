@@ -117,6 +117,79 @@ impl Fixture {
     }
 }
 
+fn format_10_generation(fixture: &Fixture) -> CloudMetadataGeneration {
+    use crate::lease::SharedGenerationId;
+
+    let directory = fixture.directory.path().join("format10-source");
+    std::fs::create_dir(&directory).unwrap();
+    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(&directory).unwrap());
+    let manifest =
+        crate::metadata::codec::encode(crate::metadata::codec::MANIFEST, &Manifest::default())
+            .unwrap();
+    let intents = serde_json::to_vec(&Vec::<crate::runtime::IntentLogEntry>::new()).unwrap();
+    let authority = crate::metadata::local_authority::LocalMetadataAuthority::initialize(
+        Arc::clone(&fs),
+        "retention-generation",
+        &manifest,
+        &intents,
+    )
+    .unwrap();
+    std::fs::write(directory.join(files::FORMAT), b"midge-format-version=10\n").unwrap();
+
+    let publication_id = uuid::Uuid::new_v4().to_string();
+    let mut objects = vec![files::FORMAT.to_owned()];
+    objects.extend(authority.selected_relative_paths());
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    let io = BlockingCloud::new(&fixture.cloud, &deadline);
+    let objects = objects
+        .into_iter()
+        .map(|relative| {
+            let bytes = std::fs::read(directory.join(&relative)).unwrap();
+            let object_key = format!("metadata/generations/{publication_id}/{relative}");
+            io.put_with_headers(&object_key, bytes.clone(), Vec::new())
+                .unwrap();
+            crate::lease::CloudMetadataObject {
+                file_name: relative,
+                object_key,
+                len: bytes.len() as u64,
+                crc32c: crc32c::crc32c(&bytes),
+            }
+        })
+        .collect();
+    CloudMetadataGeneration {
+        id: SharedGenerationId::FIRST,
+        manifest_horizon: 0,
+        objects,
+    }
+}
+
+fn put_metadata_object(fixture: &Fixture, key: &str, bytes: &[u8]) {
+    BlockingCloud::new(
+        &fixture.cloud,
+        &OperationDeadline::from_budget(Duration::from_secs(5)),
+    )
+    .put_with_headers(key, bytes.to_vec(), Vec::new())
+    .unwrap();
+}
+
+fn object_is_present(fixture: &Fixture, key: &str) -> bool {
+    BlockingCloud::new(
+        &fixture.cloud,
+        &OperationDeadline::from_budget(Duration::from_secs(5)),
+    )
+    .get_optional(key)
+    .unwrap()
+    .is_some()
+}
+
+fn publish_format_10_head(fixture: &Fixture, generation: &CloudMetadataGeneration) {
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    fixture
+        .store
+        .publish_committed_metadata("writer", 1, None, generation.clone(), deadline.remaining())
+        .unwrap();
+}
+
 #[test]
 fn should_fence_predecessor_retention_until_successor_epoch_takes_over() {
     // Arrange: the predecessor publishes an old generation and later history.
@@ -424,4 +497,111 @@ fn should_continue_bounded_pages_when_one_old_ordinal_has_many_orphan_attempts()
     assert_eq!(remaining.len(), 4);
     assert_eq!(state.totals.deleted, 31);
     read_committed_metadata_bodies_within(&fixture.cloud, &head, &deadline).unwrap();
+}
+
+#[test]
+fn should_reclaim_only_unselected_format_10_paths_with_bounded_pages() {
+    // Arrange
+    let fixture = Fixture::new();
+    let selected = format_10_generation(&fixture);
+    publish_format_10_head(&fixture, &selected);
+    let selected_keys = selected
+        .objects
+        .iter()
+        .map(|object| object.object_key.clone())
+        .collect::<Vec<_>>();
+    let orphan_id = uuid::Uuid::new_v4();
+    let orphan_head = format!("metadata/generations/{orphan_id}/metadata/HEAD");
+    let orphan_base =
+        format!("metadata/generations/{orphan_id}/metadata/generations/stale-local/manifest/base");
+    let orphan_marker = format!("metadata/generations/{orphan_id}/FORMAT");
+    put_metadata_object(&fixture, &orphan_head, b"unselected head");
+    put_metadata_object(&fixture, &orphan_base, b"unselected base");
+    put_metadata_object(&fixture, &orphan_marker, b"midge-format-version=10\n");
+
+    let legacy_id = uuid::Uuid::new_v4();
+    let legacy_marker = format!("metadata/generations/{legacy_id}/FORMAT");
+    let legacy_snapshot = format!("metadata/generations/{legacy_id}/manifest.snapshot.json");
+    put_metadata_object(&fixture, &legacy_marker, b"midge-format-version=9\n");
+    put_metadata_object(&fixture, &legacy_snapshot, b"legacy v9 snapshot");
+    let migration_id = uuid::Uuid::new_v4();
+    let migration_candidate = format!("metadata/migrations/{migration_id}/candidate.json");
+    let migration_source = format!("metadata/migrations/{migration_id}/source.json");
+    put_metadata_object(
+        &fixture,
+        &migration_candidate,
+        b"pending candidate descriptor",
+    );
+    put_metadata_object(
+        &fixture,
+        &migration_source,
+        b"pre-upgrade source descriptor",
+    );
+
+    let mut state = MetadataRetentionState {
+        interval: Duration::ZERO,
+        ..Default::default()
+    };
+
+    // Act: listing and delete admission are bounded independently per pass.
+    for _ in 0..4 {
+        let pages = state.totals.lists;
+        let probes = state.totals.probes;
+        collect_after_commit(
+            &fixture.context(&OperationDeadline::from_budget(Duration::from_secs(5))),
+            &selected,
+            &mut state,
+        );
+        assert!(state.totals.lists - pages <= LIST_BUDGET as u64);
+        assert!(state.totals.probes - probes <= CANDIDATE_BUDGET as u64);
+    }
+
+    // Assert: only canonical v10 body objects outside the exact selected set
+    // were removed; legacy sources and migration descriptors stay intact.
+    assert!(selected_keys
+        .iter()
+        .all(|key| object_is_present(&fixture, key)));
+    assert!(!object_is_present(&fixture, &orphan_head));
+    assert!(!object_is_present(&fixture, &orphan_base));
+    assert!(!object_is_present(&fixture, &orphan_marker));
+    assert!(object_is_present(&fixture, &legacy_marker));
+    assert!(object_is_present(&fixture, &legacy_snapshot));
+    assert!(object_is_present(&fixture, &migration_candidate));
+    assert!(object_is_present(&fixture, &migration_source));
+}
+
+#[test]
+fn should_retain_format_10_candidate_when_pointer_changes_before_delete() {
+    // Arrange
+    let fixture = Fixture::new();
+    let selected = format_10_generation(&fixture);
+    publish_format_10_head(&fixture, &selected);
+    let orphan_id = uuid::Uuid::new_v4();
+    let orphan = format!("metadata/generations/{orphan_id}/metadata/HEAD");
+    put_metadata_object(&fixture, &orphan, b"unselected head");
+    let mut successor = selected.clone();
+    successor.id = crate::lease::SharedGenerationId::new(2).unwrap();
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+    fixture
+        .store
+        .publish_committed_metadata(
+            "writer",
+            1,
+            Some(&selected),
+            successor,
+            deadline.remaining(),
+        )
+        .unwrap();
+
+    // Act
+    let result = reclaim_format_10_candidate(
+        &fixture.context(&deadline),
+        &selected,
+        &orphan,
+        Format10CandidateKind::Head,
+    );
+
+    // Assert
+    assert!(matches!(result, Err(MidgeError::Fenced(_))));
+    assert!(object_is_present(&fixture, &orphan));
 }
