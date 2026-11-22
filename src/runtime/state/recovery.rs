@@ -1362,8 +1362,11 @@ impl RuntimeState {
         // New intents will be written during normal operation
         self.check_startup_scope("intent log clear")?;
         if !self.is_memory_mode() {
-            if let Err(error) = crate::runtime::IntentPersistence::save_with_fs_typed(&self.fs, &[])
-            {
+            if let Err(error) = crate::runtime::IntentPersistence::save_for_selected_format(
+                &self.fs,
+                &[],
+                self.manifest_store.uses_format_10(),
+            ) {
                 if matches!(error, MidgeError::Timeout(_)) {
                     return Err(error);
                 }

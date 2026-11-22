@@ -75,6 +75,10 @@ impl std::fmt::Debug for ManifestStore {
 }
 
 impl ManifestStore {
+    pub(crate) fn uses_format_10(&self) -> bool {
+        self.format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1
+    }
+
     /// Cheap, already checkpointed flushes can retain the original forced
     /// path. Append still checks file lengths under the writer lock and the
     /// following snapshot reconciles any intervening edits. Unknown, stale

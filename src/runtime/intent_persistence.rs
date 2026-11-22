@@ -172,8 +172,17 @@ impl IntentPersistence {
         fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
         intents: &[IntentLogEntry],
     ) -> MidgeResult<()> {
+        let format_10 = crate::metadata::format::is_format_10(fs.as_ref())?;
+        Self::save_for_selected_format(fs, intents, format_10)
+    }
+
+    pub(crate) fn save_for_selected_format(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        intents: &[IntentLogEntry],
+        format_10: bool,
+    ) -> MidgeResult<()> {
         Self::validate_persisted_sst_names(intents).map_err(MidgeError::RecoveryFailed)?;
-        if crate::metadata::format::is_format_10(fs.as_ref())? {
+        if format_10 {
             return crate::metadata::journal::with_manifest_writer_lock(fs, || {
                 crate::failpoints::fail_point!("midge::intent::before_save");
                 crate::failpoints::fail_point!("midge::intent::inject_no_space_on_save", |_| Err(
