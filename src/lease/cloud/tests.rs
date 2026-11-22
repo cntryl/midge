@@ -2498,6 +2498,62 @@ fn acquired_v4_store_with_v9_source() -> (
 }
 
 #[test]
+fn should_refuse_format_10_pointer_when_the_compatibility_gate_is_absent() {
+    // Arrange
+    let (_cloud, lease, _guard, source) = acquired_v4_store_with_v9_source();
+    let store = lease.get_leader_store().expect("provider leader store");
+    let timeout = Duration::from_secs(2);
+
+    // Act
+    let result = store.publish_committed_metadata(
+        &lease.holder_id(),
+        lease.epoch(),
+        Some(&source),
+        cloud_format_10_candidate(),
+        timeout,
+    );
+
+    // Assert
+    assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+    assert_eq!(
+        store.read_committed_metadata(timeout).unwrap(),
+        CloudMetadataHead::Committed(source)
+    );
+}
+
+#[test]
+fn should_refuse_legacy_pointer_when_the_format_10_gate_is_active() {
+    // Arrange
+    let (_cloud, lease, _guard, source) = acquired_v4_store_with_v9_source();
+    let store = lease.get_leader_store().expect("provider leader store");
+    let candidate = cloud_format_10_candidate();
+    let pending = pending_format_migration(&source, &candidate);
+    let timeout = Duration::from_secs(2);
+    store
+        .install_format_10_pending(&lease.holder_id(), lease.epoch(), pending.clone(), timeout)
+        .expect("install pending FORMAT 10 gate");
+    publish_exact_candidate_and_activate(&lease, &store, &source, &candidate, &pending);
+    let mut legacy = test_metadata_generation(candidate.manifest_horizon);
+    legacy.id = candidate.id.checked_next().unwrap();
+
+    // Act
+    let result = store.publish_committed_metadata(
+        &lease.holder_id(),
+        lease.epoch(),
+        Some(&candidate),
+        legacy,
+        timeout,
+    );
+
+    // Assert
+    assert!(matches!(result, Err(LeaseError::RenewalFailed(_))));
+    assert_eq!(
+        store.read_committed_metadata(timeout).unwrap(),
+        CloudMetadataHead::Committed(candidate)
+    );
+}
+
+#[test]
 fn should_enforce_exact_candidate_cutover_after_v5_lease_takeover() {
     // Arrange
     let (cloud, lease, _guard, source) = acquired_v4_store_with_v9_source();
