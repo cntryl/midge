@@ -1993,6 +1993,34 @@ fn should_delay_takeover_until_clock_skew_tolerance_elapses() {
 }
 
 #[test]
+fn should_preserve_lease_when_skew_exceeds_remaining_wall_clock_range() {
+    // Arrange
+    let expiry = chrono::Utc::now();
+    let tolerance = chrono::DateTime::<chrono::Utc>::MAX_UTC
+        .signed_duration_since(expiry)
+        .to_std()
+        .unwrap()
+        + Duration::from_secs(1);
+    let document = LeaseDocument {
+        version: LeaseDocumentVersion::V4,
+        epoch: Some(7),
+        holder_id: "skewed-holder".into(),
+        owner_token: Some("token".into()),
+        acquired_at: (expiry - chrono::Duration::seconds(30)).to_rfc3339(),
+        expires_at: expiry.to_rfc3339(),
+        committed_metadata: None,
+    };
+
+    // Act
+    let expired = document
+        .is_expired_with_tolerance(tolerance, expiry)
+        .unwrap();
+
+    // Assert
+    assert!(!expired);
+}
+
+#[test]
 fn should_detect_active_lease() {
     // Arrange
     let future = chrono::Utc::now() + chrono::Duration::seconds(60);
