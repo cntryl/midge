@@ -480,7 +480,7 @@ fn should_resolve_successful_unknown_pointer_cas_in_small_pool_without_second_bo
 }
 
 #[test]
-fn should_capture_and_select_format10_cut_proof_with_its_exact_closure() -> MidgeResult<()> {
+fn should_select_format10_cut_proof_with_its_exact_closure() -> MidgeResult<()> {
     // Arrange
     let fixture = Fixture::new(CloudStorage::with_mock());
     let manifest =

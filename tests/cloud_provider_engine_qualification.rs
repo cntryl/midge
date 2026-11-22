@@ -30,7 +30,7 @@ mod startup_deadline;
 mod authority_publication;
 
 #[test]
-fn should_recover_format_10_after_provider_upgrade_and_cache_loss() {
+fn should_recover_upgraded_format_10_from_a_fresh_provider_cache() {
     // Arrange
     let label = "sqrzl-format-10-upgrade";
     require_sqrzl(label);
