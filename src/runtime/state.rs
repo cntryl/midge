@@ -659,7 +659,7 @@ impl RuntimeState {
                 write_stalled: self.has_any_hard_write_stall(),
                 persistence_anomaly_detected: self.persistence_anomaly_detected(),
                 pending_intents: self.intent_log.len(),
-                orphan_ssts: residue.orphan_ssts.len(),
+                orphan_ssts: residue.unaccounted_sst_count(&self.manifest),
             },
         )
     }

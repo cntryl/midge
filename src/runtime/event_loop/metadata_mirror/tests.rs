@@ -1020,3 +1020,63 @@ fn should_publish_committed_create_when_shutdown_joins_publication_owner() -> Mi
         .is_some());
     Ok(())
 }
+
+#[test]
+fn should_keep_healthy_when_compaction_deadline_expires_after_name_reservation() -> MidgeResult<()>
+{
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let _scenario = fail::FailScenario::setup();
+    // Arrange: reserve a real output name. Another owner holds the gate
+    // across mirror completion so the accepted plan cannot start compute.
+    let mut event_loop =
+        crate::runtime::event_loop::tests::create_test_cloud_event_loop_with_reserved_names(
+            StorageBudgetPolicy::default(),
+            Some(100),
+        )?;
+    let source = seed_compaction_name_source(&mut event_loop)?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let request_id = 92_015;
+    let waiter = event_loop
+        .routing
+        .router
+        .register(request_id, "reserved compaction deadline");
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(2));
+    event_loop
+        .state
+        .pending_compaction_waits
+        .insert(request_id, deadline);
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    let mut plan = crate::compaction::CompactionPlan::new(0, 0, 1);
+    plan.input_files.push(source.clone());
+    plan.source_files.push(source);
+    event_loop.launch_compaction(plan)?;
+    held.await_entry();
+    let owner = crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
+    assert!(event_loop
+        .publication
+        .publication_gate
+        .try_acquire(owner.clone()));
+    held.release.try_send(()).unwrap();
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+    assert!(event_loop.state.sst_names.reserved_through[&0] > 100);
+    std::thread::sleep(deadline.remaining());
+
+    // Act
+    event_loop.publication.publication_gate.release(&owner);
+    event_loop.resume_reserved_compaction_if_ready();
+
+    // Assert
+    assert!(matches!(
+        waiter.try_recv(),
+        Ok(RuntimeResponse::Error {
+            error: MidgeError::Timeout(_),
+            ..
+        })
+    ));
+    assert_eq!(event_loop.actors.compaction_actor.active_count(), 0);
+    assert_eq!(
+        event_loop.state.health(),
+        crate::config::EngineHealth::Healthy
+    );
+    Ok(())
+}

@@ -334,7 +334,7 @@ fn verify_storage_root(
                     write_stalled: false,
                     persistence_anomaly_detected: false,
                     pending_intents: intents.len(),
-                    orphan_ssts: residue.orphan_ssts.len(),
+                    orphan_ssts: residue.unaccounted_sst_count(&manifest),
                 },
             )
         }

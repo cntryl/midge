@@ -210,13 +210,22 @@ impl EventLoop {
         deadline: Option<OperationDeadline>,
         result: MidgeResult<()>,
     ) {
-        if result.is_ok() && !self.can_resume_reserved_compaction(&plan) {
-            self.actors
-                .cloud_coordinator
-                .metadata_mirror
-                .pending_compactions
-                .push_back((plan, deadline));
-            return;
+        if result.is_ok() {
+            // The name reservation is durable. Expiry before compute can
+            // start only ends the caller's work; it leaves no storage effect
+            // to reconcile. Publication failures still take the error path.
+            if let Err(error) = CompactionCoordinator::check_manual_deadline(deadline) {
+                CompactionCoordinator::fail_pending_compaction_waits(self, &error);
+                return;
+            }
+            if !self.can_resume_reserved_compaction(&plan) {
+                self.actors
+                    .cloud_coordinator
+                    .metadata_mirror
+                    .pending_compactions
+                    .push_back((plan, deadline));
+                return;
+            }
         }
         let result = result.and_then(|()| {
             self.authority.compaction_fence.admit_compaction()?;
