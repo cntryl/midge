@@ -1862,6 +1862,54 @@ mod compatibility_fixtures {
     }
 
     #[test]
+    fn should_preserve_published_format_9_state_when_upgrading_local_metadata() {
+        // Arrange
+        let temp = copy_fixture_dir("v0_5_3_published_local");
+        let names = [
+            "manifest.snapshot.json",
+            "manifest.journal",
+            "intent_log.json",
+            "wal/LEDGER",
+            "wal/00000000000000000002.wal",
+        ];
+        let source =
+            names.map(|name| fs::read(temp.path().join(name)).expect("read legacy source"));
+        let opts = OpenOptions::local(temp.path())
+            .recovery_policy(RecoveryPolicy::Strict)
+            .build()
+            .expect("strict local upgrade options");
+
+        // Act
+        Engine::upgrade_format_9(opts.clone(), Duration::from_secs(10))
+            .expect("upgrade published FORMAT 9 metadata");
+
+        // Assert
+        assert_eq!(
+            fs::read(temp.path().join("FORMAT")).expect("read selected format"),
+            b"midge-format-version=10\n"
+        );
+        for (name, original) in names.into_iter().zip(source) {
+            assert_eq!(
+                fs::read(temp.path().join(name)).expect("read preserved legacy bytes"),
+                original,
+                "upgrade mutated {name}"
+            );
+        }
+        let mut engine = Engine::open(opts.clone()).expect("open upgraded published fixture");
+        assert_published_v0_5_3_fixture_state(&engine);
+        write_published_fixture_upgrade_values(&engine, false);
+        engine
+            .shutdown(Duration::from_secs(10))
+            .expect("shutdown after FORMAT 10 writes");
+        let mut reopened = Engine::open(opts).expect("reopen upgraded fixture");
+        assert_published_v0_5_3_fixture_state(&reopened);
+        assert_published_fixture_upgrade_values(&reopened);
+        reopened
+            .shutdown(Duration::from_secs(10))
+            .expect("shutdown reopened upgrade fixture");
+    }
+
+    #[test]
     fn should_reject_populated_release_v3_fixture_given_unsupported_format_when_reopening() {
         // Arrange: format 3 predates the WAL segment ledger (#842).
         let temp = copy_fixture_dir("v3_populated_v4_sst_db");
