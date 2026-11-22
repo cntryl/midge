@@ -1,0 +1,31 @@
+{
+  "package": {
+    "name": "cntryl-midge",
+    "version": "0.5.3",
+    "registry": "crates.io",
+    "crate_sha256": "32be5a029183a4f3fcb76dc47289d3abb416b750383980c9cae2ad0025b6ffcf"
+  },
+  "database_format": 9,
+  "backend": "local",
+  "generation": {
+    "api": "Engine::open(OpenOptions::local), Transaction::commit(WriteOptions::sync), Engine::flush_cf",
+    "families": ["default", "archive"],
+    "expected": {
+      "default.fixture/current": "v2-current",
+      "default.fixture/deleted": null,
+      "default.fixture/wal-only": "published-unflushed",
+      "archive.archive/alpha": "archived-value"
+    },
+    "history": "Both families were flushed after the value and tombstone writes. The process exited after the WAL-only commit was acknowledged, before another flush or engine shutdown."
+  },
+  "required_artifacts": [
+    "FORMAT",
+    "intent_log.json",
+    "manifest.journal",
+    "manifest.snapshot.json",
+    "sst/000000_00_00000000000000000001.sst",
+    "sst/000001_00_00000000000000000001.sst",
+    "wal/00000000000000000002.wal",
+    "wal/LEDGER"
+  ]
+}

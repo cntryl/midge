@@ -1,0 +1,6 @@
+lease_version: 4
+fencing_epoch: 1
+holder: 79519@Machine.local
+owner: c1ff5808-2b8d-4374-aa5f-ec4c09d2dec7
+acquired: 2026-11-22T11:20:39.734463+00:00
+expires: 2026-11-22T11:21:09.734463+00:00

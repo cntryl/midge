@@ -1671,6 +1671,196 @@ mod compatibility_fixtures {
         }
     }
 
+    fn open_published_v0_5_3_fixture(path: &Path, cloud: bool) -> Engine {
+        let options = if cloud {
+            OpenOptions::cloud_simulated(path, "midge-fixtures", "published-v0.5.3")
+        } else {
+            OpenOptions::local(path)
+        };
+        Engine::open(
+            options
+                .recovery_policy(RecoveryPolicy::Strict)
+                .build()
+                .expect("build strict published fixture options"),
+        )
+        .expect("open published v0.5.3 fixture")
+    }
+
+    fn assert_published_v0_5_3_fixture_state(engine: &Engine) {
+        let default = engine
+            .get_column_family("default")
+            .expect("published default family");
+        let read = engine
+            .begin_tx(default.id(), TransactionMode::ReadOnly)
+            .expect("begin published default read");
+        assert_eq!(
+            read.get(b"fixture/current")
+                .expect("read current fixture value")
+                .as_deref(),
+            Some(b"v2-current".as_slice())
+        );
+        assert_eq!(
+            read.get(b"fixture/deleted")
+                .expect("read tombstoned fixture key"),
+            None
+        );
+        assert_eq!(
+            read.get(b"fixture/wal-only")
+                .expect("read acknowledged legacy WAL value")
+                .as_deref(),
+            Some(b"published-unflushed".as_slice())
+        );
+        drop(read);
+
+        let archive = engine
+            .get_column_family("archive")
+            .expect("published archive family");
+        let read = engine
+            .begin_tx(archive.id(), TransactionMode::ReadOnly)
+            .expect("begin published archive read");
+        assert_eq!(
+            read.get(b"archive/alpha")
+                .expect("read archived fixture value")
+                .as_deref(),
+            Some(b"archived-value".as_slice())
+        );
+    }
+
+    fn write_published_fixture_upgrade_values(engine: &Engine, cloud: bool) {
+        let durability = if cloud {
+            cntryl_midge::WriteOptions::cloud_strict()
+        } else {
+            cntryl_midge::WriteOptions::sync()
+        };
+        for (family, key, value) in [
+            (
+                "default",
+                b"fixture/after-upgrade".as_slice(),
+                b"upgraded-default".as_slice(),
+            ),
+            (
+                "archive",
+                b"archive/after-upgrade".as_slice(),
+                b"upgraded-archive".as_slice(),
+            ),
+        ] {
+            let cf = engine
+                .get_column_family(family)
+                .expect("published fixture family");
+            let mut tx = engine
+                .begin_tx(cf.id(), TransactionMode::ReadWrite)
+                .expect("begin post-upgrade write");
+            tx.put(key.to_vec(), value.to_vec(), None)
+                .expect("stage post-upgrade value");
+            tx.commit(durability).expect("commit post-upgrade value");
+            engine.flush_cf(&cf).expect("flush post-upgrade value");
+        }
+    }
+
+    fn assert_published_fixture_artifacts(path: &Path, cloud: bool) {
+        assert_eq!(
+            fs::read_to_string(path.join("FORMAT")).expect("read fixture format"),
+            "midge-format-version=9\n"
+        );
+        assert!(
+            fs::metadata(path.join("intent_log.json"))
+                .expect("read fixture intent journal")
+                .len()
+                > 0
+        );
+        assert!(path.join("wal/LEDGER").is_file());
+        if cloud {
+            assert!(path.join("wal/00000000000000000006.wal").is_file());
+            for selected in [
+                "cloud_store/metadata/authority-initialized.v1",
+                "cloud_store/metadata/committed-pointer.v1",
+                "cloud_store/metadata/ddl.registry.json",
+                "cloud_store/midge_primary_lease.json",
+                "cloud_store/wal/publication-catalog.v1.json",
+                "cloud_store/wal/publication-catalog.v1.mirror.json",
+                "cloud_store/wal/epochs/00000000000000000001/00000000000000000006.wal",
+                "cloud_store/sst/000000_00_00000000000000000001.sst",
+                "cloud_store/sst/000001_00_00000000000000000001.sst",
+            ] {
+                assert!(path.join(selected).is_file(), "missing {selected}");
+            }
+        } else {
+            assert!(path.join("wal/00000000000000000002.wal").is_file());
+            assert!(path
+                .join("sst/000000_00_00000000000000000001.sst")
+                .is_file());
+            assert!(path
+                .join("sst/000001_00_00000000000000000001.sst")
+                .is_file());
+            assert!(
+                fs::metadata(path.join("manifest.journal"))
+                    .expect("read fixture manifest journal")
+                    .len()
+                    > 0
+            );
+        }
+    }
+
+    fn assert_published_fixture_upgrade_values(engine: &Engine) {
+        for (family, key, value) in [
+            (
+                "default",
+                b"fixture/after-upgrade".as_slice(),
+                b"upgraded-default".as_slice(),
+            ),
+            (
+                "archive",
+                b"archive/after-upgrade".as_slice(),
+                b"upgraded-archive".as_slice(),
+            ),
+        ] {
+            let cf = engine
+                .get_column_family(family)
+                .expect("post-upgrade fixture family");
+            let read = engine
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                .expect("begin post-upgrade fixture read");
+            assert_eq!(
+                read.get(key)
+                    .expect("read post-upgrade fixture value")
+                    .as_deref(),
+                Some(value)
+            );
+        }
+    }
+
+    #[test]
+    fn should_reopen_published_v0_5_3_fixtures_given_strict_recovery_and_new_writes() {
+        for (fixture, cloud) in [
+            ("v0_5_3_published_local", false),
+            ("v0_5_3_published_cloud", true),
+        ] {
+            // Arrange
+            let temp = copy_fixture_dir(fixture);
+            assert_published_fixture_artifacts(temp.path(), cloud);
+
+            // Act: open the published artifacts with current Strict startup.
+            let mut engine = open_published_v0_5_3_fixture(temp.path(), cloud);
+
+            // Assert: multiple families, values, and the stored tombstone survive.
+            assert_published_v0_5_3_fixture_state(&engine);
+            write_published_fixture_upgrade_values(&engine, cloud);
+            engine
+                .shutdown(Duration::from_secs(10))
+                .expect("shutdown after upgrade writes");
+
+            // Act: a second Strict open recovers and reads the new flushed state.
+            let mut reopened = open_published_v0_5_3_fixture(temp.path(), cloud);
+
+            // Assert
+            assert_published_v0_5_3_fixture_state(&reopened);
+            assert_published_fixture_upgrade_values(&reopened);
+            reopened
+                .shutdown(Duration::from_secs(10))
+                .expect("shutdown after second fixture reopen");
+        }
+    }
+
     #[test]
     fn should_reject_populated_release_v3_fixture_given_unsupported_format_when_reopening() {
         // Arrange: format 3 predates the WAL segment ledger (#842).

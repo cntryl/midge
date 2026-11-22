@@ -1,0 +1,1 @@
+{"registry_version":2,"ddl_epoch":1,"writer_epoch":1,"column_families":[{"id":1,"name":"archive","created_at":1795346440240,"reclaimed":false}],"operations":[{"op_id":"2981b69b-245b-47b8-9c4f-e557d9f1375f","edit":{"CreateColumnFamily":{"id":1,"name":"archive","created_at":1795346440240}}}]}
