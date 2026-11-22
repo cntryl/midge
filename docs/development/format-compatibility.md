@@ -8,8 +8,10 @@ The FORMAT 8 baseline is the normative profile in
 [`cntryl/lsm-spec`](https://github.com/cntryl/lsm-spec) at commit
 `111bccdd5fa6c9ea2d13d1131b17807016c770c` (`1.0.0-dev`). Keep this reference
 aligned with the commit recorded in Pants's Midge test-parity inventory.
-Release 0.5.0 extends that baseline with FORMAT 9 below. Shared specification
-parity for that extension is not claimed. Release qualification follows the
+Release 0.5.0 extends that baseline with FORMAT 9. Release 0.6.0 adds the
+FORMAT 10 metadata authority described below and in the
+[durability boundary design](metadata-durability-boundary-1093.md). Shared
+specification parity for these extensions is not claimed. Release qualification follows the
 [release checklist](../operations/release-checklist.md).
 
 ## Covered Formats
@@ -23,9 +25,10 @@ The compatibility policy applies to:
 - cloud WAL publication catalog and epoch-scoped object-key layout
 - cloud lease metadata authority and immutable control-metadata generations
 
-## Current Local Format
+## Current Database Formats
 
-Database `FORMAT` version 9 is the 0.5.0 local format. Version 5 named the WAL's
+Database `FORMAT` version 9 is the 0.5.x format and remains the default for
+new databases. Version 5 named the WAL's
 history with a segment ledger, `wal/LEDGER` (#842): a checksummed journal that records
 which `wal/{id:020}.wal` files are history, their order, the next segment id and
 the retirement point. Segments carry their final name from creation; there is
@@ -106,15 +109,20 @@ first durably repairs any torn tail. At 1 MiB or 1,024 records the log
 atomically checkpoints its current intent set. Existing metadata filenames
 retain their historical `.json` suffix, but their contents are binary and there is no JSON fallback under FORMAT 9.
 
-Version 9 is an intentional pre-1.0 break with no in-place upgrade and no
-migration: current binaries reject database FORMAT versions 1 through 8 with
-`CompatibilityError`, and leave the marker untouched. Cloud databases are
-rejected the same way, because their hydrated metadata carries the marker,
-and a publication catalog of any other format version fails with
-`CompatibilityError` and neither catalog copy changes. FORMAT 9 requires SST
-V5; current binaries reject SST versions 1 through 4 and unknown future
-versions. There is no legacy decoder or best-effort fallback in the V5
-reader.
+FORMAT 9, introduced in 0.5.0, has no in-place migration from database FORMAT
+versions 1 through 8. Current binaries reject those versions with
+`CompatibilityError` and leave the marker untouched. Cloud databases with
+unsupported formats are rejected before catalog mutation. FORMAT 9 requires
+SST V5; current binaries reject SST versions 1 through 4 and unknown future
+versions. There is no legacy decoder or best-effort fallback in the V5 reader.
+
+FORMAT 10 (#1093), available in 0.6.0, adds an immutable metadata-generation
+authority selected by a durable `HEAD`. The migration is explicit through
+`Engine::upgrade_format_9`; strict FORMAT 9 recovery remains unchanged, and
+ambiguous or damaged legacy history is not migrated. FORMAT 10 keeps SST V5
+and cloud WAL catalog v3. New databases remain FORMAT 9. A v0.5.3 binary
+rejects FORMAT 10; cloud upgrades also retain a lease compatibility gate that
+prevents older writers from mutating startup metadata.
 
 SST V5 has the following integrity and compatibility boundaries:
 
@@ -275,6 +283,6 @@ pre-ledger WAL.
 
 Repository tests retain and reject the FORMAT 9/SST V4 fixture under strict
 and salvage recovery. They also reject the populated FORMAT 8 and FORMAT 3/SST V4 fixtures, a prior FORMAT 2
-fixture and a synthetic future FORMAT 10 fixture with `CompatibilityError`,
+fixture and a synthetic future FORMAT 11 marker with `CompatibilityError`,
 without rewriting their markers. Format changes must update these fixtures and
 their CI assertions together.

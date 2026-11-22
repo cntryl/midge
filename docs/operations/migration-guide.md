@@ -1,13 +1,43 @@
 # Migration guide
 
-Midge is a 0.x crate. Release `0.5.0` writes database FORMAT 9,
-requires SST V5, and uses cloud WAL publication catalog v3. Older database
-formats are rejected without migration. Treat upgrades as application
-migrations: read the release notes, inspect
+Midge is a 0.x crate. Releases through `0.5.3` write database FORMAT 9,
+require SST V5, and use cloud WAL publication catalog v3. Release `0.6.0`
+continues to open FORMAT 9 and adds an explicit migration to FORMAT 10 metadata;
+new databases still start at FORMAT 9. Database formats 1 through 8 are
+rejected without migration. Treat upgrades as application migrations: read the
+release notes, inspect
 [format compatibility](../development/format-compatibility.md), run
 compatibility and recovery tests, and keep a verified application-level
 backup before changing binaries. Use the applicable release transition below
 before upgrading an existing database.
+
+## 0.5.3 to 0.6.0
+
+An existing FORMAT 9 database opens under 0.6.0 without migration. The default
+for new persistent databases also remains FORMAT 9. To opt in to FORMAT 10,
+stop every process using the database, complete `engine.shutdown(timeout)` on
+any open engine, and verify a restorable application-level backup. Then run the
+explicit upgrade with the same storage options used to open the database:
+
+```rust
+use std::time::Duration;
+use cntryl_midge::{Engine, OpenOptions};
+
+let opts = OpenOptions::local("./db").build()?;
+Engine::upgrade_format_9(&opts, Duration::from_secs(30))?;
+let engine = Engine::open(opts)?;
+```
+
+The upgrade strictly validates the FORMAT 9 metadata before selecting FORMAT
+10. Ambiguous or damaged history is rejected without weakening FORMAT 9
+recovery. Cloud upgrades install a persistent compatibility gate before
+selecting FORMAT 10; v0.5.3 is rejected before it can mutate startup metadata.
+An interrupted cloud upgrade can resume when a 0.6.0 engine opens the database.
+
+Treat this as a one-way format transition for older binaries. After FORMAT 10
+is selected, v0.5.3 cannot open the database. To return to v0.5.3, restore a
+verified backup made before the upgrade or export and import the logical data.
+Writes made after that backup are not present in the restored database.
 
 ## 0.5.2 to 0.5.3
 

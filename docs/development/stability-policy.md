@@ -2,7 +2,10 @@
 
 ## Current Status
 
-Midge 0.5.0 is released and the 0.5.1 patch is in preparation. It is usable for evaluation and targeted deployments, but it is not yet making a blanket 1.0-style production or compatibility promise.
+Midge 0.5.3 is the latest published crate. The 0.6.0 minor release adds an
+explicit, opt-in migration from FORMAT 9 to FORMAT 10. It is usable for
+evaluation and targeted deployments, but it is not yet making a blanket
+1.0-style production or compatibility promise.
 
 ## What Pre-1.0 Means
 
@@ -11,12 +14,13 @@ Midge 0.5.0 is released and the 0.5.1 patch is in preparation. It is usable for 
 - Public docs should describe guarantees only where there is matching implementation and test coverage.
 - The crate is pre-1.0; this policy describes the current 0.x compatibility boundary.
 
-The planned 0.6.0 SST work has an explicit narrower requirement: a crash-safe
-in-place upgrade from released 0.5.0 databases, with mixed V5/new SST readers
-and bounded conversion. That requirement supersedes exploratory no-migration
-assumptions for 0.6.0, but it is not implemented by the 0.5.0 release and
-does not make older binaries able to read future encodings. See
-[the 0.6.0 program](https://github.com/cntryl/midge/issues/922).
+FORMAT 10 changes metadata authority, not the SST layout: it keeps SST V5 and
+is selected only by calling `Engine::upgrade_format_9`. Existing FORMAT 9
+databases and new databases do not migrate automatically. Database formats 1
+through 8 remain unsupported, and v0.5.3 cannot open FORMAT 10. The explicit
+upgrade, compatibility gate, and rollback boundary are documented in the
+[migration guide](../operations/migration-guide.md) and
+[format compatibility policy](format-compatibility.md).
 
 ## What Is Expected To Stay Stable
 
