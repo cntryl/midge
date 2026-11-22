@@ -734,6 +734,24 @@ impl LocalMetadataAuthority {
         self.head_digest
     }
 
+    /// Names of the immutable objects selected by HEAD, plus HEAD itself.
+    pub(crate) fn selected_relative_paths(&self) -> Vec<String> {
+        let mut paths = vec![HEAD_PATH.to_owned()];
+        for selected in [&self.head.manifest, &self.head.intent] {
+            paths.push(format!(
+                "metadata/generations/{}/{}",
+                self.head.generation, selected.base.name
+            ));
+            paths.extend(selected.segments.iter().map(|object| {
+                format!(
+                    "metadata/generations/{}/{}",
+                    self.head.generation, object.name
+                )
+            }));
+        }
+        paths
+    }
+
     /// Return the selected base payload and each selected logical append.
     pub(crate) fn read_stream(
         &self,
@@ -1621,7 +1639,7 @@ mod tests {
     }
 
     #[test]
-    fn should_route_manifest_and_intent_writes_through_selected_head() {
+    fn should_route_metadata_writes_through_selected_head() {
         // Arrange
         let (directory, fs) = v10_database();
         let store = crate::metadata::store::ManifestStore::new_with_format(

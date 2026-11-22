@@ -119,12 +119,24 @@ impl Engine {
         }
         let database_format_version =
             crate::metadata::format::validate_format_marker(self.root.as_ref(), &source)?;
-        if database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION {
+        if database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
             return Err(MidgeError::NotSupported(
-                "FORMAT 10 backup capture requires selected-generation inventory support".into(),
+                "backup capture does not support this database format".into(),
             ));
         }
-        let pinned = pin_durable_files(&source, self.simulated_cloud_mode, parent)?;
+        if database_format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1
+            && self.simulated_cloud_mode
+        {
+            return Err(MidgeError::NotSupported(
+                "FORMAT 10 backup capture is not available for simulated cloud storage".into(),
+            ));
+        }
+        let pinned =
+            if database_format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
+                pin_format_10_files(&source, parent)?
+            } else {
+                pin_durable_files(&source, self.simulated_cloud_mode, parent)?
+            };
         if !self.is_primary_lease_healthy() {
             return Err(MidgeError::Fenced(
                 "primary lease became unhealthy during backup capture".to_string(),
@@ -200,9 +212,9 @@ impl Engine {
         }
         let artifact = fs::canonicalize(artifact.as_ref())?;
         let manifest = validate_backup(&artifact)?;
-        if manifest.database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION {
+        if manifest.database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
             return Err(MidgeError::NotSupported(
-                "FORMAT 10 backup restore requires selected-generation inventory support".into(),
+                "backup restore does not support this database format".into(),
             ));
         }
         let storage = options.storage().clone();
@@ -228,6 +240,13 @@ impl Engine {
                 "backup storage kind {:?} cannot restore to {:?}",
                 manifest.storage_kind, kind
             )));
+        }
+        if manifest.database_format_version == crate::metadata::format::CURRENT_FORMAT_VERSION + 1
+            && kind != BackupStorageKind::Local
+        {
+            return Err(MidgeError::NotSupported(
+                "FORMAT 10 backup restore is only available for local storage".into(),
+            ));
         }
         let target = paths::prepare_target(&artifact, &target)?;
         let parent = target.parent().ok_or_else(|| {
@@ -267,6 +286,67 @@ impl Engine {
         sync_directory(parent)?;
         Ok(manifest)
     }
+}
+
+fn pin_format_10_files(root: &Path, scratch_dir: &Path) -> MidgeResult<Vec<PinnedFile>> {
+    let fs_root = std::sync::Arc::new(
+        crate::io::RealFs::open_existing(root).map_err(crate::io::FsError::into_midge)?,
+    );
+    let authority = crate::metadata::local_authority::LocalMetadataAuthority::open(fs_root)?;
+    let mut relative_paths = vec![PathBuf::from("FORMAT")];
+    relative_paths.extend(
+        authority
+            .selected_relative_paths()
+            .into_iter()
+            .map(PathBuf::from),
+    );
+    relative_paths.sort();
+    relative_paths.dedup();
+    relative_paths
+        .into_iter()
+        .map(|relative| {
+            validate_relative_path(&relative)?;
+            let path = root.join(&relative);
+            if fs::symlink_metadata(&path)?.file_type().is_symlink() {
+                return Err(MidgeError::Corruption(format!(
+                    "backup refuses symlink in selected FORMAT 10 state: '{}'",
+                    path.display()
+                )));
+            }
+            let file = File::open(&path)?;
+            let metadata = file.metadata()?;
+            if !metadata.is_file() {
+                return Err(MidgeError::Corruption(format!(
+                    "backup object '{}' is not a regular file",
+                    path.display()
+                )));
+            }
+            // Each selected immutable object is bounded by the wire protocol.
+            if metadata.len() > 64 * 1024 * 1024 {
+                return Err(MidgeError::Corruption(
+                    "selected FORMAT 10 object exceeds backup size bound".into(),
+                ));
+            }
+            let mut pinned = file;
+            if relative == Path::new("FORMAT") {
+                // FORMAT is replaced in place during activation, so freeze its bytes.
+                let mut frozen = tempfile::tempfile_in(scratch_dir)?;
+                let copied = std::io::copy(&mut pinned, &mut frozen)?;
+                if copied != metadata.len() {
+                    return Err(MidgeError::Corruption(
+                        "FORMAT marker changed during backup capture".into(),
+                    ));
+                }
+                frozen.seek(SeekFrom::Start(0))?;
+                pinned = frozen;
+            }
+            Ok(PinnedFile {
+                relative,
+                size: metadata.len(),
+                file: pinned,
+            })
+        })
+        .collect()
 }
 
 fn pin_durable_files(
@@ -517,11 +597,11 @@ fn validate_backup(artifact: &Path) -> MidgeResult<BackupManifest> {
             manifest.backup_version
         )));
     }
-    if manifest.database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION {
+    if manifest.database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION + 1 {
         return Err(MidgeError::CompatibilityError(format!(
             "backup database format {} is newer than supported format {}",
             manifest.database_format_version,
-            crate::metadata::format::CURRENT_FORMAT_VERSION
+            crate::metadata::format::CURRENT_FORMAT_VERSION + 1
         )));
     }
     uuid::Uuid::parse_str(&manifest.backup_id).map_err(|_| {
@@ -746,6 +826,99 @@ mod tests {
         // Assert
         let segment = Path::new("wal").join(crate::wal::segment_file_name(1));
         assert!(pinned.iter().any(|file| file.relative == segment));
+    }
+
+    #[test]
+    fn should_restore_only_selected_format_10_history_after_source_advances() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        fs::create_dir(&source).expect("create source");
+        let fs_root: std::sync::Arc<dyn crate::io::Fs> =
+            std::sync::Arc::new(crate::io::RealFs::new(&source).expect("create source filesystem"));
+        let manifest = crate::metadata::codec::encode(
+            crate::metadata::codec::MANIFEST,
+            &crate::metadata::Manifest::default(),
+        )
+        .expect("encode empty manifest");
+        let intents = serde_json::to_vec(&Vec::<crate::runtime::IntentLogEntry>::new())
+            .expect("encode empty intents");
+        let mut authority = crate::metadata::local_authority::LocalMetadataAuthority::initialize(
+            std::sync::Arc::clone(&fs_root),
+            "backup-generation",
+            &manifest,
+            &intents,
+        )
+        .expect("initialize FORMAT 10 metadata");
+        fs::write(source.join("FORMAT"), b"midge-format-version=10\n")
+            .expect("write FORMAT marker");
+        let first = crate::metadata::ManifestEdit::CreateColumnFamily {
+            id: 2,
+            name: "captured".into(),
+            created_at: 1,
+        };
+        let first_payload = serde_json::to_vec(&first).expect("encode first edit");
+        authority
+            .append(
+                crate::metadata::local_authority::Stream::Manifest,
+                1,
+                1,
+                &first_payload,
+            )
+            .expect("append first selected edit");
+
+        // Act: pin the selected closure, then advance the live source.
+        let pinned = pin_format_10_files(&source, directory.path()).expect("pin selected closure");
+        let artifact = directory.path().join("artifact");
+        fs::create_dir(&artifact).expect("create artifact stage");
+        let captured = materialize_backup(
+            pinned,
+            &artifact,
+            uuid::Uuid::new_v4().to_string(),
+            chrono::Utc::now().to_rfc3339(),
+            1,
+            crate::metadata::format::CURRENT_FORMAT_VERSION + 1,
+            BackupStorageKind::Local,
+        )
+        .expect("materialize selected FORMAT 10 closure");
+        validate_backup(&artifact).expect("validate captured artifact");
+        let second = crate::metadata::ManifestEdit::CreateColumnFamily {
+            id: 3,
+            name: "later".into(),
+            created_at: 2,
+        };
+        let second_payload = serde_json::to_vec(&second).expect("encode second edit");
+        authority
+            .append(
+                crate::metadata::local_authority::Stream::Manifest,
+                2,
+                2,
+                &second_payload,
+            )
+            .expect("advance source after capture");
+        let restored = directory.path().join("restored");
+        fs::create_dir(&restored).expect("create restore stage");
+        copy_verified_objects(&artifact, &restored, &captured).expect("restore captured objects");
+        crate::engine::StorageVerifier::verify_path(&restored)
+            .expect("verify restored FORMAT 10 database");
+        let restored_fs: std::sync::Arc<dyn crate::io::Fs> = std::sync::Arc::new(
+            crate::io::RealFs::open_existing(&restored).expect("open restored filesystem"),
+        );
+        let recovered = crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
+            &restored_fs,
+            crate::config::RecoveryPolicy::Strict,
+        )
+        .expect("load restored selected manifest");
+
+        // Assert
+        assert!(recovered
+            .column_families
+            .iter()
+            .any(|family| family.name == "captured"));
+        assert!(!recovered
+            .column_families
+            .iter()
+            .any(|family| family.name == "later"));
     }
 
     #[test]
