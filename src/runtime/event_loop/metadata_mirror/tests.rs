@@ -9,6 +9,34 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[test]
+fn should_refuse_v10_maintenance_mirror_when_metadata_reload_is_required() -> MidgeResult<()> {
+    // Arrange
+    let mut event_loop = create_test_cloud_event_loop(StorageBudgetPolicy::default())?;
+    let format_10 = crate::metadata::format::CURRENT_FORMAT_VERSION + 1;
+    event_loop.state.manifest_store =
+        Arc::new(crate::metadata::store::ManifestStore::new_with_format(
+            Arc::clone(&event_loop.state.fs),
+            crate::metadata::accounting::Owner::new(),
+            crate::metadata::accounting::Medium::Persistent,
+            format_10,
+        ));
+    event_loop.state.fence_metadata_until_reloaded();
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
+
+    // Act
+    let result = event_loop.start_metadata_mirror(MirrorContinuation::Retention, deadline);
+
+    // Assert
+    assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+    assert!(!event_loop
+        .actors
+        .cloud_coordinator
+        .metadata_mirror
+        .is_running());
+    Ok(())
+}
+
 struct HeldMirror {
     release: crossbeam::channel::Sender<()>,
     entered: crossbeam::channel::Receiver<()>,

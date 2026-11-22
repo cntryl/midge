@@ -168,7 +168,7 @@ impl RuntimeState {
     }
 
     pub(super) fn persist_intent_entries(
-        &self,
+        &mut self,
         intents: &[crate::runtime::IntentLogEntry],
     ) -> MidgeResult<()> {
         self.ensure_metadata_current()?;
@@ -177,6 +177,9 @@ impl RuntimeState {
             if let Err(error) = crate::runtime::IntentPersistence::save_for_selected_format(
                 &self.fs, intents, format_10,
             ) {
+                if format_10 {
+                    self.fence_metadata_until_reloaded();
+                }
                 // The root carries the startup deadline: an expired budget is
                 // a timeout, not an internal failure of the save.
                 self.check_startup_scope("intent log save")?;

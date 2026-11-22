@@ -1379,6 +1379,10 @@ impl RuntimeState {
                 &[],
                 self.manifest_store.uses_format_10(),
             ) {
+                if self.manifest_store.uses_format_10() {
+                    self.fence_metadata_until_reloaded();
+                    return Err(error);
+                }
                 if matches!(error, MidgeError::Timeout(_)) {
                     return Err(error);
                 }
