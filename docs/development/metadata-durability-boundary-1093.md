@@ -108,11 +108,13 @@ is a separate copied artifact and does not hold live database objects after
 capture finishes.
 
 Unselected objects left by an interrupted append or migration count against
-the same retained-byte and object budgets. Under the writer lease, a bounded
-collector may remove only objects it proves are outside the selected closure and every
-active pin. If a bounded scan cannot prove the state or reclaim enough space,
-retain the objects and block new metadata publication with a resource error.
-Never fall back to unbounded listing or delete candidates on age alone.
+the same retained-byte and object budgets. The pending cloud migration pins
+both its source and candidate closures through takeover and finalization.
+Under the writer lease, a bounded collector may remove only objects it
+proves are outside the selected closure and every active pin. If a bounded
+scan cannot prove the state or reclaim enough space, retain the objects and
+block new metadata publication with a resource error. Never fall back to
+unbounded listing or delete candidates on age alone.
 
 ## Append and checkpoint lifecycle
 
@@ -122,8 +124,9 @@ this order:
 
 1. Read and validate the selected head. Validate the requested edit and
    reserve the bounded segment/head workspace.
-2. Write a new uniquely named immutable segment. Sync the segment and its
-   containing directory. Verify the bytes that were persisted.
+2. Write a new uniquely named immutable segment. Sync the segment and each
+   affected directory, including the parent of any newly created directory.
+   Verify the bytes that were persisted.
 3. Construct a head whose predecessor digest equals the head read in step 1,
    and whose selected closure includes the new segment.
 4. Stage `HEAD` with the existing write, file-sync, atomic-rename,
