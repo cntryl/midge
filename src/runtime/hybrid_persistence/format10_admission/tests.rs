@@ -203,15 +203,13 @@ fn should_return_only_one_new_reservation_for_a_repeated_publication_uuid() -> M
     let publication_id = Uuid::new_v4();
 
     // Act
-    let attempts = [0_u8, 1].map(|_| {
+    let attempts = [0_u32, 1].map(|checksum_delta| {
         let cloud = std::sync::Arc::clone(&cloud);
         std::thread::spawn(move || {
             let deadline = deadline();
-            Format10AdmissionStore::new(&cloud, &deadline).reserve(
-                publication_id,
-                4,
-                &plan(publication_id),
-            )
+            let mut planned = plan(publication_id);
+            planned[0].crc32c ^= checksum_delta;
+            Format10AdmissionStore::new(&cloud, &deadline).reserve(publication_id, 4, &planned)
         })
     });
     let results = attempts.map(|attempt| attempt.join().expect("reservation thread"));
@@ -221,7 +219,7 @@ fn should_return_only_one_new_reservation_for_a_repeated_publication_uuid() -> M
     assert_eq!(
         results
             .iter()
-            .filter(|result| matches!(result, Err(MidgeError::Busy(_))))
+            .filter(|result| matches!(result, Err(MidgeError::Busy(_) | MidgeError::Corruption(_))))
             .count(),
         1
     );

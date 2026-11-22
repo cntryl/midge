@@ -166,21 +166,9 @@ impl<'a> Format10AdmissionStore<'a> {
                         "FORMAT 10 admission receipt differs from the reserved body".into(),
                     ));
                 }
-                Ok(None) => {
-                    return match self.read_raw(&key)? {
-                        Some((actual, identity)) if actual == bytes => {
-                            decode_record(slot, &actual, identity)
-                        }
-                        Some(_) => Err(MidgeError::Corruption(
-                            "FORMAT 10 admission write has an ambiguous different readback".into(),
-                        )),
-                        None => Err(MidgeError::Corruption(
-                            "FORMAT 10 admission reservation was not proven by readback".into(),
-                        )),
-                    };
-                }
-                Err(error) if error.is_precondition_failed() => match self.read_raw(&key)? {
-                    Some((actual, _identity)) if actual == bytes => {
+                Ok(None) => return self.confirm_record(slot, &bytes),
+                Err(error) if error.is_precondition_failed() => match self.read_slot(slot)? {
+                    Some(record) if record.publication_id == publication_id => {
                         return Err(MidgeError::Busy(
                             "FORMAT 10 publication already has an admission record".into(),
                         ));
@@ -188,19 +176,8 @@ impl<'a> Format10AdmissionStore<'a> {
                     Some(_) => occupied += 1,
                     None => return Err(error.into_midge()),
                 },
-                Err(error) => {
-                    // This request could still land after this read. An
-                    // unrelated occupant is therefore not grounds to try a
-                    // different slot and risk a duplicate reservation.
-                    if let Some((actual, _identity)) = self.read_raw(&key)? {
-                        if actual == bytes {
-                            return Err(MidgeError::Busy(
-                                "FORMAT 10 publication already has an admission record".into(),
-                            ));
-                        }
-                    }
-                    return Err(error.into_midge());
-                }
+                // This create might still land. No other slot may be used.
+                Err(error) => return Err(error.into_midge()),
             }
         }
         if occupied == FORMAT10_ADMISSION_SLOT_COUNT {
@@ -393,7 +370,13 @@ impl<'a> Format10AdmissionStore<'a> {
                 "FORMAT 10 admission reservation changed before readback".into(),
             ));
         }
-        decode_record(slot, &actual, identity)
+        let reserved = decode_record(slot, &actual, identity)?;
+        if self.find_by_uuid(reserved.publication_id)?.as_ref() != Some(&reserved) {
+            return Err(MidgeError::Fenced(
+                "FORMAT 10 reservation changed during readback".into(),
+            ));
+        }
+        Ok(reserved)
     }
 
     fn read_raw(&self, key: &str) -> MidgeResult<Option<(Vec<u8>, StorageObjectMetadata)>> {
