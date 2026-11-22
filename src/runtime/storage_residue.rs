@@ -24,6 +24,16 @@ pub(crate) struct HealthInputs {
 }
 
 impl StorageResidueAssessment {
+    /// Count files with neither an active reference nor a durable retirement
+    /// record. Retired files remain in the residue inventory for cleanup and
+    /// operator diagnostics while GC waits for a snapshot or deletion proof.
+    pub(crate) fn unaccounted_sst_count(&self, manifest: &Manifest) -> usize {
+        self.orphan_ssts
+            .iter()
+            .filter(|name| !manifest.retired_ssts.contains_key(name.as_str()))
+            .count()
+    }
+
     /// Inventory the SST directory of `fs` against the manifest. `check` runs
     /// before each entry, so a startup deadline can stop a long listing. A
     /// directory that cannot be listed holds no known residue, except when

@@ -4891,6 +4891,56 @@ mod consistent_cut_backup {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
+    fn should_capture_backup_when_snapshot_pins_retired_compaction_input() {
+        // Arrange
+        let directory = tempfile::tempdir().expect("test directory");
+        let source = directory.path().join("source");
+        let artifact = directory.path().join("backup");
+        let target = directory.path().join("restored");
+        let engine = Engine::open(OpenOptions::local(&source).build().expect("options"))
+            .expect("open source");
+        let family = engine.get_column_family("default").expect("default family");
+        commit_value(&engine, family.id(), b"key", b"old");
+        engine.flush_cf(&family).expect("flush old value");
+        let before = engine.metrics().get_storage_layout().expect("first layout");
+        let pinned_file = &before.levels[0].files[0].name;
+        let snapshot = engine
+            .begin_tx(family.id(), TransactionMode::ReadOnly)
+            .expect("pin old value");
+        for value in [b"mid", b"new"] {
+            commit_value(&engine, family.id(), b"key", value);
+            engine.flush_cf(&family).expect("flush newer value");
+        }
+        engine.compact_all().expect("compact overlapping versions");
+        let after = engine
+            .metrics()
+            .get_storage_layout()
+            .expect("compacted layout");
+        assert!(after.obsolete_files.contains(pinned_file));
+        assert!(source.join("sst").join(pinned_file).is_file());
+
+        // Act
+        let backup = engine.backup_to(&artifact, std::time::Duration::from_secs(10));
+
+        // Assert
+        backup.expect("capture healthy cut while its predecessor remains pinned");
+        assert_eq!(after.health, cntryl_midge::EngineHealth::Healthy);
+        assert_eq!(
+            snapshot.get(b"key").unwrap().as_deref(),
+            Some(b"old".as_slice())
+        );
+        let options = OpenOptions::local(&target)
+            .build()
+            .expect("restore options");
+        Engine::restore_backup(&artifact, options.clone()).expect("restore current cut");
+        let restored = Engine::open(options).expect("reopen backup");
+        let tx = restored
+            .begin_tx(family.id(), TransactionMode::ReadOnly)
+            .expect("read backup");
+        assert_eq!(tx.get(b"key").unwrap().as_deref(), Some(b"new".as_slice()));
+    }
+
+    #[test]
     fn should_preserve_cross_family_frontier_given_concurrent_backup_capture() {
         // Arrange
         let directory = tempfile::tempdir().expect("test directory");
