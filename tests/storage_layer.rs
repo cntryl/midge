@@ -1829,6 +1829,21 @@ mod compatibility_fixtures {
         }
     }
 
+    fn assert_published_fixture_upgrade_values_absent(engine: &Engine) {
+        for (family, key) in [
+            ("default", b"fixture/after-upgrade".as_slice()),
+            ("archive", b"archive/after-upgrade".as_slice()),
+        ] {
+            let cf = engine
+                .get_column_family(family)
+                .expect("published fixture family");
+            let read = engine
+                .begin_tx(cf.id(), TransactionMode::ReadOnly)
+                .expect("begin restored fixture read");
+            assert_eq!(read.get(key).expect("read restored key"), None);
+        }
+    }
+
     #[test]
     fn should_reopen_published_v0_5_3_fixtures_given_strict_recovery_and_new_writes() {
         for (fixture, cloud) in [
@@ -1925,6 +1940,10 @@ mod compatibility_fixtures {
         let inventory = engine
             .backup_to(&artifact, timeout)
             .expect("backup upgraded source");
+        write_published_fixture_upgrade_values(&engine, false);
+        engine
+            .shutdown(timeout)
+            .expect("shut down source after post-backup v10 writes");
         let restore_opts = OpenOptions::local(restore).build().unwrap();
         Engine::restore_backup(&artifact, restore_opts.clone()).expect("restore FORMAT 10 backup");
         let mut restored = Engine::open(restore_opts).expect("open restored FORMAT 10 data");
@@ -1940,8 +1959,8 @@ mod compatibility_fixtures {
             .iter()
             .any(|object| object.path.starts_with("sst/")));
         assert_published_v0_5_3_fixture_state(&restored);
+        assert_published_fixture_upgrade_values_absent(&restored);
         restored.shutdown(timeout).expect("shut down restored data");
-        engine.shutdown(timeout).expect("shut down source");
     }
 
     #[test]

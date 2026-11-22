@@ -1632,6 +1632,18 @@ mod tests {
         Arc::new(RealFs::new(path).expect("real filesystem"))
     }
 
+    fn write_and_sync(path: &std::path::Path, bytes: &[u8]) {
+        use std::io::Write;
+
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .expect("open selected object for damage");
+        file.write_all(bytes).expect("write selected object damage");
+        file.sync_all().expect("sync selected object damage");
+    }
+
     #[test]
     fn should_fence_writer_when_replaced_head_cannot_be_resynced() {
         // Arrange
@@ -1777,7 +1789,7 @@ mod tests {
                 };
                 let mut damaged = original[..cut].to_vec();
                 damaged.resize(original.len(), 0);
-                std::fs::write(&selected_path, damaged).expect("write zero-extended damage");
+                write_and_sync(&selected_path, &damaged);
                 assert_eq!(
                     std::fs::metadata(&selected_path)
                         .expect("stat damaged object")
@@ -1796,6 +1808,60 @@ mod tests {
                 assert!(
                     matches!(loaded, Err(MidgeError::Corruption(_))),
                     "selected {region} damage at history position {selected_position} must fail closed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn should_reject_zero_extended_selected_intent_damage_at_every_wire_region() {
+        // Arrange
+        #[cfg(feature = "failpoints")]
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        for selected_position in [0, 2] {
+            for region in ["header", "body", "crc"] {
+                let (directory, fs) = v10_database();
+                for seqno in 1..=3 {
+                    let intents =
+                        vec![crate::runtime::IntentLogEntry::SeqnoAllocated { seqno, cf_id: 0 }];
+                    crate::runtime::IntentPersistence::save_with_fs_typed(&fs, &intents)
+                        .expect("append selected intent state");
+                }
+                let authority = LocalMetadataAuthority::open(Arc::clone(&fs))
+                    .expect("open selected intent history");
+                let selected = authority.head.intent.segments[selected_position].clone();
+                let selected_path = directory
+                    .path()
+                    .join(object_path(&authority.head.generation, &selected.name));
+                let original = std::fs::read(&selected_path).expect("read selected intent segment");
+                assert_eq!(u64::try_from(original.len()).unwrap(), selected.len);
+                let cut = match region {
+                    "header" => 12,
+                    "body" => 62 + (original.len() - 66) / 2,
+                    "crc" => original.len() - 2,
+                    _ => unreachable!("known wire region"),
+                };
+                let mut damaged = original[..cut].to_vec();
+                damaged.resize(original.len(), 0);
+                write_and_sync(&selected_path, &damaged);
+                assert_eq!(
+                    std::fs::metadata(&selected_path)
+                        .expect("stat damaged intent object")
+                        .len(),
+                    selected.len,
+                    "damage retains the advertised object extent"
+                );
+
+                // Act
+                let loaded = crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+                    &fs,
+                    crate::config::RecoveryPolicy::Strict,
+                );
+
+                // Assert
+                assert!(
+                    matches!(loaded, Err(MidgeError::Corruption(_))),
+                    "selected intent {region} damage at history position {selected_position} must fail closed"
                 );
             }
         }
@@ -1910,6 +1976,66 @@ mod tests {
             .column_families
             .iter()
             .any(|family| family.id == 3));
+    }
+
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn should_preserve_and_resume_intent_state_after_interrupted_v10_append() {
+        // Arrange
+        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let scenario = fail::FailScenario::setup();
+        let (_directory, fs) = v10_database();
+        let initial = vec![crate::runtime::IntentLogEntry::SeqnoAllocated { seqno: 1, cf_id: 0 }];
+        crate::runtime::IntentPersistence::save_with_fs_typed(&fs, &initial)
+            .expect("append initial selected intent state");
+        let interrupted = vec![
+            crate::runtime::IntentLogEntry::SeqnoAllocated { seqno: 1, cf_id: 0 },
+            crate::runtime::IntentLogEntry::SeqnoAllocated { seqno: 2, cf_id: 0 },
+        ];
+        fail::cfg("midge::format10::after_object_sync", "return").expect("configure failpoint");
+
+        // Act
+        let failed = crate::runtime::IntentPersistence::save_with_fs_typed(&fs, &interrupted);
+        fail::remove("midge::format10::after_object_sync");
+        scenario.teardown();
+        let selected_before_retry =
+            crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+                &fs,
+                crate::config::RecoveryPolicy::Strict,
+            )
+            .expect("read selected intent state after interruption");
+        let retry = vec![
+            crate::runtime::IntentLogEntry::SeqnoAllocated { seqno: 1, cf_id: 0 },
+            crate::runtime::IntentLogEntry::SeqnoAllocated { seqno: 3, cf_id: 0 },
+        ];
+        let saved = crate::runtime::IntentPersistence::save_with_fs_typed(&fs, &retry);
+        let selected_after_retry =
+            crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
+                &fs,
+                crate::config::RecoveryPolicy::Strict,
+            )
+            .expect("read selected intent state after retry");
+
+        // Assert
+        assert!(failed.is_err());
+        assert!(
+            saved.is_ok(),
+            "unselected intent object must not block retry"
+        );
+        assert_eq!(selected_before_retry.len(), 1);
+        assert!(matches!(
+            selected_before_retry[0],
+            crate::runtime::IntentLogEntry::SeqnoAllocated { seqno: 1, .. }
+        ));
+        assert_eq!(selected_after_retry.len(), 2);
+        assert!(matches!(
+            selected_after_retry[0],
+            crate::runtime::IntentLogEntry::SeqnoAllocated { seqno: 1, .. }
+        ));
+        assert!(matches!(
+            selected_after_retry[1],
+            crate::runtime::IntentLogEntry::SeqnoAllocated { seqno: 3, .. }
+        ));
     }
 
     #[test]
