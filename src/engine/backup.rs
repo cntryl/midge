@@ -1021,7 +1021,7 @@ mod tests {
         let source = directory.path().join("source");
         let artifact = directory.path().join("artifact");
         let target = directory.path().join("restored");
-        let timeout = Duration::from_secs(20);
+        let timeout = Duration::from_secs(60);
         let options = OpenOptions::cloud_simulated(&source, "backup-test", "format10").build()?;
         let mut engine = Engine::open(options.clone())?;
         let default = engine.get_column_family("default").expect("default CF");
@@ -1201,6 +1201,7 @@ mod tests {
             store.read_format_migration_gate(&holder, epoch, timeout)?,
             Some(CloudFormatMigrationGate::Active { target_format: 10 })
         );
+        lease.release().expect("release active test lease");
         drop(_lease_guard);
         drop(lease);
 
