@@ -975,3 +975,48 @@ fn should_publish_committed_empty_drop_when_retention_mirror_finishes() -> Midge
     );
     Ok(())
 }
+
+#[test]
+fn should_publish_committed_create_when_shutdown_joins_publication_owner() -> MidgeResult<()> {
+    // Arrange: the WAL-prune join still owns its publication token. Shutdown
+    // has to reap the worker before it can capture the deferred DDL cut.
+    let mut event_loop = create_test_cloud_event_loop(StorageBudgetPolicy::default())?;
+    event_loop.pipeline.inline_flush_worker = false;
+    let owner = crate::runtime::event_loop::coordination::ManifestPublicationOwner::WalPrune;
+    assert!(event_loop.publication.publication_gate.try_acquire(owner));
+    event_loop.actors.cloud_coordinator.cloud_wal_prune_worker = Some(std::thread::spawn(|| {}));
+    let created = event_loop
+        .routing
+        .router
+        .register(92_013, "create during prune");
+    let shutdown = event_loop
+        .routing
+        .router
+        .register(92_014, "shutdown after deferred create");
+
+    // Act
+    ManifestCoordinator::create_column_family(
+        &mut event_loop,
+        &crossbeam::channel::never(),
+        92_013,
+        "shutdown-create",
+    );
+    assert!(matches!(
+        created.try_recv(),
+        Ok(RuntimeResponse::ColumnFamilyCreated { .. })
+    ));
+    assert!(read_selected_manifest(&event_loop)?
+        .get_column_family_by_name("shutdown-create")
+        .is_none());
+    event_loop.handle_shutdown(Some(92_014));
+
+    // Assert
+    assert!(matches!(
+        shutdown.try_recv(),
+        Ok(RuntimeResponse::Ok { .. })
+    ));
+    assert!(read_selected_manifest(&event_loop)?
+        .get_column_family_by_name("shutdown-create")
+        .is_some());
+    Ok(())
+}
