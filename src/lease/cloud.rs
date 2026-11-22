@@ -54,6 +54,12 @@ struct ProviderLeaderStore {
     metadata_pointer_cache: Mutex<Option<metadata_pointer::CachedPointer>>,
 }
 
+struct LeaseDeadlines {
+    valid_until: Instant,
+    now: chrono::DateTime<chrono::Utc>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthoritySentinelState {
     Missing,
@@ -62,6 +68,21 @@ enum AuthoritySentinelState {
 }
 
 impl ProviderLeaderStore {
+    fn lease_deadlines(&self) -> Result<LeaseDeadlines, LeaseError> {
+        let valid_until = Instant::now().checked_add(self.ttl).ok_or_else(|| {
+            LeaseError::Internal("cloud lease TTL exceeds the monotonic clock range".into())
+        })?;
+        let now = self.clock.now();
+        let expires_at = lease_expiry(now, self.ttl).ok_or_else(|| {
+            LeaseError::Internal("cloud lease TTL exceeds the wall-clock expiry range".into())
+        })?;
+        Ok(LeaseDeadlines {
+            valid_until,
+            now,
+            expires_at,
+        })
+    }
+
     fn new(
         cloud: Arc<CloudStorage>,
         ttl: Duration,
@@ -142,16 +163,18 @@ impl ProviderLeaderStore {
             .max(minimum_epoch)
             .checked_add(1)
             .ok_or(LeaseError::EpochExhausted)?;
-        let monotonic_now = Instant::now();
-        let now = self.clock.now();
-        let valid_until = monotonic_now + self.ttl;
+        let LeaseDeadlines {
+            valid_until,
+            now,
+            expires_at,
+        } = self.lease_deadlines()?;
         let document = LeaseDocument {
             version: LeaseDocumentVersion::V4,
             epoch: Some(epoch),
             holder_id: holder_id.to_string(),
             owner_token: Some(self.owner_token.clone()),
             acquired_at: now.to_rfc3339(),
-            expires_at: (now + CloudStorageLease::persisted_lease_duration(self.ttl)).to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
             committed_metadata: None,
         };
         let headers = match metadata {
@@ -419,12 +442,13 @@ impl LeaderStore for ProviderLeaderStore {
                     "cloud lease has no token for conditional renewal".to_string(),
                 )
             })?;
-            let monotonic_now = Instant::now();
-            let valid_until = monotonic_now + self.ttl;
+            let LeaseDeadlines {
+                valid_until,
+                expires_at,
+                ..
+            } = self.lease_deadlines()?;
             let document = LeaseDocument {
-                expires_at: (self.clock.now()
-                    + CloudStorageLease::persisted_lease_duration(self.ttl))
-                .to_rfc3339(),
+                expires_at: expires_at.to_rfc3339(),
                 ..existing
             };
             let write_timeout = deadline
@@ -605,15 +629,16 @@ pub struct CloudStorageLease {
     clock_skew_tolerance: Duration,
 }
 
-impl CloudStorageLease {
-    /// Lease length written to the shared document. It keeps the TTL's full
-    /// precision: truncating to whole seconds would publish an expiry earlier
-    /// than the holder's own validity, letting another writer take over while
-    /// this one still accepts writes.
-    fn persisted_lease_duration(duration: Duration) -> chrono::Duration {
-        chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
-    }
+/// Keep the full TTL precision in the shared expiry so it cannot precede
+/// the holder's monotonic validity because of truncation.
+pub(super) fn lease_expiry(
+    now: chrono::DateTime<chrono::Utc>,
+    ttl: Duration,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    now.checked_add_signed(chrono::Duration::from_std(ttl).ok()?)
+}
 
+impl CloudStorageLease {
     pub(crate) fn lease_validity(&self) -> Arc<LeaseValidity> {
         Arc::clone(&self.validity)
     }
@@ -949,7 +974,7 @@ impl LeaseDocument {
         let tolerance = chrono::Duration::from_std(tolerance).map_err(|_| {
             LeaseError::Internal("lease clock-skew tolerance is out of range".to_string())
         })?;
-        Ok(now > expires + tolerance)
+        Ok(now.signed_duration_since(expires) > tolerance)
     }
 }
 

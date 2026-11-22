@@ -135,6 +135,18 @@ impl LeaseConfig {
                 "lease clock-skew tolerance must not exceed the lease TTL".to_string(),
             ));
         }
+        if std::time::Instant::now().checked_add(self.ttl).is_none() {
+            return Err(MidgeError::InvalidArgument(
+                "lease TTL exceeds the monotonic clock range".to_string(),
+            ));
+        }
+        if matches!(storage_kind, LeaseStorageKind::Cloud)
+            && cloud::lease_expiry(self.clock.now(), self.ttl).is_none()
+        {
+            return Err(MidgeError::InvalidArgument(
+                "cloud lease TTL exceeds the wall-clock expiry range".to_string(),
+            ));
+        }
         // A cloud lease renews with two thirds of its TTL left and needs
         // enough time for its conditional provider write.
         if matches!(storage_kind, LeaseStorageKind::Cloud)

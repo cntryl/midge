@@ -243,11 +243,17 @@ impl FileSystemLease {
         // Other nodes time takeover from the wall-clock stamp the store takes
         // before its write, so local validity is anchored before it too;
         // counting a slow fsync or rename here would outlive the record.
-        let validity_anchor = std::time::Instant::now();
+        let valid_until = std::time::Instant::now()
+            .checked_add(self.ttl())
+            .ok_or_else(|| {
+                LeaseError::Internal(
+                    "filesystem lease TTL exceeds the monotonic clock range".into(),
+                )
+            })?;
         let record = self.acquire_record(minimum_epoch, scope)?;
 
         let epoch = record.epoch;
-        if let Err(error) = self.validity.activate(epoch, validity_anchor + self.ttl()) {
+        if let Err(error) = self.validity.activate(epoch, valid_until) {
             return Err(self.cleanup_failed_acquisition(epoch, scope, error));
         }
         self.acquired_epoch.store(epoch, Ordering::Release);
@@ -351,11 +357,16 @@ impl PrimaryLease for FileSystemLease {
                 return Err(LeaseError::RenewalFailed("lease not acquired".to_string()));
             }
             self.validity.remaining(our_epoch)?;
-            let validity_anchor = std::time::Instant::now();
+            let valid_until = std::time::Instant::now()
+                .checked_add(self.ttl())
+                .ok_or_else(|| {
+                    LeaseError::RenewalFailed(
+                        "filesystem lease TTL exceeds the monotonic clock range".into(),
+                    )
+                })?;
             self.leader_store
                 .refresh_timestamp(&self.holder_id, our_epoch)?;
-            self.validity
-                .advance(our_epoch, validity_anchor + self.ttl())
+            self.validity.advance(our_epoch, valid_until)
         })();
         if let Err(error) = result {
             if self

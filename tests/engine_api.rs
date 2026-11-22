@@ -3035,6 +3035,76 @@ mod engine_exclusivity {
             .expect("build local options")
     }
 
+    #[test]
+    fn should_reject_unrepresentable_local_lease_ttl_before_acquiring() {
+        // Arrange
+        let (_directory, path) = temp_db_path();
+        let builder = OpenOptions::local(&path).lease_ttl(Duration::MAX);
+
+        // Act
+        let result = builder.build().and_then(Engine::open);
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::InvalidArgument(_))));
+        assert!(!path.join(".midge_leader").exists());
+    }
+
+    #[test]
+    fn should_reject_cloud_lease_ttl_when_either_expiry_clock_overflows() {
+        // Arrange: the runtime's monotonic clock accepts this duration, but
+        // the provider lease document cannot represent its wall-clock expiry.
+        let (_directory, path) = temp_db_path();
+        let ttl = Duration::from_secs(10_000_000_000_000);
+        assert!(std::time::Instant::now().checked_add(ttl).is_some());
+        let builder = OpenOptions::cloud_simulated(&path, "bucket", "lease-ttl");
+
+        // Act
+        let wall_clock_result = builder
+            .clone()
+            .lease_ttl(ttl)
+            .build()
+            .and_then(Engine::open);
+        let monotonic_result = builder
+            .lease_ttl(Duration::MAX)
+            .build()
+            .and_then(Engine::open);
+
+        // Assert
+        assert!(matches!(
+            wall_clock_result,
+            Err(MidgeError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            monotonic_result,
+            Err(MidgeError::InvalidArgument(_))
+        ));
+        assert!(!path.join("cloud_store/midge_primary_lease.json").exists());
+    }
+
+    #[test]
+    fn should_open_with_large_representable_lease_ttl() {
+        // Arrange
+        let (_directory, path) = temp_db_path();
+        let ttl = Duration::from_hours(365 * 24);
+        let local = OpenOptions::local(path.join("local")).lease_ttl(ttl);
+        let cloud =
+            OpenOptions::cloud_simulated(path.join("cloud"), "bucket", "lease-ttl").lease_ttl(ttl);
+
+        // Act
+        let local = local
+            .build()
+            .and_then(Engine::open)
+            .expect("open local lease");
+        let cloud = cloud
+            .build()
+            .and_then(Engine::open)
+            .expect("open cloud lease");
+
+        // Assert
+        assert!(local.is_primary_lease_healthy());
+        assert!(cloud.is_primary_lease_healthy());
+    }
+
     fn memory_options() -> cntryl_midge::OpenOptions {
         OpenOptions::in_memory()
             .build()
