@@ -15,6 +15,7 @@ pub const CURRENT_FORMAT_VERSION: u32 = 9;
 /// Oldest on-disk format this build opens. Older databases are rejected, not
 /// upgraded: their cloud catalogs are unchained.
 const MIN_SUPPORTED_FORMAT_VERSION: u32 = CURRENT_FORMAT_VERSION;
+const MAX_SUPPORTED_FORMAT_VERSION: u32 = CURRENT_FORMAT_VERSION + 1;
 const FORMAT_FILE: &str = "FORMAT";
 const FORMAT_FILE_TEMP: &str = "FORMAT.tmp";
 const FORMAT_PREFIX: &str = "midge-format-version=";
@@ -78,14 +79,13 @@ fn publish_current_marker(fs: &Arc<dyn Fs>) -> MidgeResult<()> {
 /// marker, and the filesystem error when it cannot be read.
 pub fn validate_format_marker(fs: &dyn Fs, db_path: &Path) -> MidgeResult<u32> {
     let marker_path = db_path.join(FORMAT_FILE);
-    let bytes =
-        crate::io::read_all(fs, &FsPath::new(FORMAT_FILE)).map_err(|error| match error {
-            FsError::NotFound(message) => MidgeError::CompatibilityError(format!(
-                "failed to read {FORMAT_FILE} marker at '{}': {message}",
-                marker_path.display()
-            )),
-            error => error.into_midge(),
-        })?;
+    let bytes = read_format_marker(fs).map_err(|error| match error {
+        FsError::NotFound(message) => MidgeError::CompatibilityError(format!(
+            "failed to read {FORMAT_FILE} marker at '{}': {message}",
+            marker_path.display()
+        )),
+        error => error.into_midge(),
+    })?;
     let invalid = || {
         MidgeError::CompatibilityError(format!(
             "invalid {FORMAT_FILE} marker at '{}': expected '{FORMAT_PREFIX}<version>'",
@@ -109,21 +109,66 @@ pub fn validate_format_marker(fs: &dyn Fs, db_path: &Path) -> MidgeResult<u32> {
             ))
         })?;
 
-    if !(MIN_SUPPORTED_FORMAT_VERSION..=CURRENT_FORMAT_VERSION).contains(&version) {
+    if !(MIN_SUPPORTED_FORMAT_VERSION..=MAX_SUPPORTED_FORMAT_VERSION).contains(&version) {
         return Err(MidgeError::CompatibilityError(format!(
-            "unsupported on-disk format version {version} at '{}'; this build supports versions {MIN_SUPPORTED_FORMAT_VERSION}..={CURRENT_FORMAT_VERSION}",
+            "unsupported on-disk format version {version} at '{}'; this build supports versions {MIN_SUPPORTED_FORMAT_VERSION}..={MAX_SUPPORTED_FORMAT_VERSION}",
             db_path.display()
         )));
+    }
+
+    if version == MAX_SUPPORTED_FORMAT_VERSION {
+        super::local_authority::LocalMetadataAuthority::validate(fs)?;
     }
 
     Ok(version)
 }
 
+pub(crate) fn is_format_10(fs: &dyn Fs) -> MidgeResult<bool> {
+    let path = FsPath::new(FORMAT_FILE);
+    if !fs.exists(&path).map_err(FsError::into_midge)? {
+        return Ok(false);
+    }
+    let bytes = read_format_marker(fs).map_err(FsError::into_midge)?;
+    let version_9 = format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}\n");
+    let version_10 = format!("{FORMAT_PREFIX}{MAX_SUPPORTED_FORMAT_VERSION}\n");
+    if bytes.as_ref() == version_10.as_bytes() {
+        return Ok(true);
+    }
+    if bytes.as_ref() == version_9.as_bytes() {
+        return Ok(false);
+    }
+    // Malformed and unsupported markers must not route through the v9 path.
+    validate_format_marker(fs, Path::new("."))?;
+    Ok(false)
+}
+
+fn read_format_marker(fs: &dyn Fs) -> Result<bytes::Bytes, FsError> {
+    const MAX_FORMAT_MARKER_BYTES: u64 = 64;
+    let path = FsPath::new(FORMAT_FILE);
+    let metadata = fs.metadata(&path)?;
+    if metadata.is_dir || metadata.len > MAX_FORMAT_MARKER_BYTES {
+        return Err(FsError::Corruption(format!(
+            "FORMAT marker length {} exceeds bound {MAX_FORMAT_MARKER_BYTES}",
+            metadata.len
+        )));
+    }
+    let file = fs.open_read(&path)?;
+    let length = file.len()?;
+    if length > MAX_FORMAT_MARKER_BYTES || length != metadata.len {
+        return Err(FsError::Corruption(
+            "FORMAT marker length changed or exceeds bound".into(),
+        ));
+    }
+    file.read_at(0, length)
+}
+
 fn has_persisted_state_without_format_marker(fs: &dyn Fs) -> MidgeResult<bool> {
-    const ROOT_STATE_FILES: [&str; 7] = [
+    const ROOT_STATE_FILES: [&str; 9] = [
         super::files::MANIFEST,
         super::files::MANIFEST_SNAPSHOT,
         super::files::INTENT_LOG,
+        "metadata/HEAD",
+        "metadata/HEAD.tmp",
         "manifest.yaml",
         "manifest.snapshot",
         super::files::JOURNAL,
@@ -139,7 +184,7 @@ fn has_persisted_state_without_format_marker(fs: &dyn Fs) -> MidgeResult<bool> {
         }
     }
 
-    for dir_name in ["wal", "sst"] {
+    for dir_name in ["wal", "sst", "metadata/generations"] {
         let dir = FsPath::new(dir_name);
         if fs.exists(&dir).map_err(FsError::into_midge)?
             && !fs.list_dir(&dir).map_err(FsError::into_midge)?.is_empty()
@@ -274,7 +319,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(
             temp_dir.path().join(FORMAT_FILE),
-            format!("{}{}\n", FORMAT_PREFIX, CURRENT_FORMAT_VERSION + 1),
+            format!("{}{}\n", FORMAT_PREFIX, CURRENT_FORMAT_VERSION + 2),
         )
         .expect("write marker");
 
@@ -284,6 +329,63 @@ mod tests {
 
         // Assert
         assert!(matches!(error, MidgeError::CompatibilityError(_)));
+    }
+
+    #[test]
+    fn should_reject_format_10_marker_without_a_valid_selected_head() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(
+            temp_dir.path().join(FORMAT_FILE),
+            format!("{FORMAT_PREFIX}{}\n", CURRENT_FORMAT_VERSION + 1),
+        )
+        .expect("write v10 marker without head");
+
+        // Act
+        let result = validate_format_marker(root(temp_dir.path()).as_ref(), temp_dir.path());
+
+        // Assert
+        assert!(
+            result.is_err(),
+            "FORMAT 10 without a valid HEAD must fail closed"
+        );
+    }
+
+    #[test]
+    fn should_not_create_format_9_marker_when_head_exists_without_format_marker() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(temp_dir.path().join("metadata")).expect("create metadata dir");
+        std::fs::write(
+            temp_dir.path().join("metadata/HEAD"),
+            b"selected v10 authority",
+        )
+        .expect("write head");
+
+        // Act
+        let result = ensure_or_create_format_marker(&root(temp_dir.path()), temp_dir.path());
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::CompatibilityError(_))));
+        assert!(!temp_dir.path().join(FORMAT_FILE).exists());
+    }
+
+    #[test]
+    fn should_not_create_format_9_marker_when_unselected_generation_exists_without_head() {
+        // Arrange
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let generation = temp_dir
+            .path()
+            .join("metadata/generations/unselected/manifest");
+        std::fs::create_dir_all(&generation).expect("create unselected generation");
+        std::fs::write(generation.join("base"), b"staged base").expect("write staged base");
+
+        // Act
+        let result = ensure_or_create_format_marker(&root(temp_dir.path()), temp_dir.path());
+
+        // Assert
+        assert!(matches!(result, Err(MidgeError::CompatibilityError(_))));
+        assert!(!temp_dir.path().join(FORMAT_FILE).exists());
     }
 
     #[test]

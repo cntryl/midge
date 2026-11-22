@@ -119,6 +119,11 @@ impl Engine {
         }
         let database_format_version =
             crate::metadata::format::validate_format_marker(self.root.as_ref(), &source)?;
+        if database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION {
+            return Err(MidgeError::NotSupported(
+                "FORMAT 10 backup capture requires selected-generation inventory support".into(),
+            ));
+        }
         let pinned = pin_durable_files(&source, self.simulated_cloud_mode, parent)?;
         if !self.is_primary_lease_healthy() {
             return Err(MidgeError::Fenced(
@@ -195,6 +200,11 @@ impl Engine {
         }
         let artifact = fs::canonicalize(artifact.as_ref())?;
         let manifest = validate_backup(&artifact)?;
+        if manifest.database_format_version > crate::metadata::format::CURRENT_FORMAT_VERSION {
+            return Err(MidgeError::NotSupported(
+                "FORMAT 10 backup restore requires selected-generation inventory support".into(),
+            ));
+        }
         let storage = options.storage().clone();
         drop(options);
         let (target, kind) = match storage {

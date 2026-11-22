@@ -72,6 +72,11 @@ impl StorageVerifier {
         path: &Path,
     ) -> MidgeResult<StorageVerificationReport> {
         let root = super::startup::existing_host_root(path)?;
+        if crate::metadata::format::is_format_10(root.as_ref())? {
+            return Err(MidgeError::CompatibilityError(
+                "FORMAT 10 verification is not available for simulated cloud storage yet".into(),
+            ));
+        }
         let store = crate::storage::simulated::SimulatedCloud::locate(
             root.as_ref(),
             None,

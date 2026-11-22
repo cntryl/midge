@@ -2141,15 +2141,37 @@ mod compatibility_fixtures {
     }
 
     #[test]
-    fn should_reject_future_v10_fixture_given_unsupported_version_when_reopening() {
+    fn should_reject_v10_fixture_without_selected_head_when_reopening() {
         // Arrange
         let temp = copy_fixture_dir("future_v10");
 
         // Act
         let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())
-            .expect_err("future fixture should fail verify");
-        assert_compatibility_error(verify_error);
+            .expect_err("FORMAT 10 fixture without HEAD should fail verify");
+        assert!(verify_error.to_string().contains("FORMAT 10 head"));
 
+        let Err(open_error) = Engine::open(
+            OpenOptions::local(temp.path())
+                .recovery_policy(RecoveryPolicy::Strict)
+                .build()
+                .expect("build options"),
+        ) else {
+            panic!("FORMAT 10 fixture without HEAD should fail open");
+        };
+        // Assert
+        assert!(open_error.to_string().contains("FORMAT 10 head"));
+    }
+
+    #[test]
+    fn should_reject_future_v11_fixture_when_reopening() {
+        // Arrange
+        let temp = copy_fixture_dir("future_v10");
+        std::fs::write(temp.path().join("FORMAT"), b"midge-format-version=11\n")
+            .expect("write future FORMAT 11 marker");
+
+        // Act
+        let verify_error = cntryl_midge::StorageVerifier::verify_path(temp.path())
+            .expect_err("future fixture should fail verify");
         let Err(open_error) = Engine::open(
             OpenOptions::local(temp.path())
                 .recovery_policy(RecoveryPolicy::Strict)
@@ -2158,7 +2180,9 @@ mod compatibility_fixtures {
         ) else {
             panic!("future fixture should fail open");
         };
+
         // Assert
+        assert_compatibility_error(verify_error);
         assert_compatibility_error(open_error);
     }
 }

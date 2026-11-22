@@ -13,6 +13,7 @@ pub mod format;
 pub mod frontiers;
 pub mod journal;
 mod key_bounds;
+pub(crate) mod local_authority;
 pub mod manifest;
 pub mod persistence;
 #[cfg(any(test, feature = "internal-testing"))]

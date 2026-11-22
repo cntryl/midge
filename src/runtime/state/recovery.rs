@@ -169,9 +169,11 @@ impl RuntimeState {
     ) -> MidgeResult<Self> {
         check_scope(scope, "recovery filesystem")?;
         Self::ensure_directories(root.as_ref(), memory_mode)?;
-        if !memory_mode {
-            crate::metadata::ensure_or_create_format_marker(&root, db_path)?;
-        }
+        let format_version = if !memory_mode {
+            crate::metadata::ensure_or_create_format_marker(&root, db_path)?
+        } else {
+            crate::metadata::format::CURRENT_FORMAT_VERSION
+        };
         check_scope(scope, "recovery directories")?;
         let fs = match scope {
             Some(scope) => crate::io::scope_fs(root, scope.clone()),
@@ -184,6 +186,7 @@ impl RuntimeState {
             wal,
             wal_fence,
             fs,
+            format_version,
             scope,
         )
     }
@@ -195,6 +198,7 @@ impl RuntimeState {
         wal: RecoveryWal,
         wal_fence: Option<crate::runtime::wal_history::WalHistoryFence>,
         fs: Arc<dyn Fs>,
+        format_version: u32,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
         let persistence = RuntimePersistence::from_memory_mode(memory_mode);
@@ -239,10 +243,11 @@ impl RuntimeState {
             manifest: super::ManifestRuntimeState::new(manifest),
             fs: fs.clone(),
             startup_scope: scope.cloned(),
-            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new_with_accounting(
+            manifest_store: Arc::new(crate::metadata::store::ManifestStore::new_with_format(
                 fs,
                 accounting,
                 accounting_medium,
+                format_version,
             )),
             sst_names,
             recovery_sst_fs: None,

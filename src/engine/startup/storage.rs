@@ -163,7 +163,12 @@ fn load_cloud_wal_history(
         || Arc::clone(&path.root),
         |scope| crate::io::scope_fs(Arc::clone(&path.root), scope.clone()),
     );
-    crate::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
+    let format_version = crate::metadata::ensure_or_create_format_marker(root, &path.db_path)?;
+    if format_version > crate::metadata::format::CURRENT_FORMAT_VERSION {
+        return Err(MidgeError::CompatibilityError(
+            "FORMAT 10 is not available for cloud-backed databases yet".into(),
+        ));
+    }
     let wal = crate::io::subdirectory(Arc::clone(root), crate::wal::WAL_DIR);
     Ok(
         match crate::runtime::wal_history::WalHistory::load_with_fence(
@@ -918,6 +923,13 @@ impl RuntimeStorageMaterialization {
         startup_lease: &StartupLease,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Self> {
+        if !matches!(opts.storage(), Storage::Local { .. } | Storage::InMemory)
+            && crate::metadata::format::is_format_10(storage_path.root.as_ref())?
+        {
+            return Err(MidgeError::CompatibilityError(
+                "FORMAT 10 is not available for cloud-backed databases yet".into(),
+            ));
+        }
         let cloud_runtime_policy = opts.cloud_runtime_policy();
 
         match opts.storage() {

@@ -198,6 +198,9 @@ impl ManifestPersistence {
         recovery_policy: crate::config::RecoveryPolicy,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<Manifest> {
+        if crate::metadata::format::is_format_10(fs.as_ref())? {
+            return Self::load_format_10(fs, scope);
+        }
         use crate::io::traits::FsPath;
 
         let snap_path = FsPath::new(Self::MANIFEST_SNAPSHOT);
@@ -264,6 +267,42 @@ impl ManifestPersistence {
 
         Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
         check_scope(scope, "manifest validation")?;
+        Ok(manifest)
+    }
+
+    pub(crate) fn load_format_10(
+        fs: &std::sync::Arc<dyn crate::io::traits::Fs>,
+        scope: Option<&DeadlineScope>,
+    ) -> MidgeResult<Manifest> {
+        let authority = crate::metadata::local_authority::LocalMetadataAuthority::open(
+            std::sync::Arc::clone(fs),
+        )?;
+        let (base, segments) =
+            authority.read_stream(crate::metadata::local_authority::Stream::Manifest)?;
+        let mut manifest: Manifest = super::codec::decode(super::codec::MANIFEST, &base)?;
+        if manifest.edit_checkpoint_id
+            != authority.base_id(crate::metadata::local_authority::Stream::Manifest)
+        {
+            return Err(MidgeError::Corruption(
+                "FORMAT 10 manifest base checkpoint identity disagrees with HEAD".into(),
+            ));
+        }
+        for (first_id, last_id, payload) in segments {
+            check_scope(scope, "FORMAT 10 manifest segment replay")?;
+            if first_id != last_id {
+                return Err(MidgeError::Corruption(
+                    "FORMAT 10 manifest segment must contain one edit identity".into(),
+                ));
+            }
+            let edit: crate::metadata::journal::ManifestEdit = serde_json::from_slice(&payload)
+                .map_err(|error| {
+                    MidgeError::Corruption(format!("invalid FORMAT 10 manifest edit: {error}"))
+                })?;
+            edit.validate_for_append()?;
+            manifest.apply_edit(&edit)?;
+            manifest.edit_checkpoint_id = last_id;
+        }
+        Self::validate_persisted_sst_names(&manifest).map_err(MidgeError::RecoveryFailed)?;
         Ok(manifest)
     }
 
