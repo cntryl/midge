@@ -381,6 +381,18 @@ fn pin_cloud_simulated_format_10_files(
     )?;
     crate::runtime::hybrid_persistence::decode_generation_manifest(&selected, &bodies, &deadline)?;
     crate::runtime::IntentPersistence::validate_cloud_format_10_bodies(&bodies)?;
+
+    let mut pinned = bodies
+        .iter()
+        .map(|(relative, body)| pin_bytes(relative, body, scratch_dir))
+        .collect::<MidgeResult<Vec<_>>>()?;
+    let mut paths = ledger_wal_paths(root)?;
+    collect_files(&root.join("sst"), root, &mut paths)?;
+    collect_files(&root.join("cloud_store"), root, &mut paths)?;
+    pinned.extend(pin_paths(root, paths, scratch_dir)?);
+
+    // Recheck after pinning the provider pointer file so the capture cannot
+    // combine an earlier selected closure with a later pointer.
     let rechecked = crate::lease::cloud::read_active_format_10_backup_generation_for_owner(
         &cloud, &deadline, owner,
     )
@@ -395,14 +407,6 @@ fn pin_cloud_simulated_format_10_files(
         ));
     }
 
-    let mut pinned = bodies
-        .iter()
-        .map(|(relative, body)| pin_bytes(relative, body, scratch_dir))
-        .collect::<MidgeResult<Vec<_>>>()?;
-    let mut paths = ledger_wal_paths(root)?;
-    collect_files(&root.join("sst"), root, &mut paths)?;
-    collect_files(&root.join("cloud_store"), root, &mut paths)?;
-    pinned.extend(pin_paths(root, paths, scratch_dir)?);
     Ok(pinned)
 }
 

@@ -714,6 +714,39 @@ fn queue_reclamation_behind_held_mirror(
 }
 
 #[test]
+fn should_defer_backup_capture_when_a_metadata_mirror_owns_publication() -> MidgeResult<()> {
+    // Arrange
+    let _guard = crate::failpoints::test_failpoint_guard();
+    let scenario = fail::FailScenario::setup();
+    let mut event_loop = create_test_cloud_event_loop(
+        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+    )?;
+    let held = HeldMirror::new("midge::metadata_mirror::before_provider");
+    queue_reclamation_behind_held_mirror(&mut event_loop, &held)?;
+    let request_id = 92002;
+    let response = event_loop.routing.router.register(request_id, "backup");
+
+    // Act
+    event_loop.begin_backup_capture(request_id);
+    let reply = response.try_recv();
+    held.release.try_send(()).unwrap();
+
+    // Assert
+    assert!(matches!(
+        reply,
+        Ok(RuntimeResponse::Error {
+            error: MidgeError::Busy(_),
+            ..
+        })
+    ));
+    assert!(!event_loop.publication.verification_barrier.is_active());
+    let deadline = OperationDeadline::from_budget(Duration::from_secs(10));
+    event_loop.drain_metadata_mirror_within(&deadline)?;
+    scenario.teardown();
+    Ok(())
+}
+
+#[test]
 fn should_defer_reclamation_without_anomaly_when_retry_meets_a_running_mirror() -> MidgeResult<()> {
     let _guard = crate::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
