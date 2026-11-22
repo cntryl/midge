@@ -267,6 +267,9 @@ pub(super) fn read_committed_metadata_bodies_reserved_within(
             "committed metadata has zero generation ordinal".into(),
         ));
     }
+    if generation.uses_format_10() {
+        return read_format_10_bodies(cloud, generation, deadline, reservation);
+    }
     if super::metadata_chain::is_chain(generation) {
         let bodies = if let Some(reservation) = reservation {
             super::metadata_chain::read_with_cut_reserved(
@@ -345,6 +348,48 @@ pub(super) fn read_committed_metadata_bodies_reserved_within(
     if bodies[files::FORMAT] != crate::metadata::format::current_format_marker_bytes() {
         return Err(MidgeError::CompatibilityError(
             "committed cloud FORMAT differs from the current format".into(),
+        ));
+    }
+    Ok(bodies)
+}
+
+fn read_format_10_bodies(
+    cloud: &CloudStorage,
+    generation: &CloudMetadataGeneration,
+    deadline: &OperationDeadline,
+    reservation: Option<Arc<ResourceReservation>>,
+) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
+    crate::lease::cloud::validate_metadata_generation(generation)
+        .map_err(|error| MidgeError::Corruption(error.to_string()))?;
+    let mut io = BlockingCloud::new(cloud, deadline);
+    if let Some(reservation) = reservation {
+        io = io.with_reservation(reservation);
+    }
+    let mut bodies = BTreeMap::new();
+    for object in &generation.objects {
+        let data = io
+            .get_exact_len(&object.object_key, object.len)?
+            .ok_or_else(|| {
+                MidgeError::Corruption(format!(
+                    "committed cloud FORMAT 10 object '{}' is missing",
+                    object.file_name
+                ))
+            })?;
+        if u64::try_from(data.len()).unwrap_or(u64::MAX) != object.len
+            || crc32c::crc32c(&data) != object.crc32c
+        {
+            return Err(MidgeError::Corruption(format!(
+                "committed cloud FORMAT 10 object '{}' mismatches its identity",
+                object.file_name
+            )));
+        }
+        bodies.insert(object.file_name.clone(), data);
+    }
+    let horizon =
+        crate::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(&bodies)?;
+    if horizon != generation.manifest_horizon {
+        return Err(MidgeError::Corruption(
+            "cloud FORMAT 10 HEAD differs from the selected manifest horizon".into(),
         ));
     }
     Ok(bodies)
@@ -712,6 +757,72 @@ fn validate_cached_successor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_reject_unreferenced_cloud_object_when_descriptor_exceeds_selected_head(
+    ) -> MidgeResult<()> {
+        // Arrange: upload a real v10 closure and verify it through the same
+        // bounded, identity-aware reader used during provider recovery.
+        use crate::lease::CloudMetadataObject;
+        use crate::metadata::{codec, local_authority::LocalMetadataAuthority};
+        use crate::storage::StoragePrecondition;
+
+        let root: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
+        let manifest = codec::encode(codec::MANIFEST, &Manifest::default())?;
+        let local =
+            LocalMetadataAuthority::initialize(Arc::clone(&root), "test-cut", &manifest, b"[]")?;
+        let cloud = CloudStorage::new(
+            Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+            "format-ten".into(),
+        );
+        let deadline = OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+        let io = BlockingCloud::new(&cloud, &deadline);
+        let operation_id = uuid::Uuid::new_v4();
+        let put = |file_name: String, data: Vec<u8>| {
+            let object = CloudMetadataObject {
+                object_key: format!("metadata/generations/{operation_id}/{file_name}"),
+                file_name,
+                len: data.len() as u64,
+                crc32c: crc32c::crc32c(&data),
+            };
+            io.put_with_precondition(&object.object_key, data, &StoragePrecondition::IfAbsent)?;
+            Ok::<_, MidgeError>(object)
+        };
+        let mut objects = vec![put(
+            files::FORMAT.into(),
+            b"midge-format-version=10\n".to_vec(),
+        )?];
+        let selected = LocalMetadataAuthority::selected_relative_paths_from(root.as_ref())?;
+        assert_eq!(selected, local.selected_relative_paths());
+        for name in selected {
+            let bytes = crate::io::read_all(root.as_ref(), &FsPath::new(&name))
+                .map_err(crate::io::FsError::into_midge)?;
+            objects.push(put(name, bytes.to_vec())?);
+        }
+        let mut descriptor = CloudMetadataGeneration {
+            id: SharedGenerationId::FIRST,
+            manifest_horizon: 0,
+            objects,
+        };
+        assert_eq!(
+            read_committed_metadata_bodies_within(&cloud, &descriptor, &deadline)?.len(),
+            4
+        );
+        descriptor.objects.push(put(
+            "metadata/generations/test-cut/manifest/00000000000000000002-00000000000000000001-00000000000000000001.seg".into(),
+            b"unselected metadata".to_vec(),
+        )?);
+
+        // Act
+        let result = read_committed_metadata_bodies_within(&cloud, &descriptor, &deadline);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(MidgeError::Corruption(message)) if message.contains("objects selected by HEAD")
+        ));
+        Ok(())
+    }
     use crate::io::Fs;
     use crate::lease::fs_leader_store::FsLeaderStore;
 

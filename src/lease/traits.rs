@@ -643,6 +643,12 @@ pub struct CloudMetadataGeneration {
 }
 
 impl CloudMetadataGeneration {
+    pub(crate) fn uses_format_10(&self) -> bool {
+        self.objects
+            .iter()
+            .any(|object| object.file_name == crate::metadata::local_authority::HEAD_PATH)
+    }
+
     pub(crate) fn validate_successor(&self, previous: Option<&Self>) -> Result<(), LeaseError> {
         if previous == Some(self) {
             return Ok(());

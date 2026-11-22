@@ -1144,13 +1144,16 @@ fn parse_v3_lease_document(content: &str) -> Option<LeaseDocument> {
     })
 }
 
-pub(super) fn validate_metadata_generation(
+pub(crate) fn validate_metadata_generation(
     generation: &CloudMetadataGeneration,
 ) -> Result<(), LeaseError> {
     if generation.id == super::SharedGenerationId::NONE {
         return Err(LeaseError::Internal(
             "committed shared generation has zero ordinal".into(),
         ));
+    }
+    if generation.uses_format_10() {
+        return validate_format_10_generation(generation);
     }
     if generation
         .objects
@@ -1208,36 +1211,94 @@ pub(super) fn validate_metadata_generation(
                 object.file_name
             )));
         }
-        let Some(relative) = object.object_key.strip_prefix(METADATA_GENERATIONS_PREFIX) else {
-            return Err(LeaseError::Internal(format!(
-                "cloud metadata '{}' has an invalid immutable object key",
-                object.file_name
-            )));
-        };
-        let Some((generation_id, file_name)) = relative.split_once('/') else {
-            return Err(LeaseError::Internal(format!(
-                "cloud metadata '{}' has an invalid immutable object key",
-                object.file_name
-            )));
-        };
-        let parsed_id = uuid::Uuid::parse_str(generation_id).map_err(|_| {
-            LeaseError::Internal(format!(
-                "cloud metadata '{}' has an invalid generation ID",
-                object.file_name
-            ))
-        })?;
-        if parsed_id.to_string() != generation_id || file_name != object.file_name {
-            return Err(LeaseError::Internal(format!(
-                "cloud metadata '{}' has a noncanonical immutable object key",
-                object.file_name
-            )));
-        }
+        validate_immutable_body_key(object)?;
     }
     if !seen_files.contains(crate::metadata::files::FORMAT)
         || !seen_files.contains(crate::metadata::files::MANIFEST_SNAPSHOT)
     {
         return Err(LeaseError::Internal(
             "cloud metadata generation lacks FORMAT or manifest snapshot".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_immutable_body_key(object: &super::CloudMetadataObject) -> Result<(), LeaseError> {
+    let invalid_key = || {
+        LeaseError::Internal(format!(
+            "cloud metadata '{}' has an invalid immutable object key",
+            object.file_name
+        ))
+    };
+    let (generation_id, file_name) = object
+        .object_key
+        .strip_prefix(METADATA_GENERATIONS_PREFIX)
+        .and_then(|relative| relative.split_once('/'))
+        .ok_or_else(invalid_key)?;
+    let parsed_id = uuid::Uuid::parse_str(generation_id).map_err(|_| {
+        LeaseError::Internal(format!(
+            "cloud metadata '{}' has an invalid generation ID",
+            object.file_name
+        ))
+    })?;
+    if parsed_id.to_string() != generation_id || file_name != object.file_name {
+        return Err(LeaseError::Internal(format!(
+            "cloud metadata '{}' has a noncanonical immutable object key",
+            object.file_name
+        )));
+    }
+    Ok(())
+}
+
+fn validate_format_10_generation(generation: &CloudMetadataGeneration) -> Result<(), LeaseError> {
+    use crate::metadata::files::FORMAT;
+    use crate::metadata::local_authority::{
+        closure_path_parts, HEAD_PATH, MAX_CLOSURE_BYTES, MAX_HEAD_BYTES, MAX_OBJECTS,
+    };
+
+    if generation.objects.len() > MAX_OBJECTS + 2 {
+        return Err(LeaseError::Indeterminate(
+            "cloud FORMAT 10 metadata exceeds its object bound".into(),
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0_u64;
+    let mut selected_generation = None;
+    let mut have_manifest_base = false;
+    let mut have_intent_base = false;
+    for object in &generation.objects {
+        validate_immutable_body_key(object)?;
+        let name = object.file_name.as_str();
+        if object.len == 0 || !seen.insert(name) {
+            return Err(LeaseError::Indeterminate(
+                "cloud FORMAT 10 descriptor contains an empty or duplicate object".into(),
+            ));
+        }
+        match name {
+            FORMAT if object.len == b"midge-format-version=10\n".len() as u64 => continue,
+            HEAD_PATH if object.len <= MAX_HEAD_BYTES as u64 => continue,
+            _ => {}
+        }
+        let (path_generation, body) = closure_path_parts(name)
+            .map_err(|error| LeaseError::Indeterminate(error.to_string()))?;
+        if *selected_generation.get_or_insert(path_generation) != path_generation {
+            return Err(LeaseError::Indeterminate(
+                "cloud FORMAT 10 descriptor mixes metadata generations".into(),
+            ));
+        }
+        have_manifest_base |= body == "manifest/base";
+        have_intent_base |= body == "intent/base";
+        total = total.checked_add(object.len).ok_or_else(|| {
+            LeaseError::Indeterminate("cloud FORMAT 10 metadata length overflow".into())
+        })?;
+    }
+    if total > MAX_CLOSURE_BYTES
+        || !have_manifest_base
+        || !have_intent_base
+        || !seen.contains(FORMAT)
+    {
+        return Err(LeaseError::Indeterminate(
+            "cloud FORMAT 10 descriptor is incomplete or exceeds its read bound".into(),
         ));
     }
     Ok(())

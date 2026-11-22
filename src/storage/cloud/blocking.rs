@@ -152,6 +152,35 @@ impl<'a> BlockingCloud<'a> {
         })
     }
 
+    /// Read a bounded immutable body under the exact identity supplied by HEAD.
+    pub(crate) fn get_exact_len(&self, key: &str, len: u64) -> MidgeResult<Option<Vec<u8>>> {
+        let Some(identity) = self.head_optional(key)? else {
+            return Ok(None);
+        };
+        if identity.size != len || len == 0 {
+            return Err(MidgeError::Corruption(format!(
+                "cloud object '{key}' differs from its selected length {len}"
+            )));
+        }
+        let deadline = self.begin("range", key)?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.cloud.reads.read(
+            &self.cloud.full_path(key),
+            CloudReadOptions::default()
+                .with_range(0..len, identity)
+                .with_request_options(
+                    CloudRequestOptions::default()
+                        .with_deadline(deadline)
+                        .with_reservation(self.reservation.clone()),
+                ),
+            tx,
+        );
+        self.wait(&rx, &deadline, "range", key, |event| match event {
+            CloudEvent::GetRange { result, .. } => Some(result),
+            _ => None,
+        })
+    }
+
     pub(crate) fn list(&self, prefix: &str) -> MidgeResult<Vec<String>> {
         let deadline = self.begin("list", prefix)?;
         let (tx, rx) = std::sync::mpsc::channel();

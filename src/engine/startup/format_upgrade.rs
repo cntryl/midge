@@ -287,6 +287,50 @@ mod tests {
 
     const SOURCE_BUDGET: u64 = 1024 * 1024;
 
+    #[test]
+    fn should_require_directory_sync_when_resolving_visible_format_10_marker() {
+        // Arrange: stage a valid candidate, then fail its marker directory
+        // sync after the rename has made FORMAT 10 visible.
+        let mock = Arc::new(crate::io::MockFs::new());
+        let root: Arc<dyn Fs> = mock.clone();
+        crate::metadata::ensure_or_create_format_marker(&root, std::path::Path::new("."))
+            .expect("create legacy marker");
+        let base = codec::encode(codec::MANIFEST, &Manifest::default()).expect("encode base");
+        let candidate = LocalMetadataAuthority::stage_upgrade_candidate(
+            Arc::clone(&root),
+            [3; 32],
+            &base,
+            0,
+            b"[]",
+            0,
+            0,
+        )
+        .expect("stage immutable closure");
+        let scope = DeadlineScope::new(OperationDeadline::from_budget(Duration::from_secs(5)));
+        mock.set_sync_dir_failure(true);
+        let error = crate::io::staging::stage_bytes_typed(
+            &root,
+            &FsPath::new("FORMAT.tmp"),
+            &FsPath::new(files::FORMAT),
+            FORMAT_10,
+            || Ok(()),
+        )
+        .expect_err("marker directory sync fails");
+
+        // Act: exact live readback alone leaves the outcome unknown. Retry
+        // after the root directory can be synced and validated.
+        let visible = marker_bytes(root.as_ref(), &scope).expect("read live marker");
+        let uncertain =
+            reconcile_marker_switch(&root, &scope, candidate.head_digest(), error.replay());
+        mock.set_sync_dir_failure(false);
+        let confirmed = reconcile_marker_switch(&root, &scope, candidate.head_digest(), error);
+
+        // Assert
+        assert_eq!(visible.as_deref(), Some(FORMAT_10));
+        assert!(matches!(uncertain, Err(MidgeError::OutcomeUnknown(_))));
+        confirmed.expect("successful directory sync proves exact selection");
+    }
+
     #[cfg(feature = "failpoints")]
     #[test]
     fn should_resume_local_upgrade_when_marker_switch_was_interrupted() -> MidgeResult<()> {

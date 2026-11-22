@@ -11,14 +11,14 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::sync::Arc;
 
-const HEAD_PATH: &str = "metadata/HEAD";
+pub(crate) const HEAD_PATH: &str = "metadata/HEAD";
 const HEAD_TEMP: &str = "metadata/HEAD.tmp";
 const HEAD_MAGIC: &[u8; 8] = b"MDGEHD10";
 const OBJECT_MAGIC: &[u8; 8] = b"MDGEOB10";
 const WIRE_VERSION: u16 = 10;
-const MAX_HEAD_BYTES: usize = 64 * 1024;
-const MAX_OBJECTS: usize = 16;
-const MAX_CLOSURE_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_HEAD_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_OBJECTS: usize = 16;
+pub(crate) const MAX_CLOSURE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_OBJECT_BYTES: u64 = MAX_CLOSURE_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,34 +82,50 @@ pub(crate) struct LocalMetadataAuthority {
 }
 
 impl LocalMetadataAuthority {
+    /// Verify the exact committed cloud closure before using any of its bytes.
+    pub(crate) fn validate_cloud_bodies(
+        bodies: &std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> MidgeResult<u64> {
+        if bodies.get(super::files::FORMAT).map(Vec::as_slice) != Some(b"midge-format-version=10\n")
+        {
+            return Err(MidgeError::CompatibilityError(
+                "cloud FORMAT 10 closure has an invalid format marker".into(),
+            ));
+        }
+        let encoded_head = bodies
+            .get(HEAD_PATH)
+            .ok_or_else(|| MidgeError::Corruption("cloud FORMAT 10 HEAD is missing".into()))?;
+        let (head, _) = decode_head(encoded_head)?;
+        validate_head(&head)?;
+        let expected_len = 4 + head.manifest.segments.len() + head.intent.segments.len();
+        if bodies.len() != expected_len {
+            return Err(MidgeError::Corruption(
+                "cloud FORMAT 10 descriptor differs from the objects selected by HEAD".into(),
+            ));
+        }
+        for (stream, selected) in [
+            (Stream::Manifest, &head.manifest),
+            (Stream::Intent, &head.intent),
+        ] {
+            for object in std::iter::once(&selected.base).chain(&selected.segments) {
+                let path = object_path(&head.generation, &object.name);
+                let bytes = bodies.get(&path).ok_or_else(|| {
+                    MidgeError::Corruption(format!("cloud FORMAT 10 object '{path}' is missing"))
+                })?;
+                verify_object_bytes(stream, object, bytes)?;
+            }
+        }
+        Ok(head.highest_manifest_id)
+    }
+
     /// Validate a selected local head without retaining an open writer owner.
     pub(crate) fn validate(fs: &dyn Fs) -> MidgeResult<()> {
-        let bytes = read_bounded(fs, HEAD_PATH, MAX_HEAD_BYTES as u64, "FORMAT 10 head")
-            .map_err(|error| recovery_error("read FORMAT 10 head", error))?;
-        let (head, _) = decode_head(&bytes)?;
-        validate_head(&head)?;
-        verify_stream(fs, &head.generation, Stream::Manifest, &head.manifest)?;
-        verify_stream(fs, &head.generation, Stream::Intent, &head.intent)
+        load_selected_head(fs).map(|_| ())
     }
 
     /// Load the selected head and verify every selected immutable object.
     pub(crate) fn open(fs: Arc<dyn Fs>) -> MidgeResult<Self> {
-        let bytes = read_bounded(
-            fs.as_ref(),
-            HEAD_PATH,
-            MAX_HEAD_BYTES as u64,
-            "FORMAT 10 head",
-        )
-        .map_err(|error| recovery_error("read FORMAT 10 head", error))?;
-        let (head, head_digest) = decode_head(&bytes)?;
-        validate_head(&head)?;
-        verify_stream(
-            fs.as_ref(),
-            &head.generation,
-            Stream::Manifest,
-            &head.manifest,
-        )?;
-        verify_stream(fs.as_ref(), &head.generation, Stream::Intent, &head.intent)?;
+        let (head, head_digest) = load_selected_head(fs.as_ref())?;
         Ok(Self {
             fs,
             head,
@@ -736,20 +752,14 @@ impl LocalMetadataAuthority {
 
     /// Names of the immutable objects selected by HEAD, plus HEAD itself.
     pub(crate) fn selected_relative_paths(&self) -> Vec<String> {
-        let mut paths = vec![HEAD_PATH.to_owned()];
-        for selected in [&self.head.manifest, &self.head.intent] {
-            paths.push(format!(
-                "metadata/generations/{}/{}",
-                self.head.generation, selected.base.name
-            ));
-            paths.extend(selected.segments.iter().map(|object| {
-                format!(
-                    "metadata/generations/{}/{}",
-                    self.head.generation, object.name
-                )
-            }));
-        }
-        paths
+        relative_paths(&self.head)
+    }
+
+    /// Verify and enumerate the exact selected names through a borrowed root.
+    /// Callers capturing those bodies hold their writer lock through capture.
+    pub(crate) fn selected_relative_paths_from(fs: &dyn Fs) -> MidgeResult<Vec<String>> {
+        let (head, _) = load_selected_head(fs)?;
+        Ok(relative_paths(&head))
     }
 
     /// Return the selected base payload and each selected logical append.
@@ -842,8 +852,59 @@ fn validate_identifier(identifier: &str) -> MidgeResult<()> {
     Ok(())
 }
 
+/// Validate the path of an immutable FORMAT 10 body in a remote descriptor.
+/// The selected HEAD additionally checks the exact referenced object set.
+pub(crate) fn closure_path_parts(path: &str) -> MidgeResult<(&str, &str)> {
+    let invalid = || MidgeError::Corruption("invalid FORMAT 10 metadata body path".into());
+    let (generation, body) = path
+        .strip_prefix("metadata/generations/")
+        .and_then(|path| path.split_once('/'))
+        .ok_or_else(invalid)?;
+    validate_identifier(generation)?;
+    if matches!(body, "manifest/base" | "intent/base") {
+        return Ok((generation, body));
+    }
+    let (stream, segment) = body.split_once('/').ok_or_else(invalid)?;
+    let segment = segment.strip_suffix(".seg").ok_or_else(invalid)?;
+    if !matches!(stream, "manifest" | "intent")
+        || segment.split('-').count() != 3
+        || !segment.split('-').all(|number| {
+            number.len() == 20
+                && number.bytes().all(|byte| byte.is_ascii_digit())
+                && number.parse::<u64>().is_ok_and(|number| number != 0)
+        })
+    {
+        return Err(invalid());
+    }
+    Ok((generation, body))
+}
+
 fn object_path(generation: &str, relative: &str) -> String {
     format!("metadata/generations/{generation}/{relative}")
+}
+
+fn relative_paths(head: &HeadBody) -> Vec<String> {
+    let mut paths = vec![HEAD_PATH.to_owned()];
+    for selected in [&head.manifest, &head.intent] {
+        paths.push(object_path(&head.generation, &selected.base.name));
+        paths.extend(
+            selected
+                .segments
+                .iter()
+                .map(|object| object_path(&head.generation, &object.name)),
+        );
+    }
+    paths
+}
+
+fn load_selected_head(fs: &dyn Fs) -> MidgeResult<(HeadBody, [u8; 32])> {
+    let bytes = read_bounded(fs, HEAD_PATH, MAX_HEAD_BYTES as u64, "FORMAT 10 head")
+        .map_err(|error| recovery_error("read FORMAT 10 head", error))?;
+    let (head, digest) = decode_head(&bytes)?;
+    validate_head(&head)?;
+    verify_stream(fs, &head.generation, Stream::Manifest, &head.manifest)?;
+    verify_stream(fs, &head.generation, Stream::Intent, &head.intent)?;
+    Ok((head, digest))
 }
 
 fn parent_path(path: &str) -> String {
@@ -1329,9 +1390,13 @@ fn verify_object(
     let path = object_path(generation, &object.name);
     let bytes = read_bounded(fs, &path, MAX_OBJECT_BYTES, "selected FORMAT 10 object")
         .map_err(|error| recovery_error("read selected FORMAT 10 object", error))?;
+    verify_object_bytes(stream, object, &bytes)
+}
+
+fn verify_object_bytes(stream: Stream, object: &ObjectRef, bytes: &[u8]) -> MidgeResult<()> {
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != object.len
-        || crc32c::crc32c(&bytes) != object.crc32c
-        || <[u8; 32]>::from(sha2::Sha256::digest(&bytes)) != object.sha256
+        || crc32c::crc32c(bytes) != object.crc32c
+        || <[u8; 32]>::from(sha2::Sha256::digest(bytes)) != object.sha256
     {
         return Err(MidgeError::Corruption(
             "selected FORMAT 10 object does not match HEAD".into(),
