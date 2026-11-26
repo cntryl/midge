@@ -25,6 +25,8 @@
 //! Higher layers (SST, WAL, storage) depend on this via trait objects:
 
 mod buffered_read;
+#[cfg(any(test, feature = "internal-testing"))]
+mod conformance_tests;
 mod durable_dir;
 mod location;
 pub mod mock;
@@ -34,8 +36,8 @@ pub mod staging;
 pub mod stream;
 mod subdirectory;
 pub mod traits;
-#[cfg(test)]
-pub(crate) mod transient_read;
+#[cfg(any(test, feature = "internal-testing"))]
+pub mod transient_read;
 mod whole_file;
 
 pub(crate) use location::FsLocation;

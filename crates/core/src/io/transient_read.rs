@@ -6,9 +6,9 @@ use super::traits::{
 use bytes::Bytes;
 
 /// Wraps a real filesystem and fails every read that reaches `fail_from`.
-pub(crate) struct TransientReadFs {
-    pub(crate) inner: super::RealFs,
-    pub(crate) fail_from: u64,
+pub struct TransientReadFs {
+    pub inner: super::RealFs,
+    pub fail_from: u64,
 }
 
 struct TransientReadFile<'a> {

@@ -2,5 +2,5 @@
 //! 1b). Test support only: compiled for unit tests and the `internal-testing`
 //! feature, never into production builds.
 
-pub(crate) mod clock;
-pub(crate) mod crash_fs;
+pub mod clock;
+pub mod crash_fs;
