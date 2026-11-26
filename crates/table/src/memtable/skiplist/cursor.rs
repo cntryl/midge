@@ -142,7 +142,7 @@ impl SkipList {
 
     /// First node whose key is at or after `key`, or null.
     fn successor(&self, key: &[u8]) -> *mut Node {
-        let mut preds: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
+        let mut preds = [self.head.as_ref(); MAX_LEVEL];
         let mut succs: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
         self.find(key, &mut preds, &mut succs);
         succs[0]
@@ -150,14 +150,14 @@ impl SkipList {
 
     /// Last node whose key is before `key`, or null when none precedes it.
     fn predecessor(&self, key: &[u8]) -> *mut Node {
-        let mut preds: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
+        let mut preds = [self.head.as_ref(); MAX_LEVEL];
         let mut succs: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
         self.find(key, &mut preds, &mut succs);
         let pred = preds[0];
-        if ptr::eq(pred, ptr::from_ref(self.head.as_ref())) {
+        if ptr::eq(pred, self.head.as_ref()) {
             ptr::null_mut()
         } else {
-            pred
+            ptr::from_ref(pred).cast_mut()
         }
     }
 

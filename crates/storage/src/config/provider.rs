@@ -1200,7 +1200,7 @@ mod tests {
         ] {
             assert!(
                 !output.contains(secret),
-                "provider Debug output leaked configured credential {secret:?}: {output}"
+                "provider Debug output leaked a credential"
             );
         }
         assert!(output.contains("https://endpoint.example"));

@@ -251,13 +251,13 @@ impl SkipList {
     ///
     /// Fills `preds` and `succs` arrays such that, at each level `l`,
     ///   preds[l].key < key <= succs[l].key   (when they exist).
-    fn find(
-        &self,
+    fn find<'list>(
+        &'list self,
         key: &[u8],
-        preds: &mut [*mut Node; MAX_LEVEL],
+        preds: &mut [&'list Node; MAX_LEVEL],
         succs: &mut [*mut Node; MAX_LEVEL],
     ) {
-        let mut pred = ptr::from_ref(self.head.as_ref()).cast_mut();
+        let mut pred = self.head.as_ref();
 
         // Approximate top level is enough for search.
         let mut level = self.top_level.load(AO::Relaxed);
@@ -265,17 +265,16 @@ impl SkipList {
         while level > 0 {
             let l = level - 1;
 
-            // SAFETY: published nodes live until exclusive list drop.
-            let pred_ref = unsafe { &*pred };
-            let mut curr = pred_ref.link(l).load(AO::Acquire);
+            let mut curr = pred.link(l).load(AO::Acquire);
 
             // Advance while current.key < target.
             // SAFETY: `curr` was loaded with Acquire ordering,
-            // so if non-null it points to a valid, published Node.
+            // so if non-null it points to a published node that lives until
+            // exclusive list drop.
             while let Some(curr_ref) = unsafe { curr.as_ref() } {
                 match Self::cmp_key(&curr_ref.key, key) {
                     Ordering::Less => {
-                        pred = curr;
+                        pred = curr_ref;
                         curr = curr_ref.link(l).load(AO::Acquire);
                     }
                     _ => break,
@@ -479,7 +478,7 @@ impl SkipList {
             exp,
             op,
         } = version;
-        let mut preds: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
+        let mut preds = [self.head.as_ref(); MAX_LEVEL];
         let mut succs: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
 
         // Initial search.
@@ -513,8 +512,7 @@ impl SkipList {
                 }
             }
 
-            // SAFETY: preds[0] was set by find() and is a valid published pointer.
-            let level0_pred = unsafe { &*preds[0] };
+            let level0_pred = preds[0];
             let level0_succ = succs[0];
 
             // Build new node with first version.
@@ -561,8 +559,7 @@ impl SkipList {
         // Stage 2: best-effort link higher levels (1..node_level-1).
         for l in 1..node_level {
             loop {
-                // SAFETY: preds[l] was set by find() and remains live.
-                let pred = unsafe { &*preds[l] };
+                let pred = preds[l];
                 let succ = succs[l];
 
                 // SAFETY: new_ptr was successfully published at level zero and
@@ -714,7 +711,7 @@ impl SkipList {
     ) -> Vec<(Bytes, Bytes)> {
         // Find starting point.
         let start_key = start.unwrap_or(&[]);
-        let mut preds: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
+        let mut preds = [self.head.as_ref(); MAX_LEVEL];
         let mut succs: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
         self.find(start_key, &mut preds, &mut succs);
 
@@ -756,7 +753,7 @@ impl SkipList {
         snapshot_seq: u64,
     ) -> Vec<Bytes> {
         let start_key = start.unwrap_or(&[]);
-        let mut preds: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
+        let mut preds = [self.head.as_ref(); MAX_LEVEL];
         let mut succs: [*mut Node; MAX_LEVEL] = [ptr::null_mut(); MAX_LEVEL];
         self.find(start_key, &mut preds, &mut succs);
 
@@ -1053,7 +1050,8 @@ mod tests {
         let node = list.find_node(&key);
 
         // Assert
-        let node = unsafe { &*node };
+        // SAFETY: Any non-null result is a published node held by the list.
+        let node = unsafe { node.as_ref() }.expect("the inserted node is present");
         assert_eq!(node.tower.len(), expected_height - 1);
         assert!(node.tower.len() < MAX_LEVEL - 1 || expected_height == MAX_LEVEL);
     }
