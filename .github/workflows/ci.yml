@@ -13,6 +13,9 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: 0
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -22,8 +25,6 @@ jobs:
     name: Core (ubuntu-latest)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      CARGO_INCREMENTAL: 0
 
     steps:
       - name: Checkout repository
@@ -57,6 +58,23 @@ jobs:
 
       - name: Test
         run: cargo test --locked --workspace --features failpoints
+
+  fault-injection:
+    name: Serial fault injection
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Update Rust toolchain
+        run: rustup update stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci-fault-injection"
 
       - name: Fault injection tests
         run: cargo test --locked --test fault_injection --features failpoints -- --test-threads=1
