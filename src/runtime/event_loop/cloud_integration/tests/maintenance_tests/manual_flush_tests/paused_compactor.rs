@@ -1,7 +1,7 @@
 use super::*;
-use crate::common::resource_budget::ResourceBudget;
-use crate::sst::traits::{DynSstWriter, SstReaderExt};
-use crate::sst::SstFactory;
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_table::sst::traits::{DynSstWriter, SstReaderExt};
+use cntryl_midge_table::sst::SstFactory;
 
 struct FinalizeGate {
     reached: crossbeam::channel::Sender<()>,
@@ -25,7 +25,7 @@ impl Drop for ComputeRelease {
 }
 
 pub(super) fn install(el: &mut EventLoop) -> (ComputeRelease, crossbeam::channel::Receiver<()>) {
-    let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+    let reads = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&el.state.fs),
         el.actors
             .cloud_coordinator
@@ -38,7 +38,7 @@ pub(super) fn install(el: &mut EventLoop) -> (ComputeRelease, crossbeam::channel
     let delegate = Arc::new(
         crate::runtime::event_loop::resources::compaction_sst_factory(
             reads,
-            crate::codec::CompressionPolicy::default(),
+            cntryl_midge_core::codec::CompressionPolicy::default(),
         ),
     );
     let (reached, arrived) = crossbeam::channel::bounded(1);
@@ -69,7 +69,7 @@ impl PausedFactory {
 }
 
 impl SstFactory for PausedFactory {
-    fn output_fs(&self) -> Arc<dyn crate::io::Fs> {
+    fn output_fs(&self) -> Arc<dyn cntryl_midge_core::io::Fs> {
         self.delegate.output_fs()
     }
 

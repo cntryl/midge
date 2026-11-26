@@ -1,4 +1,4 @@
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::compaction::LeveledCompactionConfig;
 
 /// Leveled-compaction level sizing. Defaults match the engine's built-in

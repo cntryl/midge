@@ -1,7 +1,7 @@
-use crate::common::{MidgeError, MidgeResult};
-use crate::config::{EngineHealth, RecoveryPolicy};
-use crate::io::{Fs, FsError, FsPath, OpenMode, OpenOptions};
-use crate::types::StorageVerificationReport;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_durability::RecoveryPolicy;
+use cntryl_midge_core::io::{Fs, FsError, FsPath, OpenMode, OpenOptions};
+use cntryl_midge_core::types::{EngineHealth, StorageVerificationReport};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -72,7 +72,7 @@ impl StorageVerifier {
         path: &Path,
     ) -> MidgeResult<StorageVerificationReport> {
         let root = super::startup::existing_host_root(path)?;
-        let store = crate::storage::simulated::SimulatedCloud::locate(
+        let store = cntryl_midge_storage::simulated::SimulatedCloud::locate(
             root.as_ref(),
             None,
             OFFLINE_OBJECT_TIMEOUT,
@@ -81,12 +81,12 @@ impl StorageVerifier {
         .ok_or_else(|| {
             MidgeError::Corruption("simulated cloud WAL publication catalog is missing".into())
         })?;
-        if crate::metadata::format::is_format_10(root.as_ref())? {
+        if cntryl_midge_durability::metadata::format::is_format_10(root.as_ref())? {
             Self::verify_simulated_cloud_format_10_metadata(&root, &store)?;
         }
-        let store: Arc<dyn crate::storage::StorageBackend> = store;
+        let store: Arc<dyn cntryl_midge_storage::StorageBackend> = store;
         Self::verify_simulated_cloud_wal_catalog(&store)?;
-        let sst_fs: Arc<dyn Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+        let sst_fs: Arc<dyn Fs> = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
             Arc::clone(&root),
             store,
             OFFLINE_OBJECT_TIMEOUT,
@@ -96,15 +96,15 @@ impl StorageVerifier {
 
     fn verify_simulated_cloud_format_10_metadata(
         root: &Arc<dyn Fs>,
-        store: &Arc<dyn crate::storage::inventory::ObjectStore>,
+        store: &Arc<dyn cntryl_midge_storage::inventory::ObjectStore>,
     ) -> MidgeResult<()> {
-        let cloud = crate::storage::cloud::CloudStorage::from_object_store(
+        let cloud = cntryl_midge_storage::cloud::CloudStorage::from_object_store(
             Arc::clone(store),
             OFFLINE_OBJECT_TIMEOUT,
         );
-        let deadline = crate::common::OperationDeadline::from_budget(OFFLINE_OBJECT_TIMEOUT);
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(OFFLINE_OBJECT_TIMEOUT);
         let selected =
-            crate::lease::cloud::read_active_format_10_backup_generation(&cloud, &deadline)
+            cntryl_midge_durability::lease::cloud::read_active_format_10_backup_generation(&cloud, &deadline)
                 .map_err(|error| {
                     MidgeError::Corruption(format!("invalid CloudSim FORMAT 10 gate: {error}"))
                 })?;
@@ -120,19 +120,19 @@ impl StorageVerifier {
         crate::runtime::IntentPersistence::validate_cloud_format_10_bodies(&cloud_bodies)?;
 
         let mut local_bodies = std::collections::BTreeMap::from([(
-            crate::metadata::files::FORMAT.to_string(),
+            cntryl_midge_durability::metadata::files::FORMAT.to_string(),
             b"midge-format-version=10\n".to_vec(),
         )]);
         for path in
-            crate::metadata::local_authority::LocalMetadataAuthority::selected_relative_paths_from(
+            cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::selected_relative_paths_from(
                 root.as_ref(),
             )?
         {
-            let bytes = crate::io::read_all(root.as_ref(), &FsPath::new(&path))
+            let bytes = cntryl_midge_core::io::read_all(root.as_ref(), &FsPath::new(&path))
                 .map_err(FsError::into_midge)?;
             local_bodies.insert(path, bytes.to_vec());
         }
-        crate::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(
+        cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(
             &local_bodies,
         )?;
         if local_bodies != cloud_bodies {
@@ -150,7 +150,7 @@ impl StorageVerifier {
         }
 
         let rechecked =
-            crate::lease::cloud::read_active_format_10_backup_generation(&cloud, &deadline)
+            cntryl_midge_durability::lease::cloud::read_active_format_10_backup_generation(&cloud, &deadline)
                 .map_err(|error| {
                     MidgeError::Corruption(format!(
                         "CloudSim FORMAT 10 gate changed during verification: {error}"
@@ -166,25 +166,25 @@ impl StorageVerifier {
 
     /// Read one whole object from an offline store; `None` when absent.
     fn read_offline_object(
-        store: &Arc<dyn crate::storage::StorageBackend>,
+        store: &Arc<dyn cntryl_midge_storage::StorageBackend>,
         key: &str,
     ) -> MidgeResult<Option<Vec<u8>>> {
-        let object = crate::storage::HybridStorage::read_control_from_backend(
+        let object = cntryl_midge_storage::HybridStorage::read_control_from_backend(
             store,
             key,
-            &crate::common::resource_budget::ResourceBudget::new(usize::MAX),
+            &cntryl_midge_core::common::resource_budget::ResourceBudget::new(usize::MAX),
             OFFLINE_OBJECT_TIMEOUT,
-            &crate::common::OperationDeadline::unbounded(),
+            &cntryl_midge_core::common::OperationDeadline::unbounded(),
         )?;
         Ok(object.map(|object| object.bytes().to_vec()))
     }
 
     fn verify_simulated_cloud_wal_catalog(
-        store: &Arc<dyn crate::storage::StorageBackend>,
+        store: &Arc<dyn cntryl_midge_storage::StorageBackend>,
     ) -> MidgeResult<()> {
         let candidates = [
-            crate::wal::cloud_catalog::OBJECT_KEY,
-            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
         ];
         let mut decoded_catalog = None;
         let mut saw_catalog = false;
@@ -192,7 +192,7 @@ impl StorageVerifier {
             if let Some(bytes) = Self::read_offline_object(store, key)? {
                 saw_catalog = true;
                 if let Ok(catalog) =
-                    crate::wal::cloud_catalog::WalPublicationCatalog::decode(&bytes)
+                    cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(&bytes)
                 {
                     decoded_catalog = Some(catalog);
                     break;
@@ -238,11 +238,11 @@ impl StorageVerifier {
 
 fn verify_manifest_sst(
     fs: &Arc<dyn Fs>,
-    file_meta: &crate::metadata::FileMeta,
-    deadline: Option<&crate::common::OperationDeadline>,
+    file_meta: &cntryl_midge_durability::metadata::FileMeta,
+    deadline: Option<&cntryl_midge_core::common::OperationDeadline>,
 ) -> MidgeResult<(u64, u64)> {
     ensure_verification_deadline(deadline)?;
-    let name = crate::cloud_layout::PersistedSstName::parse(&file_meta.name)?;
+    let name = cntryl_midge_core::cloud_layout::PersistedSstName::parse(&file_meta.name)?;
     let relative = name.join_under(Path::new("sst"));
     let path = relative.to_str().ok_or_else(|| {
         MidgeError::Corruption("persisted SST path is not valid UTF-8".to_string())
@@ -269,15 +269,15 @@ fn verify_manifest_sst(
         .map_err(FsError::into_midge)?;
     // `midge verify` states a verdict about the database rather than deciding
     // whether to keep going, so every proof the manifest can carry is required.
-    crate::sst::identity::SstIdentity::of_file(file.as_ref(), actual_len, deadline)?
+    cntryl_midge_table::sst::identity::SstIdentity::of_file(file.as_ref(), actual_len, deadline)?
         .verify_against(
             file_meta.expected_sst(),
             None,
-            crate::sst::identity::ProofPolicy::Required,
+            cntryl_midge_table::sst::identity::ProofPolicy::Required,
         )
         .map_err(|mismatch| MidgeError::Corruption(mismatch.to_string()))?;
 
-    let reader = crate::sst::fs::SstFileIo::open(path, Arc::clone(fs)).map_err(|error| {
+    let reader = cntryl_midge_table::sst::fs::SstFileIo::open(path, Arc::clone(fs)).map_err(|error| {
         if matches!(error, MidgeError::CompatibilityError(_)) {
             return error;
         }
@@ -306,19 +306,19 @@ fn verify_manifest_sst(
         expected.smallest_key = None;
         expected.largest_key = None;
     }
-    crate::sst::identity::verify_summary_against(
+    cntryl_midge_table::sst::identity::verify_summary_against(
         &stats.summary,
         expected,
-        crate::sst::identity::ProofPolicy::Required,
+        cntryl_midge_table::sst::identity::ProofPolicy::Required,
     )
     .map_err(|mismatch| MidgeError::Corruption(mismatch.to_string()))?;
     Ok((stats.size_bytes, stats.data_blocks))
 }
 
 fn ensure_verification_deadline(
-    deadline: Option<&crate::common::OperationDeadline>,
+    deadline: Option<&cntryl_midge_core::common::OperationDeadline>,
 ) -> MidgeResult<()> {
-    if deadline.is_some_and(crate::common::OperationDeadline::is_expired) {
+    if deadline.is_some_and(cntryl_midge_core::common::OperationDeadline::is_expired) {
         return Err(MidgeError::Timeout(
             "storage verification deadline expired".into(),
         ));
@@ -352,11 +352,11 @@ fn verify_storage_root(
     db_path: &Path,
     runtime_health: Option<EngineHealth>,
     sst_fs: Option<&Arc<dyn Fs>>,
-    deadline: Option<&crate::common::OperationDeadline>,
+    deadline: Option<&cntryl_midge_core::common::OperationDeadline>,
 ) -> MidgeResult<StorageVerificationReport> {
-    crate::metadata::validate_format_marker(fs.as_ref(), db_path)?;
+    cntryl_midge_durability::metadata::validate_format_marker(fs.as_ref(), db_path)?;
     let manifest =
-        crate::metadata::ManifestPersistence::load_with_fs_and_policy(fs, RecoveryPolicy::Strict)
+        cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(fs, RecoveryPolicy::Strict)
             .map_err(MidgeError::RecoveryFailed)?;
     let intents =
         crate::runtime::IntentPersistence::load_with_fs_and_policy(fs, RecoveryPolicy::Strict)
@@ -371,25 +371,25 @@ fn verify_storage_root(
         data_blocks_verified = data_blocks_verified.saturating_add(data_blocks);
     }
 
-    let wal: Arc<dyn crate::io::ReadFs> =
-        crate::io::subdirectory(Arc::clone(fs), crate::wal::WAL_DIR);
+    let wal: Arc<dyn cntryl_midge_core::io::ReadFs> =
+        cntryl_midge_core::io::subdirectory(Arc::clone(fs), cntryl_midge_durability::wal::WAL_DIR);
     let wal_stats = crate::runtime::wal_history::WalHistory::read(&wal)
         .and_then(|ledger| {
             let segments =
-                ledger.map_or_else(crate::wal::recovery::ReplaySegments::default, |ledger| {
-                    crate::wal::recovery::ReplaySegments::from_ledger(&ledger, |id| {
-                        crate::wal::segment_key(id)
+                ledger.map_or_else(cntryl_midge_durability::wal::recovery::ReplaySegments::default, |ledger| {
+                    cntryl_midge_durability::wal::recovery::ReplaySegments::from_ledger(&ledger, |id| {
+                        cntryl_midge_durability::wal::segment_key(id)
                     })
                 });
-            crate::wal::recovery::validate_wal_with_policy(
+            cntryl_midge_durability::wal::recovery::validate_wal_with_policy(
                 fs.as_ref(),
                 &segments,
-                crate::wal::recovery::ReplayPolicy::Strict,
+                cntryl_midge_durability::wal::recovery::ReplayPolicy::Strict,
                 deadline,
             )
         })
         .map_err(|error| verification_stage_error("WAL verification failed", error))?;
-    let manifest_epoch = crate::metadata::journal::highest_edit_id_with_fs(fs)
+    let manifest_epoch = cntryl_midge_durability::metadata::journal::highest_edit_id_with_fs(fs)
         .map_err(|error| verification_stage_error("manifest epoch failed", error))?
         .max(manifest.edit_checkpoint_id);
 
@@ -591,11 +591,11 @@ pub(super) fn verify_storage_online(
     }
 
     let (result_tx, result_rx) = crossbeam::channel::bounded(1);
-    let deadline = crate::common::OperationDeadline::from_budget(remaining);
+    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(remaining);
     let worker = std::thread::Builder::new()
         .name("midge-storage-verification".to_string())
         .spawn(move || {
-            crate::failpoints::fail_point!("midge::verification::after_barrier_acquired");
+            cntryl_midge_core::failpoints::fail_point!("midge::verification::after_barrier_acquired");
             let mut result = verify_storage_root(
                 &root,
                 &db_path,
@@ -633,10 +633,10 @@ pub(super) fn verify_storage_online(
 #[cfg(test)]
 mod tests {
     use super::StorageVerifier;
-    use crate::io::{Durability, File, FsError, FsResult};
-    use crate::metadata::{FileMeta, Manifest, ManifestPersistence};
-    use crate::sst::{FsSstFactoryIo, SstFactory};
-    use crate::types::EntryType;
+    use cntryl_midge_core::io::{Durability, File, FsError, FsResult};
+    use cntryl_midge_durability::metadata::{FileMeta, Manifest, ManifestPersistence};
+    use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory};
+    use cntryl_midge_core::types::EntryType;
     use bytes::Bytes;
     use std::sync::{Arc, Mutex};
 
@@ -644,17 +644,17 @@ mod tests {
     /// onto the one before whatever its object's header links, as both
     /// catalog copies of the simulated cloud `store`.
     fn write_catalog_listing(store: &std::path::Path, segments: &[(u64, Vec<u8>)]) {
-        let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(7).unwrap();
+        let mut catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::empty(7).unwrap();
         for (segment_id, bytes) in segments {
-            let link = crate::wal::format::segment::footer_link(bytes)
+            let link = cntryl_midge_durability::wal::format::segment::footer_link(bytes)
                 .unwrap()
                 .expect("a sealed segment");
             assert_eq!(link.id, *segment_id);
-            let entry = crate::wal::cloud_catalog::CatalogEntry::describing(
-                &crate::wal::cloud_segment::SegmentValidation {
+            let entry = cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::describing(
+                &cntryl_midge_durability::wal::cloud_segment::SegmentValidation {
                     writer_epoch: 7,
                     prev: catalog.head(),
-                    facts: crate::wal::format::segment::sealed_footer(bytes)
+                    facts: cntryl_midge_durability::wal::format::segment::sealed_footer(bytes)
                         .unwrap()
                         .unwrap()
                         .sealed_facts(),
@@ -668,8 +668,8 @@ mod tests {
         }
         let encoded = catalog.encode().unwrap();
         for key in [
-            crate::wal::cloud_catalog::OBJECT_KEY,
-            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
         ] {
             let path = store.join(key);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -683,38 +683,38 @@ mod tests {
         // links another segment 1.
         let directory = tempfile::tempdir().unwrap();
         let put = |seq| {
-            crate::wal::WalRecord::new(
-                crate::wal::WalOpKind::Put,
+            cntryl_midge_durability::wal::WalRecord::new(
+                cntryl_midge_durability::wal::WalOpKind::Put,
                 Bytes::from_static(b"key"),
                 Some(Bytes::from_static(b"value")),
                 seq,
             )
         };
-        let (first, _) = crate::wal::format::segment::SegmentBuilder::new(
+        let (first, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
             1,
             7,
-            crate::wal::format::ChainLink::GENESIS,
+            cntryl_midge_durability::wal::format::ChainLink::GENESIS,
         )
         .record(&put(1))
         .seal();
-        let stranger = crate::wal::format::ChainLink {
+        let stranger = cntryl_midge_durability::wal::format::ChainLink {
             id: 1,
             last_seq: 1,
             digest: [0x5a; 16],
         };
-        let (second, _) = crate::wal::format::segment::SegmentBuilder::new(2, 7, stranger)
+        let (second, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(2, 7, stranger)
             .record(&put(2))
             .seal();
         write_catalog_listing(directory.path(), &[(1, first), (2, second)]);
-        let store: Arc<dyn crate::storage::StorageBackend> =
-            Arc::new(crate::storage::filesystem::FileSystem::new(directory.path()).unwrap());
+        let store: Arc<dyn cntryl_midge_storage::StorageBackend> =
+            Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(directory.path()).unwrap());
 
         // Act
         let result = StorageVerifier::verify_simulated_cloud_wal_catalog(&store);
 
         // Assert
         assert!(
-            matches!(result, Err(crate::common::MidgeError::Corruption(_))),
+            matches!(result, Err(cntryl_midge_core::common::MidgeError::Corruption(_))),
             "{result:?}"
         );
     }
@@ -730,7 +730,7 @@ mod tests {
         // Assert
         assert!(matches!(
             result,
-            Err(crate::common::MidgeError::NotSupported(_))
+            Err(cntryl_midge_core::common::MidgeError::NotSupported(_))
         ));
     }
 
@@ -748,7 +748,7 @@ mod tests {
         }
     }
 
-    impl crate::io::ReadFile for RecordingFile {
+    impl cntryl_midge_core::io::ReadFile for RecordingFile {
         fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
             self.read_lengths
                 .lock()
@@ -791,22 +791,22 @@ mod tests {
     }
 
     fn create_verification_fixture() -> VerificationFixture {
-        create_verification_fixture_with_compression(crate::codec::CompressionPolicy::default())
+        create_verification_fixture_with_compression(cntryl_midge_core::codec::CompressionPolicy::default())
     }
 
     fn create_verification_fixture_with_compression(
-        compression: crate::codec::CompressionPolicy,
+        compression: cntryl_midge_core::codec::CompressionPolicy,
     ) -> VerificationFixture {
         let temp_dir = tempfile::tempdir().expect("create verification directory");
         let db_path = temp_dir.path().to_path_buf();
-        crate::metadata::ensure_or_create_format_marker(
-            &crate::io::real::test_root(&db_path),
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(
+            &cntryl_midge_core::io::real::test_root(&db_path),
             &db_path,
         )
         .expect("create format marker");
         std::fs::create_dir_all(db_path.join("sst")).expect("create SST directory");
 
-        let factory = FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 96)
+        let factory = FsSstFactoryIo::new(Arc::new(cntryl_midge_core::io::MockFs::new()), 96)
             .with_compression_policy(compression);
         let mut writer = factory.create().expect("create SST writer");
         for index in 0..32_u64 {
@@ -823,7 +823,7 @@ mod tests {
                 .expect("append SST entry");
         }
         let bytes = writer.finish_bytes().expect("finish SST bytes");
-        let sst_name = crate::cloud_layout::file_name(0, 0, 1);
+        let sst_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
         let sst_path = db_path.join("sst").join(&sst_name);
         std::fs::write(&sst_path, &bytes).expect("write SST fixture");
 
@@ -860,7 +860,7 @@ mod tests {
         let file = RecordingFile::new(bytes.clone());
 
         // Act
-        let identity = crate::sst::identity::SstIdentity::of_file(
+        let identity = cntryl_midge_table::sst::identity::SstIdentity::of_file(
             &file,
             u64::try_from(bytes.len()).expect("test length fits u64"),
             None,
@@ -881,8 +881,8 @@ mod tests {
         // Arrange: no SSTs, so only the WAL scan can observe the deadline.
         let temp_dir = tempfile::tempdir().expect("create verification directory");
         let db_path = temp_dir.path().to_path_buf();
-        crate::metadata::ensure_or_create_format_marker(
-            &crate::io::real::test_root(&db_path),
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(
+            &cntryl_midge_core::io::real::test_root(&db_path),
             &db_path,
         )
         .expect("create format marker");
@@ -890,23 +890,23 @@ mod tests {
         std::fs::create_dir_all(db_path.join("wal")).expect("create WAL directory");
         let mut wal = Vec::new();
         for sequence in 1..=64_u64 {
-            let record = crate::wal::WalRecord::new(
-                crate::wal::WalOpKind::Put,
+            let record = cntryl_midge_durability::wal::WalRecord::new(
+                cntryl_midge_durability::wal::WalOpKind::Put,
                 bytes::Bytes::from(format!("key-{sequence}")),
                 Some(bytes::Bytes::from_static(b"value")),
                 sequence,
             );
-            let payload = crate::wal::encoding::encode(&record).expect("encode WAL record");
-            crate::wal::frame::append_frame(&mut wal, &payload).expect("frame WAL record");
+            let payload = cntryl_midge_durability::wal::encoding::encode(&record).expect("encode WAL record");
+            cntryl_midge_durability::wal::frame::append_frame(&mut wal, &payload).expect("frame WAL record");
         }
         std::fs::write(
-            db_path.join("wal").join(crate::wal::segment_file_name(1)),
+            db_path.join("wal").join(cntryl_midge_durability::wal::segment_file_name(1)),
             wal,
         )
         .expect("write WAL");
         crate::runtime::wal_history::fixture::record_at(&db_path, &[], 1)
             .expect("record WAL history");
-        let expired = crate::common::OperationDeadline::from_budget(std::time::Duration::ZERO);
+        let expired = cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::ZERO);
 
         // Act
         let root = super::super::startup::existing_host_root(&db_path).expect("host root");
@@ -914,7 +914,7 @@ mod tests {
 
         // Assert
         assert!(
-            matches!(result, Err(crate::common::MidgeError::Timeout(_))),
+            matches!(result, Err(cntryl_midge_core::common::MidgeError::Timeout(_))),
             "WAL verification must honor the caller deadline: {result:?}"
         );
     }
@@ -952,11 +952,11 @@ mod tests {
                 .join(fixture.sst_path.file_name().unwrap()),
         )
         .expect("move SST into cloud");
-        let local: Arc<dyn crate::io::Fs> =
-            Arc::new(crate::io::RealFs::open_existing(&fixture.db_path).unwrap());
-        let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+        let local: Arc<dyn cntryl_midge_core::io::Fs> =
+            Arc::new(cntryl_midge_core::io::RealFs::open_existing(&fixture.db_path).unwrap());
+        let fs: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
             local,
-            Arc::new(crate::storage::filesystem::FileSystem::new(remote.path()).unwrap()),
+            Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(remote.path()).unwrap()),
             std::time::Duration::from_secs(5),
         ));
         // Act
@@ -973,7 +973,7 @@ mod tests {
     fn should_reject_corrupt_data_block_when_manifest_crc_matches_corrupt_bytes() {
         // Arrange
         let fixture =
-            create_verification_fixture_with_compression(crate::codec::CompressionPolicy::None);
+            create_verification_fixture_with_compression(cntryl_midge_core::codec::CompressionPolicy::None);
         let mut bytes = std::fs::read(&fixture.sst_path).expect("read SST fixture");
         bytes[8] ^= 0x5a;
         std::fs::write(&fixture.sst_path, &bytes).expect("corrupt SST data block");

@@ -1,10 +1,10 @@
 //! Immutable publication of the exact local FORMAT 10 metadata closure.
 
 use super::format10_admission::Format10AdmissionStore;
-use crate::common::resource_budget::ResourceReservation;
-use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
-use crate::lease::CloudMetadataObject;
-use crate::storage::cloud::{BlockingCloud, CloudStorage};
+use cntryl_midge_core::common::resource_budget::ResourceReservation;
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::CloudMetadataObject;
+use cntryl_midge_storage::cloud::{BlockingCloud, CloudStorage};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -17,24 +17,24 @@ pub(crate) struct CapturedFormat10Closure {
 /// Capture the validated selected bytes while the shared manifest writer lock
 /// prevents HEAD and its immutable members from being retired during capture.
 pub(crate) fn capture_selected_format10_closure(
-    fs: &dyn crate::io::Fs,
+    fs: &dyn cntryl_midge_core::io::Fs,
     publication_lock: &crate::runtime::MetadataPublicationLock,
     deadline: &OperationDeadline,
 ) -> MidgeResult<CapturedFormat10Closure> {
     let scope = DeadlineScope::new(*deadline);
-    crate::metadata::journal::with_manifest_writer_view_lock_within(fs, &scope, || {
+    cntryl_midge_durability::metadata::journal::with_manifest_writer_view_lock_within(fs, &scope, || {
         capture_selected_under_writer_lock(fs, publication_lock, deadline)
     })
 }
 
 fn capture_selected_under_writer_lock(
-    fs: &dyn crate::io::Fs,
+    fs: &dyn cntryl_midge_core::io::Fs,
     publication_lock: &crate::runtime::MetadataPublicationLock,
     deadline: &OperationDeadline,
 ) -> MidgeResult<CapturedFormat10Closure> {
-    let mut paths = vec![crate::metadata::files::FORMAT.to_owned()];
+    let mut paths = vec![cntryl_midge_durability::metadata::files::FORMAT.to_owned()];
     paths.extend(
-        crate::metadata::local_authority::LocalMetadataAuthority::selected_relative_paths_from(fs)?,
+        cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::selected_relative_paths_from(fs)?,
     );
     paths.sort();
     paths.dedup();
@@ -45,12 +45,12 @@ fn capture_selected_under_writer_lock(
         DeadlineScope::new(*deadline).check("FORMAT 10 selected closure preflight")?;
         validate_relative_path(&path)?;
         let metadata = fs
-            .metadata(&crate::io::FsPath::new(&path))
-            .map_err(crate::io::FsError::into_midge)?;
-        let maximum = if path == crate::metadata::local_authority::HEAD_PATH {
-            crate::metadata::local_authority::MAX_HEAD_BYTES as u64
+            .metadata(&cntryl_midge_core::io::FsPath::new(&path))
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?;
+        let maximum = if path == cntryl_midge_durability::metadata::local_authority::HEAD_PATH {
+            cntryl_midge_durability::metadata::local_authority::MAX_HEAD_BYTES as u64
         } else {
-            crate::metadata::local_authority::MAX_CLOSURE_BYTES
+            cntryl_midge_durability::metadata::local_authority::MAX_CLOSURE_BYTES
         };
         if metadata.is_dir || metadata.len > maximum {
             return Err(MidgeError::ResourceLimit(format!(
@@ -59,7 +59,7 @@ fn capture_selected_under_writer_lock(
         }
         total = total
             .checked_add(metadata.len)
-            .filter(|length| *length <= crate::metadata::local_authority::MAX_CLOSURE_BYTES)
+            .filter(|length| *length <= cntryl_midge_durability::metadata::local_authority::MAX_CLOSURE_BYTES)
             .ok_or_else(|| {
                 MidgeError::ResourceLimit(
                     "FORMAT 10 selected closure exceeds its byte bound".into(),
@@ -72,9 +72,9 @@ fn capture_selected_under_writer_lock(
     for (path, expected_len) in expected_lengths {
         DeadlineScope::new(*deadline).check("FORMAT 10 selected closure capture")?;
         let file = fs
-            .open_read(&crate::io::FsPath::new(&path))
-            .map_err(crate::io::FsError::into_midge)?;
-        let actual_len = file.len().map_err(crate::io::FsError::into_midge)?;
+            .open_read(&cntryl_midge_core::io::FsPath::new(&path))
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?;
+        let actual_len = file.len().map_err(cntryl_midge_core::io::FsError::into_midge)?;
         if actual_len != expected_len {
             return Err(MidgeError::Corruption(format!(
                 "FORMAT 10 selected object '{path}' changed during capture"
@@ -82,7 +82,7 @@ fn capture_selected_under_writer_lock(
         }
         let bytes = file
             .read_at(0, actual_len)
-            .map_err(crate::io::FsError::into_midge)?;
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?;
         if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != actual_len {
             return Err(MidgeError::Corruption(format!(
                 "FORMAT 10 selected object '{path}' was short during capture"
@@ -91,7 +91,7 @@ fn capture_selected_under_writer_lock(
         bodies.insert(path, bytes.to_vec());
     }
     let horizon =
-        crate::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(&bodies)?;
+        cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(&bodies)?;
     Ok(CapturedFormat10Closure {
         horizon,
         bodies,
@@ -112,8 +112,8 @@ pub(crate) fn publish_format10_closure(
     reservation: &Arc<ResourceReservation>,
 ) -> MidgeResult<(u64, Vec<CloudMetadataObject>)> {
     let horizon =
-        crate::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(bodies)?;
-    if bodies.is_empty() || bodies.len() > crate::metadata::local_authority::MAX_OBJECTS + 2 {
+        cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::validate_cloud_bodies(bodies)?;
+    if bodies.is_empty() || bodies.len() > cntryl_midge_durability::metadata::local_authority::MAX_OBJECTS + 2 {
         return Err(MidgeError::ResourceLimit(
             "FORMAT 10 metadata closure exceeds its object bound".into(),
         ));
@@ -123,7 +123,7 @@ pub(crate) fn publish_format10_closure(
         |total, body| {
             total
                 .checked_add(u64::try_from(body.len()).unwrap_or(u64::MAX))
-                .filter(|next| *next <= crate::metadata::local_authority::MAX_CLOSURE_BYTES)
+                .filter(|next| *next <= cntryl_midge_durability::metadata::local_authority::MAX_CLOSURE_BYTES)
         },
     );
     if total_bytes.is_none() {
@@ -137,7 +137,7 @@ pub(crate) fn publish_format10_closure(
             .iter()
             .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
             .chain(
-                cut_proof.map(|bytes| (crate::runtime::MetadataCutProof::CLOUD_OBJECT_NAME, bytes)),
+                cut_proof.map(|bytes| (cntryl_midge_durability::metadata::files::CLOUD_CUT_PROOF, bytes)),
             )
     };
     let objects = payloads()
@@ -195,10 +195,10 @@ fn validate_relative_path(path: &str) -> MidgeResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io::{Fs, MockFs, OpenOptions};
-    use crate::lease::SharedGenerationId;
-    use crate::metadata::{codec, Manifest};
-    use crate::storage::cloud::BlockingCloud;
+    use cntryl_midge_core::io::{Fs, MockFs, OpenOptions};
+    use cntryl_midge_durability::lease::SharedGenerationId;
+    use cntryl_midge_durability::metadata::{codec, Manifest};
+    use cntryl_midge_storage::cloud::BlockingCloud;
     use std::time::Duration;
 
     #[test]
@@ -207,29 +207,29 @@ mod tests {
         // Arrange
         let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
         let manifest = codec::encode(codec::MANIFEST, &Manifest::default())?;
-        crate::metadata::local_authority::LocalMetadataAuthority::initialize(
+        cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::initialize(
             Arc::clone(&fs),
             "selected-generation",
             &manifest,
             b"[]",
         )?;
         fs.open(
-            &crate::io::FsPath::new(crate::metadata::files::FORMAT),
+            &cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::FORMAT),
             OpenOptions {
-                mode: crate::io::OpenMode::ReadWrite,
+                mode: cntryl_midge_core::io::OpenMode::ReadWrite,
                 create: true,
                 create_new: true,
                 truncate: false,
             },
         )
-        .map_err(crate::io::FsError::into_midge)?
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .append(bytes::Bytes::from_static(b"midge-format-version=10\n"))
-        .map_err(crate::io::FsError::into_midge)?;
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?;
         let publication_lock = crate::runtime::MetadataPublicationLock::default();
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
         let captured =
             capture_selected_format10_closure(fs.as_ref(), &publication_lock, &deadline)?;
-        let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
+        let backend = Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new());
         let cloud = CloudStorage::new(backend.clone(), "f10-closure-test".into());
         let publication_id = uuid::Uuid::new_v4();
 
@@ -258,12 +258,12 @@ mod tests {
         assert!(!objects
             .iter()
             .any(|object| object.file_name == "manifest.snapshot.json"));
-        let generation = crate::lease::CloudMetadataGeneration {
+        let generation = cntryl_midge_durability::lease::CloudMetadataGeneration {
             id: SharedGenerationId::FIRST,
             manifest_horizon: horizon,
             objects,
         };
-        crate::lease::cloud::validate_metadata_generation(&generation)
+        cntryl_midge_durability::lease::cloud::validate_metadata_generation(&generation)
             .expect("strictly valid FORMAT 10 cloud generation");
         for object in generation.objects {
             let bytes = BlockingCloud::new(&cloud, &deadline)

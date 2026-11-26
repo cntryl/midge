@@ -3,7 +3,7 @@
 //! These tests observe queued requests and response ownership only. The real
 //! compaction pipeline fixtures establish publication and durability behavior.
 
-use crate::common::OperationDeadline;
+use cntryl_midge_core::common::OperationDeadline;
 use crate::runtime::{next_request_id, Runtime, RuntimeHandle, RuntimeMsg, RuntimeResponse};
 use std::thread;
 use std::time::{Duration, Instant};

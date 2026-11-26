@@ -114,19 +114,19 @@ pub(crate) struct RuntimeDiagnostics {
     read_only_snapshot_cache_misses: AtomicU64,
     snapshot_register_count: AtomicU64,
     snapshot_unregister_count: AtomicU64,
-    sst: crate::sst::read_path_metrics::SstReadMetrics,
-    read_amp: crate::sst::ReadAmpMetrics,
+    sst: cntryl_midge_table::sst::read_path_metrics::SstReadMetrics,
+    read_amp: cntryl_midge_table::sst::ReadAmpMetrics,
 }
 
-impl crate::sst::read_path_metrics::SstReadObserver for RuntimeDiagnostics {
-    fn sst_metrics(&self) -> &crate::sst::read_path_metrics::SstReadMetrics {
+impl cntryl_midge_table::sst::read_path_metrics::SstReadObserver for RuntimeDiagnostics {
+    fn sst_metrics(&self) -> &cntryl_midge_table::sst::read_path_metrics::SstReadMetrics {
         &self.sst
     }
 
     fn record_block_cache_lookup(&self, hit: bool) {
         // The per-engine read-path counters already counted this lookup. Only
         // the optional process-wide exporter needs a second observation.
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+        if let Some(telemetry) = cntryl_midge_core::telemetry::Telemetry::global() {
             let metrics = telemetry.metrics();
             if hit {
                 metrics.record_cache_hit();
@@ -141,12 +141,12 @@ impl crate::sst::read_path_metrics::SstReadObserver for RuntimeDiagnostics {
 /// conflicts, cache and cloud WAL activity. Always on, so the runtime metrics
 /// snapshot works without any telemetry setup and never mixes engines.
 #[derive(Debug)]
-struct EngineCounters(Arc<crate::telemetry::Metrics>);
+struct EngineCounters(Arc<cntryl_midge_core::telemetry::Metrics>);
 
 impl Default for EngineCounters {
     fn default() -> Self {
-        Self(Arc::new(crate::telemetry::Metrics::new(
-            &crate::telemetry::TelemetryConfig::default().with_enabled(true),
+        Self(Arc::new(cntryl_midge_core::telemetry::Metrics::new(
+            &cntryl_midge_core::telemetry::TelemetryConfig::default().with_enabled(true),
         )))
     }
 }
@@ -242,20 +242,20 @@ impl RuntimeDiagnostics {
 
     /// Record an operational event for this engine, and mirror it to process
     /// global telemetry when an exporter has been set up.
-    pub(crate) fn record(&self, event: impl Fn(&crate::telemetry::Metrics)) {
+    pub(crate) fn record(&self, event: impl Fn(&cntryl_midge_core::telemetry::Metrics)) {
         event(&self.counters.0);
-        if let Some(telemetry) = crate::telemetry::Telemetry::global() {
+        if let Some(telemetry) = cntryl_midge_core::telemetry::Telemetry::global() {
             event(telemetry.metrics());
         }
     }
 
     /// This engine's operational counters.
-    pub(crate) fn counters(&self) -> crate::telemetry::metrics::MetricsSnapshot {
+    pub(crate) fn counters(&self) -> cntryl_midge_core::telemetry::metrics::MetricsSnapshot {
         self.counters.0.snapshot()
     }
 
     /// Point a component's sink at this engine's counters.
-    pub(crate) fn attach(&self, sink: &crate::telemetry::CounterSink) {
+    pub(crate) fn attach(&self, sink: &cntryl_midge_core::telemetry::CounterSink) {
         sink.attach(Arc::clone(&self.counters.0));
     }
 
@@ -288,7 +288,7 @@ impl RuntimeDiagnostics {
         }
     }
 
-    pub(crate) fn read_amp_metrics(&self) -> &crate::sst::ReadAmpMetrics {
+    pub(crate) fn read_amp_metrics(&self) -> &cntryl_midge_table::sst::ReadAmpMetrics {
         &self.read_amp
     }
 
@@ -317,7 +317,7 @@ impl RuntimeDiagnostics {
     }
 }
 
-impl crate::io::traits::ReadObserver for RuntimeDiagnostics {
+impl cntryl_midge_core::io::traits::ReadObserver for RuntimeDiagnostics {
     fn remote_range_started(&self) {
         self.sst.record_remote_range_started();
     }

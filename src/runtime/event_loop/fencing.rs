@@ -3,25 +3,25 @@ use std::sync::Arc;
 /// Write-authority state owned independently from message dispatch.
 #[derive(Clone)]
 pub struct RuntimeFence {
-    pub(super) lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
+    pub(super) lease_validity: Option<Arc<cntryl_midge_durability::lease::LeaseValidity>>,
     pub(super) lease_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) ddl_authority_ambiguous: bool,
     pub(super) writer_epoch: u64,
-    pub(super) leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
+    pub(super) leader_store: Option<Arc<dyn cntryl_midge_durability::lease::LeaderStore>>,
     pub(super) leader_holder_id: Option<String>,
 }
 
 impl RuntimeFence {
-    pub(super) fn check_health(&self) -> crate::common::MidgeResult<()> {
+    pub(super) fn check_health(&self) -> cntryl_midge_core::common::MidgeResult<()> {
         if self.ddl_authority_ambiguous {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "DDL authority is ambiguous; refusing writes until it is reconciled or the engine is reopened"
                     .into(),
             ));
         }
         if let Some(healthy) = &self.lease_healthy {
             if !healthy.load(std::sync::atomic::Ordering::Acquire) {
-                return Err(crate::common::MidgeError::Fenced(
+                return Err(cntryl_midge_core::common::MidgeError::Fenced(
                     "lease heartbeat reports unhealthy — refusing writes".into(),
                 ));
             }
@@ -42,11 +42,11 @@ impl RuntimeFence {
     /// around every seal and acknowledgement. Local stores retain their lock.
     pub(super) fn validate_within(
         &self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.check_health()?;
         if deadline.is_expired() {
-            return Err(crate::common::MidgeError::Timeout(
+            return Err(cntryl_midge_core::common::MidgeError::Timeout(
                 "operation deadline exhausted before writer lease validation".into(),
             ));
         }
@@ -63,13 +63,13 @@ impl RuntimeFence {
         };
         result.map_err(|error| {
             let error = if deadline.is_bounded() && deadline.is_expired() {
-                crate::common::MidgeError::Timeout(format!(
+                cntryl_midge_core::common::MidgeError::Timeout(format!(
                     "writer lease validation exceeded the operation deadline: {error}"
                 ))
             } else {
                 error.into_validation_error("writer lease validation failed")
             };
-            if matches!(error, crate::common::MidgeError::Fenced(_)) {
+            if matches!(error, cntryl_midge_core::common::MidgeError::Fenced(_)) {
                 if let Some(healthy) = &self.lease_healthy {
                     healthy.store(false, std::sync::atomic::Ordering::Release);
                 }
@@ -85,8 +85,8 @@ impl RuntimeFence {
 #[cfg(test)]
 mod tests {
     use super::RuntimeFence;
-    use crate::common::{MidgeError, OperationDeadline};
-    use crate::lease::{LeaderRecord, LeaderStore, LeaseError};
+    use cntryl_midge_core::common::{MidgeError, OperationDeadline};
+    use cntryl_midge_durability::lease::{LeaderRecord, LeaderStore, LeaseError};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     use std::time::Duration;
@@ -106,7 +106,7 @@ mod tests {
         }
     }
 
-    struct ExpiringLeaderStore(Arc<crate::lease::LeaseValidity>);
+    struct ExpiringLeaderStore(Arc<cntryl_midge_durability::lease::LeaseValidity>);
 
     impl LeaderStore for ExpiringLeaderStore {
         fn acquire_leadership(&self, _: &str) -> Result<LeaderRecord, LeaseError> {
@@ -124,7 +124,7 @@ mod tests {
     #[test]
     fn should_reject_authority_when_provider_validation_outlives_validity() {
         // Arrange
-        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
         validity
             .activate(1, std::time::Instant::now() + Duration::from_mins(1))
             .unwrap();
@@ -197,16 +197,16 @@ mod validity_tests {
 
     #[test]
     fn should_enforce_monotonic_cloud_authority_without_remote_reads() {
-        use crate::lease::PrimaryLease;
+        use cntryl_midge_durability::lease::PrimaryLease;
         // Arrange
-        let backend = Arc::new(crate::storage::cloud::MockCloudBackend::new());
-        let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
+        let backend = Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new());
+        let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
             backend.clone(),
             "db".into(),
         ));
         let directory = tempfile::tempdir().unwrap();
-        let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-            crate::lease::CloudLeaseConfig {
+        let lease = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+            cntryl_midge_durability::lease::CloudLeaseConfig {
                 bucket: "bucket".into(),
                 prefix: "db".into(),
             },
@@ -226,7 +226,7 @@ mod validity_tests {
         };
         backend.clear_history();
         let deadline =
-            crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
+            cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5));
 
         // Act
         for _ in 0..10 {
@@ -237,14 +237,14 @@ mod validity_tests {
 
         // Assert
         assert_eq!(backend.get_downloads(), Vec::<String>::new());
-        assert!(matches!(expired, Err(crate::common::MidgeError::Fenced(_))));
+        assert!(matches!(expired, Err(cntryl_midge_core::common::MidgeError::Fenced(_))));
         assert!(!healthy.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[test]
     fn should_reject_expired_validity_when_cached_health_is_true() {
         // Arrange
-        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
         validity
             .activate(
                 1,
@@ -264,21 +264,21 @@ mod validity_tests {
         // Act
         let result = fence.check_health();
         // Assert
-        assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+        assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Fenced(_))));
     }
 }
 
 #[cfg(test)]
 mod takeover_tests {
     use super::*;
-    use crate::lease::PrimaryLease;
+    use cntryl_midge_durability::lease::PrimaryLease;
 
     #[test]
     fn should_reject_predecessor_when_successor_takes_expired_lease() {
         // Arrange
         let directory = tempfile::tempdir().unwrap();
         let predecessor = Arc::new(
-            crate::lease::FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
+            cntryl_midge_durability::lease::FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
                 directory.path(),
                 false,
                 std::time::Duration::from_secs(2),
@@ -302,7 +302,7 @@ mod takeover_tests {
             .unwrap();
         std::thread::sleep(remaining + std::time::Duration::from_millis(100));
         let successor = Arc::new(
-            crate::lease::FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
+            cntryl_midge_durability::lease::FileSystemLease::new_with_ttl_and_clock_skew_tolerance(
                 directory.path(),
                 false,
                 std::time::Duration::from_secs(2),
@@ -317,7 +317,7 @@ mod takeover_tests {
         let _new_guard = loop {
             match Arc::clone(&successor).try_acquire() {
                 Ok(guard) => break guard,
-                Err(crate::lease::LeaseError::AcquisitionFailed(_))
+                Err(cntryl_midge_durability::lease::LeaseError::AcquisitionFailed(_))
                     if std::time::Instant::now() < takeover_deadline =>
                 {
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -330,7 +330,7 @@ mod takeover_tests {
         let result = fence.check_health();
         // Assert
         assert!(successor.epoch() > predecessor.epoch());
-        assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+        assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Fenced(_))));
         assert_eq!(
             successor
                 .get_leader_store()

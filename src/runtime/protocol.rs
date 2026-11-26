@@ -1,8 +1,8 @@
 //! Runtime messages, responses, and wire-neutral protocol DTOs.
 
-use crate::common::{MidgeError, MidgeResult};
-use crate::types::ConflictPolicy;
-use crate::wal::DurabilityPolicy;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::types::ConflictPolicy;
+use cntryl_midge_durability::wal::DurabilityPolicy;
 use bytes::Bytes;
 use crossbeam::channel::Sender;
 use std::sync::{
@@ -47,7 +47,7 @@ pub struct CompactionPlan {
     pub input_files: Vec<String>,
     pub source_level: u32,
     pub target_level: u32,
-    pub cf_id: crate::types::ColumnFamilyId,
+    pub cf_id: cntryl_midge_core::types::ColumnFamilyId,
 }
 
 /// Simplified file metadata for message passing.
@@ -58,7 +58,7 @@ pub struct FileMeta {
     pub size_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_crc32c: Option<u32>,
-    pub cf_id: crate::types::ColumnFamilyId,
+    pub cf_id: cntryl_midge_core::types::ColumnFamilyId,
     pub smallest_key: Option<Vec<u8>>,
     pub largest_key: Option<Vec<u8>>,
     pub smallest_seq: Option<u64>,
@@ -71,8 +71,8 @@ pub struct FileMeta {
 
 impl FileMeta {
     /// Borrow this entry's recorded proofs for the SST identity checker.
-    pub(crate) fn expected_sst(&self) -> crate::types::ExpectedSst<'_> {
-        crate::types::ExpectedSst {
+    pub(crate) fn expected_sst(&self) -> cntryl_midge_core::types::ExpectedSst<'_> {
+        cntryl_midge_core::types::ExpectedSst {
             name: &self.name,
             size_bytes: self.size_bytes,
             content_crc32c: self.content_crc32c,
@@ -84,7 +84,7 @@ impl FileMeta {
     }
 }
 
-impl From<&FileMeta> for crate::metadata::FileMeta {
+impl From<&FileMeta> for cntryl_midge_durability::metadata::FileMeta {
     fn from(value: &FileMeta) -> Self {
         let FileMeta {
             name,
@@ -116,9 +116,9 @@ impl From<&FileMeta> for crate::metadata::FileMeta {
     }
 }
 
-impl From<&crate::metadata::FileMeta> for FileMeta {
-    fn from(value: &crate::metadata::FileMeta) -> Self {
-        let crate::metadata::FileMeta {
+impl From<&cntryl_midge_durability::metadata::FileMeta> for FileMeta {
+    fn from(value: &cntryl_midge_durability::metadata::FileMeta) -> Self {
+        let cntryl_midge_durability::metadata::FileMeta {
             name,
             level,
             size_bytes,
@@ -172,7 +172,7 @@ mod file_meta_conversion_tests {
         };
 
         // Act
-        let manifest = crate::metadata::FileMeta::from(&runtime);
+        let manifest = cntryl_midge_durability::metadata::FileMeta::from(&runtime);
         let round_trip = FileMeta::from(&manifest);
 
         // Assert
@@ -180,7 +180,7 @@ mod file_meta_conversion_tests {
             serde_json::to_value(&runtime).unwrap(),
             serde_json::to_value(&round_trip).unwrap()
         );
-        assert!(manifest.same_identity(&crate::metadata::FileMeta::from(&round_trip)));
+        assert!(manifest.same_identity(&cntryl_midge_durability::metadata::FileMeta::from(&round_trip)));
         let mut different = manifest.clone();
         different.content_crc32c = Some(0);
         assert!(!manifest.same_identity(&different));
@@ -197,18 +197,18 @@ mod file_meta_conversion_tests {
 #[derive(Debug, Clone)]
 pub enum TransactionOp {
     Put {
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: Bytes,
         value: Bytes,
         ttl_seconds: Option<u64>,
         insert_only: bool,
     },
     Delete {
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: Bytes,
     },
     DeleteRange {
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start_key: Bytes,
         end_key: Bytes,
     },
@@ -235,7 +235,7 @@ pub enum TransactionOp {
 /// guarantee than the ambient conflict policy.
 #[derive(Debug, Clone)]
 pub struct KeyAssertion {
-    pub cf_id: crate::types::ColumnFamilyId,
+    pub cf_id: cntryl_midge_core::types::ColumnFamilyId,
     pub key: Bytes,
 }
 
@@ -267,11 +267,11 @@ pub enum IntentLogEntry {
     /// Seqno allocated
     SeqnoAllocated {
         seqno: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     },
     /// Flush plan created
     FlushPlanned {
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         seqno_range: (u64, u64),
     },
     /// Compaction plan created
@@ -282,14 +282,14 @@ pub enum IntentLogEntry {
     /// Flush output SST is durable and awaiting publication cleanup.
     FlushPublish {
         phase: PublicationPhase,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sequence: u64,
         file_meta: FileMeta,
     },
     /// Compaction output SSTs are durable and awaiting publication cleanup.
     CompactionPublish {
         phase: PublicationPhase,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         removed: Vec<String>,
         added: Vec<FileMeta>,
     },
@@ -297,7 +297,7 @@ pub enum IntentLogEntry {
     /// is a newly created output or a physical deletion obligation.
     MoveSstsPublish {
         phase: PublicationPhase,
-        captured: Vec<crate::metadata::FileMeta>,
+        captured: Vec<cntryl_midge_durability::metadata::FileMeta>,
         target_level: u32,
     },
     /// Manifest updated with new SST
@@ -344,7 +344,7 @@ pub enum RuntimeMsg {
     /// Request memtable flush for a column family.
     FlushMemtable {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     },
 
     // === Compaction Actor ===
@@ -354,7 +354,7 @@ pub enum RuntimeMsg {
         request_id: u64,
         input_ssts: Vec<String>,
         output_ssts: Vec<String>,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
         succeeded: bool,
     },
@@ -401,7 +401,7 @@ pub enum RuntimeMsg {
     /// Persist manifest to disk.
     ManifestPersist {
         request_id: u64,
-        origin: crate::metadata::accounting::Origin,
+        origin: cntryl_midge_durability::metadata::accounting::Origin,
     },
 
     // === Column Family Lifecycle ===
@@ -410,7 +410,7 @@ pub enum RuntimeMsg {
     /// Drop a column family (soft delete).
     ManifestDropColumnFamily {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         /// Explicitly allow committed data still resident in the active
         /// memtable to be discarded. Publication workers are still quiesced
         /// before either safe or destructive drop executes.
@@ -426,7 +426,7 @@ pub enum RuntimeMsg {
         enable_compaction: Option<bool>,
         l0_compaction_trigger: Option<usize>,
         wal_durability_policy: Option<DurabilityPolicy>,
-        wal_batch_config: Option<crate::wal::policy::BatchConfig>,
+        wal_batch_config: Option<cntryl_midge_durability::wal::policy::BatchConfig>,
     },
 
     // === Observability ===
@@ -456,7 +456,7 @@ pub enum RuntimeMsg {
     /// a read snapshot in a single event-loop round-trip.
     BeginTransaction {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     },
 
     // === Control ===
@@ -471,7 +471,7 @@ pub enum RuntimeMsg {
     /// Used by `Engine::commit()` to expose backpressure before accepting writes.
     CheckWriteStall {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     },
 
     /// Block until writes are no longer stalled for `cf_id`.
@@ -480,7 +480,7 @@ pub enum RuntimeMsg {
     /// until a stall-clearing event occurs (e.g. flush completion).
     WaitForWriteStallClear {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     },
 
     /// Best-effort cancel for a previous `WaitForWriteStallClear` request.
@@ -520,7 +520,7 @@ pub enum TestRuntimeMsg {
     /// Memtable flush completed.
     FlushComplete {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sst_name: String,
         sequence: u64,
     },
@@ -538,7 +538,7 @@ pub enum TestRuntimeMsg {
     /// Append record to WAL.
     WalAppend {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: Vec<u8>,
         value: Option<Vec<u8>>,
         ttl_seconds: Option<u64>, // TTL in seconds, None means no expiration
@@ -547,7 +547,7 @@ pub enum TestRuntimeMsg {
     /// Append delete range tombstone to WAL.
     WalAppendDeleteRange {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start_key: Vec<u8>,
         end_key: Vec<u8>,
         durability_policy: Option<DurabilityPolicy>,
@@ -589,10 +589,10 @@ pub enum TestRuntimeMsg {
     /// `durability_waiters` until the frontier advances.
     Read {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64, // Read at this sequence number or earlier.
-        requested_durability: crate::types::ReadDurability, // Durability level requested
+        requested_durability: cntryl_midge_core::types::ReadDurability, // Durability level requested
     },
     /// Scan a range of keys from memtables and SST files.
     ///
@@ -601,11 +601,11 @@ pub enum TestRuntimeMsg {
     /// the scan must not return data with seqno > `local_durable_seq`.
     RangeScan {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64, // Read at this sequence number or earlier.
-        requested_durability: crate::types::ReadDurability, // Durability level requested
+        requested_durability: cntryl_midge_core::types::ReadDurability, // Durability level requested
     },
 
     // === Sequencing ===
@@ -621,7 +621,7 @@ pub enum TestRuntimeMsg {
     /// allowing transactions to execute reads directly without message passing.
     CaptureReadSnapshot {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sequence: u64,
     },
 
@@ -914,7 +914,7 @@ pub enum RuntimeResponse {
     },
     Error {
         request_id: u64,
-        error: crate::common::MidgeError,
+        error: cntryl_midge_core::common::MidgeError,
     },
     #[cfg(test)]
     ReadValue {
@@ -938,35 +938,35 @@ pub enum RuntimeResponse {
     },
     ColumnFamilyCreated {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     },
     ReadAmpMetricsSnapshot {
         request_id: u64,
-        snapshot: crate::types::ReadAmpMetricsSnapshot,
+        snapshot: cntryl_midge_core::types::ReadAmpMetricsSnapshot,
     },
 
     RecoveryMetricsSnapshot {
         request_id: u64,
-        snapshot: crate::types::RecoveryMetricsSnapshot,
+        snapshot: cntryl_midge_core::types::RecoveryMetricsSnapshot,
     },
 
     /// Stable operator-facing runtime metrics snapshot.
     RuntimeMetricsSnapshot {
         request_id: u64,
-        snapshot: Box<crate::types::RuntimeMetricsSnapshot>,
+        snapshot: Box<cntryl_midge_core::types::RuntimeMetricsSnapshot>,
     },
 
     /// Stable operator-facing storage layout snapshot.
     StorageLayoutSnapshot {
         request_id: u64,
-        snapshot: crate::types::StorageLayoutSnapshot,
+        snapshot: cntryl_midge_core::types::StorageLayoutSnapshot,
     },
 
     /// Online verification barrier acquisition acknowledgement.
     StorageVerificationBarrier {
         request_id: u64,
         token: u64,
-        health: crate::config::EngineHealth,
+        health: cntryl_midge_core::types::EngineHealth,
         sequence: u64,
     },
 
@@ -1002,7 +1002,7 @@ pub enum RuntimeResponse {
         enable_compaction: bool,
         l0_compaction_trigger: usize,
         wal_durability_policy: DurabilityPolicy,
-        wal_batch_config: crate::wal::policy::BatchConfig,
+        wal_batch_config: cntryl_midge_durability::wal::policy::BatchConfig,
     },
     /// Write stall status response
     WriteStallStatus {

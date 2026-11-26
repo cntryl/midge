@@ -1,10 +1,13 @@
 //! Public flush barriers over a genuinely held cloud publication worker.
 
 use super::*;
-use crate::lease::{CreatedLease, LeaseHeartbeat};
+use crate::engine::startup::lease_selection::{
+    create_lease_with_validity_and_timeout_and_ttl, test_lease_root, CreatedLease,
+};
+use cntryl_midge_durability::lease::LeaseHeartbeat;
 use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::{RuntimeConfig, RuntimeState};
-use crate::storage::{
+use cntryl_midge_storage::{
     StorageBackend, StorageCallback, StorageEvent, StorageOutcome, StorageRequest,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -80,12 +83,12 @@ impl PublicationGate {
 }
 
 struct HeldSstStore {
-    inner: crate::storage::filesystem::FileSystem,
+    inner: cntryl_midge_storage::filesystem::FileSystem,
     gate: Arc<PublicationGate>,
 }
 
 impl StorageBackend for HeldSstStore {
-    crate::storage::forward_storage_backend!(inner; submit_delete_request, submit_head_request, submit_range_head_request, submit_range_read_request, submit_metadata_read_request);
+    cntryl_midge_storage::forward_storage_backend!(inner; submit_delete_request, submit_head_request, submit_range_head_request, submit_range_read_request, submit_metadata_read_request);
 
     fn submit_write_request(
         &self,
@@ -99,7 +102,7 @@ impl StorageBackend for HeldSstStore {
             crc32c: crc32c::crc32c(&data),
             if_absent: matches!(
                 &request.precondition,
-                crate::storage::StoragePrecondition::IfAbsent
+                cntryl_midge_storage::StoragePrecondition::IfAbsent
             ),
             started: Instant::now(),
             completed: false,
@@ -107,7 +110,7 @@ impl StorageBackend for HeldSstStore {
         let Some(index) = self.gate.enter(publication, request.remaining_timeout()) else {
             let _ = callback.send(StorageEvent::WriteComplete {
                 key: request.key,
-                result: StorageOutcome::Err(crate::storage::StorageError::timeout(
+                result: StorageOutcome::Err(cntryl_midge_storage::StorageError::timeout(
                     "held fixture publication did not receive its release",
                 )),
             });
@@ -148,9 +151,9 @@ impl RetryFixture {
         let gate = Arc::new(PublicationGate::default());
         let (storage, events) = fixture_storage(directory.path(), &gate)?;
         let state = RuntimeState::try_new(directory.path(), false, options.recovery_policy())?;
-        let created = crate::lease::create_lease_with_validity_and_timeout_and_ttl(
+        let created = create_lease_with_validity_and_timeout_and_ttl(
             options.storage(),
-            &crate::lease::test_lease_root(options.storage()),
+            &test_lease_root(options.storage()),
             None,
             options.lease_clock_skew_tolerance(),
             options.storage_io_timeout(),
@@ -169,9 +172,9 @@ impl RetryFixture {
             &created,
             &storage,
         )?);
-        config.sst_read_fs = Some(Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+        config.sst_read_fs = Some(Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
             Arc::new(
-                crate::io::RealFs::new(directory.path()).map_err(crate::io::FsError::into_midge)?,
+                cntryl_midge_core::io::RealFs::new(directory.path()).map_err(cntryl_midge_core::io::FsError::into_midge)?,
             ),
             storage.remote_sst_backend(),
             options.storage_io_timeout(),
@@ -203,8 +206,8 @@ impl RetryFixture {
         })
     }
 
-    fn manifest(&self) -> MidgeResult<crate::metadata::Manifest> {
-        crate::metadata::ManifestPersistence::load(self.directory.path())
+    fn manifest(&self) -> MidgeResult<cntryl_midge_durability::metadata::Manifest> {
+        cntryl_midge_durability::metadata::ManifestPersistence::load(self.directory.path())
             .map_err(MidgeError::Internal)
     }
 }
@@ -220,15 +223,15 @@ fn fixture_metadata_storage(
     directory: &std::path::Path,
     state: &RuntimeState,
     created: &CreatedLease,
-    storage: &crate::storage::HybridStorage,
-) -> MidgeResult<Arc<crate::storage::cloud::CloudStorage>> {
-    let cloud = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
-        Arc::new(crate::storage::filesystem::FileSystem::new(
-            crate::storage::simulated::simulated_cloud_root(directory),
+    storage: &cntryl_midge_storage::HybridStorage,
+) -> MidgeResult<Arc<cntryl_midge_storage::cloud::CloudStorage>> {
+    let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::from_object_store(
+        Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
+            cntryl_midge_storage::simulated::simulated_cloud_root(directory),
         )?),
         WORKER_WAIT,
     ));
-    crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
+    cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
         .map_err(MidgeError::Internal)?;
     let store = created
         .lease
@@ -242,7 +245,7 @@ fn fixture_metadata_storage(
     crate::runtime::ddl::fence_remote_registry_on_startup(
         storage,
         &authority,
-        &crate::common::OperationDeadline::from_budget(WORKER_WAIT),
+        &cntryl_midge_core::common::OperationDeadline::from_budget(WORKER_WAIT),
     )?;
     crate::runtime::hybrid_persistence::mirror_control_metadata_within(
         crate::runtime::hybrid_persistence::CloudMetadataMirrorContext {
@@ -250,7 +253,7 @@ fn fixture_metadata_storage(
             fs: state.fs.as_ref(),
             publication_lock: &crate::runtime::MetadataPublicationLock::default(),
             lock_wait_budget: WORKER_WAIT,
-            deadline: &crate::common::OperationDeadline::from_budget(WORKER_WAIT),
+            deadline: &cntryl_midge_core::common::OperationDeadline::from_budget(WORKER_WAIT),
             authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority {
                 store: authority.store.as_ref(),
                 holder_id: &authority.holder_id,
@@ -266,22 +269,22 @@ fn fixture_storage(
     directory: &std::path::Path,
     gate: &Arc<PublicationGate>,
 ) -> MidgeResult<(
-    Arc<crate::storage::HybridStorage>,
+    Arc<cntryl_midge_storage::HybridStorage>,
     crossbeam::channel::Receiver<StorageEvent>,
 )> {
-    let cloud_root = crate::storage::simulated::simulated_cloud_root(directory);
-    let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
+    let cloud_root = cntryl_midge_storage::simulated::simulated_cloud_root(directory);
+    let cloud = Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
         cloud_root.clone(),
     )?);
     let sst = Arc::new(HeldSstStore {
-        inner: crate::storage::filesystem::FileSystem::new(cloud_root)?,
+        inner: cntryl_midge_storage::filesystem::FileSystem::new(cloud_root)?,
         gate: Arc::clone(gate),
     });
     let (sender, events) = crossbeam::channel::bounded(
-        crate::storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
+        cntryl_midge_storage::hybrid::backend::HYBRID_STORAGE_EVENT_CHANNEL_CAPACITY,
     );
     let storage = Arc::new(
-        crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+        cntryl_midge_storage::HybridStorage::new_with_class_stores_and_event_sender(
             cloud.clone(),
             sst,
             cloud,
@@ -294,7 +297,7 @@ fn fixture_storage(
 }
 
 fn install_write_authority(
-    storage: &crate::storage::HybridStorage,
+    storage: &cntryl_midge_storage::HybridStorage,
     created: &CreatedLease,
     healthy: &Arc<AtomicBool>,
 ) -> MidgeResult<()> {
@@ -320,13 +323,13 @@ fn fixture_config(
     options: &OpenOptions,
     created: &CreatedLease,
     healthy: &Arc<AtomicBool>,
-    storage: &Arc<crate::storage::HybridStorage>,
+    storage: &Arc<cntryl_midge_storage::HybridStorage>,
     events: crossbeam::channel::Receiver<StorageEvent>,
 ) -> RuntimeConfig {
     storage.configure_maintenance_memory(options.compaction_memory_pool_size());
     RuntimeConfig {
         ttl_clock: options.ttl_clock(),
-        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync,
         storage_io_timeout: options.storage_io_timeout(),
         runtime_response_timeout: options.runtime_response_timeout(),
         hybrid_storage: Some(Arc::clone(storage)),
@@ -354,7 +357,7 @@ fn fixture_engine(
     runtime_handle: RuntimeHandle,
     lease_state: LeaseState,
     #[cfg(feature = "internal-testing")]
-    metadata_accounting: crate::metadata::accounting::MetricsHandle,
+    metadata_accounting: cntryl_midge_durability::metadata::accounting::MetricsHandle,
 ) -> Engine {
     let ingest_coordinators = dashmap::DashMap::new();
     ingest_coordinators.insert(0, Arc::new(ingest::IngestCoordinator::new(0)));
@@ -364,7 +367,7 @@ fn fixture_engine(
         runtime: Some(runtime),
         runtime_handle,
         db_path: directory.to_path_buf(),
-        root: crate::io::real::test_root(directory),
+        root: cntryl_midge_core::io::real::test_root(directory),
         memory_mode: false,
         cloud_mode: true,
         simulated_cloud_mode: true,
@@ -456,11 +459,11 @@ fn assert_one_publication(fixture: &RetryFixture) -> MidgeResult<()> {
         "barrier retry duplicated immutable ownership"
     );
     let file = &manifest.files[0];
-    assert_eq!(publication.key, crate::cloud_layout::object_key(&file.name));
+    assert_eq!(publication.key, cntryl_midge_core::cloud_layout::object_key(&file.name));
     assert_eq!(publication.len, file.size_bytes);
     assert_eq!(Some(publication.crc32c), file.content_crc32c);
     let bytes = std::fs::read(
-        crate::storage::simulated::simulated_cloud_root(fixture.directory.path())
+        cntryl_midge_storage::simulated::simulated_cloud_root(fixture.directory.path())
             .join(&publication.key),
     )?;
     assert_eq!(u64::try_from(bytes.len()).unwrap(), publication.len);

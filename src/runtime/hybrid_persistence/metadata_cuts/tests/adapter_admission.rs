@@ -1,8 +1,8 @@
 //! Exact readback waits for an existing physical completion adapter to finish.
 
 use super::*;
-use crate::common::resource_budget::ResourceBudget;
-use crate::storage::cloud::BlockingCloud;
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_storage::cloud::BlockingCloud;
 
 struct HeldAdapterTail {
     entered: mpsc::Sender<()>,
@@ -31,7 +31,7 @@ pub(super) fn wait_for_charge(
 
 #[test]
 fn should_complete_exact_readback_when_a_prior_physical_adapter_releases_its_charge() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: a genuine immutable object and source in the original pool.
         let backend = Arc::new(MockCloudBackend::new());
         let fixture = Fixture::new(CloudStorage::new(backend.clone(), String::new()));
@@ -45,7 +45,7 @@ fn should_complete_exact_readback_when_a_prior_physical_adapter_releases_its_cha
         backend.submit_put(key, body.to_vec(), Vec::new(), seeded);
         assert!(matches!(
             seed.recv().unwrap(),
-            crate::storage::cloud::CloudEvent::Put { result: Ok(()), .. }
+            cntryl_midge_storage::cloud::CloudEvent::Put { result: Ok(()), .. }
         ));
 
         // A closed logical receiver makes the real generic adapter drop this
@@ -53,7 +53,7 @@ fn should_complete_exact_readback_when_a_prior_physical_adapter_releases_its_cha
         let (forwarded, abandoned) = mpsc::channel();
         drop(abandoned);
         let retained =
-            crate::storage::retained_callback::retain(forwarded, cut.memory_reservation()).unwrap();
+            cntryl_midge_storage::retained_callback::retain(forwarded, cut.memory_reservation()).unwrap();
         let (entered, holding) = mpsc::channel();
         let (release, released) = mpsc::channel();
         retained
@@ -106,7 +106,7 @@ fn should_complete_exact_readback_when_a_prior_physical_adapter_releases_its_cha
 
 #[test]
 fn should_refuse_unsubmitted_read_when_its_adapter_exceeds_the_entire_pool() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: one source fits, but the required physical adapter cannot.
         let backend = Arc::new(MockCloudBackend::new());
         let fixture = Fixture::new(CloudStorage::new(backend.clone(), String::new()));
@@ -134,7 +134,7 @@ fn should_refuse_unsubmitted_read_when_its_adapter_exceeds_the_entire_pool() {
 
 #[test]
 fn should_end_unsubmitted_read_when_original_admission_budget_expires() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: a live shared-pool owner keeps the next adapter inadmissible.
         let backend = Arc::new(MockCloudBackend::new());
         let fixture = Fixture::new(CloudStorage::new(backend.clone(), String::new()));
@@ -167,8 +167,8 @@ fn contextualize_local_admission(error: MidgeError) -> MidgeError {
     let MidgeError::ResourceLimit(message) = error else {
         panic!("resource admission must report its own typed error");
     };
-    crate::storage::cloud::contextualize_operation_error(
-        &crate::storage::cloud::CloudError::LocalReadAdmission(message),
+    cntryl_midge_storage::cloud::contextualize_operation_error(
+        &cntryl_midge_storage::cloud::CloudError::LocalReadAdmission(message),
         "unsubmitted read",
         &OperationDeadline::from_budget(Duration::from_secs(1)),
     )
@@ -189,8 +189,8 @@ fn should_preserve_original_admission_scope_when_cloud_error_context_is_added() 
     // Act: the owners can finish between refusal and classification.
     let scoped = contextualize_local_admission(own_error);
     let unrelated = contextualize_local_admission(foreign_error);
-    let protocol = crate::storage::cloud::contextualize_operation_error(
-        &crate::storage::cloud::CloudError::Protocol(scoped.to_string()),
+    let protocol = cntryl_midge_storage::cloud::contextualize_operation_error(
+        &cntryl_midge_storage::cloud::CloudError::Protocol(scoped.to_string()),
         "provider protocol failure",
         &OperationDeadline::from_budget(Duration::from_secs(1)),
     );

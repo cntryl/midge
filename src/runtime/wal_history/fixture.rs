@@ -10,12 +10,12 @@
 //! come from whatever frames decode, so a deliberately corrupt body still
 //! seals.
 
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::{Durability, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use crate::runtime::wal_history::WalHistory;
-use crate::wal::format::segment::FIXTURE_HOLDER;
-use crate::wal::format::{ChainLink, SealedFacts, SegmentHeader, HEADER_LEN};
-use crate::wal::ledger::{HolderId, SegmentId};
+use cntryl_midge_durability::wal::format::segment::FIXTURE_HOLDER;
+use cntryl_midge_durability::wal::format::{ChainLink, SealedFacts, SegmentHeader, HEADER_LEN};
+use cntryl_midge_durability::wal::ledger::{HolderId, SegmentId};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -106,7 +106,7 @@ pub(crate) fn record(wal: &Arc<dyn Fs>, sealed: &[SegmentId], open: SegmentId) -
         "a recorded WAL history is consecutive: {ids:?}"
     );
     if wal
-        .exists(&FsPath::new(crate::wal::ledger_store::LEDGER_FILE))
+        .exists(&FsPath::new(cntryl_midge_durability::wal::ledger_store::LEDGER_FILE))
         .map_err(FsError::into_midge)?
     {
         return Err(MidgeError::InvalidArgument(
@@ -146,7 +146,7 @@ pub(crate) fn record(wal: &Arc<dyn Fs>, sealed: &[SegmentId], open: SegmentId) -
         }
     }
     let len = wal
-        .metadata(&FsPath::new(crate::wal::segment_file_name(open)))
+        .metadata(&FsPath::new(cntryl_midge_durability::wal::segment_file_name(open)))
         .map_err(FsError::into_midge)?
         .len;
     history.record_sync(len)?;
@@ -156,7 +156,7 @@ pub(crate) fn record(wal: &Arc<dyn Fs>, sealed: &[SegmentId], open: SegmentId) -
 /// Drop the ledger of the WAL directory `wal`, as if it had never been
 /// opened, then [`record`] the given history over its segment files.
 pub(crate) fn replace(wal: &Arc<dyn Fs>, sealed: &[SegmentId], open: SegmentId) -> MidgeResult<()> {
-    match wal.remove_file(&FsPath::new(crate::wal::ledger_store::LEDGER_FILE)) {
+    match wal.remove_file(&FsPath::new(cntryl_midge_durability::wal::ledger_store::LEDGER_FILE)) {
         Ok(()) | Err(FsError::NotFound(_)) => {}
         Err(error) => return Err(error.into_midge()),
     }
@@ -170,7 +170,7 @@ pub(crate) fn record_at(
     open: SegmentId,
 ) -> MidgeResult<()> {
     let wal: Arc<dyn Fs> = Arc::new(
-        crate::io::RealFs::new(db_path.join(crate::wal::WAL_DIR)).map_err(FsError::into_midge)?,
+        cntryl_midge_core::io::RealFs::new(db_path.join(cntryl_midge_durability::wal::WAL_DIR)).map_err(FsError::into_midge)?,
     );
     record(&wal, sealed, open)
 }
@@ -181,11 +181,11 @@ type FooterWrite = (u64, Vec<u8>);
 /// The facts sealing open segment `id` of `wal`, and the footer frame to
 /// write at its offset, unless the segment already ends in one.
 fn seal_facts(wal: &dyn Fs, id: SegmentId) -> MidgeResult<(SealedFacts, Option<FooterWrite>)> {
-    let bytes = crate::io::read_all(wal, &segment_path(id)).map_err(FsError::into_midge)?;
-    if let Ok(Some(footer)) = crate::wal::format::segment::sealed_footer(&bytes) {
+    let bytes = cntryl_midge_core::io::read_all(wal, &segment_path(id)).map_err(FsError::into_midge)?;
+    if let Ok(Some(footer)) = cntryl_midge_durability::wal::format::segment::sealed_footer(&bytes) {
         return Ok((footer.sealed_facts(), None));
     }
-    let footer = crate::wal::format::segment::lenient_footer(&bytes)?;
+    let footer = cntryl_midge_durability::wal::format::segment::lenient_footer(&bytes)?;
     let frame = footer.encode_frame()?;
     Ok((footer.sealed_facts(), Some((bytes.len() as u64, frame))))
 }
@@ -205,7 +205,7 @@ fn empty_facts(id: SegmentId, prev: ChainLink) -> SealedFacts {
 }
 
 fn segment_path(id: SegmentId) -> FsPath {
-    FsPath::new(crate::wal::segment_file_name(id))
+    FsPath::new(cntryl_midge_durability::wal::segment_file_name(id))
 }
 
 fn write_at(wal: &dyn Fs, id: SegmentId, offset: u64, bytes: &[u8]) -> MidgeResult<()> {
@@ -254,11 +254,11 @@ fn stash_segments(wal: &dyn Fs) -> MidgeResult<BTreeMap<SegmentId, Vec<u8>>> {
         if entry.is_dir {
             continue;
         }
-        let Some(id) = crate::wal::parse_segment_file_name(&entry.name) else {
+        let Some(id) = cntryl_midge_durability::wal::parse_segment_file_name(&entry.name) else {
             continue;
         };
         let path = FsPath::new(&entry.name);
-        let bytes = crate::io::read_all(wal, &path).map_err(FsError::into_midge)?;
+        let bytes = cntryl_midge_core::io::read_all(wal, &path).map_err(FsError::into_midge)?;
         wal.remove_file(&path).map_err(FsError::into_midge)?;
         stashed.insert(id, bytes.to_vec());
     }

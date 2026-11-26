@@ -6,7 +6,7 @@
 //! - Rollback and commit semantics
 //! - Column-family scoped transactions
 
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::engine::api::write_options::effective_wal_durability_policy;
 use crate::engine::ingest::IngestCoordinator;
 use crate::engine::ColumnFamilyId;
@@ -15,7 +15,7 @@ use crate::runtime::transaction_spill::{
     IntentEntry, IntentKeyScan, IntentLookup, TransactionMemoryPool, TransactionWriteSet,
 };
 use crate::runtime::{KeyAssertion, RuntimeHandle};
-use crate::types::ConflictPolicy;
+use cntryl_midge_core::types::ConflictPolicy;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -173,7 +173,7 @@ pub(crate) struct TransactionInit {
     pub(crate) start_sequence: u64,
     pub(crate) read_snapshot: Option<Arc<crate::runtime::ReadSnapshot>>,
     pub(crate) cloud_mode: bool,
-    pub(crate) root: Arc<dyn crate::io::Fs>,
+    pub(crate) root: Arc<dyn cntryl_midge_core::io::Fs>,
     pub(crate) memory_mode: bool,
     pub(crate) transaction_memory_pool: Arc<TransactionMemoryPool>,
     pub(crate) runtime_transaction_guard: crate::runtime::RuntimeTransactionGuard,
@@ -761,7 +761,7 @@ impl Transaction {
     /// caller waited for them; commits rejected before any engine work (an
     /// invalid option combination, a missing snapshot) are not timed.
     fn record_commit_latency(&self, opts: crate::engine::api::WriteOptions, started: Instant) {
-        use crate::telemetry::metrics::CommitDurabilityKind;
+        use cntryl_midge_core::telemetry::metrics::CommitDurabilityKind;
         let kind = if opts.is_cloud_strict() {
             CommitDurabilityKind::CloudStrict
         } else if opts.is_cloud_async() {

@@ -1,7 +1,7 @@
 //! Cargo regressions driven by actual planner/replay, HEAD inventory and
 //! journal recovery work. No custom watchdog executable or clock is involved.
 
-use crate::common::MidgeResult;
+use cntryl_midge_core::common::MidgeResult;
 use crate::runtime::cloud_startup::recovery_progress_fixture::{
     prepare_recovery_progress_fixture, PreparedRecoveryProgressFixture,
     RecoveryProgressFixtureMode, RecoveryProgressFixtureResult,
@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::layer::{Layer, SubscriberExt};
 
-#[path = "../../../benches/bench_support/stress_scenarios/recovery_progress.rs"]
+#[path = "../../benches/bench_support/stress_scenarios/recovery_progress.rs"]
 mod workload_listener;
 
 // Keep the production ProgressHandle adapter type-checked while the same
@@ -196,7 +196,7 @@ fn should_report_completed_work_when_actual_journal_replay_restores_exact_edit_f
             &phase,
             "recovery",
         );
-        crate::metadata::recovery_progress_fixture::run_journal_recovery_progress_fixture(
+        cntryl_midge_durability::metadata::recovery_progress_fixture::run_journal_recovery_progress_fixture(
             root.path(),
         )
     })?;

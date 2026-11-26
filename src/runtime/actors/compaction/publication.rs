@@ -5,7 +5,7 @@
 //! after each durable publication boundary.
 
 use super::PreparedCompactionOutput;
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -17,7 +17,7 @@ const COMPACTION_PUBLISH_CHANNEL_CAPACITY: usize = 1;
 pub(crate) struct CompactionPublicationToken {
     pub request_id: u64,
     pub writer_epoch: u64,
-    pub cf_id: crate::types::ColumnFamilyId,
+    pub cf_id: cntryl_midge_core::types::ColumnFamilyId,
     pub target_level: u32,
     pub output_generation: u64,
     pub input_ssts: Vec<String>,
@@ -46,21 +46,21 @@ pub(crate) struct CompactionPublishTask {
     pub phase: CompactionPublishPhase,
     pub outputs: Vec<PreparedCompactionOutput>,
     /// The database root; outputs are read back at root-relative `sst/` keys.
-    pub fs: Arc<dyn crate::io::Fs>,
-    pub hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
-    pub cloud_metadata_storage: Option<Arc<crate::storage::cloud::CloudStorage>>,
+    pub fs: Arc<dyn cntryl_midge_core::io::Fs>,
+    pub hybrid_storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
+    pub cloud_metadata_storage: Option<Arc<cntryl_midge_storage::cloud::CloudStorage>>,
     pub metadata_publication_lock: crate::runtime::MetadataPublicationLock,
     pub lease_healthy: Option<Arc<AtomicBool>>,
-    pub lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
-    pub leader_store: Option<Arc<dyn crate::lease::LeaderStore>>,
+    pub lease_validity: Option<Arc<cntryl_midge_durability::lease::LeaseValidity>>,
+    pub leader_store: Option<Arc<dyn cntryl_midge_durability::lease::LeaderStore>>,
     pub leader_holder_id: Option<String>,
     pub publication_memory_limit: usize,
     pub runtime_response_timeout: std::time::Duration,
     pub manual_deadline: Option<OperationDeadline>,
     /// Immutable contents and exact applied edit cut captured by the loop.
     pub checkpoint: Option<(
-        Arc<crate::metadata::store::ManifestStore>,
-        crate::metadata::Manifest,
+        Arc<cntryl_midge_durability::metadata::store::ManifestStore>,
+        cntryl_midge_durability::metadata::Manifest,
     )>,
 }
 
@@ -71,7 +71,7 @@ pub(crate) struct CompactionPublishCompletion {
 }
 
 enum CompactionPublishWorkerTask {
-    Publish(Box<CompactionPublishTask>, crate::failpoints::WorkerGate),
+    Publish(Box<CompactionPublishTask>, cntryl_midge_core::failpoints::WorkerGate),
     Shutdown,
 }
 
@@ -146,7 +146,7 @@ impl CompactionPublishActor {
             })?
             .try_send(CompactionPublishWorkerTask::Publish(
                 Box::new(task),
-                crate::failpoints::worker_gate(),
+                cntryl_midge_core::failpoints::worker_gate(),
             ))
             .map_err(|error| {
                 MidgeError::Busy(format!(
@@ -223,7 +223,7 @@ fn run_task(task: &CompactionPublishTask) -> MidgeResult<()> {
             mirror_control_metadata(task, &deadline)?;
             validate_task_lease(task, &deadline)?;
             verify_or_stage_outputs(task, &deadline)?;
-            crate::failpoints::fail_point!(
+            cntryl_midge_core::failpoints::fail_point!(
                 "slice7::after_compaction_output_durable_before_manifest_publish"
             );
         }
@@ -231,7 +231,7 @@ fn run_task(task: &CompactionPublishTask) -> MidgeResult<()> {
             validate_task_lease(task, &deadline)?;
             if let Some((store, captured)) = &task.checkpoint {
                 store.save_captured_snapshot_for(
-                    crate::metadata::accounting::Origin::CompactionBeforeGc,
+                    cntryl_midge_durability::metadata::accounting::Origin::CompactionBeforeGc,
                     captured,
                 )?;
                 validate_task_lease(task, &deadline)?;
@@ -320,7 +320,7 @@ fn verify_or_stage_outputs(
     let Some(hybrid) = &task.hybrid_storage else {
         return Ok(());
     };
-    let budget = crate::common::resource_budget::ResourceBudget::new(task.publication_memory_limit);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(task.publication_memory_limit);
     let mut proofs = Vec::new();
     for output in &task.outputs {
         if let Some(proof) = output.proof.clone() {
@@ -334,9 +334,9 @@ fn verify_or_stage_outputs(
             ))
         })?;
         validate_task_lease(task, deadline)?;
-        let key = crate::cloud_layout::object_key(&output.metadata.name);
-        let path = crate::sst::fs::sst_key(&output.metadata.name);
-        let source = crate::storage::hybrid::backend::ImmutableFileSource {
+        let key = cntryl_midge_core::cloud_layout::object_key(&output.metadata.name);
+        let path = cntryl_midge_table::sst::fs::sst_key(&output.metadata.name);
+        let source = cntryl_midge_storage::hybrid::backend::ImmutableFileSource {
             key: &key,
             fs: task.fs.as_ref(),
             path: &path,
@@ -407,13 +407,13 @@ fn mirror_control_metadata(
 
 #[cfg(test)]
 pub(crate) fn checksummed_file_crc_for_publication_test(
-    fs: &Arc<dyn crate::io::Fs>,
+    fs: &Arc<dyn cntryl_midge_core::io::Fs>,
     path: &std::path::Path,
-    budget: &crate::common::resource_budget::ResourceBudget,
+    budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
 ) -> MidgeResult<u32> {
     const CRC_BUFFER_SIZE: usize = 64 * 1024;
     let _reservation = budget.reserve(CRC_BUFFER_SIZE, "SST checksum buffer")?;
-    Ok(crate::sst::fs::file_identity_with_fs(fs, path)?.1)
+    Ok(cntryl_midge_table::sst::fs::file_identity_with_fs(fs, path)?.1)
 }
 
 #[cfg(test)]
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn should_reject_compaction_publication_when_validity_expires_without_watchdog() {
         // Arrange
-        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
         validity
             .activate(
                 7,
@@ -443,7 +443,7 @@ mod tests {
             },
             phase: CompactionPublishPhase::OutputDurable,
             outputs: Vec::new(),
-            fs: Arc::new(crate::io::MockFs::new()),
+            fs: Arc::new(cntryl_midge_core::io::MockFs::new()),
             hybrid_storage: None,
             cloud_metadata_storage: None,
             metadata_cut: None,

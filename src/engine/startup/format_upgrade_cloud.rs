@@ -6,21 +6,21 @@ use super::cloud_format_upgrade::{
     stage_source_descriptor, CloudFormatGateResolution,
 };
 use super::{epoch_floor::StartupEpochFloor, StartupLease, StartupStoragePath};
-use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::config::Storage;
 use crate::engine::OpenOptions;
-use crate::io::{Fs, FsError, FsPath};
-use crate::lease::{
+use cntryl_midge_core::io::{Fs, FsError, FsPath};
+use cntryl_midge_durability::lease::{
     CloudFormatMigrationCandidate, CloudFormatMigrationPending, CloudMetadataGeneration,
     CloudMetadataGenerationIdentity, CloudMetadataHead, LeaderStore,
 };
-use crate::metadata::local_authority::LocalMetadataAuthority;
-use crate::metadata::{codec, files, ManifestPersistence};
+use cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority;
+use cntryl_midge_durability::metadata::{codec, files, ManifestPersistence};
 use crate::runtime::hybrid_persistence::{
     publish_format10_closure, read_committed_metadata_bodies_within,
 };
 use crate::runtime::{IntentPersistence, MetadataPublicationLock};
-use crate::storage::cloud::CloudStorage;
+use cntryl_midge_storage::cloud::CloudStorage;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 pub(super) fn upgrade_cloud(opts: &OpenOptions, timeout: Duration) -> MidgeResult<()> {
@@ -44,7 +44,7 @@ pub(super) fn upgrade_cloud(opts: &OpenOptions, timeout: Duration) -> MidgeResul
     check_legacy_closure_budget(&source)?;
     let bodies = read_committed_metadata_bodies_within(&cloud, &source, &deadline)?;
     let memory = MetadataPublicationLock::default();
-    memory.configure_capture_memory(crate::common::resource_budget::ResourceBudget::new(
+    memory.configure_capture_memory(cntryl_midge_core::common::resource_budget::ResourceBudget::new(
         opts.compaction_memory_pool_size(),
     ));
     let admission = memory.reserve_metadata_body_memory(encoded_size(&bodies)?)?;
@@ -87,7 +87,7 @@ pub(super) fn upgrade_cloud(opts: &OpenOptions, timeout: Duration) -> MidgeResul
     store
         .install_format_10_pending(&holder, epoch, pending, deadline.remaining())
         .map_err(|error| error.into_validation_error("install pending cloud FORMAT 10 gate"))?;
-    crate::failpoints::fail_point!("midge::format10::after_pending_cloud_gate", |_| Err(
+    cntryl_midge_core::failpoints::fail_point!("midge::format10::after_pending_cloud_gate", |_| Err(
         MidgeError::Internal("interrupted after durable pending FORMAT 10 gate".into())
     ));
     if reconcile_cloud_format_gate(&cloud, store, &holder, epoch, &deadline)?
@@ -108,7 +108,7 @@ fn metadata_store(
     let cloud = match opts.storage() {
         Storage::Cloud { topology, .. } => {
             let location = topology.control();
-            crate::storage::providers::build_class_store(
+            cntryl_midge_storage::providers::build_class_store(
                 location.provider(),
                 location.prefix(),
                 opts.storage_io_timeout(),
@@ -116,7 +116,7 @@ fn metadata_store(
             )?
         }
         Storage::CloudSimulated { .. } => {
-            let store = crate::storage::simulated::SimulatedCloud::locate(
+            let store = cntryl_midge_storage::simulated::SimulatedCloud::locate(
                 path.root.as_ref(),
                 opts.injected_object_store(),
                 opts.storage_io_timeout(),
@@ -183,9 +183,9 @@ fn prepare_candidate(
     })?;
     let scratch = tempfile::tempdir()?;
     let fs: Arc<dyn Fs> =
-        Arc::new(crate::io::RealFs::open_existing(scratch.path()).map_err(FsError::into_midge)?);
-    let fs = crate::io::scope_fs(fs, scope.clone());
-    crate::metadata::ensure_or_create_format_marker(&fs, scratch.path())?;
+        Arc::new(cntryl_midge_core::io::RealFs::open_existing(scratch.path()).map_err(FsError::into_midge)?);
+    let fs = cntryl_midge_core::io::scope_fs(fs, scope.clone());
+    cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, scratch.path())?;
     let base = codec::encode(codec::MANIFEST, &manifest)?;
     let intent_base = serde_json::to_vec(&intents.entries).map_err(|error| {
         MidgeError::Internal(format!("encode cloud FORMAT 10 intent base: {error}"))
@@ -206,7 +206,7 @@ fn prepare_candidate(
     for name in staged.selected_relative_paths() {
         scope.check("capture staged cloud FORMAT 10 metadata")?;
         let data =
-            crate::io::read_all(fs.as_ref(), &FsPath::new(&name)).map_err(FsError::into_midge)?;
+            cntryl_midge_core::io::read_all(fs.as_ref(), &FsPath::new(&name)).map_err(FsError::into_midge)?;
         candidate.insert(name, data.to_vec());
     }
     Ok(candidate)
@@ -221,7 +221,7 @@ fn encoded_size(bodies: &BTreeMap<String, Vec<u8>>) -> MidgeResult<u64> {
 }
 
 fn check_legacy_closure_budget(source: &CloudMetadataGeneration) -> MidgeResult<()> {
-    use crate::metadata::cloud_manifest::{MAX_CHAIN_BYTES, MAX_CHAIN_OBJECTS};
+    use cntryl_midge_durability::metadata::cloud_manifest::{MAX_CHAIN_BYTES, MAX_CHAIN_OBJECTS};
     let encoded = source
         .objects
         .iter()

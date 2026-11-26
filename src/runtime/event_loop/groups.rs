@@ -34,10 +34,10 @@ impl RequestRouting {
         }
     }
 
-    pub(super) fn request_deadline(&self, request_id: u64) -> crate::common::OperationDeadline {
+    pub(super) fn request_deadline(&self, request_id: u64) -> cntryl_midge_core::common::OperationDeadline {
         self.router
             .request_deadline(request_id, self.runtime_response_timeout)
-            .unwrap_or_else(|| crate::common::OperationDeadline::from_budget(Duration::ZERO))
+            .unwrap_or_else(|| cntryl_midge_core::common::OperationDeadline::from_budget(Duration::ZERO))
     }
 
     pub(super) fn register_inline_response(

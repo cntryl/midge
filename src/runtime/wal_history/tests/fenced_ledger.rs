@@ -1,11 +1,11 @@
 //! Ledger repair and publication through the shipping filesystem writer fence.
 
 use super::{wal, WalHistory, WalHistoryFence, POWER_LOSS_SEEDS};
-use crate::common::MidgeError;
-use crate::io::Fs;
-use crate::lease::{fs_leader_store::FsLeaderStore, LeaderStore};
-use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultId, FaultOp};
-use crate::wal::ledger_store::{COMPACT_AFTER_EDITS, LEDGER_FILE};
+use cntryl_midge_core::common::MidgeError;
+use cntryl_midge_core::io::Fs;
+use cntryl_midge_durability::lease::{fs_leader_store::FsLeaderStore, LeaderStore};
+use cntryl_midge_core::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultId, FaultOp};
+use cntryl_midge_durability::wal::ledger_store::{COMPACT_AFTER_EDITS, LEDGER_FILE};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ fn open_fenced(device: &CrashDevice, holder: &str) -> FencedHistory {
     let root: Arc<dyn Fs> = Arc::new(device.fs());
     let store = Arc::new(FsLeaderStore::new(
         root,
-        crate::lease::LeaseClock::default(),
+        cntryl_midge_durability::lease::LeaseClock::default(),
     ));
     let lease = store
         .acquire_leadership(holder)
@@ -40,7 +40,7 @@ fn open_fenced(device: &CrashDevice, holder: &str) -> FencedHistory {
 fn ledger_fault(device: &CrashDevice, op: FaultOp, effect: FaultEffect) -> FaultId {
     device.inject(Fault {
         op,
-        path: format!("{}/{LEDGER_FILE}", crate::wal::WAL_DIR),
+        path: format!("{}/{LEDGER_FILE}", cntryl_midge_durability::wal::WAL_DIR),
         nth: 1,
         effect,
         error: FaultError::Io,

@@ -1,12 +1,12 @@
 use super::*;
-use crate::metadata::Manifest;
+use cntryl_midge_durability::metadata::Manifest;
 use crate::runtime::hybrid_persistence::tests::{
     fixture_manifest_frontier, SharedRetirementFixture,
 };
-use crate::storage::cloud::{BlockingCloud, CloudStorage};
-use crate::storage::HybridStorage;
-use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
-use crate::wal::format::segment::SegmentBuilder;
+use cntryl_midge_storage::cloud::{BlockingCloud, CloudStorage};
+use cntryl_midge_storage::HybridStorage;
+use cntryl_midge_durability::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
+use cntryl_midge_durability::wal::format::segment::SegmentBuilder;
 use bytes::Bytes;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,7 +28,7 @@ impl Fixture {
         let cloud = Arc::new(CloudStorage::with_mock());
         let storage = Arc::new(HybridStorage::with_policy(
             cloud.clone(),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         storage
             .configure_object_inventories(cloud.clone(), cloud.clone())
@@ -41,15 +41,15 @@ impl Fixture {
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
         let io = BlockingCloud::new(&cloud, &deadline);
         for id in 1..=4 {
-            let record = crate::wal::WalRecord::new(
-                crate::wal::WalOpKind::Put,
+            let record = cntryl_midge_durability::wal::WalRecord::new(
+                cntryl_midge_durability::wal::WalOpKind::Put,
                 Bytes::from_static(b"key"),
                 Some(Bytes::from_static(b"value")),
                 id,
             );
             let (bytes, link) = SegmentBuilder::new(id, 1, previous).record(&record).seal();
-            let key = crate::wal::segment_object_key(id, 1);
-            let valid = crate::wal::cloud_segment::validate_segment_bytes(&key, &bytes).unwrap();
+            let key = cntryl_midge_durability::wal::segment_object_key(id, 1);
+            let valid = cntryl_midge_durability::wal::cloud_segment::validate_segment_bytes(&key, &bytes).unwrap();
             entries.push(CatalogEntry::describing(&valid, &bytes));
             io.put_with_headers(&key, bytes.clone(), Vec::new())
                 .unwrap();
@@ -60,7 +60,7 @@ impl Fixture {
         }
         catalog.append_run(2, &entries).unwrap();
         catalog
-            .retire_prefix(2, &entries[..3], crate::lease::SharedGenerationId::FIRST)
+            .retire_prefix(2, &entries[..3], cntryl_midge_durability::lease::SharedGenerationId::FIRST)
             .unwrap();
         let fixture = Self {
             shared,
@@ -77,8 +77,8 @@ impl Fixture {
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
         let io = BlockingCloud::new(&self.cloud, &deadline);
         for key in [
-            crate::wal::cloud_catalog::OBJECT_KEY,
-            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
         ] {
             io.put_with_headers(key, catalog.encode().unwrap(), Vec::new())
                 .unwrap();
@@ -100,7 +100,7 @@ impl Fixture {
             &self.cloud,
             &OperationDeadline::from_budget(Duration::from_secs(5)),
         )
-        .get_optional(&crate::wal::segment_object_key(id, epoch))
+        .get_optional(&cntryl_midge_durability::wal::segment_object_key(id, epoch))
         .unwrap()
     }
 }
@@ -146,7 +146,7 @@ fn should_retain_wal_candidates_without_valid_anchor_coverage() {
     }
     .encode();
     io.put_with_headers(
-        &crate::wal::segment_object_key(1, 3),
+        &cntryl_midge_durability::wal::segment_object_key(1, 3),
         future.to_vec(),
         Vec::new(),
     )
@@ -160,7 +160,7 @@ fn should_retain_wal_candidates_without_valid_anchor_coverage() {
     }
     .encode();
     io.put_with_headers(
-        &crate::wal::segment_object_key(2, 1),
+        &cntryl_midge_durability::wal::segment_object_key(2, 1),
         wrong.to_vec(),
         Vec::new(),
     )
@@ -189,7 +189,7 @@ fn should_revisit_late_retired_put_without_restoring_catalog_membership() {
         &OperationDeadline::from_budget(Duration::from_secs(5)),
     )
     .put_with_headers(
-        &crate::wal::segment_object_key(1, 1),
+        &cntryl_midge_durability::wal::segment_object_key(1, 1),
         fixture.first.clone(),
         Vec::new(),
     )

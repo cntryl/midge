@@ -36,7 +36,7 @@ impl Fixture {
         let state = RuntimeState::try_new(
             std::path::PathBuf::from("startup-gate-memory"),
             true,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         )
         .unwrap();
         let (runtime, _) = Runtime::new();
@@ -51,7 +51,7 @@ impl Fixture {
 }
 
 fn unbounded_scope() -> DeadlineScope {
-    DeadlineScope::new(crate::common::OperationDeadline::unbounded())
+    DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::unbounded())
 }
 
 #[test]
@@ -75,9 +75,9 @@ fn should_abort_actual_prepared_runtime_when_owner_drops_without_acceptance() {
 
 #[test]
 fn should_admit_actual_prepared_runtime_when_scope_and_authority_are_healthy() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
-        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+        let scope = DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::from_budget(
             Duration::from_secs(5),
         ));
         let fixture = Fixture::prepare(scope.clone(), RuntimeConfig::default());
@@ -117,10 +117,10 @@ fn should_reject_actual_prepared_runtime_when_outer_owner_cancels_shared_scope()
 
 #[test]
 fn should_reject_actual_prepared_runtime_when_original_open_deadline_expires() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let deadline = Instant::now() + Duration::from_millis(120);
-        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+        let scope = DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::from_budget(
             Duration::from_millis(120),
         ));
         let fixture = Fixture::prepare(scope, RuntimeConfig::default());
@@ -164,9 +164,9 @@ fn should_fence_actual_prepared_runtime_when_heartbeat_health_is_lost_before_acc
 
 #[test]
 fn should_fence_actual_prepared_runtime_when_monotonic_validity_expires_without_watchdog() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
-        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
         let until = Instant::now() + Duration::from_millis(120);
         validity.activate(7, until).unwrap();
         let fixture = Fixture::prepare(
@@ -239,34 +239,34 @@ impl ActiveWalFixture {
         let database = directory.path().join("database");
         let mut state = RuntimeState::new(database.clone(), false);
         std::fs::create_dir_all(database.join("wal")).unwrap();
-        let record = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
+        let record = cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::WalOpKind::Put,
             bytes::Bytes::from_static(b"recovered-key"),
             Some(bytes::Bytes::from_static(b"acknowledged-value")),
             1,
         );
-        let payload = crate::wal::encoding::encode(&record).unwrap();
+        let payload = cntryl_midge_durability::wal::encoding::encode(&record).unwrap();
         let mut body = Vec::new();
-        crate::wal::frame::append_frame(&mut body, &payload).unwrap();
+        cntryl_midge_durability::wal::frame::append_frame(&mut body, &payload).unwrap();
         // Release the ledger recovery opened, then record segment 1 open
         // with the acknowledged record and reopen it.
         state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
-        let segment = database.join("wal").join(crate::wal::segment_file_name(1));
+        let segment = database.join("wal").join(cntryl_midge_durability::wal::segment_file_name(1));
         std::fs::remove_file(&segment).unwrap();
         std::fs::write(&segment, &body).unwrap();
-        let wal: Arc<dyn crate::io::Fs> =
-            Arc::new(crate::io::RealFs::new(database.join("wal")).unwrap());
+        let wal: Arc<dyn cntryl_midge_core::io::Fs> =
+            Arc::new(cntryl_midge_core::io::RealFs::new(database.join("wal")).unwrap());
         crate::runtime::wal_history::fixture::replace(&wal, &[], 1).unwrap();
         state.wal.history = crate::runtime::wal_history::WalHistory::open(wal, 1, 0).unwrap();
         let bytes = std::fs::read(&segment).unwrap();
         state.sequence = 1;
         let cloud = Arc::new(
-            crate::storage::filesystem::FileSystem::new(directory.path().join("cloud-store"))
+            cntryl_midge_storage::filesystem::FileSystem::new(directory.path().join("cloud-store"))
                 .unwrap(),
         );
-        let storage = Arc::new(crate::storage::HybridStorage::with_test_upload_limits(
+        let storage = Arc::new(cntryl_midge_storage::HybridStorage::with_test_upload_limits(
             cloud,
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
             1,
             // The sealed segment adds a footer to `bytes`.
             bytes.len() as u64 + 256,
@@ -276,7 +276,7 @@ impl ActiveWalFixture {
             .unwrap();
         let events = Arc::new(Events::default());
         let config = RuntimeConfig {
-            wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+            wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync,
             hybrid_storage: Some(storage),
             writer_epoch: 1,
             startup_observer: Some(events.clone()),
@@ -294,13 +294,13 @@ impl ActiveWalFixture {
 
 #[test]
 fn should_seal_actual_recovered_active_wal_when_short_open_budget_precedes_larger_io_cap() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: genuine recovered active bytes require fsync and rotation at
         // startup. Fast local I/O fits500ms, while the normal I/O cap remains30s.
         let fixture = ActiveWalFixture::new();
         let budget = Duration::from_millis(500);
         assert!(fixture.config.storage_io_timeout > budget);
-        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(budget));
+        let scope = DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::from_budget(budget));
         let (runtime, _) = Runtime::new();
 
         // Act: always release/join an actual prepared worker before asserting.
@@ -310,7 +310,7 @@ fn should_seal_actual_recovered_active_wal_when_short_open_budget_precedes_large
                 .directory
                 .path()
                 .join("database/wal")
-                .join(crate::wal::segment_file_name(1)),
+                .join(cntryl_midge_durability::wal::segment_file_name(1)),
         )
         .ok();
         let prepared = result.map(|(runtime, _, gate)| {
@@ -323,7 +323,7 @@ fn should_seal_actual_recovered_active_wal_when_short_open_budget_precedes_large
         prepared.unwrap();
         let sealed_bytes = sealed_bytes.expect("the recovered tail survives");
         assert!(sealed_bytes.starts_with(&fixture.bytes));
-        assert!(crate::wal::format::segment::footer_link(&sealed_bytes)
+        assert!(cntryl_midge_durability::wal::format::segment::footer_link(&sealed_bytes)
             .unwrap()
             .is_some());
         assert_eq!(fixture.events.prepared.load(Ordering::Acquire), 1);
@@ -337,25 +337,25 @@ struct HeldStartupAuthority {
     read_expired: Arc<AtomicBool>,
 }
 
-impl crate::lease::LeaderStore for HeldStartupAuthority {
+impl cntryl_midge_durability::lease::LeaderStore for HeldStartupAuthority {
     fn acquire_leadership(
         &self,
         _: &str,
-    ) -> Result<crate::lease::LeaderRecord, crate::lease::LeaseError> {
-        Err(crate::lease::LeaseError::Internal(
+    ) -> Result<cntryl_midge_durability::lease::LeaderRecord, cntryl_midge_durability::lease::LeaseError> {
+        Err(cntryl_midge_durability::lease::LeaseError::Internal(
             "unused fixture acquisition".into(),
         ))
     }
 
-    fn read_current(&self) -> Result<Option<crate::lease::LeaderRecord>, crate::lease::LeaseError> {
-        Ok(Some(crate::lease::LeaderRecord {
+    fn read_current(&self) -> Result<Option<cntryl_midge_durability::lease::LeaderRecord>, cntryl_midge_durability::lease::LeaseError> {
+        Ok(Some(cntryl_midge_durability::lease::LeaderRecord {
             epoch: 1,
             holder_id: "startup-owner".into(),
             acquired_at: "2026-10-04T00:00:00Z".into(),
         }))
     }
 
-    fn validate_epoch(&self, holder: &str, epoch: u64) -> Result<(), crate::lease::LeaseError> {
+    fn validate_epoch(&self, holder: &str, epoch: u64) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
         // Only the fixture's authority read has this 80ms deadline. Its clock
         // starts after actual method entry, independently of worker creation.
         self.validate_epoch_with_timeout(holder, epoch, Duration::from_millis(80))
@@ -366,13 +366,13 @@ impl crate::lease::LeaderStore for HeldStartupAuthority {
         _: &str,
         _: u64,
         timeout: Duration,
-    ) -> Result<(), crate::lease::LeaseError> {
+    ) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
         self.validations.fetch_add(1, Ordering::AcqRel);
-        let deadline = crate::common::OperationDeadline::from_budget(timeout);
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(timeout);
         std::thread::sleep(deadline.remaining());
         self.read_expired
             .store(deadline.is_expired(), Ordering::Release);
-        Err(crate::lease::LeaseError::Timeout(
+        Err(cntryl_midge_durability::lease::LeaseError::Timeout(
             "held startup authority read".into(),
         ))
     }
@@ -380,7 +380,7 @@ impl crate::lease::LeaderStore for HeldStartupAuthority {
 
 #[test]
 fn should_retain_recovered_active_wal_when_entered_startup_authority_read_times_out() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: real owned Runtime/actors must reach the fixture authority
         // before its 80ms read clock starts. This is not aggregate-open expiry.
         // Recovery seals the tail locally first (#843); the authority read
@@ -415,7 +415,7 @@ fn should_retain_recovered_active_wal_when_entered_startup_authority_read_times_
                 .directory
                 .path()
                 .join("database/wal")
-                .join(crate::wal::segment_file_name(1)),
+                .join(cntryl_midge_durability::wal::segment_file_name(1)),
         )
         .unwrap();
 
@@ -426,7 +426,7 @@ fn should_retain_recovered_active_wal_when_entered_startup_authority_read_times_
         assert!(read_expired.load(Ordering::Acquire));
         assert!(retained.starts_with(&fixture.bytes));
         assert_eq!(
-            crate::wal::format::segment::footer_link(&retained)
+            cntryl_midge_durability::wal::format::segment::footer_link(&retained)
                 .unwrap()
                 .map(|link| link.last_seq),
             Some(1)
@@ -439,7 +439,7 @@ fn should_retain_recovered_active_wal_when_entered_startup_authority_read_times_
 
 #[test]
 fn should_retain_recovered_active_wal_when_startup_budget_expires_before_authority_entry() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: explicitly spend the unchanged original 80ms scope before
         // calling preparation. An expired request must not submit authority I/O.
         let mut fixture = ActiveWalFixture::new();
@@ -451,7 +451,7 @@ fn should_retain_recovered_active_wal_when_startup_budget_expires_before_authori
         }));
         fixture.config.leader_holder_id = Some("startup-owner".into());
         let (runtime, _) = Runtime::new();
-        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+        let scope = DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::from_budget(
             Duration::from_millis(80),
         ));
         std::thread::sleep(scope.deadline().remaining() + Duration::from_millis(1));
@@ -472,14 +472,14 @@ fn should_retain_recovered_active_wal_when_startup_budget_expires_before_authori
                 .directory
                 .path()
                 .join("database/wal")
-                .join(crate::wal::segment_file_name(1)),
+                .join(cntryl_midge_durability::wal::segment_file_name(1)),
         )
         .unwrap();
         let rotated = fixture
             .directory
             .path()
             .join("database/wal")
-            .join(crate::wal::segment_file_name(2))
+            .join(cntryl_midge_durability::wal::segment_file_name(2))
             .exists();
 
         // Assert: fail closed and preserve bytes without pretending the read ran.

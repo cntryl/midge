@@ -1,13 +1,13 @@
 //! Manifest publication and compaction/flush intent transitions.
 
 use super::{MidgeResult, PublicationPhase, RuntimeState};
-use crate::metadata::accounting::Origin;
+use cntryl_midge_durability::metadata::accounting::Origin;
 mod moves;
 
 #[derive(Clone, Copy)]
 pub(crate) struct FlushManifestPublication<'a> {
     pub(crate) origin: Origin,
-    pub(crate) cf_id: crate::types::ColumnFamilyId,
+    pub(crate) cf_id: cntryl_midge_core::types::ColumnFamilyId,
     pub(crate) sequence: u64,
     pub(crate) file_meta: &'a crate::runtime::FileMeta,
     pub(crate) next_sst_seq: u64,
@@ -36,7 +36,7 @@ fn flush_record_is_bounded(file_meta: &crate::runtime::FileMeta) -> bool {
                 .map_or(0, |key| key.len().saturating_mul(2)),
         )
         .saturating_add(1_536);
-    record_bound <= crate::metadata::store::LOCAL_FLUSH_RECORD_BYTES
+    record_bound <= cntryl_midge_durability::metadata::store::LOCAL_FLUSH_RECORD_BYTES
 }
 
 /// Pairs `(remaining L0 file, compacted L0 input)` where a file still in L0
@@ -48,10 +48,10 @@ fn flush_record_is_bounded(file_meta: &crate::runtime::FileMeta) -> bool {
 /// without complete bounds may hold any key and overlaps everything; a file
 /// without sequences cannot be judged and is skipped.
 fn l0_level_order_violations(
-    remaining: &[crate::metadata::FileMeta],
-    compacted: &[crate::metadata::FileMeta],
+    remaining: &[cntryl_midge_durability::metadata::FileMeta],
+    compacted: &[cntryl_midge_durability::metadata::FileMeta],
 ) -> Vec<(String, String)> {
-    fn range(file: &crate::metadata::FileMeta) -> Option<(&[u8], &[u8])> {
+    fn range(file: &cntryl_midge_durability::metadata::FileMeta) -> Option<(&[u8], &[u8])> {
         match (&file.smallest_key, &file.largest_key) {
             (Some(first), Some(last)) if file.key_bounds_complete => {
                 Some((first.as_slice(), last.as_slice()))
@@ -107,18 +107,18 @@ impl RuntimeState {
         // intents is as unsafe to publish from as two stale files.
         let loaded = (|| {
             if self.manifest_store.uses_format_10() {
-                crate::metadata::local_authority::LocalMetadataAuthority::sync_selected_head(
+                cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority::sync_selected_head(
                     &self.fs,
                 )
                 .map_err(|error| error.to_string())?;
             }
-            let manifest = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+            let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
                 &self.fs,
-                crate::config::RecoveryPolicy::Strict,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
             )?;
             crate::runtime::IntentPersistence::load_with_fs_and_policy(
                 &self.fs,
-                crate::config::RecoveryPolicy::Strict,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
             )
             .map(|intents| (manifest, intents))
         })();
@@ -132,7 +132,7 @@ impl RuntimeState {
             Err(error) => {
                 self.recovery.metadata = super::MetadataSync::ReloadRequired;
                 self.mark_persistence_anomaly();
-                Err(crate::common::MidgeError::Internal(error))
+                Err(cntryl_midge_core::common::MidgeError::Internal(error))
             }
         }
     }
@@ -141,7 +141,7 @@ impl RuntimeState {
     pub(crate) fn retry_metadata_reload(&mut self) -> MidgeResult<()> {
         if self.recovery.metadata == super::MetadataSync::ReloadRequired {
             self.reload_persisted_metadata().map_err(|error| {
-                crate::common::MidgeError::Fenced(format!(
+                cntryl_midge_core::common::MidgeError::Fenced(format!(
                     "manifest and intent log are still behind disk; refusing to publish: {error}"
                 ))
             })?;
@@ -153,7 +153,7 @@ impl RuntimeState {
     /// disk; see `MetadataSync::ReloadRequired`.
     pub(crate) fn ensure_metadata_current(&self) -> MidgeResult<()> {
         if self.recovery.metadata == super::MetadataSync::ReloadRequired {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "manifest and intent log could not be reloaded after a failed publication; \
                  refusing to publish from stale metadata"
                     .into(),
@@ -186,7 +186,7 @@ impl RuntimeState {
                 return Err(if format_10 {
                     error
                 } else {
-                    crate::common::MidgeError::Internal(error.to_string())
+                    cntryl_midge_core::common::MidgeError::Internal(error.to_string())
                 });
             }
         }
@@ -195,16 +195,16 @@ impl RuntimeState {
 
     pub fn record_compaction_publication_intent(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         removed: Vec<String>,
         added: Vec<crate::runtime::FileMeta>,
     ) -> MidgeResult<Vec<String>> {
         if added.iter().any(|file_meta| file_meta.cf_id != cf_id) {
-            return Err(crate::common::MidgeError::Corruption(format!(
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
                 "compaction output metadata does not belong to column family {cf_id}"
             )));
         }
-        let same_inputs = |existing_cf_id: crate::types::ColumnFamilyId,
+        let same_inputs = |existing_cf_id: cntryl_midge_core::types::ColumnFamilyId,
                            existing_removed: &[String]| {
             existing_cf_id == cf_id
                 && Self::same_file_name_set(
@@ -234,12 +234,12 @@ impl RuntimeState {
             let inputs_match = same_inputs(*existing_cf_id, existing_removed);
             let outputs_match = same_outputs(existing_added);
             if *phase == PublicationPhase::ManifestPublished && (inputs_match || outputs_match) {
-                return Err(crate::common::MidgeError::Busy(
+                return Err(cntryl_midge_core::common::MidgeError::Busy(
                     "cannot replace a manifest-published compaction intent".to_string(),
                 ));
             }
             if outputs_match && !inputs_match {
-                return Err(crate::common::MidgeError::Corruption(
+                return Err(cntryl_midge_core::common::MidgeError::Corruption(
                     "compaction output identity is already owned by different inputs".to_string(),
                 ));
             }
@@ -307,7 +307,7 @@ impl RuntimeState {
 
     pub(crate) fn record_flush_publication_intent(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sequence: u64,
         file_meta: &crate::runtime::FileMeta,
     ) -> MidgeResult<()> {
@@ -347,7 +347,7 @@ impl RuntimeState {
     #[cfg(test)]
     pub(crate) fn commit_flush_publication(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         sequence: u64,
         file_meta: &crate::runtime::FileMeta,
         next_sst_seq: u64,
@@ -382,7 +382,7 @@ impl RuntimeState {
                 .save_snapshot_for(origin, &self.manifest)?;
             if !checkpoint.caller_was_current {
                 self.fence_metadata_until_reloaded();
-                return Err(crate::common::MidgeError::Fenced(
+                return Err(cntryl_midge_core::common::MidgeError::Fenced(
                     "local flush checkpoint caller is behind durable authority".into(),
                 ));
             }
@@ -450,7 +450,7 @@ impl RuntimeState {
         if ordinary_local {
             self.prepare_local_flush_checkpoint(origin, bounded_record, forced_path)?;
         }
-        let manifest_meta: crate::metadata::FileMeta = file_meta.into();
+        let manifest_meta: cntryl_midge_durability::metadata::FileMeta = file_meta.into();
         let next_sst_seq = self
             .manifest
             .next_sst_seqs
@@ -466,28 +466,28 @@ impl RuntimeState {
             .find(|file| file.name == manifest_meta.name)
         {
             Some(existing) if existing.same_identity(&manifest_meta) => {
-                if !matches!(self.manifest.flush_frontiers().get(cf_id)?, crate::metadata::frontiers::FamilyFrontier::Live { through_sequence } if through_sequence >= sequence)
+                if !matches!(self.manifest.flush_frontiers().get(cf_id)?, cntryl_midge_durability::metadata::frontiers::FamilyFrontier::Live { through_sequence } if through_sequence >= sequence)
                 {
-                    return Err(crate::common::MidgeError::Corruption(
+                    return Err(cntryl_midge_core::common::MidgeError::Corruption(
                         "existing flush output lacks its durable family frontier".into(),
                     ));
                 }
             }
             Some(_) => {
-                return Err(crate::common::MidgeError::Corruption(format!(
+                return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
                     "flush output conflicts with existing SST {}",
                     manifest_meta.name
                 )));
             }
             None => {
-                crate::failpoints::fail_point!("midge::flush_worker::before_manifest_persist");
-                let batch = crate::metadata::ManifestEdit::Batch(vec![
-                    crate::metadata::ManifestEdit::BumpNextSstSeq {
+                cntryl_midge_core::failpoints::fail_point!("midge::flush_worker::before_manifest_persist");
+                let batch = cntryl_midge_durability::metadata::ManifestEdit::Batch(vec![
+                    cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
                         cf_id,
                         next_seq: next_sst_seq,
                     },
-                    crate::metadata::ManifestEdit::AddSst(manifest_meta),
-                    crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                    cntryl_midge_durability::metadata::ManifestEdit::AddSst(manifest_meta),
+                    cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
                         cf_id,
                         freeze_sequence: sequence,
                     },
@@ -506,7 +506,7 @@ impl RuntimeState {
                     }
                 }
                 appended = true;
-                crate::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
+                cntryl_midge_core::failpoints::fail_point!("midge::flush_worker::after_manifest_journal");
             }
         }
         self.finish_local_flush_intent(&file_meta.name, retained_phase)?;
@@ -566,7 +566,7 @@ impl RuntimeState {
             }
         }
         if matched != 1 {
-            return Err(crate::common::MidgeError::Corruption(format!(
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
                 "expected exactly one compaction publication intent transition, found {matched}"
             )));
         }
@@ -597,13 +597,13 @@ impl RuntimeState {
         });
         let removed_count = before.saturating_sub(proposed.len());
         if removed_count != 1 {
-            return Err(crate::common::MidgeError::Corruption(format!(
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
                 "expected exactly one compaction publication intent clear, found {removed_count}"
             )));
         }
-        crate::failpoints::fail_point!(
+        cntryl_midge_core::failpoints::fail_point!(
             "midge::compaction::inject_no_space_on_intent_clear",
-            |_| Err(crate::common::MidgeError::NoSpace(
+            |_| Err(cntryl_midge_core::common::MidgeError::NoSpace(
                 "failpoint: no space while clearing compaction publication intent".to_string()
             ))
         );
@@ -713,7 +713,7 @@ impl RuntimeState {
         self.manifest_store
             .append_for(
                 Origin::Recovery,
-                &crate::metadata::ManifestEdit::AddSst(file_meta.into()),
+                &cntryl_midge_durability::metadata::ManifestEdit::AddSst(file_meta.into()),
             )
             .map(|_| ())
     }
@@ -729,10 +729,10 @@ impl RuntimeState {
 
         let mut edits = Vec::with_capacity(removed.len() + added.len());
         for name in removed {
-            edits.push(crate::metadata::ManifestEdit::RemoveSst { name: name.clone() });
+            edits.push(cntryl_midge_durability::metadata::ManifestEdit::RemoveSst { name: name.clone() });
         }
         for file_meta in added {
-            edits.push(crate::metadata::ManifestEdit::AddSst(file_meta.into()));
+            edits.push(cntryl_midge_durability::metadata::ManifestEdit::AddSst(file_meta.into()));
         }
 
         if edits.is_empty() {
@@ -762,8 +762,8 @@ impl RuntimeState {
 mod l0_level_order_tests {
     use super::l0_level_order_violations;
 
-    fn l0(name: &str, first: &[u8], last: &[u8], seqs: (u64, u64)) -> crate::metadata::FileMeta {
-        crate::metadata::FileMeta {
+    fn l0(name: &str, first: &[u8], last: &[u8], seqs: (u64, u64)) -> cntryl_midge_durability::metadata::FileMeta {
+        cntryl_midge_durability::metadata::FileMeta {
             name: name.to_string(),
             level: 0,
             size_bytes: 1,
@@ -890,19 +890,19 @@ mod checkpoint_bound_tests {
                 continue;
             }
             assert!(eligible);
-            let batch = crate::metadata::ManifestEdit::Batch(vec![
-                crate::metadata::ManifestEdit::BumpNextSstSeq {
+            let batch = cntryl_midge_durability::metadata::ManifestEdit::Batch(vec![
+                cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
                     cf_id: u32::MAX,
                     next_seq: u64::MAX,
                 },
-                crate::metadata::ManifestEdit::AddSst((&meta).into()),
-                crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+                cntryl_midge_durability::metadata::ManifestEdit::AddSst((&meta).into()),
+                cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
                     cf_id: u32::MAX,
                     freeze_sequence: u64::MAX - 1,
                 },
             ]);
             let envelope = serde_json::json!({"edit_id": u64::MAX, "edit": batch});
-            let marker = crate::metadata::journal::FsyncMarker {
+            let marker = cntryl_midge_durability::metadata::journal::FsyncMarker {
                 last_persisted_sequence: u64::MAX,
                 ts_millis: u64::MAX,
             };
@@ -910,7 +910,7 @@ mod checkpoint_bound_tests {
                 + serde_json::to_vec(&marker).unwrap().len()
                 + 18;
             assert!(
-                framed_bytes <= crate::metadata::store::LOCAL_FLUSH_RECORD_BYTES,
+                framed_bytes <= cntryl_midge_durability::metadata::store::LOCAL_FLUSH_RECORD_BYTES,
                 "{key_bytes} key bytes produced {framed_bytes} framed bytes"
             );
         }

@@ -3,10 +3,10 @@
 //! All engine state that can change at runtime lives here.
 //! Actors read from and propose updates to this state.
 
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::diagnostics::RuntimeDiagnostics;
-use crate::memtable::SkipListMemtable;
-use crate::metadata::Manifest;
+use cntryl_midge_table::memtable::SkipListMemtable;
+use cntryl_midge_durability::metadata::Manifest;
 use crate::runtime::snapshot_pins::SnapshotPinRegistry;
 use crate::runtime::{IntentLogEntry, PublicationPhase};
 
@@ -17,7 +17,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::io::traits::{Fs, FsError, FsPath};
+use cntryl_midge_core::io::traits::{Fs, FsError, FsPath};
 
 mod accounting;
 mod flush;
@@ -32,7 +32,7 @@ pub(crate) use recovery::RecoveryWal;
 const MAX_RECENT_DELETE_RANGES: usize = 4096;
 #[derive(Debug, Clone)]
 pub struct RecentDeleteRange {
-    pub cf_id: crate::types::ColumnFamilyId,
+    pub cf_id: cntryl_midge_core::types::ColumnFamilyId,
     pub start_key: Vec<u8>,
     pub end_key: Vec<u8>,
     pub sequence: u64,
@@ -147,12 +147,12 @@ impl ColumnFamilyState {
 /// past every name an earlier session handed out.
 #[derive(Debug, Default)]
 pub(crate) struct SstNameAllocation {
-    pub(crate) cursor: HashMap<crate::types::ColumnFamilyId, u64>,
-    pub(crate) reserved_through: HashMap<crate::types::ColumnFamilyId, u64>,
+    pub(crate) cursor: HashMap<cntryl_midge_core::types::ColumnFamilyId, u64>,
+    pub(crate) reserved_through: HashMap<cntryl_midge_core::types::ColumnFamilyId, u64>,
     pub(crate) prefetch_retry_at: Option<std::time::Instant>,
     /// Captured from recovered authority before this session reserves any
     /// output name. Never derive orphan eligibility from the moving counter.
-    pub(crate) startup_floor: HashMap<crate::types::ColumnFamilyId, u64>,
+    pub(crate) startup_floor: HashMap<cntryl_midge_core::types::ColumnFamilyId, u64>,
     pub(crate) startup_floor_epoch: Option<u64>,
 }
 
@@ -201,7 +201,7 @@ impl WalState {
     }
 
     /// The segment the WAL writer appends to: the ledger's open segment.
-    pub(crate) fn open_segment(&self) -> crate::wal::ledger::SegmentId {
+    pub(crate) fn open_segment(&self) -> cntryl_midge_durability::wal::ledger::SegmentId {
         self.history.ledger().open_segment()
     }
 }
@@ -224,7 +224,7 @@ impl CloudState {
     /// Stop tracking `segment_id`'s WAL object as queued for upload.
     pub fn forget_pending_upload(&mut self, segment_id: u64) {
         self.pending_uploads.retain(|item| {
-            crate::wal::parse_segment_object_key(item)
+            cntryl_midge_durability::wal::parse_segment_object_key(item)
                 .is_none_or(|(_, pending)| pending != segment_id)
         });
     }
@@ -271,7 +271,7 @@ pub(crate) const LOCAL_EVENTUAL_FLUSH_TRIGGER_MULTIPLE: u64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlushCandidate {
-    pub cf_id: crate::types::ColumnFamilyId,
+    pub cf_id: cntryl_midge_core::types::ColumnFamilyId,
     pub reason: FlushReason,
 }
 
@@ -306,7 +306,7 @@ pub struct RuntimeMode {
 }
 
 pub struct RecoveryStatus {
-    pub policy: crate::config::RecoveryPolicy,
+    pub policy: cntryl_midge_durability::RecoveryPolicy,
     pub opened_in_salvage_mode: bool,
     pub persistence_anomaly_detected: bool,
     /// Set by the DDL path when a remote authority switch could not be
@@ -373,7 +373,7 @@ pub struct ManifestRuntimeState {
 }
 
 pub(crate) struct PreparedRuntimeManifestEdit<'a> {
-    prepared: crate::metadata::manifest::PreparedManifestEdit<'a>,
+    prepared: cntryl_midge_durability::metadata::manifest::PreparedManifestEdit<'a>,
     read_views: &'a mut crate::runtime::sst_read_view::SstReadViewCache,
     changes_files: bool,
 }
@@ -402,19 +402,19 @@ impl ManifestRuntimeState {
         self.manifest = manifest;
     }
 
-    pub(crate) fn replace_files(&mut self, files: Vec<crate::metadata::FileMeta>) {
+    pub(crate) fn replace_files(&mut self, files: Vec<cntryl_midge_durability::metadata::FileMeta>) {
         self.read_views.get_mut().invalidate();
         self.manifest.files = files;
     }
 
-    pub(crate) fn add_file(&mut self, file: crate::metadata::FileMeta) {
+    pub(crate) fn add_file(&mut self, file: cntryl_midge_durability::metadata::FileMeta) {
         self.read_views.get_mut().invalidate();
         self.manifest.add_file(file);
     }
 
     pub(crate) fn retain_files(
         &mut self,
-        mut keep: impl FnMut(&crate::metadata::FileMeta) -> bool,
+        mut keep: impl FnMut(&cntryl_midge_durability::metadata::FileMeta) -> bool,
     ) {
         self.read_views.get_mut().invalidate();
         self.manifest.files.retain(|file| keep(file));
@@ -435,17 +435,17 @@ impl ManifestRuntimeState {
 
     pub(crate) fn adopt_checkpoint(
         &mut self,
-        checkpoint: crate::metadata::persistence::WrittenCheckpoint,
+        checkpoint: cntryl_midge_durability::metadata::persistence::WrittenCheckpoint,
     ) {
         checkpoint.adopt_into(&mut self.manifest);
     }
 
     pub(crate) fn prepare_edit<'a>(
         &'a mut self,
-        edit: &crate::metadata::ManifestEdit,
+        edit: &cntryl_midge_durability::metadata::ManifestEdit,
     ) -> MidgeResult<PreparedRuntimeManifestEdit<'a>> {
-        fn changes_files(edit: &crate::metadata::ManifestEdit) -> bool {
-            use crate::metadata::ManifestEdit;
+        fn changes_files(edit: &cntryl_midge_durability::metadata::ManifestEdit) -> bool {
+            use cntryl_midge_durability::metadata::ManifestEdit;
             match edit {
                 ManifestEdit::AddSst(_)
                 | ManifestEdit::RemoveSst { .. }
@@ -463,7 +463,7 @@ impl ManifestRuntimeState {
         })
     }
 
-    pub(crate) fn apply_edit(&mut self, edit: &crate::metadata::ManifestEdit) -> MidgeResult<()> {
+    pub(crate) fn apply_edit(&mut self, edit: &cntryl_midge_durability::metadata::ManifestEdit) -> MidgeResult<()> {
         self.prepare_edit(edit)?.commit();
         Ok(())
     }
@@ -476,7 +476,7 @@ impl ManifestRuntimeState {
 
     pub(crate) fn read_view_for(
         &self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> std::sync::Arc<crate::runtime::sst_read_view::SstReadView> {
         self.read_views.borrow_mut().view_for(&self.manifest, cf_id)
     }
@@ -558,9 +558,9 @@ pub struct RuntimeState {
 
     // Filesystem abstraction for all IO (never call std::fs directly)
     pub fs: std::sync::Arc<dyn Fs>,
-    pub(crate) startup_scope: Option<crate::common::DeadlineScope>,
+    pub(crate) startup_scope: Option<cntryl_midge_core::common::DeadlineScope>,
     /// The only runtime writer of the manifest journal and snapshot (#494).
-    pub(crate) manifest_store: Arc<crate::metadata::store::ManifestStore>,
+    pub(crate) manifest_store: Arc<cntryl_midge_durability::metadata::store::ManifestStore>,
     /// Flush SST name allocation in hybrid mode (#491).
     pub(crate) sst_names: SstNameAllocation,
     /// Authoritative SST views used during cloud intent replay. Local SST
@@ -570,7 +570,7 @@ pub struct RuntimeState {
     /// cannot use the authoritative cloud object.
     pub(crate) salvaged_local_ssts: HashSet<String>,
     /// Engine-scoped TTL clock with a process-local nondecreasing floor.
-    pub(crate) ttl_clock: Arc<crate::common::time::ObservedClock>,
+    pub(crate) ttl_clock: Arc<cntryl_midge_core::common::time::ObservedClock>,
 
     // === Subsystem State ===
     pub wal: WalState,
@@ -607,7 +607,7 @@ pub struct RuntimeState {
     pub active_compactions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
     /// Manual compaction requests awaiting a completed worker or cloud turn.
-    pub pending_compaction_waits: std::collections::BTreeMap<u64, crate::common::OperationDeadline>,
+    pub pending_compaction_waits: std::collections::BTreeMap<u64, cntryl_midge_core::common::OperationDeadline>,
 }
 
 struct RuntimeMetricsGauges {
@@ -630,7 +630,7 @@ impl RuntimeState {
         self.ttl_clock.now_millis()
     }
 
-    pub(crate) fn install_ttl_clock(&mut self, clock: Arc<crate::common::time::ObservedClock>) {
+    pub(crate) fn install_ttl_clock(&mut self, clock: Arc<cntryl_midge_core::common::time::ObservedClock>) {
         self.ttl_clock = clock;
     }
 }
@@ -641,17 +641,17 @@ impl RuntimeState {
     /// root-relative keys through `fs`.
     #[cfg(test)]
     pub(crate) fn host_wal_dir(&self) -> PathBuf {
-        self.db_path.join(crate::wal::WAL_DIR)
+        self.db_path.join(cntryl_midge_durability::wal::WAL_DIR)
     }
 
     /// The host directory behind the root's `sst/`, for tests that place or
     /// inspect SST files directly.
     #[cfg(test)]
     pub(crate) fn host_sst_dir(&self) -> PathBuf {
-        self.db_path.join(crate::sst::fs::SST_DIR)
+        self.db_path.join(cntryl_midge_table::sst::fs::SST_DIR)
     }
 
-    pub fn health(&self) -> crate::config::EngineHealth {
+    pub fn health(&self) -> cntryl_midge_core::types::EngineHealth {
         let residue = self.storage_residue_assessment();
         crate::runtime::storage_residue::classify_engine_health(
             crate::runtime::storage_residue::HealthInputs {
@@ -687,7 +687,7 @@ impl RuntimeState {
         )
     }
 
-    pub fn runtime_metrics_snapshot(&self) -> crate::types::RuntimeMetricsSnapshot {
+    pub fn runtime_metrics_snapshot(&self) -> cntryl_midge_core::types::RuntimeMetricsSnapshot {
         let now = Instant::now();
         let (pinned_ssts, oldest_snapshot_age_seconds) = self.snapshot_retention_metrics(now);
         let (active_memtables, immutable_memtables) = self.memtable_counts();
@@ -756,12 +756,12 @@ impl RuntimeState {
     fn assemble_runtime_metrics(
         &self,
         gauges: &RuntimeMetricsGauges,
-        telemetry: &crate::telemetry::metrics::MetricsSnapshot,
+        telemetry: &cntryl_midge_core::telemetry::metrics::MetricsSnapshot,
         read_path: &crate::diagnostics::ReadPathDiagnosticsSnapshot,
-    ) -> crate::types::RuntimeMetricsSnapshot {
+    ) -> cntryl_midge_core::types::RuntimeMetricsSnapshot {
         let ledger_syncs = self.wal.history.ledger_sync_counts();
         let admission = &self.write_pressure.admission;
-        crate::types::RuntimeMetricsSnapshot {
+        cntryl_midge_core::types::RuntimeMetricsSnapshot {
             wal_ledger_file_sync_attempts: ledger_syncs.file_attempts,
             wal_ledger_file_syncs: ledger_syncs.file_completed,
             wal_ledger_directory_sync_attempts: ledger_syncs.directory_attempts,
@@ -848,10 +848,10 @@ impl RuntimeState {
     }
 
     fn io_runtime_metrics(
-        telemetry: &crate::telemetry::metrics::MetricsSnapshot,
+        telemetry: &cntryl_midge_core::telemetry::metrics::MetricsSnapshot,
         read_path: &crate::diagnostics::ReadPathDiagnosticsSnapshot,
-    ) -> crate::types::RuntimeMetricsSnapshot {
-        crate::types::RuntimeMetricsSnapshot {
+    ) -> cntryl_midge_core::types::RuntimeMetricsSnapshot {
+        cntryl_midge_core::types::RuntimeMetricsSnapshot {
             cache_hits: read_path.sst_block_cache_hits,
             cache_misses: read_path.sst_block_cache_misses,
             wal_append_count: telemetry.wal_append_count,
@@ -874,30 +874,30 @@ impl RuntimeState {
 
     fn manifest_flush_frontier_metrics(
         &self,
-    ) -> std::collections::BTreeMap<crate::types::ColumnFamilyId, Option<u64>> {
+    ) -> std::collections::BTreeMap<cntryl_midge_core::types::ColumnFamilyId, Option<u64>> {
         self.manifest
             .flush_frontiers()
             .iter()
             .map(|(id, frontier)| {
                 let through = match frontier {
-                    crate::metadata::FamilyFrontier::Live { through_sequence } => {
+                    cntryl_midge_durability::metadata::FamilyFrontier::Live { through_sequence } => {
                         Some(through_sequence)
                     }
-                    crate::metadata::FamilyFrontier::Dropped => None,
+                    cntryl_midge_durability::metadata::FamilyFrontier::Dropped => None,
                 };
                 (id, through)
             })
             .collect()
     }
 
-    pub fn storage_layout_snapshot(&self) -> crate::types::StorageLayoutSnapshot {
+    pub fn storage_layout_snapshot(&self) -> cntryl_midge_core::types::StorageLayoutSnapshot {
         let mut levels =
-            std::collections::BTreeMap::<u32, Vec<crate::types::StorageFileLayout>>::new();
+            std::collections::BTreeMap::<u32, Vec<cntryl_midge_core::types::StorageFileLayout>>::new();
         for file in &self.manifest.files {
             levels
                 .entry(file.level)
                 .or_default()
-                .push(crate::types::StorageFileLayout {
+                .push(cntryl_midge_core::types::StorageFileLayout {
                     name: file.name.clone(),
                     level: file.level,
                     cf_id: file.cf_id,
@@ -914,7 +914,7 @@ impl RuntimeState {
             .map(|(level, mut files)| {
                 files.sort_by(|a, b| a.name.cmp(&b.name));
                 let total_bytes = files.iter().map(|file| file.size_bytes).sum();
-                crate::types::StorageLayoutLevel {
+                cntryl_midge_core::types::StorageLayoutLevel {
                     level,
                     file_count: files.len(),
                     total_bytes,
@@ -926,7 +926,7 @@ impl RuntimeState {
         let active_snapshots = self.snapshot_pins.snapshots(Instant::now());
         let residue = self.storage_residue_assessment();
 
-        crate::types::StorageLayoutSnapshot {
+        cntryl_midge_core::types::StorageLayoutSnapshot {
             health: self.health(),
             levels,
             active_snapshots,
@@ -983,7 +983,7 @@ impl RuntimeState {
 
         for temp_name in residue.sst_temp_files {
             self.check_startup_scope("startup residue entry")?;
-            let path = FsPath::new(crate::cloud_layout::object_key(&temp_name));
+            let path = FsPath::new(cntryl_midge_core::cloud_layout::object_key(&temp_name));
             match self.fs.remove_file(&path) {
                 Ok(()) => {
                     tracing::info!(path = %path.0.as_str(), "deleted non-authoritative SST temp residue");
@@ -1013,9 +1013,9 @@ impl RuntimeState {
 
         for orphan_name in residue.orphan_ssts {
             self.check_startup_scope("startup residue entry")?;
-            let path = FsPath::new(crate::cloud_layout::object_key(&orphan_name));
+            let path = FsPath::new(cntryl_midge_core::cloud_layout::object_key(&orphan_name));
             let injected_delete_failure =
-                crate::failpoints::is_active("midge::recovery::inject_orphan_sst_delete_failure");
+                cntryl_midge_core::failpoints::is_active("midge::recovery::inject_orphan_sst_delete_failure");
             if injected_delete_failure {
                 self.mark_persistence_anomaly();
                 tracing::warn!(
@@ -1047,7 +1047,7 @@ impl RuntimeState {
 
     fn cleanup_flush_staging_residue(&mut self) -> MidgeResult<()> {
         self.check_startup_scope("flush staging residue")?;
-        let staging_dir = crate::sst::fs::FLUSH_STAGING_DIR;
+        let staging_dir = cntryl_midge_table::sst::fs::FLUSH_STAGING_DIR;
         match self.fs.remove_dir_all(&FsPath::new(staging_dir)) {
             Ok(()) => {
                 tracing::info!(
@@ -1074,7 +1074,7 @@ impl RuntimeState {
     /// directory.
     fn cleanup_repair_scratch_residue(&mut self) -> MidgeResult<()> {
         self.check_startup_scope("repair scratch residue")?;
-        let directory = crate::sst::fs::REPAIR_SCRATCH_DIR;
+        let directory = cntryl_midge_table::sst::fs::REPAIR_SCRATCH_DIR;
         match self.fs.remove_dir_all(&FsPath::new(directory)) {
             Ok(()) => {
                 tracing::info!(path = directory, "deleted stale overlap-repair scratch");
@@ -1113,7 +1113,7 @@ impl RuntimeState {
         let mut moved = 0usize;
         for name in sst_names {
             self.check_startup_scope("startup residue entry")?;
-            let from = FsPath::new(crate::cloud_layout::object_key(name));
+            let from = FsPath::new(cntryl_midge_core::cloud_layout::object_key(name));
             let to = FsPath::new(format!("{}/{name}", quarantine.0));
             match self.fs.rename_atomic(&from, &to) {
                 Ok(()) => moved += 1,
@@ -1130,14 +1130,14 @@ impl RuntimeState {
             }
         }
         for dir in [
-            FsPath::new(crate::cloud_layout::object_key("")),
+            FsPath::new(cntryl_midge_core::cloud_layout::object_key("")),
             quarantine.clone(),
             FsPath::new(SALVAGE_RETAINED_DIR),
             FsPath::new(""),
         ] {
             self.check_startup_scope("salvage SST quarantine directory")?;
             let dir = FsPath::new(dir.0.trim_end_matches('/'));
-            if let Err(error) = self.fs.sync_dir(&dir, crate::io::Durability::Durable) {
+            if let Err(error) = self.fs.sync_dir(&dir, cntryl_midge_core::io::Durability::Durable) {
                 if matches!(error, FsError::Timeout(_)) {
                     return Err(error.into_midge());
                 }
@@ -1210,8 +1210,8 @@ impl RuntimeState {
         for dir_name in staging_dirs {
             self.check_startup_scope("startup residue entry")?;
             let path = FsPath::new(dir_name);
-            let result = if crate::failpoints::with_read_gate(|| {
-                crate::failpoints::is_active("midge::recovery::inject_root_staging_delete_failure")
+            let result = if cntryl_midge_core::failpoints::with_read_gate(|| {
+                cntryl_midge_core::failpoints::is_active("midge::recovery::inject_root_staging_delete_failure")
             }) {
                 Err(FsError::Io("injected root staging cleanup failure".into()))
             } else {
@@ -1285,7 +1285,7 @@ impl RuntimeState {
     /// acknowledged write, whatever else syncs the database root (#519).
     fn ensure_directories(root: &dyn Fs, memory_mode: bool) -> MidgeResult<()> {
         if !memory_mode {
-            for directory in ["wal", crate::sst::fs::SST_DIR] {
+            for directory in ["wal", cntryl_midge_table::sst::fs::SST_DIR] {
                 root.create_dir_all(&FsPath::new(directory))
                     .map_err(FsError::into_midge)?;
             }
@@ -1317,7 +1317,7 @@ impl RuntimeState {
         &mut self,
         count: u64,
     ) -> MidgeResult<std::ops::RangeInclusive<u64>> {
-        use crate::wal::sequence::{allocate, refill_due, Allocation};
+        use cntryl_midge_durability::wal::sequence::{allocate, refill_due, Allocation};
         let last = self.sequence;
         let reserved = self.wal.history.ledger().seq_reserved_through();
         if allocate(last, reserved, count).is_none() {
@@ -1387,7 +1387,7 @@ impl RuntimeState {
         &mut self,
         epoch: u64,
     ) -> MidgeResult<Option<crate::runtime::wal_history::SealedSegment>> {
-        let last = crate::wal::sequence::opening_last(
+        let last = cntryl_midge_durability::wal::sequence::opening_last(
             self.sequence,
             self.compaction_output_generation,
             self.wal.history.ledger().seq_reserved_through(),
@@ -1395,7 +1395,7 @@ impl RuntimeState {
         let exhausted = || MidgeError::ResourceLimit("sequence space exhausted".to_string());
         let first_seq = last.checked_add(1).ok_or_else(exhausted)?;
         let through = last
-            .checked_add(crate::wal::sequence::RESERVATION_BLOCK)
+            .checked_add(cntryl_midge_durability::wal::sequence::RESERVATION_BLOCK)
             .ok_or_else(exhausted)?;
         let sealed = self.wal.history.start_epoch(epoch, first_seq)?;
         self.wal.history.reserve(through)?;
@@ -1469,13 +1469,13 @@ impl RuntimeState {
     /// A retry replaces any earlier intent for the same SST in a proposed copy
     /// and installs that copy only after persistence succeeds. This prevents a
     /// failed retry from accumulating duplicate intents or mutating live state.
-    pub fn get_cf(&self, cf_id: crate::types::ColumnFamilyId) -> Option<&ColumnFamilyState> {
+    pub fn get_cf(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> Option<&ColumnFamilyState> {
         self.column_families.get(&cf_id)
     }
 
     pub fn get_cf_mut(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> Option<&mut ColumnFamilyState> {
         self.column_families.get_mut(&cf_id)
     }
@@ -1484,7 +1484,7 @@ impl RuntimeState {
     pub fn create_cf(&mut self, name: String) -> MidgeResult<u32> {
         let id = self.manifest.next_cf_id()?;
         self.manifest
-            .apply_edit(&crate::metadata::ManifestEdit::CreateColumnFamily {
+            .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::CreateColumnFamily {
                 id,
                 name: name.clone(),
                 created_at: 0,

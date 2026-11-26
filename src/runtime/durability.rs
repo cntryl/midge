@@ -5,7 +5,7 @@
 
 use crate::runtime::keyed_group_commit::KeyedGroupCommit;
 #[cfg(test)]
-use crate::types::ReadDurability;
+use cntryl_midge_core::types::ReadDurability;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -33,13 +33,13 @@ pub enum TestDurabilityWaiter {
     },
     Read {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: Vec<u8>,
         sequence: u64,
     },
     RangeScan {
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start: Vec<u8>,
         end: Vec<u8>,
         sequence: u64,
@@ -295,12 +295,12 @@ impl DurabilityCoordinator {
         &self,
         expected_current: u64,
         new_key: u64,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if let Some(waiters) = &self.waiters {
             waiters
                 .rotate_from_to(&expected_current, new_key)
                 .map_err(|_| {
-                    crate::common::MidgeError::Internal(format!(
+                    cntryl_midge_core::common::MidgeError::Internal(format!(
                         "durability generation drift: expected current key {expected_current}"
                     ))
                 })?;
@@ -323,18 +323,18 @@ impl DurabilityCoordinator {
     /// inflight segment. A later segment ack never makes earlier gaps durable.
     pub fn contiguous_acked_cloud_segments(
         &self,
-        acks: &crate::wal::publish::AckSet,
-    ) -> Result<Vec<crate::wal::publish::OwedSegment>, crate::wal::publish::Refusal> {
-        let mut owed: Vec<crate::wal::publish::OwedSegment> = self
+        acks: &cntryl_midge_durability::wal::publish::AckSet,
+    ) -> Result<Vec<cntryl_midge_durability::wal::publish::OwedSegment>, cntryl_midge_durability::wal::publish::Refusal> {
+        let mut owed: Vec<cntryl_midge_durability::wal::publish::OwedSegment> = self
             .inflight
             .iter()
-            .map(|(segment_id, info)| crate::wal::publish::OwedSegment {
+            .map(|(segment_id, info)| cntryl_midge_durability::wal::publish::OwedSegment {
                 segment_id: *segment_id,
                 max_sequence: info.max_sequence,
             })
             .collect();
         owed.sort_unstable_by_key(|segment| segment.segment_id);
-        crate::wal::publish::uploaded_run(&owed, acks)
+        cntryl_midge_durability::wal::publish::uploaded_run(&owed, acks)
     }
 
     /// Retire a cloud segment only after its frontier and waiter commit has
@@ -350,8 +350,8 @@ impl DurabilityCoordinator {
     #[cfg(test)]
     pub fn take_contiguous_acked_cloud_segments(
         &mut self,
-        acks: &crate::wal::publish::AckSet,
-    ) -> Result<Vec<crate::wal::publish::OwedSegment>, crate::wal::publish::Refusal> {
+        acks: &cntryl_midge_durability::wal::publish::AckSet,
+    ) -> Result<Vec<cntryl_midge_durability::wal::publish::OwedSegment>, cntryl_midge_durability::wal::publish::Refusal> {
         let ready = self.contiguous_acked_cloud_segments(acks)?;
         for segment in &ready {
             self.inflight.remove(&segment.segment_id);
@@ -471,8 +471,8 @@ impl DurabilityCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn acknowledgements(entries: &[(u64, u64)]) -> crate::wal::publish::AckSet {
-        let mut set = crate::wal::publish::AckSet::default();
+    fn acknowledgements(entries: &[(u64, u64)]) -> cntryl_midge_durability::wal::publish::AckSet {
+        let mut set = cntryl_midge_durability::wal::publish::AckSet::default();
         for &(id, sequence) in entries {
             set.acknowledge(id, sequence);
         }
@@ -505,11 +505,11 @@ mod tests {
         assert_eq!(
             ready,
             vec![
-                crate::wal::publish::OwedSegment {
+                cntryl_midge_durability::wal::publish::OwedSegment {
                     segment_id: 1,
                     max_sequence: 10,
                 },
-                crate::wal::publish::OwedSegment {
+                cntryl_midge_durability::wal::publish::OwedSegment {
                     segment_id: 2,
                     max_sequence: 20,
                 },
@@ -530,7 +530,7 @@ mod tests {
         // Assert
         assert_eq!(
             result,
-            Err(crate::wal::publish::Refusal::SequenceMismatch {
+            Err(cntryl_midge_durability::wal::publish::Refusal::SequenceMismatch {
                 segment_id: 7,
                 sealed: 70,
                 uploaded: 71,

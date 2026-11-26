@@ -1,6 +1,6 @@
 use super::*;
-use crate::io::traits::{DirEntry, FsError, Metadata};
-use crate::io::{
+use cntryl_midge_core::io::traits::{DirEntry, FsError, Metadata};
+use cntryl_midge_core::io::{
     Durability as FsDurability, File, Fs, FsPath, FsResult, MockFs, OpenOptions as FsOpenOptions,
     ReadFs,
 };
@@ -8,7 +8,7 @@ use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
 #[cfg(feature = "failpoints")]
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
 use crate::runtime::RuntimeState;
-use crate::types::EntryType;
+use cntryl_midge_core::types::EntryType;
 use bytes::Bytes;
 use std::path::PathBuf;
 #[cfg(feature = "failpoints")]
@@ -33,7 +33,7 @@ fn should_reject_wal_append_before_disk_growth_when_ephemeral_budget_is_exhauste
 ) -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir()?;
-    let setup = crate::storage::simulated::host_simulated_cloud(temp.path(), Some(1))?;
+    let setup = cntryl_midge_storage::simulated::host_simulated_cloud(temp.path(), Some(1))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(1);
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
     let mut actor = WalActor::open(
@@ -41,7 +41,7 @@ fn should_reject_wal_append_before_disk_growth_when_ephemeral_budget_is_exhauste
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     actor.set_storage_budget(setup.hybrid_storage.clone());
     let prepared = prepare_put_transaction(
@@ -60,10 +60,10 @@ fn should_reject_wal_append_before_disk_growth_when_ephemeral_budget_is_exhauste
         std::fs::metadata(
             temp.path()
                 .join("wal")
-                .join(crate::wal::segment_file_name(1))
+                .join(cntryl_midge_durability::wal::segment_file_name(1))
         )?
         .len(),
-        crate::wal::format::HEADER_LEN as u64
+        cntryl_midge_durability::wal::format::HEADER_LEN as u64
     );
     assert_eq!(
         setup.hybrid_storage.budget_snapshot().total_committed_bytes,
@@ -76,7 +76,7 @@ fn should_reject_wal_append_before_disk_growth_when_ephemeral_budget_is_exhauste
 fn should_charge_actual_wal_bytes_when_successful_append_compresses_payload() -> MidgeResult<()> {
     // Arrange
     let temp = tempfile::tempdir()?;
-    let setup = crate::storage::simulated::host_simulated_cloud(temp.path(), Some(8192))?;
+    let setup = cntryl_midge_storage::simulated::host_simulated_cloud(temp.path(), Some(8192))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
     let mut actor = WalActor::open(
@@ -84,7 +84,7 @@ fn should_charge_actual_wal_bytes_when_successful_append_compresses_payload() ->
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     actor.set_storage_budget(setup.hybrid_storage.clone());
     let prepared = actor.prepare_transaction_append(
@@ -109,12 +109,12 @@ fn should_charge_actual_wal_bytes_when_successful_append_compresses_payload() ->
     let physical = std::fs::metadata(
         temp.path()
             .join("wal")
-            .join(crate::wal::segment_file_name(1)),
+            .join(cntryl_midge_durability::wal::segment_file_name(1)),
     )?
     .len();
     // Assert: the segment header is written when the segment is created,
     // outside WAL admission; appends are charged what they wrote.
-    let appended = physical - crate::wal::format::HEADER_LEN as u64;
+    let appended = physical - cntryl_midge_durability::wal::format::HEADER_LEN as u64;
     assert!(appended > 0 && appended < 4096);
     assert_eq!(
         setup.hybrid_storage.budget_snapshot().total_committed_bytes,
@@ -126,23 +126,23 @@ fn should_charge_actual_wal_bytes_when_successful_append_compresses_payload() ->
 #[test]
 fn should_check_transaction_assertions_against_remote_sst_when_local_cache_is_empty(
 ) -> MidgeResult<()> {
-    use crate::sst::SstFactory;
+    use cntryl_midge_table::sst::SstFactory;
     // Arrange
     let local = tempfile::tempdir()?;
     let remote = tempfile::tempdir()?;
     let mut state = RuntimeState::new(local.path().to_path_buf(), false);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::new(cntryl_midge_core::io::MockFs::new()), 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(b"asserted", Some(b"value"), 9, EntryType::Put, None)?;
     let bytes = writer.finish_bytes()?;
-    let name = crate::cloud_layout::file_name(0, 0, 1);
+    let name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
     std::fs::create_dir_all(remote.path().join("sst"))?;
     std::fs::write(remote.path().join("sst").join(&name), &bytes)?;
     state
         .manifest
         .test_mut()
         .files
-        .push(crate::metadata::FileMeta {
+        .push(cntryl_midge_durability::metadata::FileMeta {
             name,
             cf_id: 0,
             size_bytes: bytes.len() as u64,
@@ -155,9 +155,9 @@ fn should_check_transaction_assertions_against_remote_sst_when_local_cache_is_em
         });
     // Validation reads through the event loop's resources, which in
     // ephemeral-cache cloud mode sit over the remote SST store.
-    let remote_fs: Arc<dyn crate::io::Fs> = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+    let remote_fs: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&state.fs),
-        Arc::new(crate::storage::filesystem::FileSystem::new(remote.path())?),
+        Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(remote.path())?),
         Duration::from_secs(5),
     ));
     let resources = Arc::new(
@@ -165,7 +165,7 @@ fn should_check_transaction_assertions_against_remote_sst_when_local_cache_is_em
             remote_fs,
             std::path::PathBuf::from("sst"),
             64 * 1024,
-            crate::sst::cache::CachePolicyType::Lru,
+            cntryl_midge_table::sst::cache::CachePolicyType::Lru,
             Arc::new(crate::diagnostics::RuntimeDiagnostics::default()),
         ),
     );
@@ -233,7 +233,7 @@ fn should_reject_transaction_without_mutation_when_sequence_space_is_exhausted()
         DurabilityPolicy::BestEffort,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
 
     // Act
@@ -266,7 +266,7 @@ fn should_reject_transaction_without_mutation_when_commit_would_use_the_dropped_
         DurabilityPolicy::BestEffort,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
 
     // Act
@@ -301,7 +301,7 @@ struct TxnAppendBatchNoSpaceFailpointGuard {
     // Drop order: the scenario is torn down in `drop` before the gate field
     // is released.
     scenario: Option<fail::FailScenario<'static>>,
-    _test_guard: crate::failpoints::TestFailpointGuard,
+    _test_guard: cntryl_midge_core::failpoints::TestFailpointGuard,
 }
 
 #[cfg(feature = "failpoints")]
@@ -309,7 +309,7 @@ impl TxnAppendBatchNoSpaceFailpointGuard {
     /// Take the failpoint gate before the `fail` scenario lock, matching
     /// every other failpoint test; the reverse order deadlocks against them.
     fn setup(request_id: u64) -> Self {
-        let test_guard = crate::failpoints::test_failpoint_guard();
+        let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
         set_txn_append_batch_no_space_failpoint_request_id(Some(request_id));
         fail::cfg("midge::wal::inject_no_space_on_txn_append_batch", "return")
@@ -374,7 +374,7 @@ fn actor_over(
         policy,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )
 }
 
@@ -388,7 +388,7 @@ impl SegmentCreateFailingFs {
     fn new(segment: u64) -> Self {
         Self {
             inner: MockFs::new(),
-            segment: FsPath::new(crate::wal::segment_file_name(segment)),
+            segment: FsPath::new(cntryl_midge_durability::wal::segment_file_name(segment)),
         }
     }
 
@@ -398,9 +398,9 @@ impl SegmentCreateFailingFs {
 }
 
 impl ReadFs for SegmentCreateFailingFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         self.open(path, FsOpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -416,7 +416,7 @@ impl ReadFs for SegmentCreateFailingFs {
     }
 }
 
-impl crate::io::PersistentHandleFs for SegmentCreateFailingFs {
+impl cntryl_midge_core::io::PersistentHandleFs for SegmentCreateFailingFs {
     fn open_persistent(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File>> {
         if self.should_fail_open(path, opts) {
             return Err(FsError::Unavailable(format!(
@@ -424,22 +424,22 @@ impl crate::io::PersistentHandleFs for SegmentCreateFailingFs {
                 path.0
             )));
         }
-        crate::io::open_persistent_handle(&self.inner, path, opts)
+        cntryl_midge_core::io::open_persistent_handle(&self.inner, path, opts)
     }
 }
 
 impl Fs for SegmentCreateFailingFs {
     fn try_lock_exclusive(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
-            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+            .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
     }
 
     fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
@@ -483,7 +483,7 @@ impl SegmentWriterOpenFailingFs {
     fn new(segment: u64) -> Self {
         Self {
             inner: MockFs::new(),
-            segment: FsPath::new(crate::wal::segment_file_name(segment)),
+            segment: FsPath::new(cntryl_midge_durability::wal::segment_file_name(segment)),
         }
     }
 
@@ -494,9 +494,9 @@ impl SegmentWriterOpenFailingFs {
 }
 
 impl ReadFs for SegmentWriterOpenFailingFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         self.open(path, FsOpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -512,29 +512,29 @@ impl ReadFs for SegmentWriterOpenFailingFs {
     }
 }
 
-impl crate::io::PersistentHandleFs for SegmentWriterOpenFailingFs {
+impl cntryl_midge_core::io::PersistentHandleFs for SegmentWriterOpenFailingFs {
     fn open_persistent(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File>> {
         if self.should_fail_open(path, opts) {
             return Err(FsError::Unavailable(
                 "next WAL writer open failed".to_string(),
             ));
         }
-        crate::io::open_persistent_handle(&self.inner, path, opts)
+        cntryl_midge_core::io::open_persistent_handle(&self.inner, path, opts)
     }
 }
 
 impl Fs for SegmentWriterOpenFailingFs {
     fn try_lock_exclusive(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
-            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+            .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
     }
 
     fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
@@ -574,9 +574,9 @@ struct RotationPreflightFailingOnceFs {
 }
 
 impl ReadFs for RotationPreflightFailingOnceFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         self.open(path, FsOpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -600,24 +600,24 @@ impl ReadFs for RotationPreflightFailingOnceFs {
     }
 }
 
-impl crate::io::PersistentHandleFs for RotationPreflightFailingOnceFs {
+impl cntryl_midge_core::io::PersistentHandleFs for RotationPreflightFailingOnceFs {
     fn open_persistent(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File>> {
-        crate::io::open_persistent_handle(&self.inner, path, opts)
+        cntryl_midge_core::io::open_persistent_handle(&self.inner, path, opts)
     }
 }
 
 impl Fs for RotationPreflightFailingOnceFs {
     fn try_lock_exclusive(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
-            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+            .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
     }
 
     fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
@@ -647,21 +647,21 @@ impl Fs for RotationPreflightFailingOnceFs {
 
 /// Writer whose fsync always fails after appends succeeded.
 struct FsyncFailingWriter {
-    inner: Box<dyn crate::wal::WalWriter>,
+    inner: Box<dyn cntryl_midge_durability::wal::WalWriter>,
 }
 
-impl crate::wal::WalWriter for FsyncFailingWriter {
+impl cntryl_midge_durability::wal::WalWriter for FsyncFailingWriter {
     fn append_record_accounted(
         &self,
-        record: &crate::wal::WalRecord,
-    ) -> Result<u64, crate::wal::traits::WalAppendError> {
+        record: &cntryl_midge_durability::wal::WalRecord,
+    ) -> Result<u64, cntryl_midge_durability::wal::traits::WalAppendError> {
         self.inner.append_record_accounted(record)
     }
 
     fn append_batch_accounted(
         &self,
-        records: &[crate::wal::WalRecord],
-    ) -> Result<u64, crate::wal::traits::WalAppendError> {
+        records: &[cntryl_midge_durability::wal::WalRecord],
+    ) -> Result<u64, cntryl_midge_durability::wal::traits::WalAppendError> {
         self.inner.append_batch_accounted(records)
     }
 
@@ -675,21 +675,21 @@ impl crate::wal::WalWriter for FsyncFailingWriter {
         self.inner.current_pos()
     }
 
-    fn tail(&self) -> crate::wal::format::SegmentTail {
+    fn tail(&self) -> cntryl_midge_durability::wal::format::SegmentTail {
         self.inner.tail()
     }
 
     fn seal_facts(
         &self,
         timeout: std::time::Duration,
-    ) -> MidgeResult<crate::wal::format::SealedFacts> {
+    ) -> MidgeResult<cntryl_midge_durability::wal::format::SealedFacts> {
         self.inner.seal_facts(timeout)
     }
 
     /// Sealing syncs the footer, which fails like every other sync.
     fn write_footer(
         &self,
-        _facts: &crate::wal::format::SealedFacts,
+        _facts: &cntryl_midge_durability::wal::format::SealedFacts,
         _timeout: std::time::Duration,
     ) -> MidgeResult<()> {
         Err(MidgeError::Io(std::io::Error::other(
@@ -769,7 +769,7 @@ fn should_fence_rotation_when_open_segment_is_missing_with_pending_records() -> 
     )?;
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     assert!(wal_actor.has_pending_data());
-    mock.remove_file(&FsPath::new(crate::wal::segment_file_name(4)))
+    mock.remove_file(&FsPath::new(cntryl_midge_durability::wal::segment_file_name(4)))
         .map_err(FsError::into_midge)?;
     let ticket = seal_ticket_for_test(&wal_actor, &state);
 
@@ -802,7 +802,7 @@ fn should_fence_rotation_when_seal_ticket_disagrees_with_actor_state() -> MidgeR
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let segment_id = state.wal.open_segment();
     let mismatched_ticket = WalSealTicket::for_test(segment_id, segment_id + 1, 99);
@@ -818,10 +818,10 @@ fn should_fence_rotation_when_seal_ticket_disagrees_with_actor_state() -> MidgeR
     assert_eq!(state.wal.open_segment(), segment_id);
     assert_eq!(Some(state.wal.open_segment()), Some(segment_id));
     assert!(wal_dir
-        .join(crate::wal::segment_file_name(segment_id))
+        .join(cntryl_midge_durability::wal::segment_file_name(segment_id))
         .exists());
     assert!(!wal_dir
-        .join(crate::wal::segment_file_name(segment_id + 1))
+        .join(cntryl_midge_durability::wal::segment_file_name(segment_id + 1))
         .exists());
     Ok(())
 }
@@ -836,11 +836,11 @@ fn should_fence_strict_transaction_when_sync_fails_after_records_are_appended() 
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
     let inner =
-        FsWalFactoryIo::new(Arc::clone(&fs)).create_writer(&crate::wal::segment_file_name(1))?;
+        FsWalFactoryIo::new(Arc::clone(&fs)).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?;
     wal_actor.replace_writer_for_test(Box::new(FsyncFailingWriter { inner }));
     let prepared = prepare_put_transaction(
         &mut wal_actor,
@@ -896,7 +896,7 @@ fn should_keep_unknown_lease_authority_as_authority_loss_when_sync_fails() -> Mi
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let authority_calls = Arc::clone(&calls);
@@ -953,7 +953,7 @@ fn should_apply_wal_sequence_to_memtable() -> MidgeResult<()> {
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
 
     // Act: append a single put
@@ -986,7 +986,7 @@ fn should_apply_wal_sequence_to_memtable() -> MidgeResult<()> {
 #[test]
 fn should_not_force_sync_immediately() -> MidgeResult<()> {
     // Arrange: WAL actor with a long batch window so batching is possible
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let wal_dir = temp.path().to_path_buf();
     let batch_cfg = BatchConfig {
         max_delay_ms: 10_000,
@@ -998,7 +998,7 @@ fn should_not_force_sync_immediately() -> MidgeResult<()> {
         DurabilityPolicy::Batched,
         batch_cfg,
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
 
     // Act: append a small batch (deferred in Batched mode)
@@ -1054,7 +1054,7 @@ fn should_not_force_sync_immediately() -> MidgeResult<()> {
 #[test]
 fn should_append_multiple_prepared_transactions_with_one_physical_call() -> MidgeResult<()> {
     // Arrange
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path, false);
     let mut wal_actor = WalActor::open(
@@ -1062,7 +1062,7 @@ fn should_append_multiple_prepared_transactions_with_one_physical_call() -> Midg
         DurabilityPolicy::Batched,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
 
     let first = wal_actor.prepare_transaction_append(
@@ -1132,7 +1132,7 @@ fn should_append_multiple_prepared_transactions_with_one_physical_call() -> Midg
 fn should_build_one_read_snapshot_when_checking_multiple_assertions_in_one_column_family(
 ) -> MidgeResult<()> {
     // Arrange
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let state = RuntimeState::new(temp.path().to_path_buf(), false);
     let assertions = vec![
         crate::runtime::KeyAssertion {
@@ -1170,7 +1170,7 @@ fn should_build_one_read_snapshot_when_checking_multiple_assertions_in_one_colum
 #[test]
 fn should_durably_append_strict_transaction_group_once_before_memtable_apply() -> MidgeResult<()> {
     // Arrange
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
     let mut wal_actor = WalActor::open(
@@ -1178,7 +1178,7 @@ fn should_durably_append_strict_transaction_group_once_before_memtable_apply() -
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let first = prepare_put_transaction(
         &mut wal_actor,
@@ -1225,7 +1225,7 @@ fn should_durably_append_strict_transaction_group_once_before_memtable_apply() -
 #[test]
 fn should_reject_whole_group_before_wal_append_given_duplicate_key_sequence() -> MidgeResult<()> {
     // Arrange
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
     let mut wal_actor = WalActor::open(
@@ -1233,7 +1233,7 @@ fn should_reject_whole_group_before_wal_append_given_duplicate_key_sequence() ->
         DurabilityPolicy::Batched,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let first = prepare_put_transaction(
         &mut wal_actor,
@@ -1281,7 +1281,7 @@ fn should_reject_whole_group_before_wal_append_given_duplicate_key_sequence() ->
 #[test]
 fn should_reject_whole_group_before_wal_append_given_cf_missing_after_prepare() -> MidgeResult<()> {
     // Arrange
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
     let mut wal_actor = WalActor::open(
@@ -1289,7 +1289,7 @@ fn should_reject_whole_group_before_wal_append_given_cf_missing_after_prepare() 
         DurabilityPolicy::Batched,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let prepared = prepare_put_transaction(
         &mut wal_actor,
@@ -1315,7 +1315,7 @@ fn should_leave_no_partial_writes_given_later_memtable_preflight_failure() -> Mi
     // Arrange: a transaction is single-family (#843), so the later
     // operation fails preflight on its own key: the memtable already holds
     // that key at every sequence the transaction could have taken.
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
     let mut wal_actor = WalActor::open(
@@ -1323,7 +1323,7 @@ fn should_leave_no_partial_writes_given_later_memtable_preflight_failure() -> Mi
         DurabilityPolicy::Batched,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let put = |key: &'static [u8]| crate::runtime::TransactionOp::Put {
         cf_id: 0,
@@ -1390,9 +1390,9 @@ fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<(
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let test_guard = crate::failpoints::test_failpoint_guard();
+    let test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
     let mut wal_actor = WalActor::open(
@@ -1400,7 +1400,7 @@ fn should_apply_no_strict_group_member_when_shared_sync_fails() -> MidgeResult<(
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let first = prepare_put_transaction(
         &mut wal_actor,
@@ -1450,8 +1450,8 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
     let _guard = failpoint_test_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
-    let setup = crate::storage::simulated::host_simulated_cloud(temp.path(), Some(8192))?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
+    let setup = cntryl_midge_storage::simulated::host_simulated_cloud(temp.path(), Some(8192))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(8192);
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path, false);
@@ -1460,7 +1460,7 @@ fn should_fail_all_prepared_transactions_when_batch_append_hits_no_space() -> Mi
         DurabilityPolicy::Batched,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     wal_actor.set_storage_budget(setup.hybrid_storage.clone());
 
@@ -1559,7 +1559,7 @@ fn should_rotate_through_ledger_in_memory_mode() -> MidgeResult<()> {
         DurabilityPolicy::Batched,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let ticket = seal_ticket_for_test(&wal_actor, &state);
 
@@ -1580,14 +1580,14 @@ fn should_rotate_through_ledger_in_memory_mode() -> MidgeResult<()> {
 #[test]
 fn should_not_report_sync_deadline_without_pending_data() -> MidgeResult<()> {
     // Arrange
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let state = RuntimeState::new(temp.path().to_path_buf(), false);
     let wal_actor = WalActor::open(
         &state,
         DurabilityPolicy::Batched,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
 
     // Act
@@ -1601,7 +1601,7 @@ fn should_not_report_sync_deadline_without_pending_data() -> MidgeResult<()> {
 #[test]
 fn should_not_report_local_batch_work_given_pending_cloud_async_wal() -> MidgeResult<()> {
     // Arrange
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
     let mut wal_actor = WalActor::open(
@@ -1612,7 +1612,7 @@ fn should_not_report_local_batch_work_given_pending_cloud_async_wal() -> MidgeRe
             max_bytes: 1,
         },
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let (_, deferred) = wal_actor.append_single_op(
         &mut state,
@@ -1641,7 +1641,7 @@ fn should_not_report_local_batch_work_given_pending_cloud_async_wal() -> MidgeRe
 #[test]
 fn should_only_coalesce_supported_local_transaction_appends() -> MidgeResult<()> {
     // Arrange
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let actor = |directory: &str, policy, memory_mode| {
         let state = RuntimeState::new(temp.path().join(directory), memory_mode);
         WalActor::open(
@@ -1649,7 +1649,7 @@ fn should_only_coalesce_supported_local_transaction_appends() -> MidgeResult<()>
             policy,
             BatchConfig::default(),
             1,
-            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
         )
     };
     let batched_actor = actor("batched", DurabilityPolicy::Batched, false)?;
@@ -1678,7 +1678,7 @@ fn should_only_coalesce_supported_local_transaction_appends() -> MidgeResult<()>
 #[test]
 fn should_rotate_to_lex_sortable_wal_segment_name() -> MidgeResult<()> {
     // Arrange
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let wal_dir = db_path.join("wal");
     let mut state = RuntimeState::new(db_path, false);
@@ -1687,7 +1687,7 @@ fn should_rotate_to_lex_sortable_wal_segment_name() -> MidgeResult<()> {
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let ticket = seal_ticket_for_test(&wal_actor, &state);
 
@@ -1696,7 +1696,7 @@ fn should_rotate_to_lex_sortable_wal_segment_name() -> MidgeResult<()> {
 
     // Assert
     assert!(
-        wal_dir.join(crate::wal::segment_file_name(1)).exists(),
+        wal_dir.join(cntryl_midge_durability::wal::segment_file_name(1)).exists(),
         "rotated WAL segments should use the canonical lex-sortable segment name"
     );
     assert!(
@@ -1711,7 +1711,7 @@ fn should_rotate_to_lex_sortable_wal_segment_name() -> MidgeResult<()> {
 fn should_fail_rotate_without_advancing_segment_when_next_segment_creation_fails() -> MidgeResult<()>
 {
     // Arrange
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let fs: Arc<dyn Fs> = Arc::new(SegmentCreateFailingFs::new(8));
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
     let mut wal_actor = actor_over(&mut state, Arc::clone(&fs), 7, DurabilityPolicy::Strict)?;
@@ -1725,8 +1725,8 @@ fn should_fail_rotate_without_advancing_segment_when_next_segment_creation_fails
     )?;
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     let max_sequence = wal_actor.open_segment_max_sequence();
-    let segment = FsPath::new(crate::wal::segment_file_name(7));
-    let before = crate::io::read_all(fs.as_ref(), &segment).map_err(FsError::into_midge)?;
+    let segment = FsPath::new(cntryl_midge_durability::wal::segment_file_name(7));
+    let before = cntryl_midge_core::io::read_all(fs.as_ref(), &segment).map_err(FsError::into_midge)?;
     let ticket = seal_ticket_for_test(&wal_actor, &state);
 
     // Act
@@ -1740,7 +1740,7 @@ fn should_fail_rotate_without_advancing_segment_when_next_segment_creation_fails
     assert!(max_sequence > 0);
     assert_eq!(wal_actor.open_segment_max_sequence(), max_sequence);
     assert_eq!(
-        crate::io::read_all(fs.as_ref(), &segment).map_err(FsError::into_midge)?,
+        cntryl_midge_core::io::read_all(fs.as_ref(), &segment).map_err(FsError::into_midge)?,
         before
     );
     assert!(wal_actor.writer().is_some());
@@ -1752,7 +1752,7 @@ fn should_fail_rotate_without_advancing_segment_when_next_segment_creation_fails
 #[test]
 fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() -> MidgeResult<()> {
     // Arrange
-    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let _test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
 
     for boundary in WalTransitionBoundary::LOCAL_ROTATION_BOUNDARIES {
@@ -1765,7 +1765,7 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
             DurabilityPolicy::Strict,
             BatchConfig::default(),
             1,
-            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
         let segment_id = state.wal.open_segment();
         let ticket = seal_ticket_for_test(&wal_actor, &state);
@@ -1780,7 +1780,7 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
         // Assert
         assert!(matches!(error, MidgeError::Internal(_)));
         assert!(wal_dir
-            .join(crate::wal::segment_file_name(segment_id))
+            .join(cntryl_midge_durability::wal::segment_file_name(segment_id))
             .exists());
         let ledger_open = Some(state.wal.open_segment());
         // The footer is the first irreversible step: from it on the actor
@@ -1803,7 +1803,7 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
             assert_eq!(ledger_open, Some(segment_id));
             assert_eq!(
                 wal_dir
-                    .join(crate::wal::segment_file_name(segment_id + 1))
+                    .join(cntryl_midge_durability::wal::segment_file_name(segment_id + 1))
                     .exists(),
                 boundary == WalTransitionBoundary::AfterSegmentCreate
             );
@@ -1820,7 +1820,7 @@ fn should_leave_rotation_operational_or_fenced_at_every_filesystem_boundary() ->
 #[test]
 fn should_fence_each_append_path_after_physical_commit_before_accounting() -> MidgeResult<()> {
     // Arrange
-    let _test_guard = crate::failpoints::test_failpoint_guard();
+    let _test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
 
     for spilled in [false, true] {
@@ -1831,7 +1831,7 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
             DurabilityPolicy::CloudAsync,
             BatchConfig::default(),
             1,
-            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
         fail::cfg(
             WalTransitionBoundary::AfterAppendBeforeAccounting.failpoint_name(),
@@ -1844,7 +1844,7 @@ fn should_fence_each_append_path_after_physical_commit_before_accounting() -> Mi
             let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(0));
             let mut writes = crate::runtime::transaction_spill::TransactionWriteSet::new(
                 pool,
-                &crate::io::real::test_root(temp.path()),
+                &cntryl_midge_core::io::real::test_root(temp.path()),
                 false,
                 1,
             );
@@ -1928,13 +1928,13 @@ fn should_fence_rotation_before_overwriting_a_next_segment_that_holds_data() -> 
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let segment_id = state.wal.open_segment();
-    let next_path = wal_dir.join(crate::wal::segment_file_name(segment_id + 1));
+    let next_path = wal_dir.join(cntryl_midge_durability::wal::segment_file_name(segment_id + 1));
     // Longer than a segment header, so it may hold records.
     let existing = [
-        vec![0xa5; crate::wal::format::HEADER_LEN],
+        vec![0xa5; cntryl_midge_durability::wal::format::HEADER_LEN],
         b"existing-segment-data".to_vec(),
     ]
     .concat();
@@ -1999,7 +1999,7 @@ fn should_keep_rotation_retryable_when_next_segment_directory_sync_fails() -> Mi
 fn should_fence_filesystem_wal_when_next_writer_open_fails_after_ledger_rotate() -> MidgeResult<()>
 {
     // Arrange
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let fs: Arc<dyn Fs> = Arc::new(SegmentWriterOpenFailingFs::new(8));
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
     let mut wal_actor = actor_over(&mut state, Arc::clone(&fs), 7, DurabilityPolicy::CloudAsync)?;
@@ -2082,7 +2082,7 @@ fn should_fence_filesystem_wal_when_next_writer_open_fails_after_ledger_rotate()
         "rejected write must not mutate the memtable"
     );
     assert!(fs
-        .exists(&FsPath::new(crate::wal::segment_file_name(7)))
+        .exists(&FsPath::new(cntryl_midge_durability::wal::segment_file_name(7)))
         .map_err(FsError::into_midge)?);
     assert_eq!(
         Some(state.wal.open_segment()),
@@ -2144,7 +2144,7 @@ struct DurableSyncCountingFile<'a> {
     durable_syncs: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-impl crate::io::ReadFile for DurableSyncCountingFile<'_> {
+impl cntryl_midge_core::io::ReadFile for DurableSyncCountingFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<Bytes> {
         self.inner.read_at(offset, len)
     }
@@ -2182,9 +2182,9 @@ struct DurableSyncCountingFs {
 }
 
 impl ReadFs for DurableSyncCountingFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         self.open(path, FsOpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -2200,10 +2200,10 @@ impl ReadFs for DurableSyncCountingFs {
     }
 }
 
-impl crate::io::PersistentHandleFs for DurableSyncCountingFs {
+impl cntryl_midge_core::io::PersistentHandleFs for DurableSyncCountingFs {
     fn open_persistent(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File>> {
         Ok(Box::new(DurableSyncCountingFile {
-            inner: crate::io::open_persistent_handle(&self.inner, path, opts)?,
+            inner: cntryl_midge_core::io::open_persistent_handle(&self.inner, path, opts)?,
             durable_syncs: Arc::clone(&self.durable_syncs),
         }))
     }
@@ -2212,15 +2212,15 @@ impl crate::io::PersistentHandleFs for DurableSyncCountingFs {
 impl Fs for DurableSyncCountingFs {
     fn try_lock_exclusive(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
-            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+            .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
     }
 
     fn open(&self, path: &FsPath, opts: FsOpenOptions) -> FsResult<Box<dyn File + '_>> {
@@ -2270,7 +2270,7 @@ fn should_fsync_active_segment_before_sealing_cloud_async_wal() -> MidgeResult<(
     wal_actor.append_prepared_transactions(&mut state, vec![prepared])?;
     let syncs_before_seal = durable_syncs.load(std::sync::atomic::Ordering::SeqCst);
     let ticket = seal_ticket_for_test(&wal_actor, &state);
-    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(1));
+    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(1));
     assert!(deadline.remaining() < wal_actor.storage_io_timeout);
 
     // Act
@@ -2302,7 +2302,7 @@ fn may_be_applied_on_restart<T>(result: &MidgeResult<T>) -> bool {
 fn should_answer_fenced_when_lease_lapses_before_unlogged_unit_applies() -> MidgeResult<()> {
     // Arrange: a BestEffort unit has no WAL record. The lease lapses after
     // its sequences are allocated, at the apply of the group of one.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let temp = tempfile::tempdir()?;
     let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
@@ -2311,13 +2311,13 @@ fn should_answer_fenced_when_lease_lapses_before_unlogged_unit_applies() -> Midg
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
+        FsWalFactoryIo::new(fs).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
     );
-    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
     validity.activate(1, Instant::now() + Duration::from_mins(1))?;
     actor.set_lease_validity(Some(Arc::clone(&validity)));
     let sequence_before = state.sequence;
@@ -2363,7 +2363,7 @@ fn should_answer_fenced_when_lease_lapses_before_unlogged_unit_applies() -> Midg
 #[test]
 fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let temp = tempfile::tempdir()?;
     let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
@@ -2372,16 +2372,16 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
+        FsWalFactoryIo::new(fs).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
     );
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
     let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
         pool,
-        &crate::io::real::test_root(temp.path()),
+        &cntryl_midge_core::io::real::test_root(temp.path()),
         false,
         1,
     );
@@ -2424,7 +2424,7 @@ fn should_fence_when_spilled_apply_fails_after_durable_wal_commit() -> MidgeResu
 #[test]
 fn should_report_discard_on_restart_when_best_effort_spill_partly_applies() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let temp = tempfile::tempdir()?;
     let fs: Arc<dyn Fs> = Arc::new(MockFs::new());
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
@@ -2433,16 +2433,16 @@ fn should_report_discard_on_restart_when_best_effort_spill_partly_applies() -> M
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     actor.install_filesystem_for_test(
         Arc::clone(&fs),
-        FsWalFactoryIo::new(fs).create_writer(&crate::wal::segment_file_name(1))?,
+        FsWalFactoryIo::new(fs).create_writer(&cntryl_midge_durability::wal::segment_file_name(1))?,
     );
     let pool = Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(16));
     let mut write_set = crate::runtime::transaction_spill::TransactionWriteSet::new(
         pool,
-        &crate::io::real::test_root(temp.path()),
+        &cntryl_midge_core::io::real::test_root(temp.path()),
         false,
         1,
     );
@@ -2922,7 +2922,7 @@ fn should_reject_resident_transaction_when_batch_payload_exceeds_wal_decode_limi
     // Arrange: each value is under the per-entry limit, but the batch payload
     // is not. It compresses well, so the old frame-size check let it through
     // and replay then rejected the acknowledged record.
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let db_path = temp.path().to_path_buf();
     let mut state = RuntimeState::new(db_path.clone(), false);
     let mut wal_actor = WalActor::open(
@@ -2930,9 +2930,9 @@ fn should_reject_resident_transaction_when_batch_payload_exceeds_wal_decode_limi
         DurabilityPolicy::Batched,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
-    let half = crate::wal::frame::WAL_MAX_VALUE_LEN / 2 + 1;
+    let half = cntryl_midge_durability::wal::frame::WAL_MAX_VALUE_LEN / 2 + 1;
     let sequence_before = state.sequence;
     let put = |key: &'static [u8]| crate::runtime::TransactionOp::Put {
         cf_id: 0,
@@ -2987,7 +2987,7 @@ fn should_build_one_read_snapshot_per_cf_when_validating_insert_only_conflict_ch
         DurabilityPolicy::BestEffort,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let ops = (0..100_u32)
         .map(|index| crate::runtime::TransactionOp::Put {
@@ -3020,51 +3020,51 @@ fn should_build_one_read_snapshot_per_cf_when_validating_insert_only_conflict_ch
 
 /// Counts SST file opens through the filesystem, whichever read path does them.
 struct SstOpenCountingFs {
-    inner: crate::io::RealFs,
+    inner: cntryl_midge_core::io::RealFs,
     sst_opens: std::sync::atomic::AtomicUsize,
 }
 
-impl crate::io::ReadFs for SstOpenCountingFs {
+impl cntryl_midge_core::io::ReadFs for SstOpenCountingFs {
     fn open_read(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
-        crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
+        cntryl_midge_core::io::Fs::open(self, path, cntryl_midge_core::io::OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
-    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+    fn exists(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
     fn metadata(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<cntryl_midge_core::io::traits::Metadata> {
         self.inner.metadata(path)
     }
 
     fn list_dir(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Vec<cntryl_midge_core::io::traits::DirEntry>> {
         self.inner.list_dir(path)
     }
 }
 
-impl crate::io::Fs for SstOpenCountingFs {
+impl cntryl_midge_core::io::Fs for SstOpenCountingFs {
     fn try_lock_exclusive(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
     fn open(
         &self,
-        path: &crate::io::FsPath,
-        opts: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        path: &cntryl_midge_core::io::FsPath,
+        opts: cntryl_midge_core::io::OpenOptions,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File + '_>> {
         if std::path::Path::new(&path.0)
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
@@ -3074,27 +3074,27 @@ impl crate::io::Fs for SstOpenCountingFs {
         }
         self.inner.open(path, opts)
     }
-    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_file(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
-    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn create_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
-    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
     fn sync_dir(
         &self,
-        path: &crate::io::FsPath,
-        durability: crate::io::Durability,
-    ) -> crate::io::FsResult<()> {
+        path: &cntryl_midge_core::io::FsPath,
+        durability: cntryl_midge_core::io::Durability,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.sync_dir(path, durability)
     }
     fn rename_atomic(
         &self,
-        from: &crate::io::FsPath,
-        to: &crate::io::FsPath,
-    ) -> crate::io::FsResult<()> {
+        from: &cntryl_midge_core::io::FsPath,
+        to: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.rename_atomic(from, to)
     }
 }
@@ -3103,16 +3103,16 @@ impl crate::io::Fs for SstOpenCountingFs {
 /// asserts every tenth key, over four published SSTs of 25 keys each,
 /// validating `keys_per_file` keys from each file.
 fn sst_opens_to_validate(keys_per_file: usize) -> MidgeResult<usize> {
-    use crate::sst::SstFactory;
+    use cntryl_midge_table::sst::SstFactory;
     let temp = tempfile::tempdir()?;
     let counting = Arc::new(SstOpenCountingFs {
-        inner: crate::io::RealFs::new(temp.path()).map_err(FsError::into_midge)?,
+        inner: cntryl_midge_core::io::RealFs::new(temp.path()).map_err(FsError::into_midge)?,
         sst_opens: std::sync::atomic::AtomicUsize::new(0),
     });
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
     state.fs = counting.clone();
     std::fs::create_dir_all(temp.path().join("sst"))?;
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::new(cntryl_midge_core::io::MockFs::new()), 4096);
     let mut keys = Vec::new();
     for file in 0..4_u64 {
         let mut writer = factory.create()?;
@@ -3123,13 +3123,13 @@ fn sst_opens_to_validate(keys_per_file: usize) -> MidgeResult<usize> {
             writer.add_with_meta(key, Some(b"value"), 1, EntryType::Put, None)?;
         }
         let bytes = writer.finish_bytes()?;
-        let name = crate::cloud_layout::file_name(0, 0, file + 1);
+        let name = cntryl_midge_core::cloud_layout::file_name(0, 0, file + 1);
         std::fs::write(temp.path().join("sst").join(&name), &bytes)?;
         state
             .manifest
             .test_mut()
             .files
-            .push(crate::metadata::FileMeta {
+            .push(cntryl_midge_durability::metadata::FileMeta {
                 name,
                 cf_id: 0,
                 level: 1,
@@ -3149,15 +3149,15 @@ fn sst_opens_to_validate(keys_per_file: usize) -> MidgeResult<usize> {
         DurabilityPolicy::Batched,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
-    let counting_fs: Arc<dyn crate::io::Fs> = counting.clone();
+    let counting_fs: Arc<dyn cntryl_midge_core::io::Fs> = counting.clone();
     actor.set_read_resources(Some(Arc::new(
         crate::runtime::read_resources::ReadResources::new_with_diagnostics(
             counting_fs,
             std::path::PathBuf::from("sst"),
             64 * 1024,
-            crate::sst::cache::CachePolicyType::Lru,
+            cntryl_midge_table::sst::cache::CachePolicyType::Lru,
             Arc::new(crate::diagnostics::RuntimeDiagnostics::default()),
         ),
     )));
@@ -3224,7 +3224,7 @@ fn should_fence_as_local_failure_when_pending_wal_count_regresses_under_sync_rec
         DurabilityPolicy::Batched,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let prepared = prepare_put_transaction(
         &mut wal_actor,
@@ -3262,7 +3262,7 @@ fn should_not_regress_local_durable_seq_when_older_sync_receipt_completes_after_
         DurabilityPolicy::BestEffort,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     state.wal.frontiers.set_last_synced_for_test(20);
     state.wal.frontiers.set_local_durable_for_test(20);
@@ -3294,9 +3294,9 @@ fn should_reject_prepared_group_when_validity_expires_before_append() -> MidgeRe
             policy,
             BatchConfig::default(),
             1,
-            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
-        let validity = Arc::new(crate::lease::LeaseValidity::new());
+        let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
         validity.activate(1, Instant::now() + Duration::from_mins(1))?;
         actor.set_lease_validity(Some(Arc::clone(&validity)));
         let first = prepare_put_transaction(&mut actor, &mut state, 1, b"first", b"value", policy)?;
@@ -3313,10 +3313,10 @@ fn should_reject_prepared_group_when_validity_expires_before_append() -> MidgeRe
             std::fs::metadata(
                 temp.path()
                     .join("wal")
-                    .join(crate::wal::segment_file_name(1))
+                    .join(cntryl_midge_durability::wal::segment_file_name(1))
             )?
             .len(),
-            crate::wal::format::HEADER_LEN as u64
+            cntryl_midge_durability::wal::format::HEADER_LEN as u64
         );
     }
     Ok(())
@@ -3326,7 +3326,7 @@ fn should_reject_prepared_group_when_validity_expires_before_append() -> MidgeRe
 #[test]
 fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     for policy in [DurabilityPolicy::BestEffort, DurabilityPolicy::CloudAsync] {
         for spilled in [false, true] {
@@ -3337,9 +3337,9 @@ fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult
                 policy,
                 BatchConfig::default(),
                 1,
-                crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+                cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
             )?;
-            let validity = Arc::new(crate::lease::LeaseValidity::new());
+            let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
             validity.activate(1, Instant::now() + Duration::from_mins(1))?;
             actor.set_lease_validity(Some(Arc::clone(&validity)));
             let trigger = if spilled {
@@ -3355,7 +3355,7 @@ fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult
                     Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(0));
                 let mut writes = crate::runtime::transaction_spill::TransactionWriteSet::new(
                     pool,
-                    &crate::io::real::test_root(temp.path()),
+                    &cntryl_midge_core::io::real::test_root(temp.path()),
                     false,
                     1,
                 );
@@ -3390,10 +3390,10 @@ fn should_reject_write_when_validity_expires_during_preparation() -> MidgeResult
                 std::fs::metadata(
                     temp.path()
                         .join("wal")
-                        .join(crate::wal::segment_file_name(1))
+                        .join(cntryl_midge_durability::wal::segment_file_name(1))
                 )?
                 .len(),
-                crate::wal::format::HEADER_LEN as u64
+                cntryl_midge_durability::wal::format::HEADER_LEN as u64
             );
         }
     }
@@ -3411,17 +3411,17 @@ fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
-    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
     validity
         .activate(1, Instant::now() + Duration::from_mins(1))
         .unwrap();
     actor.set_lease_validity(Some(Arc::clone(&validity)));
     let ticket = seal_ticket_for_test(&actor, &state);
     actor.rotate(&mut state, &ticket)?;
-    let record = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
+    let record = cntryl_midge_durability::wal::WalRecord::new(
+        cntryl_midge_durability::wal::WalOpKind::Put,
         Bytes::from_static(b"key"),
         Some(Bytes::from_static(b"value")),
         1,
@@ -3432,7 +3432,7 @@ fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
     // Assert
     assert!(matches!(
         result,
-        Err(crate::wal::traits::WalAppendError {
+        Err(cntryl_midge_durability::wal::traits::WalAppendError {
             error: MidgeError::Fenced(_),
             unchanged: true
         })
@@ -3441,10 +3441,10 @@ fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
         std::fs::metadata(
             temp.path()
                 .join("wal")
-                .join(crate::wal::segment_file_name(2))
+                .join(cntryl_midge_durability::wal::segment_file_name(2))
         )?
         .len(),
-        crate::wal::format::HEADER_LEN as u64
+        cntryl_midge_durability::wal::format::HEADER_LEN as u64
     );
     Ok(())
 }
@@ -3454,7 +3454,7 @@ fn should_retain_physical_writer_validity_after_rotation() -> MidgeResult<()> {
 fn should_preserve_open_segment_when_validity_expires_before_next_segment_create() -> MidgeResult<()>
 {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
@@ -3463,9 +3463,9 @@ fn should_preserve_open_segment_when_validity_expires_before_next_segment_create
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
-    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
     validity
         .activate(1, Instant::now() + Duration::from_mins(1))
         .unwrap();
@@ -3479,7 +3479,7 @@ fn should_preserve_open_segment_when_validity_expires_before_next_segment_create
     let active = temp
         .path()
         .join("wal")
-        .join(crate::wal::segment_file_name(1));
+        .join(cntryl_midge_durability::wal::segment_file_name(1));
     let before = std::fs::read(&active)?;
     // Act
     let result = actor.rotate(&mut state, &ticket);
@@ -3489,7 +3489,7 @@ fn should_preserve_open_segment_when_validity_expires_before_next_segment_create
     assert!(!temp
         .path()
         .join("wal")
-        .join(crate::wal::segment_file_name(2))
+        .join(cntryl_midge_durability::wal::segment_file_name(2))
         .exists());
     drop(scenario);
     Ok(())
@@ -3505,9 +3505,9 @@ fn should_settle_cloud_flush_transition_when_validity_expires_before_rotation() 
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
-    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
     validity
         .activate(1, Instant::now() + Duration::from_mins(1))
         .unwrap();
@@ -3517,7 +3517,7 @@ fn should_settle_cloud_flush_transition_when_validity_expires_before_rotation() 
     let active = temp
         .path()
         .join("wal")
-        .join(crate::wal::segment_file_name(1));
+        .join(cntryl_midge_durability::wal::segment_file_name(1));
     let before = std::fs::read(&active)?;
     validity.expire_for_test();
     // Act
@@ -3529,7 +3529,7 @@ fn should_settle_cloud_flush_transition_when_validity_expires_before_rotation() 
     assert!(!temp
         .path()
         .join("wal")
-        .join(crate::wal::segment_file_name(2))
+        .join(cntryl_midge_durability::wal::segment_file_name(2))
         .exists());
     Ok(())
 }
@@ -3538,7 +3538,7 @@ fn should_settle_cloud_flush_transition_when_validity_expires_before_rotation() 
 fn should_fence_when_footer_write_fails() -> MidgeResult<()> {
     // Arrange: segment 7 holds a record; the footer write lands half its
     // bytes and fails, after the next segment was created.
-    let temp = tempfile::tempdir().map_err(crate::common::MidgeError::Io)?;
+    let temp = tempfile::tempdir().map_err(cntryl_midge_core::common::MidgeError::Io)?;
     let fs = Arc::new(admission::PartialAppendFs::default());
     let mut state = RuntimeState::new(temp.path().to_path_buf(), true);
     let mut wal_actor = actor_over(
@@ -3587,7 +3587,7 @@ fn actor_with_second_family(
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     Ok((state, actor, family))
 }
@@ -3629,15 +3629,15 @@ fn should_stamp_transaction_batch_with_its_family() -> MidgeResult<()> {
     // Assert: the batch frame and every operation in it name the family.
     let segment = state
         .host_wal_dir()
-        .join(crate::wal::segment_file_name(state.wal.open_segment()));
-    let records = crate::wal::format::segment::records(&std::fs::read(segment)?)?;
+        .join(cntryl_midge_durability::wal::segment_file_name(state.wal.open_segment()));
+    let records = cntryl_midge_durability::wal::format::segment::records(&std::fs::read(segment)?)?;
     let [batch] = records.as_slice() else {
         panic!("one transaction frame: {records:?}");
     };
-    assert_eq!(batch.op, crate::wal::WalOpKind::TxnBatch);
+    assert_eq!(batch.op, cntryl_midge_durability::wal::WalOpKind::TxnBatch);
     assert_eq!(batch.cf_id, family);
     let payload = batch.value.as_ref().expect("batch payload");
-    let decoded = crate::wal::encoding::decode_txn_batch_payload(batch, payload)?;
+    let decoded = cntryl_midge_durability::wal::encoding::decode_txn_batch_payload(batch, payload)?;
     assert_eq!(decoded.records.len(), 2);
     assert!(decoded.records.iter().all(|record| record.cf_id == family));
     Ok(())
@@ -3651,7 +3651,7 @@ fn should_reject_transaction_spanning_families_before_allocating() -> MidgeResul
     let sequence_before = state.sequence;
     let segment = state
         .host_wal_dir()
-        .join(crate::wal::segment_file_name(state.wal.open_segment()));
+        .join(cntryl_midge_durability::wal::segment_file_name(state.wal.open_segment()));
     let bytes_before = std::fs::read(&segment)?;
 
     // Act

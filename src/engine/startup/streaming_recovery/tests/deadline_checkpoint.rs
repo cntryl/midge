@@ -4,7 +4,7 @@ use super::*;
 use crate::engine::startup::test_control::{
     self, CheckpointTestBoundaries, OneShotBarrier, OpenTestControl, OwnerExit,
 };
-use crate::lease::PrimaryLease;
+use cntryl_midge_durability::lease::PrimaryLease;
 use crate::runtime::{StartupEvent, StartupObserver};
 use crossbeam::channel::{self, Receiver, Sender};
 use std::path::{Path, PathBuf};
@@ -212,8 +212,8 @@ fn bounded_options(path: &Path, trace: Arc<OwnershipTrace>) -> OpenOptions {
         .unwrap()
 }
 
-fn authoritative_catalog(path: &Path) -> crate::wal::cloud_catalog::WalPublicationCatalog {
-    crate::wal::cloud_catalog::WalPublicationCatalog::decode(
+fn authoritative_catalog(path: &Path) -> cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog {
+    cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::decode(
         &std::fs::read(path.join("cloud_store/wal/publication-catalog.v1.json")).unwrap(),
     )
     .unwrap()
@@ -222,7 +222,7 @@ fn authoritative_catalog(path: &Path) -> crate::wal::cloud_catalog::WalPublicati
 struct Seed {
     path: PathBuf,
     source: Vec<u8>,
-    catalog: crate::wal::cloud_catalog::WalPublicationCatalog,
+    catalog: cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog,
 }
 
 impl Seed {
@@ -264,7 +264,7 @@ impl Seed {
         }
         drop(tx);
         if let Some((name, frontier)) = reservation {
-            let after = crate::metadata::ManifestPersistence::load(&self.path).unwrap();
+            let after = cntryl_midge_durability::metadata::ManifestPersistence::load(&self.path).unwrap();
             assert!(after.next_sst_seqs.get(&0).copied().unwrap() >= frontier);
             assert!(!after
                 .files
@@ -275,11 +275,11 @@ impl Seed {
     }
 }
 
-fn timeout_error(result: crate::common::MidgeResult<Engine>) -> crate::common::MidgeError {
+fn timeout_error(result: cntryl_midge_core::common::MidgeResult<Engine>) -> cntryl_midge_core::common::MidgeError {
     match result {
         Err(error) => {
             assert!(
-                matches!(error, crate::common::MidgeError::Timeout(_)),
+                matches!(error, cntryl_midge_core::common::MidgeError::Timeout(_)),
                 "actual public result: {error:?}"
             );
             error
@@ -339,17 +339,17 @@ fn aggregate_deadline(seed: &Seed, delayed: bool) {
 }
 
 fn real_contender_is_denied(path: &Path) -> bool {
-    let contender = Arc::new(crate::lease::CloudStorageLease::new(
-        crate::lease::CloudLeaseConfig {
+    let contender = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new(
+        cntryl_midge_durability::lease::CloudLeaseConfig {
             bucket: "bucket".into(),
             prefix: "streaming-recovery".into(),
         },
-        crate::storage::simulated::simulated_cloud_root(path),
+        cntryl_midge_storage::simulated::simulated_cloud_root(path),
     ));
     let contention = contender.try_acquire();
     let denied = matches!(
         contention,
-        Err(crate::lease::LeaseError::AcquisitionFailed(_))
+        Err(cntryl_midge_durability::lease::LeaseError::AcquisitionFailed(_))
     );
     if let Ok(guard) = contention {
         guard.release();
@@ -379,7 +379,7 @@ fn held_evidence(
         "one actual completed SST upload required"
     );
     assert!(std::fs::metadata(&uploaded[0]).unwrap().len() > 0);
-    let manifest = crate::metadata::ManifestPersistence::load(&seed.path).unwrap();
+    let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load(&seed.path).unwrap();
     assert!(manifest.files.is_empty());
     seed.assert_history();
     // Check after ALL contender/filesystem observations, not only before them.
@@ -395,7 +395,7 @@ fn held_evidence(
 
 struct ControlledCaller {
     owner: AttemptOwner,
-    result: Receiver<crate::common::MidgeResult<Engine>>,
+    result: Receiver<cntryl_midge_core::common::MidgeResult<Engine>>,
     before_receive: Receiver<()>,
     join_started: Receiver<()>,
 }

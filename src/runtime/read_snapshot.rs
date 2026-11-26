@@ -3,19 +3,19 @@
 //! Captures immutable references to memtables and SST metadata
 //! at a specific sequence number, allowing safe parallel reads.
 
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::Fs;
-use crate::memtable::SkipListMemtable;
-use crate::metadata::FileMeta;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::Fs;
+use cntryl_midge_table::memtable::SkipListMemtable;
+use cntryl_midge_durability::metadata::FileMeta;
 use crate::runtime::range_cover::RangeCoverSweep;
 use crate::runtime::read_resources::ReadResources;
 use crate::runtime::sst_read_view::{LevelRangeCandidates, RangeCandidates, SstReadView};
-use crate::sst::fs::reader_io::SstStateScan;
-use crate::sst::fs::SstFileIo;
-use crate::sst::traits::SstStateReader;
+use cntryl_midge_table::sst::fs::reader_io::SstStateScan;
+use cntryl_midge_table::sst::fs::SstFileIo;
+use cntryl_midge_table::sst::traits::SstStateReader;
 #[cfg(test)]
-use crate::types::EntryType;
-use crate::types::{KeyState, RangeTombstone};
+use cntryl_midge_core::types::EntryType;
+use cntryl_midge_core::types::{KeyState, RangeTombstone};
 #[cfg(test)]
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ pub struct ReadSnapshot {
 #[doc(hidden)]
 pub struct ReadSnapshotSources {
     /// CF ID
-    pub cf_id: crate::types::ColumnFamilyId,
+    pub cf_id: cntryl_midge_core::types::ColumnFamilyId,
     /// Active memtable snapshot
     pub memtable: Arc<SkipListMemtable>,
     /// Immutable memtables, oldest to newest as frozen; point reads iterate

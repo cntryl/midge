@@ -1,6 +1,6 @@
 use super::EventLoop;
-use crate::io::FsError;
-use crate::metadata::accounting::Origin;
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_durability::metadata::accounting::Origin;
 use crate::runtime::actors::flush::{
     FlushBuildCompletion, FlushBuildOutput, FlushIdentity, FlushMirrorCompletion, FlushMirrorTask,
     FlushPublicationDelta, FlushPublishCompletion, FlushPublishTask, FlushWorkerResult,

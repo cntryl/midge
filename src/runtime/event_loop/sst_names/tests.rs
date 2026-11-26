@@ -1,6 +1,6 @@
 use super::*;
-use crate::common::{MidgeResult, OperationDeadline};
-use crate::lease::{CloudMetadataGeneration, CloudMetadataHead};
+use cntryl_midge_core::common::{MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::{CloudMetadataGeneration, CloudMetadataHead};
 use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ fn generation(event_loop: &EventLoop) -> CloudMetadataGeneration {
 fn should_prewarm_first_flush_block_before_output_needs_its_name() -> MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
 
     // Act: maintenance publishes a block while no output owns the control turn.
@@ -32,8 +32,8 @@ fn should_prewarm_first_flush_block_before_output_needs_its_name() -> MidgeResul
     let journal_before = event_loop
         .state
         .fs
-        .metadata(&crate::io::FsPath::new(crate::metadata::files::JOURNAL))
-        .map_err(crate::io::FsError::into_midge)?
+        .metadata(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::JOURNAL))
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .len;
     let assigned = event_loop.reserve_flush_sst_seq(0)?;
 
@@ -46,8 +46,8 @@ fn should_prewarm_first_flush_block_before_output_needs_its_name() -> MidgeResul
         event_loop
             .state
             .fs
-            .metadata(&crate::io::FsPath::new(crate::metadata::files::JOURNAL))
-            .map_err(crate::io::FsError::into_midge)?
+            .metadata(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::JOURNAL))
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?
             .len,
         journal_before
     );
@@ -75,7 +75,7 @@ fn should_prewarm_first_flush_block_before_output_needs_its_name() -> MidgeResul
 fn should_reserve_next_flush_block_when_eight_names_remain() -> MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop.prefetch_flush_sst_names_if_due();
     for expected in 1..=8 {
@@ -102,7 +102,7 @@ fn should_use_shared_prefetched_name_cursor_when_wal_sequence_is_high() -> Midge
     // Arrange: allocating data sequence one million must not discard the
     // durably mirrored filename block beginning at one.
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop.state.raise_sequence_to(1_000_000);
     event_loop.state.allocate_sequences(1)?;
@@ -112,8 +112,8 @@ fn should_use_shared_prefetched_name_cursor_when_wal_sequence_is_high() -> Midge
     let journal_before = event_loop
         .state
         .fs
-        .metadata(&crate::io::FsPath::new(crate::metadata::files::JOURNAL))
-        .map_err(crate::io::FsError::into_midge)?
+        .metadata(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::JOURNAL))
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .len;
     // Act: these are the production naming entry points used by output launch.
     let first = event_loop
@@ -129,8 +129,8 @@ fn should_use_shared_prefetched_name_cursor_when_wal_sequence_is_high() -> Midge
         event_loop
             .state
             .fs
-            .metadata(&crate::io::FsPath::new(crate::metadata::files::JOURNAL))
-            .map_err(crate::io::FsError::into_midge)?
+            .metadata(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::JOURNAL))
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?
             .len,
         journal_before
     );
@@ -143,7 +143,7 @@ fn should_keep_preassigned_compaction_generation_when_resumed_after_name_publica
     // Arrange: the accepted generation survives provider wait and resumes
     // through this same preparation entry point without consuming another.
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let accepted = event_loop
         .assign_compaction_output_sequence(crate::compaction::CompactionPlan::new(0, 0, 1))?;
@@ -163,7 +163,7 @@ fn should_keep_preassigned_compaction_generation_when_resumed_after_name_publica
 fn should_prefetch_next_block_as_compaction_consumes_the_shared_name_cursor() -> MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop.prefetch_flush_sst_names_if_due();
     let first = generation(&event_loop);

@@ -1,8 +1,8 @@
 //! Constant-size streamed validation, retaining no per-key result cache.
 
 use super::WalActor;
-use crate::common::resource_budget::ResourceBudget;
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::read_snapshot::point_read::ValidationValue;
 use crate::runtime::state::{RecentDeleteRange, RuntimeState};
 use crate::runtime::transaction_spill::{IntentLookup, TransactionOpSource};
@@ -131,7 +131,7 @@ impl SpilledValidationProof {
             ValidationFailure::Point { cf_id, key } => {
                 state
                     .diagnostics
-                    .record(crate::telemetry::Metrics::record_write_conflict_point);
+                    .record(cntryl_midge_core::telemetry::Metrics::record_write_conflict_point);
                 MidgeError::WriteConflict(format!(
                     "key conflict on cf {cf_id} for key {key:?} after tx start {start_sequence}"
                 ))
@@ -139,7 +139,7 @@ impl SpilledValidationProof {
             ValidationFailure::Range { cf_id, start, end } => {
                 state
                     .diagnostics
-                    .record(crate::telemetry::Metrics::record_write_conflict_range);
+                    .record(cntryl_midge_core::telemetry::Metrics::record_write_conflict_range);
                 MidgeError::WriteConflict(format!("range conflict on cf {cf_id} for [{start:?}, {end:?}) after tx start {start_sequence}"))
             }
             ValidationFailure::Assertion {
@@ -149,7 +149,7 @@ impl SpilledValidationProof {
             } => {
                 state
                     .diagnostics
-                    .record(crate::telemetry::Metrics::record_write_conflict_point);
+                    .record(cntryl_midge_core::telemetry::Metrics::record_write_conflict_point);
                 MidgeError::WriteConflict(format!("assertion conflict on cf {cf_id} for key {key:?}: latest seq {sequence} > tx start {start_sequence}"))
             }
             ValidationFailure::Duplicate | ValidationFailure::Read(_) => {

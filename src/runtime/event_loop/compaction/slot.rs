@@ -27,14 +27,14 @@ impl<P> PublicationSlot<P> {
         gate: &ManifestPublicationGate,
         owner: ManifestPublicationOwner,
         pending: P,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if self.pending.is_some() {
-            return Err(crate::common::MidgeError::Internal(
+            return Err(cntryl_midge_core::common::MidgeError::Internal(
                 "a publication is already in flight".into(),
             ));
         }
         if !gate.is_owned_by(&owner) {
-            return Err(crate::common::MidgeError::Internal(
+            return Err(cntryl_midge_core::common::MidgeError::Internal(
                 "a publication may be installed only by the gate's owner".into(),
             ));
         }

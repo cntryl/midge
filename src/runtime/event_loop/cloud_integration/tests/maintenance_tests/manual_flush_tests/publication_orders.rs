@@ -1,9 +1,9 @@
 use super::*;
-use crate::lease::PrimaryLease as _;
+use cntryl_midge_durability::lease::PrimaryLease as _;
 use crate::runtime::actors::compaction::publication::CompactionPublishActor;
 use crate::runtime::actors::flush::FlushWorkerResult;
 use crate::runtime::event_loop::coordination::ManifestPublicationOwner;
-use crate::storage::cloud::{CloudBackend, CloudCallback, CloudStorage, MockCloudBackend};
+use cntryl_midge_storage::cloud::{CloudBackend, CloudCallback, CloudStorage, MockCloudBackend};
 
 const PUBLISHER_READ_WAIT: Duration = Duration::from_secs(30);
 
@@ -41,7 +41,7 @@ impl PublisherBackend {
     }
 }
 
-impl crate::storage::cloud::CloudReadCapability for PublisherBackend {
+impl cntryl_midge_storage::cloud::CloudReadCapability for PublisherBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.pause_publisher_read();
         self.inner.submit_get(key, callback);
@@ -57,7 +57,7 @@ impl crate::storage::cloud::CloudReadCapability for PublisherBackend {
     }
 }
 
-impl crate::storage::cloud::CloudWriteCapability for PublisherBackend {
+impl cntryl_midge_storage::cloud::CloudWriteCapability for PublisherBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -70,19 +70,19 @@ impl crate::storage::cloud::CloudWriteCapability for PublisherBackend {
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for PublisherBackend {
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for PublisherBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
 }
 
-impl crate::storage::cloud::CloudListCapability for PublisherBackend {
+impl cntryl_midge_storage::cloud::CloudListCapability for PublisherBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
 }
 
-impl crate::storage::cloud::CloudHeadCapability for PublisherBackend {
+impl cntryl_midge_storage::cloud::CloudHeadCapability for PublisherBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_head(key, callback);
     }
@@ -109,7 +109,7 @@ impl Drop for PublisherRelease {
 struct MetadataFixture {
     cloud: Arc<CloudStorage>,
     backend: Arc<PublisherBackend>,
-    lease: Arc<crate::lease::CloudStorageLease>,
+    lease: Arc<cntryl_midge_durability::lease::CloudStorageLease>,
     release: PublisherRelease,
     reached: crossbeam::channel::Receiver<()>,
 }
@@ -141,16 +141,16 @@ fn metadata_fixture(el: &mut EventLoop) -> MidgeResult<MetadataFixture> {
     };
     assert_eq!(
         head()?,
-        crate::lease::CloudMetadataHead::Uncommitted,
+        cntryl_midge_durability::lease::CloudMetadataHead::Uncommitted,
         "acquiring a lease does not publish the seeded manifest"
     );
     el.mirror_metadata_to_authoritative_cloud_within(
-        &crate::common::OperationDeadline::from_budget(TEST_WAIT),
+        &cntryl_midge_core::common::OperationDeadline::from_budget(TEST_WAIT),
     )?;
     let baseline = head()?;
     assert!(matches!(
         baseline,
-        crate::lease::CloudMetadataHead::Committed(_)
+        cntryl_midge_durability::lease::CloudMetadataHead::Committed(_)
     ));
     let (publisher_tx, publisher_rx) = crossbeam::channel::unbounded();
     el.actors.compaction_publish_actor = CompactionPublishActor::new(publisher_tx, false)?;
@@ -237,7 +237,7 @@ fn name_work_snapshot(
     })
 }
 
-fn read_committed_manifest(metadata: &MetadataFixture) -> MidgeResult<crate::metadata::Manifest> {
+fn read_committed_manifest(metadata: &MetadataFixture) -> MidgeResult<cntryl_midge_durability::metadata::Manifest> {
     let directory = tempfile::tempdir()?;
     let store = metadata
         .lease
@@ -246,11 +246,11 @@ fn read_committed_manifest(metadata: &MetadataFixture) -> MidgeResult<crate::met
     crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
         &metadata.cloud,
         store.as_ref(),
-        &crate::io::real::test_root(directory.path()),
+        &cntryl_midge_core::io::real::test_root(directory.path()),
         directory.path(),
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
-    crate::metadata::ManifestPersistence::load(directory.path()).map_err(MidgeError::Internal)
+    cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).map_err(MidgeError::Internal)
 }
 
 fn assert_committed_files(
@@ -302,7 +302,7 @@ fn assert_committed_files(
 #[test]
 fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_race(
 ) -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: force a genuine durable name-block mirror before building.
         let (mut el, worker, _) = cloud_debt(4)?;
         el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
@@ -370,7 +370,7 @@ fn should_reuse_prereserved_flush_name_when_compaction_publication_wins_build_ra
 #[test]
 fn should_admit_compaction_completion_while_manual_flush_provider_task_is_owned() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let (mut el, worker, _) = cloud_debt(4)?;
         el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
@@ -442,7 +442,7 @@ fn schedule_automatic_flush(el: &mut EventLoop, cf_id: u32) -> MidgeResult<u64> 
 #[test]
 fn should_reuse_automatic_flush_name_when_compaction_publication_wins_build_race() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: ordinary flush debt must reserve its name beside a real compute owner.
         let (mut el, worker, _) = cloud_debt(4)?;
         el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
@@ -510,7 +510,7 @@ fn should_reuse_automatic_flush_name_when_compaction_publication_wins_build_race
 #[test]
 fn should_admit_compaction_completion_while_automatic_flush_provider_task_is_owned(
 ) -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: use actual compute and provider metadata, without a flush request.
         let (mut el, worker, _) = cloud_debt(4)?;
         el.state.sequence = test_flush_frontier(&el.state.manifest, 0);

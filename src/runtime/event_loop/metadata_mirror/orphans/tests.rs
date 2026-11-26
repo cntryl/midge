@@ -1,11 +1,11 @@
 use super::*;
 use crate::runtime::event_loop::tests::create_test_cloud_event_loop_with_reserved_names;
-use crate::storage::test_support::StorageBackendTestExt;
+use cntryl_midge_storage::test_support::StorageBackendTestExt;
 use std::time::Duration;
 
 fn fixture() -> MidgeResult<EventLoop> {
     create_test_cloud_event_loop_with_reserved_names(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         Some(100),
     )
 }
@@ -20,14 +20,14 @@ fn put(event_loop: &EventLoop, name: &str) {
         .unwrap()
         .remote_sst_backend()
         .write_for_test(
-            &crate::cloud_layout::object_key(name),
+            &cntryl_midge_core::cloud_layout::object_key(name),
             b"unpublished".to_vec(),
             tx,
         );
     assert!(matches!(
         rx.recv().unwrap(),
-        crate::storage::StorageEvent::WriteComplete {
-            result: crate::storage::StorageOutcome::Ok(()),
+        cntryl_midge_storage::StorageEvent::WriteComplete {
+            result: cntryl_midge_storage::StorageOutcome::Ok(()),
             ..
         }
     ));
@@ -41,7 +41,7 @@ fn exists(event_loop: &EventLoop, name: &str) -> bool {
         .as_ref()
         .unwrap()
         .remote_range_metadata_optional_within(
-            &crate::cloud_layout::object_key(name),
+            &cntryl_midge_core::cloud_layout::object_key(name),
             &OperationDeadline::from_budget(Duration::from_secs(5)),
         )
         .unwrap()
@@ -64,8 +64,8 @@ fn should_exclude_same_epoch_prefetched_names_when_startup_floor_is_immutable() 
     event_loop.prefetch_flush_sst_names_if_due();
     assert_eq!(event_loop.state.sst_names.startup_floor[&0], 100);
     assert_eq!(event_loop.state.manifest.next_sst_seqs[&0], 116);
-    let old = crate::cloud_layout::file_name(0, 1, 99);
-    let admitted = crate::cloud_layout::file_name(0, 1, 105);
+    let old = cntryl_midge_core::cloud_layout::file_name(0, 1, 99);
+    let admitted = cntryl_midge_core::cloud_layout::file_name(0, 1, 105);
     put(&event_loop, &old);
     put(&event_loop, &admitted);
 
@@ -86,12 +86,12 @@ fn should_exclude_same_epoch_prefetched_names_when_startup_floor_is_immutable() 
 fn should_retain_every_captured_source_before_orphan_deletion() -> MidgeResult<()> {
     // Arrange
     let mut event_loop = fixture()?;
-    let pinned = crate::cloud_layout::file_name(0, 1, 10);
-    let intent = crate::cloud_layout::file_name(0, 1, 11);
-    let input = crate::cloud_layout::file_name(0, 1, 12);
-    let output = crate::cloud_layout::compaction_file_name(0, 2, 13, 0);
-    let flush_name = crate::cloud_layout::file_name(0, 0, 14);
-    let orphan = crate::cloud_layout::file_name(0, 1, 15);
+    let pinned = cntryl_midge_core::cloud_layout::file_name(0, 1, 10);
+    let intent = cntryl_midge_core::cloud_layout::file_name(0, 1, 11);
+    let input = cntryl_midge_core::cloud_layout::file_name(0, 1, 12);
+    let output = cntryl_midge_core::cloud_layout::compaction_file_name(0, 2, 13, 0);
+    let flush_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 14);
+    let orphan = cntryl_midge_core::cloud_layout::file_name(0, 1, 15);
     for name in [&pinned, &intent, &input, &output, &flush_name, &orphan] {
         put(&event_loop, name);
     }
@@ -169,8 +169,8 @@ fn should_retain_every_captured_source_before_orphan_deletion() -> MidgeResult<(
 fn should_revisit_late_predecessor_put_without_deleting_successor_names() -> MidgeResult<()> {
     // Arrange
     let mut event_loop = fixture()?;
-    let old = crate::cloud_layout::file_name(0, 1, 50);
-    let successor = crate::cloud_layout::file_name(0, 1, 100);
+    let old = cntryl_midge_core::cloud_layout::file_name(0, 1, 50);
+    let successor = cntryl_midge_core::cloud_layout::file_name(0, 1, 100);
     put(&event_loop, &old);
     put(&event_loop, &successor);
     run_sweep(&mut event_loop)?;
@@ -190,12 +190,12 @@ fn should_revisit_late_predecessor_put_without_deleting_successor_names() -> Mid
 fn should_retain_sst_candidates_without_valid_deletion_proof() -> MidgeResult<()> {
     // Arrange
     let mut event_loop = fixture()?;
-    let retired = crate::cloud_layout::file_name(0, 1, 20);
-    let foreign_family = crate::cloud_layout::file_name(1, 1, 21);
+    let retired = cntryl_midge_core::cloud_layout::file_name(0, 1, 20);
+    let foreign_family = cntryl_midge_core::cloud_layout::file_name(1, 1, 21);
     for name in [&retired, &foreign_family, "unknown.sst"] {
         put(&event_loop, name);
     }
-    let add = crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+    let add = cntryl_midge_durability::metadata::ManifestEdit::AddSst(cntryl_midge_durability::metadata::FileMeta {
         name: retired.clone(),
         level: 1,
         cf_id: 0,
@@ -204,14 +204,14 @@ fn should_retain_sst_candidates_without_valid_deletion_proof() -> MidgeResult<()
         content_crc32c: None,
         ..Default::default()
     });
-    let remove = crate::metadata::ManifestEdit::RemoveSst {
+    let remove = cntryl_midge_durability::metadata::ManifestEdit::RemoveSst {
         name: retired.clone(),
     };
     for edit in [&add, &remove] {
         let id = event_loop
             .state
             .manifest_store
-            .append_for(crate::metadata::accounting::Origin::Administration, edit)?;
+            .append_for(cntryl_midge_durability::metadata::accounting::Origin::Administration, edit)?;
         event_loop.state.manifest.apply_edit(edit)?;
         event_loop.state.manifest.note_applied_journal_edit(id);
     }
@@ -239,10 +239,10 @@ fn should_retain_sst_candidates_without_valid_deletion_proof() -> MidgeResult<()
 fn should_retain_orphan_when_selected_reference_bytes_cannot_be_verified() -> MidgeResult<()> {
     // Arrange
     let mut event_loop = fixture()?;
-    let orphan = crate::cloud_layout::file_name(0, 1, 20);
+    let orphan = cntryl_midge_core::cloud_layout::file_name(0, 1, 20);
     put(&event_loop, &orphan);
     let store = event_loop.authority.fencing.leader_store.as_ref().unwrap();
-    let crate::lease::CloudMetadataHead::Committed(generation) =
+    let cntryl_midge_durability::lease::CloudMetadataHead::Committed(generation) =
         store.read_committed_metadata(Duration::from_secs(5))?
     else {
         panic!("selected references")
@@ -261,8 +261,8 @@ fn should_retain_orphan_when_selected_reference_bytes_cannot_be_verified() -> Mi
     );
     assert!(matches!(
         rx.recv().unwrap(),
-        crate::storage::StorageEvent::WriteComplete {
-            result: crate::storage::StorageOutcome::Ok(()),
+        cntryl_midge_storage::StorageEvent::WriteComplete {
+            result: cntryl_midge_storage::StorageOutcome::Ok(()),
             ..
         }
     ));
@@ -284,7 +284,7 @@ fn should_keep_unprobed_page_tail_until_later_bounded_sweep_completions() -> Mid
     // Arrange
     let mut event_loop = fixture()?;
     let names = (1..=25)
-        .map(|sequence| crate::cloud_layout::file_name(0, 1, sequence))
+        .map(|sequence| cntryl_midge_core::cloud_layout::file_name(0, 1, sequence))
         .collect::<Vec<_>>();
     for name in &names {
         put(&event_loop, name);
@@ -313,11 +313,11 @@ fn should_keep_unprobed_page_tail_until_later_bounded_sweep_completions() -> Mid
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_keep_new_identity_when_an_orphan_changes_after_its_probe() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let _scenario = fail::FailScenario::setup();
     // Arrange
     let mut event_loop = fixture()?;
-    let orphan = crate::cloud_layout::file_name(0, 1, 20);
+    let orphan = cntryl_midge_core::cloud_layout::file_name(0, 1, 20);
     put(&event_loop, &orphan);
     let backend = event_loop
         .actors
@@ -326,14 +326,14 @@ fn should_keep_new_identity_when_an_orphan_changes_after_its_probe() -> MidgeRes
         .as_ref()
         .unwrap()
         .remote_sst_backend();
-    let key = crate::cloud_layout::object_key(&orphan);
+    let key = cntryl_midge_core::cloud_layout::object_key(&orphan);
     fail::cfg_callback("midge::cloud::before_compaction_orphan_delete", move || {
         let (tx, rx) = std::sync::mpsc::channel();
         backend.write_for_test(&key, b"replaced".to_vec(), tx);
         assert!(matches!(
             rx.recv().unwrap(),
-            crate::storage::StorageEvent::WriteComplete {
-                result: crate::storage::StorageOutcome::Ok(()),
+            cntryl_midge_storage::StorageEvent::WriteComplete {
+                result: cntryl_midge_storage::StorageOutcome::Ok(()),
                 ..
             }
         ));

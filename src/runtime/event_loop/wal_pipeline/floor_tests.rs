@@ -6,7 +6,7 @@ use super::tests::{settle, write};
 use super::*;
 use crate::config::AmortizedSyncFloor;
 use crate::runtime::TestRuntimeMsg;
-use crate::wal::format::HEADER_LEN;
+use cntryl_midge_durability::wal::format::HEADER_LEN;
 
 const HEADER: u64 = HEADER_LEN as u64;
 
@@ -50,12 +50,12 @@ fn recorded_floor(event_loop: &EventLoop) -> Option<u64> {
 }
 
 fn open_segment_len(event_loop: &EventLoop) -> MidgeResult<u64> {
-    let path = crate::wal::segment_key(event_loop.state.wal.open_segment());
+    let path = cntryl_midge_durability::wal::segment_key(event_loop.state.wal.open_segment());
     Ok(event_loop
         .state
         .fs
         .metadata(&path)
-        .map_err(crate::io::FsError::into_midge)?
+        .map_err(cntryl_midge_core::io::FsError::into_midge)?
         .len)
 }
 
@@ -88,7 +88,7 @@ fn leaked_key(ordinal: usize) -> &'static [u8] {
 #[test]
 fn should_skip_ledger_edit_when_strict_sync_is_inside_floor_window() -> MidgeResult<()> {
     // Arrange: warm the sequence reservation so only floor edits are counted.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1024 * 1024, Duration::from_secs(10)))?;
     commit_strict(&mut event_loop, 95_000, b"warmup");
     let ledger_syncs = ledger_file_syncs(&event_loop);
@@ -121,7 +121,7 @@ fn should_skip_ledger_edit_when_strict_sync_is_inside_floor_window() -> MidgeRes
 fn should_record_floor_when_unrecorded_bytes_reach_threshold() -> MidgeResult<()> {
     // Arrange
     const THRESHOLD: u64 = 4 * 1024;
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(THRESHOLD, Duration::from_secs(10)))?;
     commit_strict(&mut event_loop, 95_100, b"warmup");
     let proofs = ledger_proofs(&event_loop);
@@ -172,7 +172,7 @@ fn should_record_floor_when_unrecorded_bytes_reach_threshold() -> MidgeResult<()
 #[test]
 fn should_record_exact_floor_when_rotating_with_unrecorded_window() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1024 * 1024, Duration::from_secs(10)))?;
     commit_strict(&mut event_loop, 95_300, b"warmup");
     commit_strict(&mut event_loop, 95_301, b"before-rotation");
@@ -219,7 +219,7 @@ fn should_record_exact_floor_when_rotating_with_unrecorded_window() -> MidgeResu
 fn should_discard_deferred_floor_when_it_belongs_to_another_segment() -> MidgeResult<()> {
     // Arrange: plant a deferred end far past anything the new segment holds, as
     // if a rotation had failed to clear it.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1, Duration::from_secs(10)))?;
     commit_strict(&mut event_loop, 95_400, b"warmup");
     let rotate = event_loop.routing.router.register(95_401, "rotate");
@@ -251,7 +251,7 @@ fn should_discard_deferred_floor_when_it_belongs_to_another_segment() -> MidgeRe
 #[test]
 fn should_clear_deferred_floor_when_an_exact_sync_records_the_floor() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1024 * 1024, Duration::from_secs(10)))?;
     commit_strict(&mut event_loop, 95_500, b"warmup");
     commit_strict(&mut event_loop, 95_501, b"deferred");
@@ -275,7 +275,7 @@ fn should_clear_deferred_floor_when_an_exact_sync_records_the_floor() -> MidgeRe
 #[test]
 fn should_clear_deferred_floor_when_the_wal_is_fenced() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1024 * 1024, Duration::from_secs(10)))?;
     commit_strict(&mut event_loop, 95_600, b"warmup");
     commit_strict(&mut event_loop, 95_601, b"deferred");
@@ -305,7 +305,7 @@ fn buffered_write(request_id: u64, key: &'static [u8]) -> RuntimeMsg {
         durability_policy, ..
     } = &mut message
     {
-        *durability_policy = Some(crate::wal::DurabilityPolicy::Batched);
+        *durability_policy = Some(cntryl_midge_durability::wal::DurabilityPolicy::Batched);
     }
     message
 }
@@ -313,8 +313,8 @@ fn buffered_write(request_id: u64, key: &'static [u8]) -> RuntimeMsg {
 /// Keep the batched-window sync out of the way so only the floor timer acts.
 fn silence_batched_sync(event_loop: &mut EventLoop) {
     event_loop.actors.wal_actor.set_durability(
-        crate::wal::DurabilityPolicy::Batched,
-        crate::wal::policy::BatchConfig {
+        cntryl_midge_durability::wal::DurabilityPolicy::Batched,
+        cntryl_midge_durability::wal::policy::BatchConfig {
             max_delay_ms: 3_600_000,
             max_bytes: usize::MAX,
         },
@@ -325,7 +325,7 @@ fn silence_batched_sync(event_loop: &mut EventLoop) {
 fn should_bound_idle_wait_by_delay_without_writing_when_delay_has_not_elapsed() -> MidgeResult<()> {
     // Arrange: the maximum delay cannot elapse during the test.
     const DELAY: Duration = Duration::from_secs(10);
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1024 * 1024, DELAY))?;
     silence_batched_sync(&mut event_loop);
     commit_strict(&mut event_loop, 95_690, b"warmup");
@@ -353,7 +353,7 @@ fn should_not_report_floor_deadline_when_the_transition_is_not_ready() -> MidgeR
     // Arrange: an overdue deferral while a sync ticket holds the protocol
     // phase non-Ready and the actor is still Open.
     const DELAY: Duration = Duration::from_millis(20);
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1024 * 1024, DELAY))?;
     silence_batched_sync(&mut event_loop);
     commit_strict(&mut event_loop, 95_650, b"warmup");
@@ -377,7 +377,7 @@ fn should_not_report_floor_deadline_when_the_transition_is_not_ready() -> MidgeR
 fn should_record_floor_on_idle_tail_when_delay_elapses() -> MidgeResult<()> {
     // Arrange
     const DELAY: Duration = Duration::from_millis(40);
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1024 * 1024, DELAY))?;
     silence_batched_sync(&mut event_loop);
     commit_strict(&mut event_loop, 95_700, b"warmup");
@@ -406,7 +406,7 @@ fn should_record_floor_on_idle_tail_when_delay_elapses() -> MidgeResult<()> {
 fn should_never_record_floor_past_completed_sync_when_later_append_is_queued() -> MidgeResult<()> {
     // Arrange: a buffered append sits in the segment past the last fsync.
     const DELAY: Duration = Duration::from_millis(50);
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1024 * 1024, DELAY))?;
     silence_batched_sync(&mut event_loop);
     commit_strict(&mut event_loop, 95_800, b"warmup");
@@ -438,7 +438,7 @@ fn should_never_record_floor_past_completed_sync_when_later_append_is_queued() -
 fn should_discard_stale_deferred_floor_when_timer_runs_on_another_segment() -> MidgeResult<()> {
     // Arrange
     const DELAY: Duration = Duration::from_millis(30);
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1024 * 1024, DELAY))?;
     silence_batched_sync(&mut event_loop);
     commit_strict(&mut event_loop, 95_900, b"warmup");
@@ -471,7 +471,7 @@ fn should_discard_stale_deferred_floor_when_timer_runs_on_another_segment() -> M
 #[test]
 fn should_record_exact_floor_when_storage_verification_barrier_begins() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = loop_with_floor(window(1024 * 1024, Duration::from_secs(10)))?;
     commit_strict(&mut event_loop, 96_000, b"warmup");
     commit_strict(&mut event_loop, 96_001, b"deferred");
@@ -512,7 +512,7 @@ fn should_record_exact_floor_when_storage_verification_barrier_begins() -> Midge
 fn should_not_write_ledger_when_storage_verification_barrier_begins_with_exact_floor(
 ) -> MidgeResult<()> {
     // Arrange: the default configuration records every strict sync exactly.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     commit_strict(&mut event_loop, 96_100, b"warmup");

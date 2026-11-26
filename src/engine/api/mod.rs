@@ -14,7 +14,7 @@ mod write_options;
 pub mod iterator;
 pub mod query;
 
-pub use crate::types::ConflictPolicy;
+pub use cntryl_midge_core::types::ConflictPolicy;
 pub use iterator::{Direction, Iterator as ScanIterator, IteratorState};
 pub use kv::{Key, Value};
 pub use options::{

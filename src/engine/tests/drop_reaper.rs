@@ -75,7 +75,7 @@ fn should_fence_outliving_transactions_when_drop_transaction_wait_expires() -> M
 fn should_retain_writer_authority_after_drop_wait_until_admitted_wal_effect_drains(
 ) -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let directory = tempfile::tempdir()?;
     let engine = Engine::open(reaper_options(directory.path(), false)?)?;
     let cf = engine.get_column_family("default").expect("default family");
@@ -102,7 +102,7 @@ fn should_retain_writer_authority_after_drop_wait_until_admitted_wal_effect_drai
                 insert_only: false,
             }],
             assertions: Vec::new(),
-            durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+            durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Strict),
             start_sequence: None,
             conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             response_tx: None,

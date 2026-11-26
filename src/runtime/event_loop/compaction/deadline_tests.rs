@@ -1,5 +1,5 @@
 use super::*;
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::event_loop::tests::{
     create_test_cloud_event_loop, create_test_local_event_loop,
 };
@@ -8,7 +8,7 @@ use std::time::Instant;
 
 #[test]
 fn should_refuse_manual_compaction_when_route_budget_expired_in_queue() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: the registered caller spent its allowance before dispatch.
         let mut event_loop = create_test_local_event_loop()?;
         event_loop.routing.runtime_response_timeout = Duration::from_secs(1);
@@ -48,10 +48,10 @@ fn should_refuse_manual_compaction_when_route_budget_expired_in_queue() -> Midge
 
 #[test]
 fn should_expire_manual_waiter_when_maintenance_remains_blocked() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: a genuine publication owner prevents admitting caller work.
         let mut event_loop = create_test_cloud_event_loop(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
         event_loop
             .actors
@@ -110,7 +110,7 @@ fn should_expire_manual_waiter_when_maintenance_remains_blocked() -> MidgeResult
 
 #[test]
 fn should_wake_idle_runtime_when_blocked_manual_waiter_budget_expires() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: no worker completion or new caller can wake this queued obligation.
         let (requests, request_rx) = crossbeam::channel::unbounded();
         let (_workers, worker_rx) = crossbeam::channel::unbounded();
@@ -163,7 +163,7 @@ fn run_blocked_manual_waiter(
     initialized: &crossbeam::channel::Sender<IdleWaiterSetup>,
 ) -> MidgeResult<(bool, bool)> {
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop
         .actors

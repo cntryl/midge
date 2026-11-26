@@ -100,8 +100,8 @@ fn put_and_flush(
 
 fn find_sst_containing(engine: &Engine, key: &[u8]) -> MidgeResult<String> {
     let factory = sst_factory(engine);
-    let manifest = crate::metadata::ManifestPersistence::load(&engine.db_path)
-        .map_err(crate::common::MidgeError::Internal)?;
+    let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load(&engine.db_path)
+        .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
     for file in manifest.files {
         let reader = factory.open(std::path::Path::new(&file.name))?;
         let cursor = reader.raw_version_cursor(None, None)?;
@@ -123,22 +123,22 @@ fn manifest_contains(engine: &Engine, name: &str) -> MidgeResult<bool> {
     Ok(manifest_file(engine, name)?.is_some())
 }
 
-fn manifest_file(engine: &Engine, name: &str) -> MidgeResult<Option<crate::metadata::FileMeta>> {
-    let manifest = crate::metadata::ManifestPersistence::load(&engine.db_path)
-        .map_err(crate::common::MidgeError::Internal)?;
+fn manifest_file(engine: &Engine, name: &str) -> MidgeResult<Option<cntryl_midge_durability::metadata::FileMeta>> {
+    let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load(&engine.db_path)
+        .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
     Ok(manifest.files.into_iter().find(|file| file.name == name))
 }
 
 #[derive(Default)]
 struct PublishedSstState {
-    versions: Vec<crate::sst::traits::RawSstVersion>,
-    range_markers: Vec<crate::types::RangeTombstone>,
+    versions: Vec<cntryl_midge_table::sst::traits::RawSstVersion>,
+    range_markers: Vec<cntryl_midge_core::types::RangeTombstone>,
 }
 
 fn inspect_published_ssts(engine: &Engine) -> MidgeResult<PublishedSstState> {
     let factory = sst_factory(engine);
-    let manifest = crate::metadata::ManifestPersistence::load(&engine.db_path)
-        .map_err(crate::common::MidgeError::Internal)?;
+    let manifest = cntryl_midge_durability::metadata::ManifestPersistence::load(&engine.db_path)
+        .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
     let mut state = PublishedSstState::default();
     for file in manifest.files {
         let reader = factory.open(std::path::Path::new(&file.name))?;
@@ -152,9 +152,9 @@ fn inspect_published_ssts(engine: &Engine) -> MidgeResult<PublishedSstState> {
     Ok(state)
 }
 
-fn sst_factory(engine: &Engine) -> crate::sst::FsSstFactoryIo {
-    crate::sst::FsSstFactoryIo::new(
-        crate::io::subdirectory(Arc::clone(&engine.root), crate::sst::fs::SST_DIR),
+fn sst_factory(engine: &Engine) -> cntryl_midge_table::sst::FsSstFactoryIo {
+    cntryl_midge_table::sst::FsSstFactoryIo::new(
+        cntryl_midge_core::io::subdirectory(Arc::clone(&engine.root), cntryl_midge_table::sst::fs::SST_DIR),
         64 * 1024,
     )
 }

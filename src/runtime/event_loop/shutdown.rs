@@ -1,5 +1,5 @@
 use super::{EventLoop, HandleOutcome};
-use crate::common::MidgeError;
+use cntryl_midge_core::common::MidgeError;
 use crate::runtime::durability::{DurabilityWaiter, TestDurabilityWaiter};
 use crate::runtime::{RuntimeMsg, RuntimeResponse};
 
@@ -58,7 +58,7 @@ impl EventLoop {
         }
 
         let cloud_async = self.actors.wal_actor.is_cloud_async();
-        let cloud_shutdown_deadline = crate::common::OperationDeadline::from_budget(
+        let cloud_shutdown_deadline = cntryl_midge_core::common::OperationDeadline::from_budget(
             self.shutdown.shutdown_cloud_drain_timeout,
         );
 
@@ -237,7 +237,7 @@ impl EventLoop {
     fn join_shutdown_storage_workers(
         &mut self,
         cloud_async: bool,
-        cloud_shutdown_deadline: &crate::common::OperationDeadline,
+        cloud_shutdown_deadline: &cntryl_midge_core::common::OperationDeadline,
         shutdown_error: &mut Option<MidgeError>,
     ) {
         let join_deadline = cloud_async.then_some(cloud_shutdown_deadline);
@@ -306,7 +306,7 @@ impl EventLoop {
 
     fn drain_shutdown_cloud_uploads_within(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
     ) -> Option<MidgeError> {
         let storage = self
             .actors
@@ -341,7 +341,7 @@ impl EventLoop {
         let storage_pending = storage.pending_upload_count();
         let runtime_pending = self.actors.cloud_coordinator.cloud_wal.backlog().len();
         if storage_pending > 0 || runtime_pending > 0 {
-            crate::failpoints::fail_point!("midge::shutdown::after_cloud_upload_drain_timeout");
+            cntryl_midge_core::failpoints::fail_point!("midge::shutdown::after_cloud_upload_drain_timeout");
             tracing::warn!(
                 storage_pending,
                 runtime_pending,
@@ -356,7 +356,7 @@ impl EventLoop {
         }
     }
 
-    fn drain_shutdown_compaction_publication(&mut self) -> crate::common::MidgeResult<()> {
+    fn drain_shutdown_compaction_publication(&mut self) -> cntryl_midge_core::common::MidgeResult<()> {
         while self.actors.compaction_publish_actor.is_inflight()
             || crate::runtime::event_loop::compaction::CompactionCoordinator::has_pending_capture(
                 self,
@@ -401,8 +401,8 @@ impl EventLoop {
 
     fn checkpoint_active_cloud_memtables_within(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let mut cf_ids: Vec<_> = self.state.column_families.keys().copied().collect();
         cf_ids.sort_unstable();
         for cf_id in cf_ids {
@@ -411,15 +411,15 @@ impl EventLoop {
                     "cloud shutdown checkpoint exceeded the durability deadline".to_string(),
                 ));
             }
-            self.freeze_active_memtable_for(cf_id, crate::metadata::accounting::Origin::Shutdown)?;
+            self.freeze_active_memtable_for(cf_id, cntryl_midge_durability::metadata::accounting::Origin::Shutdown)?;
         }
         self.drain_shutdown_flush_pipeline_within(deadline)
     }
 
     pub(super) fn drain_shutdown_flush_pipeline_within(
         &mut self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         loop {
             self.reap_cloud_wal_prune_worker();
             self.reap_metadata_mirror();
@@ -561,7 +561,7 @@ impl EventLoop {
 // changing the requirement to join accepted workers before releasing fencing.
 fn trace_shutdown_phase<T>(
     phase: &'static str,
-    deadline: Option<&crate::common::OperationDeadline>,
+    deadline: Option<&cntryl_midge_core::common::OperationDeadline>,
     operation: impl FnOnce() -> T,
 ) -> T {
     let started = std::time::Instant::now();
@@ -617,22 +617,22 @@ mod tests {
 
     struct CountingSyncWriter(Arc<AtomicUsize>);
 
-    impl crate::wal::WalWriter for CountingSyncWriter {
+    impl cntryl_midge_durability::wal::WalWriter for CountingSyncWriter {
         fn append_record_accounted(
             &self,
-            _record: &crate::wal::WalRecord,
-        ) -> Result<u64, crate::wal::traits::WalAppendError> {
+            _record: &cntryl_midge_durability::wal::WalRecord,
+        ) -> Result<u64, cntryl_midge_durability::wal::traits::WalAppendError> {
             Ok(0)
         }
 
         fn append_batch_accounted(
             &self,
-            _records: &[crate::wal::WalRecord],
-        ) -> Result<u64, crate::wal::traits::WalAppendError> {
+            _records: &[cntryl_midge_durability::wal::WalRecord],
+        ) -> Result<u64, cntryl_midge_durability::wal::traits::WalAppendError> {
             Ok(0)
         }
 
-        fn sync_with_timeout(&self, _timeout: Duration) -> crate::common::MidgeResult<()> {
+        fn sync_with_timeout(&self, _timeout: Duration) -> cntryl_midge_core::common::MidgeResult<()> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -641,30 +641,30 @@ mod tests {
             0
         }
 
-        fn tail(&self) -> crate::wal::format::SegmentTail {
-            crate::wal::traits::unsealable::tail()
+        fn tail(&self) -> cntryl_midge_durability::wal::format::SegmentTail {
+            cntryl_midge_durability::wal::traits::unsealable::tail()
         }
 
         fn seal_facts(
             &self,
             _timeout: std::time::Duration,
-        ) -> crate::common::MidgeResult<crate::wal::format::SealedFacts> {
-            crate::wal::traits::unsealable::seal()
+        ) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_durability::wal::format::SealedFacts> {
+            cntryl_midge_durability::wal::traits::unsealable::seal()
         }
 
         fn write_footer(
             &self,
-            _facts: &crate::wal::format::SealedFacts,
+            _facts: &cntryl_midge_durability::wal::format::SealedFacts,
             _timeout: std::time::Duration,
-        ) -> crate::common::MidgeResult<()> {
-            crate::wal::traits::unsealable::write_footer()
+        ) -> cntryl_midge_core::common::MidgeResult<()> {
+            cntryl_midge_durability::wal::traits::unsealable::write_footer()
         }
     }
 
     fn local_event_loop_with_counting_writer() -> (EventLoop, Arc<AtomicUsize>) {
         let router = Arc::new(ResponseRouter::new());
         let config = RuntimeConfig {
-            wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
+            wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::Batched,
             ..RuntimeConfig::default()
         };
         let mut event_loop = EventLoop::new(

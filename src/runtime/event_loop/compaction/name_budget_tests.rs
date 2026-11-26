@@ -5,16 +5,16 @@
 //! accounting; they do not establish native socket cancellation or public ACKs.
 
 use super::EventLoop;
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crate::lease::{CloudMetadataHead, LeaseGuard, PrimaryLease as _};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::{CloudMetadataHead, LeaseGuard, PrimaryLease as _};
 use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use crate::runtime::RuntimeState;
-use crate::sst::SstFactory as _;
-use crate::storage::cloud::CloudReadCapability;
-use crate::storage::cloud::{
+use cntryl_midge_table::sst::SstFactory as _;
+use cntryl_midge_storage::cloud::CloudReadCapability;
+use cntryl_midge_storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
-use crate::types::{EntryType, KeyState};
+use cntryl_midge_core::types::{EntryType, KeyState};
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -60,7 +60,7 @@ struct DelayedAuthorityBackend {
 }
 
 impl DelayedAuthorityBackend {
-    fn descriptor(&self, key: &str) -> (Vec<u8>, crate::storage::StorageObjectMetadata) {
+    fn descriptor(&self, key: &str) -> (Vec<u8>, cntryl_midge_storage::StorageObjectMetadata) {
         let (observed, result) = std::sync::mpsc::channel();
         self.inner.submit_get_with_metadata(key, observed);
         match result
@@ -76,7 +76,7 @@ impl DelayedAuthorityBackend {
     }
 }
 
-impl crate::storage::cloud::CloudReadCapability for DelayedAuthorityBackend {
+impl cntryl_midge_storage::cloud::CloudReadCapability for DelayedAuthorityBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_get(key, callback);
     }
@@ -100,7 +100,7 @@ impl crate::storage::cloud::CloudReadCapability for DelayedAuthorityBackend {
     }
 }
 
-impl crate::storage::cloud::CloudWriteCapability for DelayedAuthorityBackend {
+impl cntryl_midge_storage::cloud::CloudWriteCapability for DelayedAuthorityBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -112,9 +112,9 @@ impl crate::storage::cloud::CloudWriteCapability for DelayedAuthorityBackend {
         let provider_budget = headers
             .iter()
             .find(|(name, _)| {
-                name.eq_ignore_ascii_case(crate::storage::cloud::REQUEST_TIMEOUT_HEADER)
+                name.eq_ignore_ascii_case(cntryl_midge_storage::cloud::REQUEST_TIMEOUT_HEADER)
             })
-            .and_then(|(_, value)| crate::storage::cloud::parse_request_timeout(value).ok());
+            .and_then(|(_, value)| cntryl_midge_storage::cloud::parse_request_timeout(value).ok());
         let expected = bytes.clone();
         let (observed, result) = std::sync::mpsc::channel();
         self.inner.submit_put(key, bytes, headers, observed);
@@ -122,7 +122,7 @@ impl crate::storage::cloud::CloudWriteCapability for DelayedAuthorityBackend {
             .recv_timeout(PROVIDER_CAP)
             .expect("receive actual delegated conditional PUT");
         let genuine_success = matches!(&event,
-            CloudEvent::Put { key: actual, result: crate::storage::cloud::CloudOutcome::Ok(()) }
+            CloudEvent::Put { key: actual, result: cntryl_midge_storage::cloud::CloudOutcome::Ok(()) }
             if actual == key);
         self.puts.lock().unwrap().push(PutEvidence {
             key: key.to_string(),
@@ -155,19 +155,19 @@ impl crate::storage::cloud::CloudWriteCapability for DelayedAuthorityBackend {
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for DelayedAuthorityBackend {
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for DelayedAuthorityBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
 }
 
-impl crate::storage::cloud::CloudListCapability for DelayedAuthorityBackend {
+impl cntryl_midge_storage::cloud::CloudListCapability for DelayedAuthorityBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
 }
 
-impl crate::storage::cloud::CloudHeadCapability for DelayedAuthorityBackend {
+impl cntryl_midge_storage::cloud::CloudHeadCapability for DelayedAuthorityBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_head(key, callback);
     }
@@ -179,7 +179,7 @@ struct NameFixture {
     el: EventLoop,
     cloud: Arc<CloudStorage>,
     backend: Arc<DelayedAuthorityBackend>,
-    lease: Arc<crate::lease::CloudStorageLease>,
+    lease: Arc<cntryl_midge_durability::lease::CloudStorageLease>,
     _guard: LeaseGuard,
     sst_name: String,
     sst_bytes: Vec<u8>,
@@ -187,15 +187,15 @@ struct NameFixture {
 }
 
 fn seed_actual_sst(el: &mut EventLoop) -> MidgeResult<(String, Vec<u8>)> {
-    let name = crate::cloud_layout::file_name(0, 0, 1);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&el.state.fs), 4096);
+    let name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&el.state.fs), 4096);
     let mut writer = factory.create()?;
     writer.add_with_meta(KEY, Some(VALUE), 7, EntryType::Put, None)?;
     let path = el.state.host_sst_dir().join(&name);
     writer.finish_to_path(&path)?;
     let bytes = std::fs::read(path)?;
     let manifest = el.state.manifest.test_mut();
-    let file = crate::metadata::FileMeta {
+    let file = cntryl_midge_durability::metadata::FileMeta {
         name: name.clone(),
         level: 0,
         cf_id: 0,
@@ -209,20 +209,20 @@ fn seed_actual_sst(el: &mut EventLoop) -> MidgeResult<(String, Vec<u8>)> {
         ..Default::default()
     };
     manifest
-        .apply_edit(&crate::metadata::ManifestEdit::Batch(vec![
-            crate::metadata::ManifestEdit::BumpNextSstSeq {
+        .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::Batch(vec![
+            cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
                 cf_id: 0,
                 next_seq: 2,
             },
-            crate::metadata::ManifestEdit::AddSst(file),
-            crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+            cntryl_midge_durability::metadata::ManifestEdit::AddSst(file),
+            cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
                 cf_id: 0,
                 freeze_sequence: 7,
             },
         ]))
         .unwrap();
     el.state.sequence = 7;
-    crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+    cntryl_midge_durability::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
         .map_err(MidgeError::Internal)?;
     Ok((name, bytes))
 }
@@ -230,7 +230,7 @@ fn seed_actual_sst(el: &mut EventLoop) -> MidgeResult<(String, Vec<u8>)> {
 impl NameFixture {
     fn new() -> MidgeResult<Self> {
         let mut el = create_test_cloud_event_loop(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         )?;
         el.state.set_compaction_enabled(false);
         let (sst_name, sst_bytes) = seed_actual_sst(&mut el)?;
@@ -240,8 +240,8 @@ impl NameFixture {
             String::new(),
             PROVIDER_CAP,
         ));
-        let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-            crate::lease::CloudLeaseConfig {
+        let lease = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+            cntryl_midge_durability::lease::CloudLeaseConfig {
                 bucket: "test".into(),
                 prefix: "name-budget".into(),
             },
@@ -281,7 +281,7 @@ impl NameFixture {
             .map_err(|error| error.into_validation_error("name fixture committed pointer"))
     }
 
-    fn committed_manifest(&self) -> MidgeResult<crate::metadata::Manifest> {
+    fn committed_manifest(&self) -> MidgeResult<cntryl_midge_durability::metadata::Manifest> {
         let directory = tempfile::tempdir()?;
         let store = self
             .lease
@@ -290,11 +290,11 @@ impl NameFixture {
         crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
             &self.cloud,
             store.as_ref(),
-            &crate::io::real::test_root(directory.path()),
+            &cntryl_midge_core::io::real::test_root(directory.path()),
             directory.path(),
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
-        crate::metadata::ManifestPersistence::load(directory.path()).map_err(MidgeError::Internal)
+        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).map_err(MidgeError::Internal)
     }
 
     fn exact_data(&self) -> MidgeResult<DataEvidence> {
@@ -358,7 +358,7 @@ fn assert_late_genuine_metadata_io(reads: &[MetadataIoEvidence], started: Instan
 #[test]
 fn should_keep_name_reservation_uncovered_when_actual_metadata_write_outlives_original_budget(
 ) -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: real FORMAT/manifest and conditional committed pointer precede time.
         let mut fixture = NameFixture::new()?;
         let before_head = fixture.committed_head()?;
@@ -383,7 +383,7 @@ fn should_keep_name_reservation_uncovered_when_actual_metadata_write_outlives_or
         let after_uploads = fixture.backend.inner.get_uploads();
         let puts = fixture.backend.puts.lock().unwrap()[before_puts..].to_vec();
         let bound = fixture.el.state.sst_names.reserved_through.get(&0).copied();
-        let local = crate::metadata::ManifestPersistence::load(&fixture.el.state.db_path);
+        let local = cntryl_midge_durability::metadata::ManifestPersistence::load(&fixture.el.state.db_path);
         let recovered =
             RuntimeState::new_in_epoch(&fixture.el.state.db_path, false, fixture.lease.epoch());
         let mut recovered_loop = EventLoop::new(
@@ -494,7 +494,7 @@ fn assert_metadata_staging_before_expiry(
 
 #[test]
 fn should_cover_reserved_name_when_real_metadata_mirror_fits_original_budget() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let mut fixture = NameFixture::new()?;
         let before = fixture.committed_head()?;
@@ -507,7 +507,7 @@ fn should_cover_reserved_name_when_real_metadata_mirror_fits_original_budget() -
         let covered = fixture.el.state.sst_names.reserved_through.get(&0).copied();
         let head = fixture.committed_head();
         let manifest = fixture.committed_manifest();
-        let local = crate::metadata::ManifestPersistence::load(&fixture.el.state.db_path);
+        let local = cntryl_midge_durability::metadata::ManifestPersistence::load(&fixture.el.state.db_path);
         let data = fixture.exact_data();
         let healthy = fixture.el.check_lease_health();
         let cleanup = fixture.stop();

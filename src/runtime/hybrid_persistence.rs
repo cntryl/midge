@@ -4,17 +4,17 @@
 //! identities, bounded callbacks, and conditional deletion. This runtime layer
 //! owns WAL/SST decoding and durable frontier decisions.
 
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 #[cfg(test)]
-use crate::metadata::{FileMeta, Manifest};
+use cntryl_midge_durability::metadata::{FileMeta, Manifest};
 #[cfg(test)]
-use crate::storage::cloud::CloudStorage;
+use cntryl_midge_storage::cloud::CloudStorage;
 #[cfg(test)]
-use crate::storage::hybrid::backend::GuardedObjectProof;
-use crate::storage::hybrid::backend::{HybridStorage, RemoteObjectProof};
+use cntryl_midge_storage::hybrid::backend::GuardedObjectProof;
+use cntryl_midge_storage::hybrid::backend::{HybridStorage, RemoteObjectProof};
 #[cfg(test)]
-use crate::storage::{StorageBackend, StorageObjectMetadata};
-use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
+use cntryl_midge_storage::{StorageBackend, StorageObjectMetadata};
+use cntryl_midge_durability::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
 use std::sync::Arc;
 
 mod catalog;
@@ -31,7 +31,7 @@ mod orphan_sweep;
 mod wal_orphan_sweep;
 pub(crate) use wal_orphan_sweep::sweep_retired_wal_within;
 mod retired_sst;
-use crate::storage::hybrid::backend::ControlObject;
+use cntryl_midge_storage::hybrid::backend::ControlObject;
 pub(crate) use catalog::refusal_error;
 pub(crate) use catalog::AdmittedCatalog;
 use catalog::{load_and_repair_catalog_within, mutate_wal_catalog_within, Missing, Mutation};
@@ -57,7 +57,7 @@ pub(crate) enum PublicationError {
     Mismatch { segment_id: u64, detail: String },
     /// The catalog refuses the run: publishing it would break the catalog's
     /// order or identity. No retry can fix it.
-    Refused(crate::wal::publish::Refusal),
+    Refused(cntryl_midge_durability::wal::publish::Refusal),
     /// Another writer epoch owns the catalog.
     Fenced(MidgeError),
     /// A failure a later attempt may not repeat: I/O, a timeout, a lost
@@ -84,10 +84,10 @@ impl From<MidgeError> for PublicationError {
     }
 }
 
-impl From<crate::wal::publish::Refusal> for PublicationError {
-    fn from(refusal: crate::wal::publish::Refusal) -> Self {
+impl From<cntryl_midge_durability::wal::publish::Refusal> for PublicationError {
+    fn from(refusal: cntryl_midge_durability::wal::publish::Refusal) -> Self {
         match refusal {
-            crate::wal::publish::Refusal::EpochMismatch { .. } => {
+            cntryl_midge_durability::wal::publish::Refusal::EpochMismatch { .. } => {
                 Self::Fenced(MidgeError::Fenced(refusal.to_string()))
             }
             refusal => Self::Refused(refusal),
@@ -157,9 +157,9 @@ impl std::ops::Deref for CloudPersistence {
 fn validate_remote_sst_within(
     storage: &HybridStorage,
     file: &FileMeta,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<RemoteObjectProof> {
-    let key = crate::cloud_layout::object_key(&file.name);
+    let key = cntryl_midge_core::cloud_layout::object_key(&file.name);
     let proof = storage.remote_object_proof_within(&key, deadline)?;
     validate_sst_object_bytes(
         &file.name,
@@ -179,7 +179,7 @@ fn validate_sst_object_bytes(
     expected_content_crc32c: Option<u32>,
     expected_file: Option<&FileMeta>,
     data: &[u8],
-) -> Result<crate::sst::fs::SstFileSummary, String> {
+) -> Result<cntryl_midge_table::sst::fs::SstFileSummary, String> {
     if expected_size_bytes > 0 && data.len() as u64 != expected_size_bytes {
         return Err(format!(
             "cloud SST '{sst_name}' size mismatch: manifest={expected_size_bytes}, object={}",
@@ -196,12 +196,12 @@ fn validate_sst_object_bytes(
         }
     }
 
-    let fs: Arc<dyn crate::io::Fs> = Arc::new(crate::io::MockFs::new());
-    let verifier = crate::io::FsPath::new("verify.sst");
+    let fs: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
+    let verifier = cntryl_midge_core::io::FsPath::new("verify.sst");
     fs.open(
         &verifier,
-        crate::io::OpenOptions {
-            mode: crate::io::OpenMode::ReadWrite,
+        cntryl_midge_core::io::OpenOptions {
+            mode: cntryl_midge_core::io::OpenMode::ReadWrite,
             create: true,
             create_new: true,
             truncate: false,
@@ -210,7 +210,7 @@ fn validate_sst_object_bytes(
     .and_then(|mut file| file.append(bytes::Bytes::copy_from_slice(data)))
     .map_err(|error| format!("stage SST verifier for '{sst_name}': {error}"))?;
 
-    let summary = crate::sst::fs::SstFileIo::summarize_with_fs(&verifier.0, fs)
+    let summary = cntryl_midge_table::sst::fs::SstFileIo::summarize_with_fs(&verifier.0, fs)
         .map_err(|error| format!("cloud SST '{sst_name}' summary validation: {error}"))?;
     if let Some(expected_file) = expected_file {
         verify_sst_summary_matches_manifest(sst_name, &summary, expected_file)?;
@@ -222,7 +222,7 @@ impl CloudPersistence {
     /// Validate the local segment at `source` and queue it for upload.
     pub(crate) fn enqueue_wal_segment(
         &self,
-        source: &crate::io::FsLocation,
+        source: &cntryl_midge_core::io::FsLocation,
         segment_id: u64,
         max_sequence: u64,
     ) -> MidgeResult<String> {
@@ -230,7 +230,7 @@ impl CloudPersistence {
             .read_all()
             .map_err(|error| MidgeError::Io(error.into_io()))?;
         let readback =
-            crate::wal::cloud_segment::validate_bytes(&source.to_string(), &bytes, max_sequence)
+            cntryl_midge_durability::wal::cloud_segment::validate_bytes(&source.to_string(), &bytes, max_sequence)
                 .map_err(MidgeError::Corruption)?;
         // The object is named for the epoch of the writer that wrote it,
         // which its header records (#843).
@@ -252,14 +252,14 @@ impl CloudPersistence {
     ) -> MidgeResult<AdmittedCatalog> {
         self.fence_cloud_wal_catalog_within(
             writer_epoch,
-            &crate::common::OperationDeadline::unbounded(),
+            &cntryl_midge_core::common::OperationDeadline::unbounded(),
         )
     }
 
     pub(crate) fn fence_cloud_wal_catalog_within(
         &self,
         writer_epoch: u64,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
     ) -> MidgeResult<AdmittedCatalog> {
         mutate_wal_catalog_within(
             self,
@@ -291,11 +291,11 @@ impl CloudPersistence {
     pub(crate) fn set_aside_catalog_suffix_with_authority_within(
         &self,
         writer_epoch: u64,
-        from: Option<crate::wal::ledger::SegmentId>,
+        from: Option<cntryl_midge_durability::wal::ledger::SegmentId>,
         expected: &[CatalogEntry],
         floor: u64,
         validate: &dyn Fn() -> MidgeResult<()>,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
     ) -> MidgeResult<()> {
         mutate_wal_catalog_within(
             self,
@@ -329,8 +329,8 @@ impl CloudPersistence {
         &self,
         segment_id: u64,
         expected_max_sequence: u64,
-        source: &crate::io::FsLocation,
-        deadline: &crate::common::OperationDeadline,
+        source: &cntryl_midge_core::io::FsLocation,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
     ) -> Result<CatalogEntry, PublicationError> {
         let local_bytes = source.read_all().map_err(|error| {
             let error = error.into_io();
@@ -341,7 +341,7 @@ impl CloudPersistence {
                 ),
             ))
         })?;
-        let local_readback = crate::wal::cloud_segment::validate_bytes(
+        let local_readback = cntryl_midge_durability::wal::cloud_segment::validate_bytes(
             &source.to_string(),
             &local_bytes,
             expected_max_sequence,
@@ -377,7 +377,7 @@ impl CloudPersistence {
     /// compare-and-swap.
     ///
     /// The caller selects `run` as the contiguous uploads its writer owes the
-    /// catalog ([`crate::wal::publish::uploaded_run`]); the catalog appends
+    /// catalog ([`cntryl_midge_durability::wal::publish::uploaded_run`]); the catalog appends
     /// it past its head ([`WalPublicationCatalog::append_run`]). Segments it
     /// already publishes identically add nothing.
     ///
@@ -391,7 +391,7 @@ impl CloudPersistence {
         &self,
         run: &[CatalogEntry],
         fencing_epoch: u64,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
     ) -> Result<(), PublicationError> {
         let publication = mutate_wal_catalog_within(
             self,
@@ -424,7 +424,7 @@ impl CloudPersistence {
         candidates: &[(u64, u64)],
         authority: &SharedRetirementAuthority,
         fencing_epoch: u64,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
     ) -> MidgeResult<CloudWalPruneBatchResults> {
         if candidates.is_empty() {
             return Ok(Vec::new());
@@ -454,10 +454,10 @@ impl CloudPersistence {
         let mut targets = Vec::new();
         let covered_count = catalog
             .retirable_prefix(|cf, sequence| match authority.frontiers().get(cf) {
-                Ok(crate::metadata::FamilyFrontier::Live { through_sequence }) => {
+                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Live { through_sequence }) => {
                     sequence <= through_sequence
                 }
-                Ok(crate::metadata::FamilyFrontier::Dropped) => true,
+                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Dropped) => true,
                 Err(_) => false,
             })
             .len()
@@ -522,7 +522,7 @@ impl CloudPersistence {
             match identity {
                 Some(_) => {}
                 None => {
-                    self.queue_cloud_wal_prune_complete(id, crate::storage::StorageOutcome::Ok(()));
+                    self.queue_cloud_wal_prune_complete(id, cntryl_midge_storage::StorageOutcome::Ok(()));
                 }
             }
         }
@@ -538,7 +538,7 @@ pub(crate) fn authoritative_wal_entry(
     segment_id: u64,
 ) -> Result<CatalogEntry, String> {
     // Read both copies, never this writer's cache: callers check the store.
-    let deadline = crate::common::OperationDeadline::unbounded();
+    let deadline = cntryl_midge_core::common::OperationDeadline::unbounded();
     let _catalog_mutation = storage
         .lock_wal_catalog_mutation_within(&deadline, "cloud WAL catalog read")
         .map_err(|error| error.to_string())?;
@@ -557,7 +557,7 @@ pub(crate) fn authoritative_wal_entry(
 /// commits by compare-and-swap, so a successor's fence still refuses it.
 fn authoritative_wal_catalog_within(
     storage: &HybridStorage,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<AdmittedCatalog> {
     let _catalog_mutation =
         storage.lock_wal_catalog_mutation_within(deadline, "cloud WAL catalog read")?;
@@ -573,7 +573,7 @@ fn authoritative_wal_catalog_within(
 fn validate_remote_wal(
     storage: &HybridStorage,
     entry: &CatalogEntry,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> Result<ValidatedWalObject, PublicationError> {
     let proof = storage.remote_object_proof_within(&entry.object_key(), deadline)?;
     // The object exists but holds other bytes than the segment it names.
@@ -599,15 +599,15 @@ fn contextualize_cloud_error(error: MidgeError, context: &str) -> MidgeError {
 #[cfg(test)]
 fn verify_sst_summary_matches_manifest(
     sst_name: &str,
-    summary: &crate::sst::fs::SstFileSummary,
+    summary: &cntryl_midge_table::sst::fs::SstFileSummary,
     file: &FileMeta,
 ) -> Result<(), String> {
     // The CRC is proven separately by the streaming pass, so this compares
     // only what the decoded summary can attest to.
-    crate::sst::identity::verify_summary_against(
+    cntryl_midge_table::sst::identity::verify_summary_against(
         summary,
         file.expected_sst(),
-        crate::sst::identity::ProofPolicy::Legacy,
+        cntryl_midge_table::sst::identity::ProofPolicy::Legacy,
     )
     .map_err(|mismatch| format!("cloud SST '{sst_name}': {mismatch}"))
 }

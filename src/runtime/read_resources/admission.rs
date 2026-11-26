@@ -1,8 +1,8 @@
 //! Bounded ownership of in-flight immutable reader opens.
 
 use super::{ReaderCacheKey, SstFileIo};
-use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
 use std::sync::Arc;

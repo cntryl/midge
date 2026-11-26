@@ -1,10 +1,10 @@
 use super::super::*;
 use super::*;
-use crate::io::FsError;
-use crate::io::RealFs;
-use crate::sst::traits::SstFactory;
-use crate::sst::FsSstFactoryIo;
-use crate::types::EntryType;
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_core::io::RealFs;
+use cntryl_midge_table::sst::traits::SstFactory;
+use cntryl_midge_table::sst::FsSstFactoryIo;
+use cntryl_midge_core::types::EntryType;
 use std::path::Path;
 
 type Point<'a> = (&'a [u8], &'a [u8], u64);
@@ -51,7 +51,7 @@ fn snapshot(
         Arc::clone(&fs),
         std::path::PathBuf::new(),
         64 * 1024,
-        crate::sst::cache::CachePolicyType::Lru,
+        cntryl_midge_table::sst::cache::CachePolicyType::Lru,
         Arc::new(crate::diagnostics::RuntimeDiagnostics::default()),
     ));
     let snapshot = ReadSnapshot::new_with_resources(

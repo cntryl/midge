@@ -1,6 +1,6 @@
 use super::*;
-use crate::wal::cloud_catalog::CatalogEntry;
-use crate::wal::format::ChainLink;
+use cntryl_midge_durability::wal::cloud_catalog::CatalogEntry;
+use cntryl_midge_durability::wal::format::ChainLink;
 
 fn populated_catalog() -> WalPublicationCatalog {
     populated_catalog_with_segments(4096)
@@ -11,14 +11,14 @@ fn populated_catalog_with_segments(count: u64) -> WalPublicationCatalog {
     let mut prev = ChainLink::GENESIS;
     let entries: Vec<CatalogEntry> = (1..=count)
         .map(|segment_id| {
-            let record = crate::wal::WalRecord::new(
-                crate::wal::WalOpKind::Put,
+            let record = cntryl_midge_durability::wal::WalRecord::new(
+                cntryl_midge_durability::wal::WalOpKind::Put,
                 bytes::Bytes::from_static(b"key"),
                 Some(bytes::Bytes::from_static(b"value")),
                 segment_id,
             );
             let (bytes, link) =
-                crate::wal::format::segment::SegmentBuilder::new(segment_id, 7, prev)
+                cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(segment_id, 7, prev)
                     .record(&record)
                     .seal();
             let entry = CatalogEntry::from_sealed_bytes(&bytes).expect("verified fixture segment");
@@ -58,16 +58,16 @@ fn storage_fixture() -> (tempfile::TempDir, super::super::CloudPersistence) {
     let directory = tempfile::tempdir().unwrap();
     let storage = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
         Arc::new(CloudStorage::with_mock()),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
     (directory, storage)
 }
 
 fn catalog_with_family_frontiers() -> WalPublicationCatalog {
-    let mut builder = crate::wal::format::segment::SegmentBuilder::new(1, 7, ChainLink::GENESIS);
+    let mut builder = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(1, 7, ChainLink::GENESIS);
     for family in 1..=512_u32 {
-        let mut record = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
+        let mut record = cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::WalOpKind::Put,
             bytes::Bytes::from_static(b"key"),
             Some(bytes::Bytes::from_static(b"value")),
             u64::from(family),
@@ -141,8 +141,8 @@ fn should_publish_compact_catalog_when_fencing_existing_pretty_authority() {
     let (_directory, storage) = storage_fixture();
     let catalog = populated_catalog();
     let original = catalog.encode().unwrap();
-    let primary = crate::wal::cloud_catalog::OBJECT_KEY;
-    let mirror = crate::wal::cloud_catalog::MIRROR_OBJECT_KEY;
+    let primary = cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY;
+    let mirror = cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY;
     storage
         .compare_exchange_remote_object(primary, None, original.clone())
         .unwrap();
@@ -174,8 +174,8 @@ fn should_repair_corrupt_mirror_from_compact_authority() {
     let (_directory, storage) = storage_fixture();
     let catalog = populated_catalog();
     let compact = serde_json::to_vec(&catalog).unwrap();
-    let primary = crate::wal::cloud_catalog::OBJECT_KEY;
-    let mirror = crate::wal::cloud_catalog::MIRROR_OBJECT_KEY;
+    let primary = cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY;
+    let mirror = cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY;
     storage
         .compare_exchange_remote_object(primary, None, compact.clone())
         .unwrap();
@@ -252,7 +252,7 @@ fn should_refuse_escaped_document_before_parsing_when_scratch_exceeds_budget() {
     // Arrange: a long raw prefix then one escape. The parser copies the
     // prefix, then doubles its scratch while the old buffer is still live.
     let key = "a".repeat(1024 * 1024);
-    let version = crate::wal::cloud_catalog::FORMAT_VERSION;
+    let version = cntryl_midge_durability::wal::cloud_catalog::FORMAT_VERSION;
     let bytes = format!("{{\"format_version\":{version},\"{key}\\n\":0}}").into_bytes();
     let budget = ResourceBudget::new(bytes.len() * 2 + 8192);
 
@@ -286,9 +286,9 @@ fn should_retain_only_decoded_capacity_when_decode_peak_is_released() {
 
 fn chained_entry(head: ChainLink, epoch: u64) -> CatalogEntry {
     let id = head.id + 1;
-    let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(id, epoch, head)
-        .record(&crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
+    let (bytes, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(id, epoch, head)
+        .record(&cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::WalOpKind::Put,
             bytes::Bytes::from_static(b"new"),
             Some(bytes::Bytes::from_static(b"value")),
             head.last_seq + 1,
@@ -300,7 +300,7 @@ fn chained_entry(head: ChainLink, epoch: u64) -> CatalogEntry {
 /// A decoded catalog while compaction holds the rest of the pool.
 fn catalog_in_full_pool() -> (
     WalPublicationCatalog,
-    crate::common::resource_budget::ResourceReservation,
+    cntryl_midge_core::common::resource_budget::ResourceReservation,
     AdmittedCatalog,
 ) {
     let catalog = populated_catalog();
@@ -353,7 +353,7 @@ fn should_refuse_deeply_nested_document_before_parsing_when_scratch_exceeds_budg
     // Arrange: no escapes, but the version probe skips the unknown value
     // with a parser stack that holds one byte per open array.
     let depth = 1024 * 1024;
-    let version = crate::wal::cloud_catalog::FORMAT_VERSION;
+    let version = cntryl_midge_durability::wal::cloud_catalog::FORMAT_VERSION;
     let bytes = format!(
         "{{\"format_version\":{version},\"x\":{}{}}}",
         "[".repeat(depth),

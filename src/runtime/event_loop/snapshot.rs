@@ -9,7 +9,7 @@ impl SnapshotCoordinator {
     pub(super) fn capture(
         event_loop: &mut EventLoop,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         _sequence: u64,
     ) -> HandleOutcome {
         if let Some(snapshot) = event_loop.create_read_snapshot(cf_id) {
@@ -25,7 +25,7 @@ impl SnapshotCoordinator {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::Internal(format!(
+                    error: cntryl_midge_core::common::MidgeError::Internal(format!(
                         "Column family {cf_id} not found"
                     )),
                 },
@@ -37,7 +37,7 @@ impl SnapshotCoordinator {
     pub(super) fn begin_transaction(
         event_loop: &mut EventLoop,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> HandleOutcome {
         let start_sequence = event_loop.state.applied_sequence;
         let snapshot = event_loop.create_read_snapshot(cf_id).map(Arc::new);
@@ -70,7 +70,7 @@ impl SnapshotCoordinator {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::InvalidArgument(format!(
+                    error: cntryl_midge_core::common::MidgeError::InvalidArgument(format!(
                         "snapshot {snapshot_id} is already registered"
                     )),
                 },

@@ -1,6 +1,6 @@
 use super::*;
-use crate::common::MidgeError;
-use crate::io::FsError;
+use cntryl_midge_core::common::MidgeError;
+use cntryl_midge_core::io::FsError;
 
 #[test]
 fn should_make_new_database_root_chain_durable_before_startup_writes() -> MidgeResult<()> {
@@ -9,7 +9,7 @@ fn should_make_new_database_root_chain_durable_before_startup_writes() -> MidgeR
     let parent = std::fs::canonicalize(temp.path())?;
     let db_path = parent.join("nested/database");
     let opts = OpenOptions::local(&db_path).build()?;
-    crate::io::durable_dir::take_synced_dirs();
+    cntryl_midge_core::io::durable_dir::take_synced_dirs();
 
     // Act
     StartupStoragePath::resolve(&opts)?;
@@ -18,33 +18,33 @@ fn should_make_new_database_root_chain_durable_before_startup_writes() -> MidgeR
     // before startup proceeds to lease, WAL, metadata, or SST writes.
     assert!(db_path.is_dir());
     assert_eq!(
-        crate::io::durable_dir::take_synced_dirs(),
+        cntryl_midge_core::io::durable_dir::take_synced_dirs(),
         [parent.clone(), parent.join("nested"), parent.join("nested")]
     );
     Ok(())
 }
 
 struct StartupWatchdogLease {
-    validity: std::sync::Arc<crate::lease::LeaseValidity>,
+    validity: std::sync::Arc<cntryl_midge_durability::lease::LeaseValidity>,
     renewals: std::sync::atomic::AtomicUsize,
 }
 
 struct AcquisitionFailureLease {
-    error: fn() -> crate::lease::LeaseError,
+    error: fn() -> cntryl_midge_durability::lease::LeaseError,
 }
 
-impl crate::lease::PrimaryLease for AcquisitionFailureLease {
+impl cntryl_midge_durability::lease::PrimaryLease for AcquisitionFailureLease {
     fn try_acquire(
         self: std::sync::Arc<Self>,
-    ) -> Result<crate::lease::LeaseGuard, crate::lease::LeaseError> {
+    ) -> Result<cntryl_midge_durability::lease::LeaseGuard, cntryl_midge_durability::lease::LeaseError> {
         Err((self.error)())
     }
 
-    fn renew(&self) -> Result<(), crate::lease::LeaseError> {
+    fn renew(&self) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
         unreachable!("an unacquired lease must never renew")
     }
 
-    fn release(&self) -> Result<(), crate::lease::LeaseError> {
+    fn release(&self) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
         Ok(())
     }
 
@@ -61,18 +61,18 @@ impl crate::lease::PrimaryLease for AcquisitionFailureLease {
     }
 }
 
-impl crate::lease::PrimaryLease for StartupWatchdogLease {
+impl cntryl_midge_durability::lease::PrimaryLease for StartupWatchdogLease {
     fn try_acquire(
         self: std::sync::Arc<Self>,
-    ) -> Result<crate::lease::LeaseGuard, crate::lease::LeaseError> {
+    ) -> Result<cntryl_midge_durability::lease::LeaseGuard, cntryl_midge_durability::lease::LeaseError> {
         self.validity.activate(
             1,
             std::time::Instant::now() + std::time::Duration::from_secs(2),
         )?;
-        Ok(crate::lease::LeaseGuard::token())
+        Ok(cntryl_midge_durability::lease::LeaseGuard::token())
     }
 
-    fn renew(&self) -> Result<(), crate::lease::LeaseError> {
+    fn renew(&self) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
         self.validity.advance(
             1,
             std::time::Instant::now() + std::time::Duration::from_secs(2),
@@ -82,7 +82,7 @@ impl crate::lease::PrimaryLease for StartupWatchdogLease {
         Ok(())
     }
 
-    fn release(&self) -> Result<(), crate::lease::LeaseError> {
+    fn release(&self) -> Result<(), cntryl_midge_durability::lease::LeaseError> {
         self.validity.deactivate(1);
         Ok(())
     }
@@ -139,19 +139,19 @@ fn should_not_log_cloud_credentials_when_tracing_engine_startup() {
         "gcs-bearer-do-not-log",
     ];
     let providers = [
-        crate::config::CloudProviderConfig::s3_compatible(
+        cntryl_midge_storage::config::CloudProviderConfig::s3_compatible(
             "bucket",
             "region",
             "https://s3.example",
             secrets[0],
             secrets[1],
         ),
-        crate::config::CloudProviderConfig::azure_blob_connection_string(
+        cntryl_midge_storage::config::CloudProviderConfig::azure_blob_connection_string(
             "container",
             "DefaultEndpointsProtocol=https;AccountName=account;AccountKey=azure-secret-do-not-log",
         ),
-        crate::config::CloudProviderConfig::gcs_hmac("bucket", secrets[3], secrets[4]),
-        crate::config::CloudProviderConfig::gcs_bearer_token("bucket", secrets[5]),
+        cntryl_midge_storage::config::CloudProviderConfig::gcs_hmac("bucket", secrets[3], secrets[4]),
+        cntryl_midge_storage::config::CloudProviderConfig::gcs_bearer_token("bucket", secrets[5]),
     ];
     let captured = CapturedLogs(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
     let subscriber = tracing_subscriber::fmt()
@@ -164,15 +164,15 @@ fn should_not_log_cloud_credentials_when_tracing_engine_startup() {
     // Act
     tracing::subscriber::with_default(subscriber, || {
         for provider in providers {
-            let topology = crate::config::CloudStorageTopology::new(
-                crate::config::CloudStorageLocation::new(provider, "prefix"),
+            let topology = cntryl_midge_storage::config::CloudStorageTopology::new(
+                cntryl_midge_storage::config::CloudStorageLocation::new(provider, "prefix"),
             )
-            .with_sst(crate::config::CloudStorageLocation::new(
-                crate::config::CloudProviderConfig::aws_s3("redaction-sst-bucket", "us-east-1"),
+            .with_sst(cntryl_midge_storage::config::CloudStorageLocation::new(
+                cntryl_midge_storage::config::CloudProviderConfig::aws_s3("redaction-sst-bucket", "us-east-1"),
                 "prefix",
             ))
-            .with_control(crate::config::CloudStorageLocation::new(
-                crate::config::CloudProviderConfig::aws_s3("redaction-control-bucket", "us-east-1"),
+            .with_control(cntryl_midge_storage::config::CloudStorageLocation::new(
+                cntryl_midge_storage::config::CloudProviderConfig::aws_s3("redaction-control-bucket", "us-east-1"),
                 "prefix",
             ));
             let opts = OpenOptions::cloud_multi("/tmp/midge-redaction", topology)
@@ -217,7 +217,7 @@ fn should_apply_open_options_block_cache_policy_to_runtime_config() -> MidgeResu
     // Assert
     assert_eq!(
         materialized.runtime_config.block_cache_policy,
-        crate::sst::cache::CachePolicyType::ClockPro
+        cntryl_midge_table::sst::cache::CachePolicyType::ClockPro
     );
     Ok(())
 }
@@ -249,10 +249,10 @@ fn should_apply_open_options_retry_policy_to_local_runtime_config() -> MidgeResu
 fn should_run_heartbeat_before_cloud_recovery_can_block_startup() -> MidgeResult<()> {
     // Arrange
     let lease = std::sync::Arc::new(StartupWatchdogLease {
-        validity: std::sync::Arc::new(crate::lease::LeaseValidity::new()),
+        validity: std::sync::Arc::new(cntryl_midge_durability::lease::LeaseValidity::new()),
         renewals: std::sync::atomic::AtomicUsize::new(0),
     });
-    let lease_object: std::sync::Arc<dyn crate::lease::PrimaryLease> = lease.clone();
+    let lease_object: std::sync::Arc<dyn cntryl_midge_durability::lease::PrimaryLease> = lease.clone();
 
     // Act
     let startup_lease =
@@ -274,9 +274,9 @@ fn should_run_heartbeat_before_cloud_recovery_can_block_startup() -> MidgeResult
 #[test]
 fn should_return_lease_held_given_active_writer_when_acquiring_startup_lease() {
     // Arrange
-    let lease: std::sync::Arc<dyn crate::lease::PrimaryLease> =
+    let lease: std::sync::Arc<dyn cntryl_midge_durability::lease::PrimaryLease> =
         std::sync::Arc::new(AcquisitionFailureLease {
-            error: || crate::lease::LeaseError::AcquisitionFailed("active writer".to_string()),
+            error: || cntryl_midge_durability::lease::LeaseError::AcquisitionFailed("active writer".to_string()),
         });
 
     // Act
@@ -291,9 +291,9 @@ fn should_return_lease_held_given_active_writer_when_acquiring_startup_lease() {
 #[test]
 fn should_return_lease_unavailable_given_backend_failure_when_acquiring_startup_lease() {
     // Arrange
-    let lease: std::sync::Arc<dyn crate::lease::PrimaryLease> =
+    let lease: std::sync::Arc<dyn cntryl_midge_durability::lease::PrimaryLease> =
         std::sync::Arc::new(AcquisitionFailureLease {
-            error: || crate::lease::LeaseError::IoError("backend unavailable".to_string()),
+            error: || cntryl_midge_durability::lease::LeaseError::IoError("backend unavailable".to_string()),
         });
 
     // Act
@@ -309,10 +309,10 @@ fn should_return_lease_unavailable_given_backend_failure_when_acquiring_startup_
 fn should_return_fenced_given_lease_loss_after_startup_acquisition() -> MidgeResult<()> {
     // Arrange
     let lease = std::sync::Arc::new(StartupWatchdogLease {
-        validity: std::sync::Arc::new(crate::lease::LeaseValidity::new()),
+        validity: std::sync::Arc::new(cntryl_midge_durability::lease::LeaseValidity::new()),
         renewals: std::sync::atomic::AtomicUsize::new(0),
     });
-    let lease_object: std::sync::Arc<dyn crate::lease::PrimaryLease> = lease.clone();
+    let lease_object: std::sync::Arc<dyn cntryl_midge_durability::lease::PrimaryLease> = lease.clone();
     let startup_lease =
         StartupLease::acquire_for_test(lease_object, Some(std::sync::Arc::clone(&lease.validity)))?;
 
@@ -356,8 +356,8 @@ fn should_grant_epoch_above_wal_writer_epoch_when_leader_record_is_deleted() -> 
     drop(engine);
     let wal_epoch = 7;
     {
-        let fs: std::sync::Arc<dyn crate::io::Fs> = std::sync::Arc::new(
-            crate::io::RealFs::new(dir.path().join("wal")).map_err(FsError::into_midge)?,
+        let fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs> = std::sync::Arc::new(
+            cntryl_midge_core::io::RealFs::new(dir.path().join("wal")).map_err(FsError::into_midge)?,
         );
         // A writer under lease epoch 7 opened the newest segment the ledger
         // names; segment headers carry the epoch (#843).
@@ -398,8 +398,8 @@ fn should_fail_closed_when_shared_lease_authority_is_deleted() -> MidgeResult<()
         let retained_paths = [
             "cloud_store/wal/publication-catalog.v1.json",
             "cloud_store/wal/publication-catalog.v1.mirror.json",
-            crate::metadata::files::MANIFEST_SNAPSHOT,
-            crate::metadata::files::FORMAT,
+            cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT,
+            cntryl_midge_durability::metadata::files::FORMAT,
         ];
         let retained: Vec<_> = retained_paths
             .iter()
@@ -432,38 +432,38 @@ fn should_fail_closed_when_shared_lease_authority_is_deleted() -> MidgeResult<()
 
 struct ProviderMetadataBootstrapFixture {
     local_cache: tempfile::TempDir,
-    cloud: std::sync::Arc<crate::storage::cloud::CloudStorage>,
-    sst_cloud: std::sync::Arc<crate::storage::cloud::CloudStorage>,
-    hybrid: std::sync::Arc<crate::storage::HybridStorage>,
-    _events: crossbeam::channel::Receiver<crate::storage::StorageEvent>,
-    lease: std::sync::Arc<crate::lease::CloudStorageLease>,
-    lease_guard: crate::lease::LeaseGuard,
-    leader_store: std::sync::Arc<dyn crate::lease::LeaderStore>,
-    wal_catalog: crate::wal::cloud_catalog::WalPublicationCatalog,
+    cloud: std::sync::Arc<cntryl_midge_storage::cloud::CloudStorage>,
+    sst_cloud: std::sync::Arc<cntryl_midge_storage::cloud::CloudStorage>,
+    hybrid: std::sync::Arc<cntryl_midge_storage::HybridStorage>,
+    _events: crossbeam::channel::Receiver<cntryl_midge_storage::StorageEvent>,
+    lease: std::sync::Arc<cntryl_midge_durability::lease::CloudStorageLease>,
+    lease_guard: cntryl_midge_durability::lease::LeaseGuard,
+    leader_store: std::sync::Arc<dyn cntryl_midge_durability::lease::LeaderStore>,
+    wal_catalog: cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog,
 }
 
 impl ProviderMetadataBootstrapFixture {
-    fn new(backend: std::sync::Arc<dyn crate::storage::cloud::CloudBackend>) -> MidgeResult<Self> {
+    fn new(backend: std::sync::Arc<dyn cntryl_midge_storage::cloud::CloudBackend>) -> MidgeResult<Self> {
         Self::new_with_sst_backend(std::sync::Arc::clone(&backend), backend)
     }
 
     fn new_with_sst_backend(
-        backend: std::sync::Arc<dyn crate::storage::cloud::CloudBackend>,
-        sst_backend: std::sync::Arc<dyn crate::storage::cloud::CloudBackend>,
+        backend: std::sync::Arc<dyn cntryl_midge_storage::cloud::CloudBackend>,
+        sst_backend: std::sync::Arc<dyn cntryl_midge_storage::cloud::CloudBackend>,
     ) -> MidgeResult<Self> {
-        use crate::lease::PrimaryLease as _;
+        use cntryl_midge_durability::lease::PrimaryLease as _;
 
         let local_cache = tempfile::tempdir()?;
-        let cloud = std::sync::Arc::new(crate::storage::cloud::CloudStorage::new(
+        let cloud = std::sync::Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
             backend,
             String::new(),
         ));
-        let sst_cloud = std::sync::Arc::new(crate::storage::cloud::CloudStorage::new(
+        let sst_cloud = std::sync::Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
             sst_backend,
             String::new(),
         ));
-        let lease = std::sync::Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-            crate::lease::CloudLeaseConfig {
+        let lease = std::sync::Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+            cntryl_midge_durability::lease::CloudLeaseConfig {
                 bucket: "test".into(),
                 prefix: String::new(),
             },
@@ -474,12 +474,12 @@ impl ProviderMetadataBootstrapFixture {
         let leader_store = lease
             .get_leader_store()
             .expect("provider-backed lease has a leader store");
-        let wal_backend: std::sync::Arc<dyn crate::storage::StorageBackend> = cloud.clone();
-        let sst_backend: std::sync::Arc<dyn crate::storage::StorageBackend> = sst_cloud.clone();
-        let control_backend: std::sync::Arc<dyn crate::storage::StorageBackend> = cloud.clone();
+        let wal_backend: std::sync::Arc<dyn cntryl_midge_storage::StorageBackend> = cloud.clone();
+        let sst_backend: std::sync::Arc<dyn cntryl_midge_storage::StorageBackend> = sst_cloud.clone();
+        let control_backend: std::sync::Arc<dyn cntryl_midge_storage::StorageBackend> = cloud.clone();
         let (event_tx, events) = crossbeam::channel::unbounded();
         let hybrid = std::sync::Arc::new(
-            crate::storage::HybridStorage::new_with_class_stores_and_event_sender(
+            cntryl_midge_storage::HybridStorage::new_with_class_stores_and_event_sender(
                 wal_backend,
                 sst_backend,
                 control_backend,
@@ -495,7 +495,7 @@ impl ProviderMetadataBootstrapFixture {
         crate::runtime::ddl::fence_remote_registry_on_startup(
             &hybrid,
             &authority,
-            &crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+            &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
         )?;
         let fenced_catalog = crate::runtime::hybrid_persistence::CloudPersistence::new(
             std::sync::Arc::clone(&hybrid),
@@ -522,9 +522,9 @@ impl ProviderMetadataBootstrapFixture {
 
     fn bootstrap_with_catalog(
         &self,
-        wal_catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+        wal_catalog: &cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog,
     ) -> MidgeResult<()> {
-        use crate::lease::PrimaryLease as _;
+        use cntryl_midge_durability::lease::PrimaryLease as _;
 
         let authority = crate::runtime::ddl::DdlLeaseAuthority {
             store: std::sync::Arc::clone(&self.leader_store),
@@ -543,11 +543,11 @@ impl ProviderMetadataBootstrapFixture {
     }
 
     fn acquire_successor(&mut self) -> MidgeResult<()> {
-        use crate::lease::PrimaryLease as _;
+        use cntryl_midge_durability::lease::PrimaryLease as _;
 
         self.lease.release()?;
-        let successor = std::sync::Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-            crate::lease::CloudLeaseConfig {
+        let successor = std::sync::Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+            cntryl_midge_durability::lease::CloudLeaseConfig {
                 bucket: "test".into(),
                 prefix: String::new(),
             },
@@ -566,7 +566,7 @@ impl ProviderMetadataBootstrapFixture {
         crate::runtime::ddl::fence_remote_registry_on_startup(
             &self.hybrid,
             &authority,
-            &crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+            &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
         )?;
         let fenced_catalog = crate::runtime::hybrid_persistence::CloudPersistence::new(
             std::sync::Arc::clone(&self.hybrid),
@@ -579,13 +579,13 @@ impl ProviderMetadataBootstrapFixture {
         Ok(())
     }
 
-    fn committed_generation(&self) -> crate::lease::CloudMetadataGeneration {
+    fn committed_generation(&self) -> cntryl_midge_durability::lease::CloudMetadataGeneration {
         match self
             .leader_store
             .read_committed_metadata(std::time::Duration::from_secs(5))
             .expect("read cloud metadata authority")
         {
-            crate::lease::CloudMetadataHead::Committed(generation) => generation,
+            cntryl_midge_durability::lease::CloudMetadataHead::Committed(generation) => generation,
             other => panic!("expected committed cloud metadata, got {other:?}"),
         }
     }
@@ -595,34 +595,34 @@ impl ProviderMetadataBootstrapFixture {
             self.leader_store
                 .read_committed_metadata(std::time::Duration::from_secs(5))
                 .expect("read cloud metadata authority"),
-            crate::lease::CloudMetadataHead::Uncommitted
+            cntryl_midge_durability::lease::CloudMetadataHead::Uncommitted
         ));
     }
 }
 
 struct FailGenerationPutBackend {
-    inner: std::sync::Arc<crate::storage::cloud::MockCloudBackend>,
+    inner: std::sync::Arc<cntryl_midge_storage::cloud::MockCloudBackend>,
     fail_generation_puts: std::sync::atomic::AtomicBool,
     rejected_generation_puts: std::sync::atomic::AtomicUsize,
 }
 
 struct LoseMetadataCommitCallbackBackend {
-    inner: std::sync::Arc<crate::storage::cloud::MockCloudBackend>,
+    inner: std::sync::Arc<cntryl_midge_storage::cloud::MockCloudBackend>,
     armed: std::sync::atomic::AtomicBool,
     fired: std::sync::atomic::AtomicBool,
 }
 
-impl crate::storage::cloud::CloudReadCapability for LoseMetadataCommitCallbackBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+impl cntryl_midge_storage::cloud::CloudReadCapability for LoseMetadataCommitCallbackBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
 }
 
-impl crate::storage::cloud::CloudWriteCapability for LoseMetadataCommitCallbackBackend {
+impl cntryl_midge_storage::cloud::CloudWriteCapability for LoseMetadataCommitCallbackBackend {
     fn submit_put(
         &self,
         key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
         if key == "metadata/committed-pointer.v1"
             && self.armed.swap(false, std::sync::atomic::Ordering::AcqRel)
@@ -633,15 +633,15 @@ impl crate::storage::cloud::CloudWriteCapability for LoseMetadataCommitCallbackB
                 .recv()
                 .expect("mock provider completes metadata pointer CAS")
             {
-                crate::storage::cloud::CloudEvent::Put {
-                    result: crate::storage::cloud::CloudOutcome::Ok(()),
+                cntryl_midge_storage::cloud::CloudEvent::Put {
+                    result: cntryl_midge_storage::cloud::CloudOutcome::Ok(()),
                     ..
                 } => {
                     self.fired.store(true, std::sync::atomic::Ordering::Release);
-                    let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
+                    let _ = callback.send(cntryl_midge_storage::cloud::CloudEvent::Put {
                         key: key.to_string(),
-                        result: crate::storage::cloud::CloudOutcome::Err(
-                            crate::storage::cloud::CloudError::Transport(
+                        result: cntryl_midge_storage::cloud::CloudOutcome::Err(
+                            cntryl_midge_storage::cloud::CloudError::Transport(
                                 "injected lost metadata commit callback".into(),
                             ),
                         ),
@@ -657,31 +657,31 @@ impl crate::storage::cloud::CloudWriteCapability for LoseMetadataCommitCallbackB
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for LoseMetadataCommitCallbackBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for LoseMetadataCommitCallbackBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_delete);
 }
 
-impl crate::storage::cloud::CloudListCapability for LoseMetadataCommitCallbackBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+impl cntryl_midge_storage::cloud::CloudListCapability for LoseMetadataCommitCallbackBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_list);
 }
 
-impl crate::storage::cloud::CloudHeadCapability for LoseMetadataCommitCallbackBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+impl cntryl_midge_storage::cloud::CloudHeadCapability for LoseMetadataCommitCallbackBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_head);
 }
 
-impl crate::storage::cloud::CloudBackend for LoseMetadataCommitCallbackBackend {}
+impl cntryl_midge_storage::cloud::CloudBackend for LoseMetadataCommitCallbackBackend {}
 
-impl crate::storage::cloud::CloudReadCapability for FailGenerationPutBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+impl cntryl_midge_storage::cloud::CloudReadCapability for FailGenerationPutBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
 }
 
-impl crate::storage::cloud::CloudWriteCapability for FailGenerationPutBackend {
+impl cntryl_midge_storage::cloud::CloudWriteCapability for FailGenerationPutBackend {
     fn submit_put(
         &self,
         key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
-        callback: crate::storage::cloud::CloudCallback,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
         if key.starts_with("manifest/")
             && self
@@ -690,10 +690,10 @@ impl crate::storage::cloud::CloudWriteCapability for FailGenerationPutBackend {
         {
             self.rejected_generation_puts
                 .fetch_add(1, std::sync::atomic::Ordering::Release);
-            let _ = callback.send(crate::storage::cloud::CloudEvent::Put {
+            let _ = callback.send(cntryl_midge_storage::cloud::CloudEvent::Put {
                 key: key.to_string(),
-                result: crate::storage::cloud::CloudOutcome::Err(
-                    crate::storage::cloud::CloudError::Transport(
+                result: cntryl_midge_storage::cloud::CloudOutcome::Err(
+                    cntryl_midge_storage::cloud::CloudError::Transport(
                         "injected persistent generation upload failure".into(),
                     ),
                 ),
@@ -704,26 +704,26 @@ impl crate::storage::cloud::CloudWriteCapability for FailGenerationPutBackend {
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for FailGenerationPutBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for FailGenerationPutBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_delete);
 }
 
-impl crate::storage::cloud::CloudListCapability for FailGenerationPutBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+impl cntryl_midge_storage::cloud::CloudListCapability for FailGenerationPutBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_list);
 }
 
-impl crate::storage::cloud::CloudHeadCapability for FailGenerationPutBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+impl cntryl_midge_storage::cloud::CloudHeadCapability for FailGenerationPutBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_head);
 }
 
-impl crate::storage::cloud::CloudBackend for FailGenerationPutBackend {}
+impl cntryl_midge_storage::cloud::CloudBackend for FailGenerationPutBackend {}
 
 #[test]
 fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -> MidgeResult<()> {
     // Arrange: a provider lease, WAL catalog, and DDL fence exist, but there
     // are no committed metadata or local cache files.
     let fixture = ProviderMetadataBootstrapFixture::new(std::sync::Arc::new(
-        crate::storage::cloud::MockCloudBackend::new(),
+        cntryl_midge_storage::cloud::MockCloudBackend::new(),
     ))?;
     fixture.assert_uncommitted();
 
@@ -736,11 +736,11 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
     let bodies = crate::runtime::hybrid_persistence::read_committed_metadata_bodies_within(
         &fixture.cloud,
         &generation,
-        &crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+        &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
     )?;
     for name in [
-        crate::metadata::files::FORMAT,
-        crate::metadata::files::MANIFEST_SNAPSHOT,
+        cntryl_midge_durability::metadata::files::FORMAT,
+        cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT,
     ] {
         assert!(bodies.contains_key(name));
         assert!(fixture.local_cache.path().join(name).is_file());
@@ -749,22 +749,22 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
     crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
         &fixture.cloud,
         fixture.leader_store.as_ref(),
-        &crate::io::real::test_root(fresh_cache.path()),
+        &cntryl_midge_core::io::real::test_root(fresh_cache.path()),
         fresh_cache.path(),
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
-    let restored: crate::metadata::Manifest = crate::metadata::codec::decode(
-        crate::metadata::codec::MANIFEST,
+    let restored: cntryl_midge_durability::metadata::Manifest = cntryl_midge_durability::metadata::codec::decode(
+        cntryl_midge_durability::metadata::codec::MANIFEST,
         &std::fs::read(
             fresh_cache
                 .path()
-                .join(crate::metadata::files::MANIFEST_SNAPSHOT),
+                .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT),
         )?,
     )
     .expect("decode committed manifest snapshot");
     assert_eq!(
         restored.flush_frontiers().get(0).unwrap(),
-        crate::metadata::FamilyFrontier::Live {
+        cntryl_midge_durability::metadata::FamilyFrontier::Live {
             through_sequence: 0
         }
     );
@@ -776,12 +776,12 @@ fn should_bootstrap_fresh_provider_metadata_before_recovery_uses_local_cache() -
 #[test]
 fn should_retry_provider_metadata_bootstrap_with_same_cache_after_failed_generation_upload(
 ) -> MidgeResult<()> {
-    use crate::lease::PrimaryLease as _;
+    use cntryl_midge_durability::lease::PrimaryLease as _;
 
     // Arrange: the provider rejects every immutable upload in the first
     // bootstrap attempt, including retries of its conditional PUT.
     let backend = std::sync::Arc::new(FailGenerationPutBackend {
-        inner: std::sync::Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        inner: std::sync::Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
         fail_generation_puts: std::sync::atomic::AtomicBool::new(true),
         rejected_generation_puts: std::sync::atomic::AtomicUsize::new(0),
     });
@@ -807,12 +807,12 @@ fn should_retry_provider_metadata_bootstrap_with_same_cache_after_failed_generat
     assert!(!fixture
         .local_cache
         .path()
-        .join(crate::metadata::files::FORMAT)
+        .join(cntryl_midge_durability::metadata::files::FORMAT)
         .exists());
     assert!(!fixture
         .local_cache
         .path()
-        .join(crate::metadata::files::MANIFEST_SNAPSHOT)
+        .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT)
         .exists());
     let first_epoch = fixture.lease.epoch();
     backend
@@ -831,7 +831,7 @@ fn should_hydrate_committed_provider_metadata_when_metadata_pointer_cas_callback
     // Arrange: the provider applies the metadata-pointer CAS but reports a
     // transport error. Readback must resolve the ambiguous publication.
     let backend = std::sync::Arc::new(LoseMetadataCommitCallbackBackend {
-        inner: std::sync::Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        inner: std::sync::Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
         armed: std::sync::atomic::AtomicBool::new(false),
         fired: std::sync::atomic::AtomicBool::new(false),
     });
@@ -849,7 +849,7 @@ fn should_hydrate_committed_provider_metadata_when_metadata_pointer_cas_callback
     assert!(fixture
         .local_cache
         .path()
-        .join(crate::metadata::files::MANIFEST_SNAPSHOT)
+        .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT)
         .is_file());
     Ok(())
 }
@@ -859,12 +859,12 @@ fn should_reject_stale_local_cache_when_provider_metadata_is_uncommitted() -> Mi
     // Arrange: local metadata may belong to another database, so the lease's
     // uncommitted pointer cannot authorize replacing it with a default state.
     let fixture = ProviderMetadataBootstrapFixture::new(std::sync::Arc::new(
-        crate::storage::cloud::MockCloudBackend::new(),
+        cntryl_midge_storage::cloud::MockCloudBackend::new(),
     ))?;
     let format_path = fixture
         .local_cache
         .path()
-        .join(crate::metadata::files::FORMAT);
+        .join(cntryl_midge_durability::metadata::files::FORMAT);
     std::fs::write(&format_path, b"stale-local-format")?;
 
     // Act
@@ -882,7 +882,7 @@ fn should_reject_local_wal_residue_when_provider_metadata_is_uncommitted() -> Mi
     // Arrange: the provider catalog is empty, but a reused cache still has
     // WAL bytes that an empty manifest must not silently replace.
     let fixture = ProviderMetadataBootstrapFixture::new(std::sync::Arc::new(
-        crate::storage::cloud::MockCloudBackend::new(),
+        cntryl_midge_storage::cloud::MockCloudBackend::new(),
     ))?;
     let wal_dir = fixture.local_cache.path().join("wal");
     std::fs::create_dir(&wal_dir)?;
@@ -902,12 +902,12 @@ fn should_reject_local_wal_residue_when_provider_metadata_is_uncommitted() -> Mi
 #[test]
 fn should_reject_provider_bootstrap_when_cloud_wal_catalog_has_a_sequence_floor() -> MidgeResult<()>
 {
-    use crate::lease::PrimaryLease as _;
+    use cntryl_midge_durability::lease::PrimaryLease as _;
 
     // Arrange: a catalog floor proves prior remote WAL history even without
     // any currently published segment.
     let fixture = ProviderMetadataBootstrapFixture::new(std::sync::Arc::new(
-        crate::storage::cloud::MockCloudBackend::new(),
+        cntryl_midge_storage::cloud::MockCloudBackend::new(),
     ))?;
     let persistence = crate::runtime::hybrid_persistence::CloudPersistence::new(
         std::sync::Arc::clone(&fixture.hybrid),
@@ -918,7 +918,7 @@ fn should_reject_provider_bootstrap_when_cloud_wal_catalog_has_a_sequence_floor(
         &[],
         7,
         &|| Ok(()),
-        &crate::common::OperationDeadline::unbounded(),
+        &cntryl_midge_core::common::OperationDeadline::unbounded(),
     )?;
     let catalog = persistence.fence_cloud_wal_catalog(fixture.lease.epoch())?;
     assert_eq!(catalog.seq_floor(), 7);
@@ -932,36 +932,36 @@ fn should_reject_provider_bootstrap_when_cloud_wal_catalog_has_a_sequence_floor(
     assert!(!fixture
         .local_cache
         .path()
-        .join(crate::metadata::files::MANIFEST_SNAPSHOT)
+        .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT)
         .exists());
     Ok(())
 }
 
 #[test]
 fn should_refuse_metadata_bootstrap_over_a_fully_retired_wal_catalog() -> MidgeResult<()> {
-    use crate::lease::PrimaryLease as _;
+    use cntryl_midge_durability::lease::PrimaryLease as _;
 
     // Arrange: a writer published segment 1, then retired it once SSTs
     // covered it, so the catalog lists nothing but still holds history.
     let fixture = ProviderMetadataBootstrapFixture::new(std::sync::Arc::new(
-        crate::storage::cloud::MockCloudBackend::new(),
+        cntryl_midge_storage::cloud::MockCloudBackend::new(),
     ))?;
     let epoch = fixture.lease.epoch();
-    let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(
+    let (bytes, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
         1,
         epoch,
-        crate::wal::format::ChainLink::GENESIS,
+        cntryl_midge_durability::wal::format::ChainLink::GENESIS,
     )
-    .record(&crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
+    .record(&cntryl_midge_durability::wal::WalRecord::new(
+        cntryl_midge_durability::wal::WalOpKind::Put,
         bytes::Bytes::from_static(b"key"),
         Some(bytes::Bytes::from_static(b"value")),
         1,
     ))
     .seal();
-    let entry = crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
+    let entry = cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
         .map_err(MidgeError::Corruption)?;
-    let mut catalog = crate::wal::cloud_catalog::WalPublicationCatalog::empty(epoch)
+    let mut catalog = cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog::empty(epoch)
         .map_err(MidgeError::Internal)?;
     catalog
         .append_run(epoch, std::slice::from_ref(&entry))
@@ -970,7 +970,7 @@ fn should_refuse_metadata_bootstrap_over_a_fully_retired_wal_catalog() -> MidgeR
         .retire_prefix(
             epoch,
             std::slice::from_ref(&entry),
-            crate::lease::SharedGenerationId::FIRST,
+            cntryl_midge_durability::lease::SharedGenerationId::FIRST,
         )
         .map_err(crate::runtime::hybrid_persistence::refusal_error)?;
 
@@ -991,10 +991,10 @@ fn should_reject_provider_bootstrap_when_split_sst_store_has_remote_objects() ->
     // Arrange: the control store has no metadata, but a separate SST class
     // store still contains bytes that could belong to an older database.
     let fixture = ProviderMetadataBootstrapFixture::new_with_sst_backend(
-        std::sync::Arc::new(crate::storage::cloud::MockCloudBackend::new()),
-        std::sync::Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+        std::sync::Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
+        std::sync::Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
     )?;
-    let sst_key = crate::cloud_layout::object_key(&crate::cloud_layout::file_name(0, 0, 1));
+    let sst_key = cntryl_midge_core::cloud_layout::object_key(&cntryl_midge_core::cloud_layout::file_name(0, 0, 1));
     crate::runtime::cloud_startup::cloud_io::BlockingCloudIo::new(&fixture.sst_cloud)
         .put(&sst_key, b"retained remote SST bytes".to_vec())?;
 
@@ -1007,7 +1007,7 @@ fn should_reject_provider_bootstrap_when_split_sst_store_has_remote_objects() ->
     assert!(!fixture
         .local_cache
         .path()
-        .join(crate::metadata::files::MANIFEST_SNAPSHOT)
+        .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT)
         .exists());
     assert!(
         crate::runtime::cloud_startup::cloud_io::BlockingCloudIo::new(&fixture.sst_cloud)
@@ -1020,18 +1020,18 @@ fn should_reject_provider_bootstrap_when_split_sst_store_has_remote_objects() ->
 #[test]
 fn should_reject_provider_bootstrap_when_current_epoch_ddl_registry_has_history() -> MidgeResult<()>
 {
-    use crate::lease::PrimaryLease as _;
+    use cntryl_midge_durability::lease::PrimaryLease as _;
 
     // Arrange: the remote DDL registry has an operation but the test cache is
     // still empty. Its current writer epoch alone does not make it fresh.
     let fixture = ProviderMetadataBootstrapFixture::new(std::sync::Arc::new(
-        crate::storage::cloud::MockCloudBackend::new(),
+        cntryl_midge_storage::cloud::MockCloudBackend::new(),
     ))?;
     let state_dir = tempfile::tempdir()?;
     let mut state = crate::runtime::RuntimeState::try_new(
         state_dir.path(),
         false,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
     let edit = crate::runtime::ddl::create_edit(&state, "existing-cf")?;
     let authority = crate::runtime::ddl::DdlLeaseAuthority {
@@ -1044,7 +1044,7 @@ fn should_reject_provider_bootstrap_when_current_epoch_ddl_registry_has_history(
         Some(&fixture.hybrid),
         &edit,
         Some(&authority),
-        &crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
+        &cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(5)),
     )?;
 
     // Act
@@ -1056,7 +1056,7 @@ fn should_reject_provider_bootstrap_when_current_epoch_ddl_registry_has_history(
     assert!(!fixture
         .local_cache
         .path()
-        .join(crate::metadata::files::MANIFEST_SNAPSHOT)
+        .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT)
         .exists());
     Ok(())
 }

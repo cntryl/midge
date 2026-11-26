@@ -42,7 +42,7 @@
 //!   it is retired after cloud durability (or immediately for a local seal),
 //!   so it cannot fall out of ownership between components.
 
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::actors::wal::WalRotationReceipt;
 use std::collections::BTreeMap;
 

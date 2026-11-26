@@ -10,15 +10,15 @@
 //! The SST inputs are genuine seeded rows, not public transaction acks.
 //!
 use super::*;
-use crate::common::OperationDeadline;
-use crate::lease::{LeaseGuard, PrimaryLease as _};
+use cntryl_midge_core::common::OperationDeadline;
+use cntryl_midge_durability::lease::{LeaseGuard, PrimaryLease as _};
 use crate::runtime::actors::compaction::publication::{
     CompactionPublishActor, CompactionPublishPhase,
 };
-use crate::storage::cloud::{
+use cntryl_midge_storage::cloud::{
     CloudBackend, CloudCallback, CloudEvent, CloudStorage, MockCloudBackend,
 };
-use crate::storage::cloud::{CloudReadCapability, CloudWriteCapability};
+use cntryl_midge_storage::cloud::{CloudReadCapability, CloudWriteCapability};
 
 mod authority_timeout_tests;
 mod deadline_owner_tests;
@@ -77,7 +77,7 @@ impl PhasedMetadataBackend {
         assert!(self.cas_hold.lock().unwrap().replace(until).is_none());
     }
 
-    fn descriptor(&self, key: &str) -> (Vec<u8>, crate::storage::StorageObjectMetadata) {
+    fn descriptor(&self, key: &str) -> (Vec<u8>, cntryl_midge_storage::StorageObjectMetadata) {
         let (tx, rx) = std::sync::mpsc::channel();
         self.inner.submit_get_with_metadata(key, tx);
         match rx
@@ -123,7 +123,7 @@ impl PhasedMetadataBackend {
         };
         let (before, before_metadata) = self.descriptor(key);
         let lease_before = self
-            .descriptor(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+            .descriptor(cntryl_midge_core::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
             .0;
         let (tx, rx) = std::sync::mpsc::channel();
         self.inner.submit_put(key, data, headers, tx);
@@ -147,7 +147,7 @@ impl PhasedMetadataBackend {
                 after_etag: after_metadata.etag,
                 lease_before,
                 lease_after: self
-                    .descriptor(crate::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
+                    .descriptor(cntryl_midge_core::cloud_layout::CloudObjectLayout::LEASE_OBJECT_KEY)
                     .0,
             });
         }
@@ -165,9 +165,9 @@ impl PhasedMetadataBackend {
         let provider_budget = headers
             .iter()
             .find(|(name, _)| {
-                name.eq_ignore_ascii_case(crate::storage::cloud::REQUEST_TIMEOUT_HEADER)
+                name.eq_ignore_ascii_case(cntryl_midge_storage::cloud::REQUEST_TIMEOUT_HEADER)
             })
-            .and_then(|(_, value)| crate::storage::cloud::parse_request_timeout(value).ok());
+            .and_then(|(_, value)| cntryl_midge_storage::cloud::parse_request_timeout(value).ok());
         let length = data.len();
         let checksum = crc32c::crc32c(&data);
         let delegated_at = Instant::now();
@@ -222,7 +222,7 @@ impl PhasedMetadataBackend {
     }
 }
 
-impl crate::storage::cloud::CloudReadCapability for PhasedMetadataBackend {
+impl cntryl_midge_storage::cloud::CloudReadCapability for PhasedMetadataBackend {
     fn submit_get(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_get(key, callback);
     }
@@ -245,7 +245,7 @@ impl crate::storage::cloud::CloudReadCapability for PhasedMetadataBackend {
     }
 }
 
-impl crate::storage::cloud::CloudWriteCapability for PhasedMetadataBackend {
+impl cntryl_midge_storage::cloud::CloudWriteCapability for PhasedMetadataBackend {
     fn submit_put(
         &self,
         key: &str,
@@ -257,19 +257,19 @@ impl crate::storage::cloud::CloudWriteCapability for PhasedMetadataBackend {
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for PhasedMetadataBackend {
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for PhasedMetadataBackend {
     fn submit_delete(&self, key: &str, headers: Vec<(String, String)>, callback: CloudCallback) {
         self.inner.submit_delete(key, headers, callback);
     }
 }
 
-impl crate::storage::cloud::CloudListCapability for PhasedMetadataBackend {
+impl cntryl_midge_storage::cloud::CloudListCapability for PhasedMetadataBackend {
     fn submit_list(&self, prefix: &str, callback: CloudCallback) {
         self.inner.submit_list(prefix, callback);
     }
 }
 
-impl crate::storage::cloud::CloudHeadCapability for PhasedMetadataBackend {
+impl cntryl_midge_storage::cloud::CloudHeadCapability for PhasedMetadataBackend {
     fn submit_head(&self, key: &str, callback: CloudCallback) {
         self.inner.submit_head(key, callback);
     }
@@ -289,7 +289,7 @@ struct BudgetFixture {
     compute: crossbeam::channel::Receiver<RuntimeMsg>,
     cloud: Arc<CloudStorage>,
     backend: Arc<PhasedMetadataBackend>,
-    lease: Arc<crate::lease::CloudStorageLease>,
+    lease: Arc<cntryl_midge_durability::lease::CloudStorageLease>,
     _token: LeaseGuard,
     inputs: Vec<(String, Vec<u8>)>,
     outputs: Vec<String>,
@@ -321,7 +321,7 @@ impl BudgetFixture {
         }
         el.state.set_compaction_enabled(false);
         el.routing.runtime_response_timeout = CALLER_BUDGET;
-        crate::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
+        cntryl_midge_durability::metadata::ManifestPersistence::save(&el.state.db_path, &el.state.manifest)
             .map_err(MidgeError::Internal)?;
         let inputs = el
             .state
@@ -341,8 +341,8 @@ impl BudgetFixture {
             String::new(),
             PROVIDER_CAP,
         ));
-        let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-            crate::lease::CloudLeaseConfig {
+        let lease = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+            cntryl_midge_durability::lease::CloudLeaseConfig {
                 bucket: "test".into(),
                 prefix: "compaction-budget".into(),
             },
@@ -488,7 +488,7 @@ impl BudgetFixture {
         observed
     }
 
-    fn committed_manifest(&self) -> MidgeResult<crate::metadata::Manifest> {
+    fn committed_manifest(&self) -> MidgeResult<cntryl_midge_durability::metadata::Manifest> {
         let directory = tempfile::tempdir()?;
         let store = self
             .lease
@@ -497,11 +497,11 @@ impl BudgetFixture {
         crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
             &self.cloud,
             store.as_ref(),
-            &crate::io::real::test_root(directory.path()),
+            &cntryl_midge_core::io::real::test_root(directory.path()),
             directory.path(),
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
-        crate::metadata::ManifestPersistence::load(directory.path()).map_err(MidgeError::Internal)
+        cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).map_err(MidgeError::Internal)
     }
 
     fn exact_output_rows(&self) -> MidgeResult<Vec<(Bytes, KeyState)>> {
@@ -574,7 +574,7 @@ impl BudgetFixture {
         // remain unchanged; do not run metadata publication/fairness here.
         let deadline = OperationDeadline::from_budget(FIXTURE_WAIT);
         loop {
-            crate::common::DeadlineScope::new(deadline).check("post-clear fixture retirement")?;
+            cntryl_midge_core::common::DeadlineScope::new(deadline).check("post-clear fixture retirement")?;
             self.el
                 .actors
                 .gc_actor
@@ -680,7 +680,7 @@ fn should_complete_manual_compaction_when_all_real_phases_fit_one_budget() -> Mi
     // Arrange: acquire the shared failpoint scope before fixture setup and clocks.
     // Act: drive the real publication pipeline while retaining that scope.
     // Assert: the case checks exact rows, all three phases and caller settlement.
-    crate::failpoints::with_read_gate(complete_manual_case)
+    cntryl_midge_core::failpoints::with_read_gate(complete_manual_case)
 }
 
 fn complete_manual_case() -> MidgeResult<()> {
@@ -770,7 +770,7 @@ fn should_retain_both_authorities_when_second_real_phase_exceeds_caller_budget()
     // Arrange: acquire the shared failpoint scope before fixture setup and clocks.
     // Act: let the actual second publication phase cross the original deadline.
     // Assert: the case checks retained authorities and the genuine caller error.
-    crate::failpoints::with_read_gate(second_phase_timeout_case)
+    cntryl_midge_core::failpoints::with_read_gate(second_phase_timeout_case)
 }
 
 fn second_phase_timeout_case() -> MidgeResult<()> {

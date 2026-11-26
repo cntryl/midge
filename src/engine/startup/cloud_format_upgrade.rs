@@ -4,8 +4,8 @@
 //! catalog mutation. Pending FORMAT 10 publication is reconciled against the
 //! exact selected closure before runtime recovery proceeds.
 
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crate::lease::{
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::{
     CloudFormatMigrationGate, CloudFormatMigrationPending, CloudMetadataGeneration,
     CloudMetadataGenerationIdentity, CloudMetadataHead, LeaderStore, SharedGenerationId,
 };
@@ -13,8 +13,8 @@ use crate::runtime::hybrid_persistence::{
     decode_generation_manifest, metadata_chain, read_committed_metadata_bodies_within,
     Format10AdmissionStore,
 };
-use crate::storage::cloud::{BlockingCloud, CloudEvent, CloudStorage};
-use crate::storage::StoragePrecondition;
+use cntryl_midge_storage::cloud::{BlockingCloud, CloudEvent, CloudStorage};
+use cntryl_midge_storage::StoragePrecondition;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::BTreeMap;
@@ -40,7 +40,7 @@ pub(super) enum CloudFormatGateResolution {
 struct CandidateDescriptor {
     id: SharedGenerationId,
     manifest_horizon: u64,
-    objects: Vec<crate::lease::CloudMetadataObject>,
+    objects: Vec<cntryl_midge_durability::lease::CloudMetadataObject>,
 }
 
 impl From<&CloudMetadataGeneration> for CandidateDescriptor {
@@ -128,12 +128,12 @@ fn stage_immutable_generation_descriptor(
     let mut headers = StoragePrecondition::IfAbsent
         .headers()
         .map_err(|error| MidgeError::Internal(error.to_string()))?;
-    crate::storage::cloud::set_request_timeout_header(&mut headers, timeout);
+    cntryl_midge_storage::cloud::set_request_timeout_header(&mut headers, timeout);
     let (sender, receiver) = std::sync::mpsc::channel();
     cloud.submit_put(key, wire.clone(), headers, sender);
     let write_result = match receiver.recv_timeout(timeout) {
         Ok(CloudEvent::Put { result, .. }) => result.map_err(|error| {
-            crate::storage::cloud::contextualize_operation_error(
+            cntryl_midge_storage::cloud::contextualize_operation_error(
                 &error,
                 format!("immutable {description} descriptor write"),
                 deadline,
@@ -155,7 +155,7 @@ fn stage_immutable_generation_descriptor(
         )));
     }
 
-    let readback = if crate::failpoints::is_active(
+    let readback = if cntryl_midge_core::failpoints::is_active(
         "midge::cloud::inject_missing_format_descriptor_readback",
     ) {
         None
@@ -240,7 +240,7 @@ pub(super) fn reconcile_cloud_format_gate(
             }
             Some(generation) => {
                 let marker = read_generation_format(cloud, &generation, deadline)?;
-                if marker != crate::metadata::format::current_format_marker_bytes() {
+                if marker != cntryl_midge_durability::metadata::format::current_format_marker_bytes() {
                     return Err(MidgeError::NotSupported(
                         "cloud FORMAT 10 authority requires the migration compatibility gate and a v10-capable runtime".into(),
                     ));
@@ -267,7 +267,7 @@ pub(super) fn reconcile_cloud_format_gate(
                 )
             })?;
             let bodies = read_committed_metadata_bodies_within(cloud, &generation, deadline)?;
-            let marker = bodies.get(crate::metadata::files::FORMAT).ok_or_else(|| {
+            let marker = bodies.get(cntryl_midge_durability::metadata::files::FORMAT).ok_or_else(|| {
                 MidgeError::Corruption("active FORMAT 10 marker body is missing".into())
             })?;
             if marker.as_slice() != FORMAT_10_MARKER {
@@ -314,7 +314,7 @@ fn reconcile_pending(
     let candidate = read_candidate_descriptor(cloud, pending, deadline)?;
     let candidate_bodies = read_committed_metadata_bodies_within(cloud, &candidate, deadline)?;
     if candidate_bodies
-        .get(crate::metadata::files::FORMAT)
+        .get(cntryl_midge_durability::metadata::files::FORMAT)
         .map(Vec::as_slice)
         != Some(FORMAT_10_MARKER)
     {
@@ -465,9 +465,9 @@ fn read_v9_generation(
 ) -> MidgeResult<BTreeMap<String, Vec<u8>>> {
     let bodies = read_committed_metadata_bodies_within(cloud, generation, deadline)?;
     let marker = bodies
-        .get(crate::metadata::files::FORMAT)
+        .get(cntryl_midge_durability::metadata::files::FORMAT)
         .ok_or_else(|| MidgeError::Corruption("selected v9 FORMAT marker is missing".into()))?;
-    if marker.as_slice() != crate::metadata::format::current_format_marker_bytes().as_slice() {
+    if marker.as_slice() != cntryl_midge_durability::metadata::format::current_format_marker_bytes().as_slice() {
         return Err(MidgeError::NotSupported(
             "selected cloud source is not a FORMAT 9 generation".into(),
         ));
@@ -480,16 +480,16 @@ fn validate_v9_bodies_strict(
     bodies: &BTreeMap<String, Vec<u8>>,
     deadline: &OperationDeadline,
 ) -> MidgeResult<()> {
-    let fs: std::sync::Arc<dyn crate::io::Fs> = std::sync::Arc::new(crate::io::MockFs::new());
+    let fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs> = std::sync::Arc::new(cntryl_midge_core::io::MockFs::new());
     for (name, body) in bodies {
         if deadline.is_expired() {
             return Err(MidgeError::Timeout(
                 "cloud FORMAT 9 strict source validation exceeded startup deadline".into(),
             ));
         }
-        let temp = crate::io::FsPath::new(format!("{name}.migration.tmp"));
-        let target = crate::io::FsPath::new(name.as_str());
-        crate::io::staging::stage_bytes_typed(&fs, &temp, &target, body, || {
+        let temp = cntryl_midge_core::io::FsPath::new(format!("{name}.migration.tmp"));
+        let target = cntryl_midge_core::io::FsPath::new(name.as_str());
+        cntryl_midge_core::io::staging::stage_bytes_typed(&fs, &temp, &target, body, || {
             if deadline.is_expired() {
                 Err(MidgeError::Timeout(
                     "cloud FORMAT 9 strict source validation exceeded startup deadline".into(),
@@ -499,14 +499,14 @@ fn validate_v9_bodies_strict(
             }
         })?;
     }
-    crate::metadata::validate_format_marker(fs.as_ref(), std::path::Path::new("cloud source"))?;
-    crate::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
+    cntryl_midge_durability::metadata::validate_format_marker(fs.as_ref(), std::path::Path::new("cloud source"))?;
+    cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy_typed(
         &fs,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
     crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
         &fs,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
     Ok(())
 }
@@ -519,7 +519,7 @@ fn read_generation_format(
     let object = generation
         .objects
         .iter()
-        .find(|object| object.file_name == crate::metadata::files::FORMAT)
+        .find(|object| object.file_name == cntryl_midge_durability::metadata::files::FORMAT)
         .ok_or_else(|| MidgeError::Corruption("cloud FORMAT marker reference is missing".into()))?;
     if object.len != FORMAT_10_MARKER.len() as u64
         && object.len != FORMAT_10_MARKER.len() as u64 - 1
@@ -562,11 +562,11 @@ fn remaining(cloud: &CloudStorage, deadline: &OperationDeadline) -> MidgeResult<
         .ok_or_else(|| MidgeError::Timeout("cloud FORMAT gate deadline expired".into()))
 }
 
-fn map_lease_error(error: crate::lease::LeaseError) -> MidgeError {
+fn map_lease_error(error: cntryl_midge_durability::lease::LeaseError) -> MidgeError {
     match error {
-        crate::lease::LeaseError::Timeout(message) => MidgeError::Timeout(message),
-        crate::lease::LeaseError::Indeterminate(message) => MidgeError::LeaseIndeterminate(message),
-        crate::lease::LeaseError::RenewalFailed(message) => MidgeError::Fenced(message),
+        cntryl_midge_durability::lease::LeaseError::Timeout(message) => MidgeError::Timeout(message),
+        cntryl_midge_durability::lease::LeaseError::Indeterminate(message) => MidgeError::LeaseIndeterminate(message),
+        cntryl_midge_durability::lease::LeaseError::RenewalFailed(message) => MidgeError::Fenced(message),
         other => {
             MidgeError::RecoveryFailed(format!("cloud FORMAT gate reconciliation failed: {other}"))
         }

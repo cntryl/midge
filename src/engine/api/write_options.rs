@@ -134,13 +134,13 @@ impl WriteOptions {
     /// - `BestEffort` → `BestEffort` (skip WAL entirely)
     /// - `CloudAsync` / `CloudStrict` → `CloudAsync` (commit finalization decides
     ///   whether to wait for cloud acknowledgment)
-    pub(crate) fn to_wal_durability_policy(self) -> crate::wal::DurabilityPolicy {
+    pub(crate) fn to_wal_durability_policy(self) -> cntryl_midge_durability::wal::DurabilityPolicy {
         match self.policy {
-            DurabilityPolicy::Sync => crate::wal::DurabilityPolicy::Strict,
-            DurabilityPolicy::Buffered => crate::wal::DurabilityPolicy::Batched,
-            DurabilityPolicy::BestEffort => crate::wal::DurabilityPolicy::BestEffort,
+            DurabilityPolicy::Sync => cntryl_midge_durability::wal::DurabilityPolicy::Strict,
+            DurabilityPolicy::Buffered => cntryl_midge_durability::wal::DurabilityPolicy::Batched,
+            DurabilityPolicy::BestEffort => cntryl_midge_durability::wal::DurabilityPolicy::BestEffort,
             DurabilityPolicy::CloudAsync | DurabilityPolicy::CloudStrict => {
-                crate::wal::DurabilityPolicy::CloudAsync
+                cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync
             }
         }
     }
@@ -149,15 +149,15 @@ impl WriteOptions {
 pub(crate) fn effective_wal_durability_policy(
     cloud_mode: bool,
     opts: WriteOptions,
-) -> crate::common::MidgeResult<crate::wal::DurabilityPolicy> {
+) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_durability::wal::DurabilityPolicy> {
     if cloud_mode {
         return match opts.policy() {
-            DurabilityPolicy::BestEffort => Ok(crate::wal::DurabilityPolicy::BestEffort),
+            DurabilityPolicy::BestEffort => Ok(cntryl_midge_durability::wal::DurabilityPolicy::BestEffort),
             DurabilityPolicy::CloudAsync | DurabilityPolicy::CloudStrict => {
-                Ok(crate::wal::DurabilityPolicy::CloudAsync)
+                Ok(cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync)
             }
             DurabilityPolicy::Sync | DurabilityPolicy::Buffered => Err(
-                crate::common::MidgeError::InvalidArgument(
+                cntryl_midge_core::common::MidgeError::InvalidArgument(
                     "sync() and buffered() are local-only; use cloud_async() or cloud_strict() for cloud-backed storage".to_string(),
                 ),
             ),
@@ -165,7 +165,7 @@ pub(crate) fn effective_wal_durability_policy(
     }
 
     if opts.is_cloud_async() || opts.is_cloud_strict() {
-        return Err(crate::common::MidgeError::InvalidArgument(
+        return Err(cntryl_midge_core::common::MidgeError::InvalidArgument(
             "cloud_async() and cloud_strict() require cloud-backed storage".to_string(),
         ));
     }
@@ -182,14 +182,14 @@ mod tests {
     ) {
         // Arrange
         let options = [
-            (WriteOptions::sync(), crate::wal::DurabilityPolicy::Strict),
+            (WriteOptions::sync(), cntryl_midge_durability::wal::DurabilityPolicy::Strict),
             (
                 WriteOptions::buffered(),
-                crate::wal::DurabilityPolicy::Batched,
+                cntryl_midge_durability::wal::DurabilityPolicy::Batched,
             ),
             (
                 WriteOptions::best_effort(),
-                crate::wal::DurabilityPolicy::BestEffort,
+                cntryl_midge_durability::wal::DurabilityPolicy::BestEffort,
             ),
         ];
 

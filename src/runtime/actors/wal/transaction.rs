@@ -9,10 +9,10 @@ use super::{
     TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_DISABLED_REQUEST_ID,
     TXN_APPEND_BATCH_NO_SPACE_FAILPOINT_REQUEST_ID,
 };
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
-use crate::wal::DurabilityPolicy;
+use cntryl_midge_durability::wal::DurabilityPolicy;
 #[cfg(all(test, feature = "failpoints"))]
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -206,7 +206,7 @@ impl WalActor {
             }
         };
 
-        crate::failpoints::fail_point!("midge::wal::after_transaction_preparation");
+        cntryl_midge_core::failpoints::fail_point!("midge::wal::after_transaction_preparation");
         if let Err(error) = self.ensure_lease_validity() {
             state.release_sequences(&sequence_plan.range());
             return Err(error);
@@ -304,7 +304,7 @@ impl WalActor {
                     };
                 }
             }
-            crate::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
+            cntryl_midge_core::failpoints::fail_point!("midge::wal::before_prepared_transaction_apply");
             // Every unit in the group is in the WAL and `state.sequence` is
             // past every commit; the earlier units are applied. A lease that
             // lapsed since is a failed apply of this unit and the rest, none
@@ -397,10 +397,10 @@ impl WalActor {
     pub(super) fn begin_strict_writer_group(
         &mut self,
         state: &mut RuntimeState,
-    ) -> MidgeResult<Option<crate::lease::WriterEffectGroup>> {
+    ) -> MidgeResult<Option<cntryl_midge_durability::lease::WriterEffectGroup>> {
         let acquired = self
             .writer()
-            .and_then(crate::wal::WalWriter::writer_group_capability)
+            .and_then(cntryl_midge_durability::wal::WalWriter::writer_group_capability)
             .map(|writer| writer.begin_group(self.storage_io_timeout))
             .transpose();
         match acquired {
@@ -428,7 +428,7 @@ impl WalActor {
         let logged = unapplied
             .iter()
             .any(|prepared| prepared.wal_batch.unit.is_some());
-        crate::common::error::classify_commit_error(error, !logged)
+        cntryl_midge_core::common::error::classify_commit_error(error, !logged)
     }
 
     fn fail_unapplied_group(
@@ -498,7 +498,7 @@ impl WalActor {
 
         let mut intents = Vec::with_capacity(ops.len());
         let mut key_exists_after_intents =
-            |cf_id: crate::types::ColumnFamilyId, key: &[u8], intents: &[TransactionIntent<'_>]| {
+            |cf_id: cntryl_midge_core::types::ColumnFamilyId, key: &[u8], intents: &[TransactionIntent<'_>]| {
                 for intent in intents.iter().rev() {
                     match intent {
                         TransactionIntent::Point {
@@ -577,8 +577,8 @@ impl WalActor {
     ///
     /// `InvalidArgument` when the operations span families.
     pub(super) fn transaction_family(
-        mut families: impl Iterator<Item = crate::types::ColumnFamilyId>,
-    ) -> MidgeResult<crate::types::ColumnFamilyId> {
+        mut families: impl Iterator<Item = cntryl_midge_core::types::ColumnFamilyId>,
+    ) -> MidgeResult<cntryl_midge_core::types::ColumnFamilyId> {
         let first = families.next().unwrap_or_default();
         match families.find(|cf_id| *cf_id != first) {
             Some(other) => Err(MidgeError::InvalidArgument(format!(
@@ -591,7 +591,7 @@ impl WalActor {
     pub(super) fn allocate_transaction_sequences(
         state: &mut RuntimeState,
         ops_count: usize,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> MidgeResult<TxnSequencePlan> {
         debug_assert!(
             ops_count > 0,
@@ -642,7 +642,7 @@ impl WalActor {
         let unit = self.build_transaction_batch_unit(sequence_plan, &apply_ops, encode_wal)?;
         let total_wal_bytes = unit.as_ref().map_or(
             Ok(0),
-            crate::wal::sequenced::SequencedWalUnit::frame_size_bound,
+            cntryl_midge_durability::wal::sequenced::SequencedWalUnit::frame_size_bound,
         )?;
         let pending_wal_records = usize::from(!skip_wal);
         Ok((
@@ -660,11 +660,11 @@ impl WalActor {
         sequence_plan: &TxnSequencePlan,
         apply_ops: &[TransactionApplyOp],
         encode_wal: bool,
-    ) -> MidgeResult<Option<crate::wal::sequenced::SequencedWalUnit>> {
+    ) -> MidgeResult<Option<cntryl_midge_durability::wal::sequenced::SequencedWalUnit>> {
         if !encode_wal {
             return Ok(None);
         }
-        let unit = crate::wal::sequenced::SequencedWalUnit {
+        let unit = cntryl_midge_durability::wal::sequenced::SequencedWalUnit {
             txn_id: sequence_plan.txn_id,
             begin_sequence: sequence_plan.begin_seq,
             commit_sequence: sequence_plan.commit_seq,
@@ -675,17 +675,17 @@ impl WalActor {
                 .collect(),
         };
         let payload_len = unit.nested_payload_len()?;
-        if payload_len > crate::wal::frame::WAL_MAX_VALUE_LEN {
+        if payload_len > cntryl_midge_durability::wal::frame::WAL_MAX_VALUE_LEN {
             return Err(MidgeError::ResourceLimit(format!(
                 "transaction batch {} encodes to {} bytes; WAL replay accepts at most {} bytes",
                 sequence_plan.txn_id,
                 payload_len,
-                crate::wal::frame::WAL_MAX_VALUE_LEN
+                cntryl_midge_durability::wal::frame::WAL_MAX_VALUE_LEN
             )));
         }
 
         let decoded_bound =
-            crate::wal::encoding::txn_batch_decoded_bound(payload_len, apply_ops.len());
+            cntryl_midge_durability::wal::encoding::txn_batch_decoded_bound(payload_len, apply_ops.len());
         // Replay rejects the batch if either its frame or its decoded
         // allocation exceeds the budget; check the larger of the two.
         let frame_bound = unit.frame_size_bound()?;
@@ -697,7 +697,7 @@ impl WalActor {
         &mut self,
         state: &mut RuntimeState,
         prepared_transactions: &[PreparedTransactionAppend],
-        group: Option<&crate::lease::WriterEffectGroup>,
+        group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
     ) -> MidgeResult<()> {
         let mut records = Vec::with_capacity(prepared_transactions.len());
         let mut total_wal_bytes = 0usize;
@@ -725,7 +725,7 @@ impl WalActor {
         }
 
         let admitted = self.admit_wal_records(&records)?;
-        let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
+        let previous_position = self.writer().map_or(0, cntryl_midge_durability::wal::WalWriter::current_pos);
 
         if let Err(error) = self.ensure_lease_validity() {
             self.settle_wal_append(admitted, previous_position);
@@ -755,7 +755,7 @@ impl WalActor {
                 self.fence_transition(state, error.to_string());
                 return Err(Self::appended_unit_error(error));
             }
-            crate::failpoints::fail_point!("midge::wal::after_append_batch_before_sync");
+            cntryl_midge_core::failpoints::fail_point!("midge::wal::after_append_batch_before_sync");
         }
 
         state.wal.pending_writes += pending_wal_records;
@@ -773,20 +773,20 @@ impl WalActor {
         prepared_transactions: &[PreparedTransactionAppend],
     ) -> MidgeResult<()> {
         let _ = prepared_transactions;
-        crate::failpoints::fail_point!(
+        cntryl_midge_core::failpoints::fail_point!(
             "midge::wal::inject_no_space_on_txn_append_batch",
             Self::should_inject_txn_append_batch_no_space(prepared_transactions),
             |_| Err(MidgeError::NoSpace(
                 "failpoint: no space on transaction batch append".into()
             ))
         );
-        crate::failpoints::fail_point!(
+        cntryl_midge_core::failpoints::fail_point!(
             "midge::wal::inject_no_space_on_txn_commit_append",
             |_| Err(MidgeError::NoSpace(
                 "failpoint: no space on transaction batch append".into()
             ))
         );
-        crate::failpoints::fail_point!("midge::wal::txn_after_ops_append_before_commit");
+        cntryl_midge_core::failpoints::fail_point!("midge::wal::txn_after_ops_append_before_commit");
         Ok(())
     }
 

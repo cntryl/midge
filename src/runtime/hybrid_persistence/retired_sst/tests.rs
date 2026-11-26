@@ -1,6 +1,6 @@
 use super::*;
-use crate::storage::cloud::{BlockingCloud, CloudStorage, MockCloudBackend};
-use crate::storage::HybridStorage;
+use cntryl_midge_storage::cloud::{BlockingCloud, CloudStorage, MockCloudBackend};
+use cntryl_midge_storage::HybridStorage;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,10 +18,10 @@ impl Fixture {
         let cloud = Arc::new(CloudStorage::new(backend.clone(), "retired".into()));
         let storage = Arc::new(HybridStorage::with_policy(
             cloud.clone(),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         let original = FileMeta {
-            name: crate::cloud_layout::file_name(0, 1, 7),
+            name: cntryl_midge_core::cloud_layout::file_name(0, 1, 7),
             cf_id: 0,
             level: 1,
             sst_seq: 7,
@@ -29,7 +29,7 @@ impl Fixture {
             content_crc32c: Some(crc32c::crc32c(bytes)),
             ..FileMeta::default()
         };
-        let key = crate::cloud_layout::object_key(&original.name);
+        let key = cntryl_midge_core::cloud_layout::object_key(&original.name);
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
         BlockingCloud::new(&cloud, &deadline)
             .put_with_headers(&key, bytes.to_vec(), Vec::new())
@@ -131,7 +131,7 @@ fn should_retain_original_identity_when_final_writer_validation_fails() {
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_retain_replacement_when_identity_changes_after_original_checksum_read() {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let _scenario = fail::FailScenario::setup();
     // Arrange
     let fixture = Fixture::new(b"original");

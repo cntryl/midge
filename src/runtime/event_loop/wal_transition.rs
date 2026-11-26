@@ -8,7 +8,7 @@
 //! Every seal and sync path in the event loop routes its failures through
 //! these two helpers so the actor and protocol views cannot diverge.
 
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::actors::wal::WalRotationReceipt;
 use crate::runtime::wal_transition::WalSealTicket;
 
@@ -30,7 +30,7 @@ impl super::EventLoop {
         self.actors.wal_actor.fence_with_cause(
             &mut self.state,
             error.to_string(),
-            error.severity() == crate::common::Severity::Fenced,
+            error.severity() == cntryl_midge_core::common::Severity::Fenced,
         );
         // Read the cause back from the actor: it may already have fenced
         // itself as authority-lost (an epoch check that could not reach the
@@ -176,8 +176,8 @@ impl super::EventLoop {
 mod tests {
     use super::super::tests::create_test_state;
     use super::super::EventLoop;
-    use crate::common::MidgeError;
-    use crate::io::{Fs, MockFs};
+    use cntryl_midge_core::common::MidgeError;
+    use cntryl_midge_core::io::{Fs, MockFs};
     #[cfg(feature = "failpoints")]
     use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
     use crate::runtime::{ResponseRouter, RuntimeConfig};
@@ -187,7 +187,7 @@ mod tests {
         let state = create_test_state();
         let router = Arc::new(ResponseRouter::new());
         let config = RuntimeConfig {
-            wal_durability_policy: crate::wal::DurabilityPolicy::Batched,
+            wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::Batched,
             ..RuntimeConfig::default()
         };
         let mut event_loop = EventLoop::new(
@@ -303,7 +303,7 @@ mod tests {
     #[test]
     fn should_keep_both_transition_views_consistent_at_every_local_rotation_boundary() {
         // Arrange
-        let _test_guard = crate::failpoints::test_failpoint_guard();
+        let _test_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
 
         for boundary in WalTransitionBoundary::LOCAL_ROTATION_BOUNDARIES {

@@ -1,7 +1,7 @@
 //! Replay-local cursors into durably published name reservations.
 
-use crate::common::MidgeResult;
-use crate::wal::recovery::streaming::StreamingReplayLimits;
+use cntryl_midge_core::common::MidgeResult;
+use cntryl_midge_durability::wal::recovery::streaming::StreamingReplayLimits;
 use std::collections::HashMap;
 
 pub(super) struct Names {
@@ -32,7 +32,7 @@ impl Names {
             *range = publish(self.count)?;
         }
         range.next().ok_or_else(|| {
-            crate::common::MidgeError::Internal("empty recovery SST name reservation".into())
+            cntryl_midge_core::common::MidgeError::Internal("empty recovery SST name reservation".into())
         })
     }
 }
@@ -88,7 +88,7 @@ mod tests {
         // Act
         let failed = names.take(0, |count| {
             high_water += count;
-            Err(crate::common::MidgeError::Internal(
+            Err(cntryl_midge_core::common::MidgeError::Internal(
                 "mirror failed after local reservation".into(),
             ))
         });

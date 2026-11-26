@@ -1,8 +1,8 @@
 use super::actors::CompactionActor;
 use super::RuntimeState;
 use crate::compaction::{Compactor, LeveledCompactionConfig};
-use crate::memtable::SkipListMemtable;
-use crate::metadata::FileMeta;
+use cntryl_midge_table::memtable::SkipListMemtable;
+use cntryl_midge_durability::metadata::FileMeta;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -129,8 +129,8 @@ fn apply_plan(state: &mut RuntimeState, plan: &crate::compaction::CompactionPlan
 fn should_prove_every_small_abstract_manifest_invariant() {
     let config = proof_config();
     let compactor = Compactor::with_config(config.clone());
-    let factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::FsSstFactoryIo::new(
-        Arc::new(crate::io::MockFs::new()),
+    let factory: Arc<dyn cntryl_midge_table::sst::SstFactory> = Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(
+        Arc::new(cntryl_midge_core::io::MockFs::new()),
         4096,
     ));
 
@@ -175,8 +175,8 @@ fn should_prove_every_small_abstract_manifest_invariant() {
 fn should_round_robin_every_critical_column_family_without_starvation() {
     // Arrange
     let config = proof_config();
-    let factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::FsSstFactoryIo::new(
-        Arc::new(crate::io::MockFs::new()),
+    let factory: Arc<dyn cntryl_midge_table::sst::SstFactory> = Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(
+        Arc::new(cntryl_midge_core::io::MockFs::new()),
         4096,
     ));
     let mut actor = CompactionActor::new_with_config(factory, config);

@@ -21,12 +21,12 @@ fn run_cloud_wal_retirement(
     attempt_budget: std::time::Duration,
 ) {
     let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let deadline = crate::common::OperationDeadline::from_budget(attempt_budget);
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(attempt_budget);
         let authority = metadata_snapshot.committed_retirement_authority_within(&deadline)?;
         storage.prune_cloud_wal_segments_within(candidates, &authority, writer_epoch, &deadline)
     }))
     .unwrap_or_else(|_| {
-        Err(crate::common::MidgeError::Internal(
+        Err(cntryl_midge_core::common::MidgeError::Internal(
             "cloud WAL retirement panicked".into(),
         ))
     });
@@ -35,7 +35,7 @@ fn run_cloud_wal_retirement(
             for (id, result) in results {
                 match result {
                     Ok(()) => storage
-                        .queue_cloud_wal_prune_complete(id, crate::storage::StorageOutcome::Ok(())),
+                        .queue_cloud_wal_prune_complete(id, cntryl_midge_storage::StorageOutcome::Ok(())),
                     Err(error) => {
                         storage.queue_cloud_wal_prune_attempt_failed(id, error.to_string());
                     }
@@ -62,7 +62,7 @@ impl EventLoop {
 
     pub(crate) fn prune_cloud_wal_segments_covered_by_manifest(&mut self) {
         // A cleanup omission retains native WAL authority for recovery fixtures.
-        crate::failpoints::fail_point!("midge::cloud::defer_wal_prune_admission", |_| ());
+        cntryl_midge_core::failpoints::fail_point!("midge::cloud::defer_wal_prune_admission", |_| ());
         // Shutdown must settle admitted durability work without admitting a
         // fresh optional retirement from flush/upload completion or maintenance.
         // Retain recovery authority for a later engine lifetime instead.
@@ -152,7 +152,7 @@ impl EventLoop {
 
     fn start_cloud_wal_retirement_worker(
         &mut self,
-        storage: std::sync::Arc<crate::storage::HybridStorage>,
+        storage: std::sync::Arc<cntryl_midge_storage::HybridStorage>,
         candidates: Vec<(u64, u64)>,
         metadata_snapshot: SharedMetadataSnapshot,
         writer_epoch: u64,
@@ -174,7 +174,7 @@ impl EventLoop {
         );
         let worker_candidate_ids = candidate_ids.clone();
         // `EventLoop::drop` joins this worker, possibly inside a failpoint test.
-        let failpoint_gate = crate::failpoints::worker_gate();
+        let failpoint_gate = cntryl_midge_core::failpoints::worker_gate();
         let worker = std::thread::Builder::new()
             .name(worker_name)
             .spawn(move || {
@@ -301,7 +301,7 @@ impl EventLoop {
         &mut self,
         segment_id: u64,
         release: crate::runtime::event_loop::coordination::LocalRetirement,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.actors
             .cloud_coordinator
             .cloud_wal

@@ -1,9 +1,9 @@
 //! Real loop-owned compute, publication and recovery with independent jobs.
 use super::*;
-use crate::lease::PrimaryLease as _;
+use cntryl_midge_durability::lease::PrimaryLease as _;
 use crate::runtime::{ResponseRouter, RuntimeConfig, RuntimeMsg, RuntimeState};
-use crate::sst::{FsSstFactoryIo, SstFactory as _};
-use crate::types::EntryType;
+use cntryl_midge_table::sst::{FsSstFactoryIo, SstFactory as _};
+use cntryl_midge_core::types::EntryType;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 mod capture_queue_tests;
@@ -14,22 +14,22 @@ struct ConcurrentFixture {
     event_loop: EventLoop,
     workers: crossbeam::channel::Receiver<RuntimeMsg>,
     requests: crossbeam::channel::Receiver<RuntimeMsg>,
-    guard: crate::lease::LeaseGuard,
-    lease: Arc<crate::lease::FileSystemLease>,
+    guard: cntryl_midge_durability::lease::LeaseGuard,
+    lease: Arc<cntryl_midge_durability::lease::FileSystemLease>,
     directory: tempfile::TempDir,
 }
 
 impl ConcurrentFixture {
     fn new(memory: usize, debt: bool) -> MidgeResult<Self> {
         let directory = tempfile::tempdir()?;
-        let fs = crate::io::real::test_root(directory.path());
-        crate::metadata::ensure_or_create_format_marker(&fs, directory.path())?;
-        crate::metadata::ManifestPersistence::save_with_fs(
+        let fs = cntryl_midge_core::io::real::test_root(directory.path());
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path())?;
+        cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(
             &fs,
-            &crate::metadata::Manifest::default(),
+            &cntryl_midge_durability::metadata::Manifest::default(),
         )
         .map_err(MidgeError::Internal)?;
-        let lease = Arc::new(crate::lease::FileSystemLease::new(directory.path(), false)?);
+        let lease = Arc::new(cntryl_midge_durability::lease::FileSystemLease::new(directory.path(), false)?);
         let guard = Arc::clone(&lease).try_acquire()?;
         let state = RuntimeState::new_in_epoch(directory.path(), false, lease.epoch());
         let (completed, workers) = crossbeam::channel::unbounded();
@@ -52,7 +52,7 @@ impl ConcurrentFixture {
             crate::runtime::event_loop::FlushWorkerMode::Background(completed),
         )?;
         let factory = Arc::new(FsSstFactoryIo::new(
-            crate::io::subdirectory(Arc::clone(&event_loop.state.fs), "sst"),
+            cntryl_midge_core::io::subdirectory(Arc::clone(&event_loop.state.fs), "sst"),
             64 * 1024,
         ));
         let mut config = crate::compaction::LeveledCompactionConfig::default();
@@ -85,13 +85,13 @@ impl ConcurrentFixture {
         value: &[u8],
         sequence: u64,
     ) -> MidgeResult<String> {
-        let name = crate::cloud_layout::file_name(0, level, generation);
+        let name = cntryl_midge_core::cloud_layout::file_name(0, level, generation);
         let factory = FsSstFactoryIo::new(
-            crate::io::subdirectory(Arc::clone(&self.event_loop.state.fs), "sst"),
+            cntryl_midge_core::io::subdirectory(Arc::clone(&self.event_loop.state.fs), "sst"),
             64 * 1024,
         )
-        .with_compression_policy(crate::codec::CompressionPolicy::Fixed(
-            crate::codec::CompressionAlgo::None,
+        .with_compression_policy(cntryl_midge_core::codec::CompressionPolicy::Fixed(
+            cntryl_midge_core::codec::CompressionAlgo::None,
         ));
         let mut writer = factory.create()?;
         writer.add_sorted_with_meta(key, Some(value), sequence, EntryType::Put, None)?;
@@ -104,7 +104,7 @@ impl ConcurrentFixture {
             .manifest
             .test_mut()
             .files
-            .push(crate::metadata::FileMeta {
+            .push(cntryl_midge_durability::metadata::FileMeta {
                 name: name.clone(),
                 level,
                 cf_id: 0,
@@ -136,7 +136,7 @@ impl ConcurrentFixture {
         *self.event_loop.state.manifest.test_mut() = serde_json::from_value(value).unwrap();
         self.event_loop.state.sequence = sequence;
         self.event_loop.state.applied_sequence = sequence;
-        crate::metadata::ManifestPersistence::save_with_fs(
+        cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(
             &self.event_loop.state.fs,
             &self.event_loop.state.manifest,
         )
@@ -263,7 +263,7 @@ impl ConcurrentFixture {
 fn cursor_fixture() -> MidgeResult<ConcurrentFixture> {
     let mut fixture = ConcurrentFixture::new(16 * 1024 * 1024, false)?;
     let factory = Arc::new(FsSstFactoryIo::new(
-        crate::io::subdirectory(Arc::clone(&fixture.event_loop.state.fs), "sst"),
+        cntryl_midge_core::io::subdirectory(Arc::clone(&fixture.event_loop.state.fs), "sst"),
         64 * 1024,
     ));
     let config = crate::compaction::LeveledCompactionConfig {
@@ -282,7 +282,7 @@ fn cursor_fixture() -> MidgeResult<ConcurrentFixture> {
 fn should_advance_inner_compaction_across_key_space_when_lower_keys_are_reintroduced(
 ) -> MidgeResult<()> {
     // Arrange: five real, disjoint L1 sources exceed the one-byte target.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut fixture = cursor_fixture()?;
     for (generation, key) in [(1, b"b"), (2, b"c"), (3, b"d"), (4, b"e"), (5, b"f")] {
         fixture.file(1, generation, key, b"value", generation)?;
@@ -312,7 +312,7 @@ fn should_advance_inner_compaction_across_key_space_when_lower_keys_are_reintrod
     assert!(
         next.source_files
             .iter()
-            .any(|name| name == &crate::cloud_layout::file_name(0, 1, 5)),
+            .any(|name| name == &cntryl_midge_core::cloud_layout::file_name(0, 1, 5)),
         "cold tail was not selected: {:?}",
         next.source_files
     );
@@ -372,10 +372,10 @@ fn should_advance_inner_compaction_across_key_space_when_lower_keys_are_reintrod
 fn should_keep_compaction_retryable_when_cursor_admission_exceeds_memory_budget() -> MidgeResult<()>
 {
     // Arrange: the file is real and eligible, but the cursor cannot be charged.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut fixture = ConcurrentFixture::new(64, false)?;
     let factory = Arc::new(FsSstFactoryIo::new(
-        crate::io::subdirectory(Arc::clone(&fixture.event_loop.state.fs), "sst"),
+        cntryl_midge_core::io::subdirectory(Arc::clone(&fixture.event_loop.state.fs), "sst"),
         64 * 1024,
     ));
     let config = crate::compaction::LeveledCompactionConfig {
@@ -416,7 +416,7 @@ fn should_keep_compaction_retryable_when_cursor_admission_exceeds_memory_budget(
 
 #[test]
 fn should_preserve_l0_level_order_when_an_overlapping_job_is_owned() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: hot newer overlapping L0 files cannot pass the cold oldest
     // file; an unrelated level can still compute while that L0 owner is held.
@@ -447,7 +447,7 @@ fn should_preserve_l0_level_order_when_an_overlapping_job_is_owned() -> MidgeRes
         .iter()
         .filter(|file| file.level == 0)
         .collect();
-    assert!(selected.contains(&crate::cloud_layout::file_name(0, 0, 1)));
+    assert!(selected.contains(&cntryl_midge_core::cloud_layout::file_name(0, 0, 1)));
     for older in l0.iter().filter(|file| !selected.contains(&file.name)) {
         for newer in l0.iter().filter(|file| selected.contains(&file.name)) {
             assert!(
@@ -493,7 +493,7 @@ fn should_preserve_l0_level_order_when_an_overlapping_job_is_owned() -> MidgeRes
 #[test]
 fn should_reuse_free_compute_slot_immediately_when_publication_leaves_level_debt() -> MidgeResult<()>
 {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: both worker slots are occupied; either completed output remains
     // above its one-byte target, independently of a new flush or timer tick.
@@ -551,7 +551,7 @@ fn should_reuse_free_compute_slot_immediately_when_publication_leaves_level_debt
 
 #[test]
 fn should_keep_compact_all_waiting_for_an_existing_background_compaction() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: hold a real compaction worker after it becomes active, then
     // issue CompactAll while the actor cannot schedule another plan.
@@ -604,7 +604,7 @@ fn should_keep_compact_all_waiting_for_an_existing_background_compaction() -> Mi
 
 #[test]
 fn should_reject_conflicting_reserved_span_while_an_independent_job_publishes() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: the first job owns both source a and its overlapping target.
     let mut fixture = ConcurrentFixture::new(16 * 1024 * 1024, false)?;
@@ -643,7 +643,7 @@ fn should_reject_conflicting_reserved_span_while_an_independent_job_publishes() 
 #[test]
 fn should_retain_oversized_input_while_sibling_job_uses_the_shared_memory_pool() -> MidgeResult<()>
 {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: one complete entry exceeds its 256KiB child quota; the sibling
     // uses the same 512KiB total pool and remains independently admissible.
@@ -733,7 +733,7 @@ impl Drop for HeldComputes {
 
 #[test]
 fn should_recover_published_disjoint_jobs_when_both_compute_workers_are_held() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
     let mut fixture = ConcurrentFixture::new(16 * 1024 * 1024, false)?;

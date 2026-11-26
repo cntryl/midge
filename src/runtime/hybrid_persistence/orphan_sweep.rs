@@ -1,12 +1,12 @@
 //! Discover only keys that this writer can never admit into selected history.
 
 use super::{decode_generation_manifest, read_committed_metadata_bodies_within};
-use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crate::lease::{CloudMetadataGeneration, CloudMetadataHead};
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::{CloudMetadataGeneration, CloudMetadataHead};
 use crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority;
-use crate::storage::cloud::{CloudListPageRequest, CloudStorage, MAX_LIST_PAGE_KEYS};
-use crate::storage::HybridStorage;
+use cntryl_midge_storage::cloud::{CloudListPageRequest, CloudStorage, MAX_LIST_PAGE_KEYS};
+use cntryl_midge_storage::HybridStorage;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::Ordering;
 
@@ -57,8 +57,8 @@ impl SstOrphanProtection {
     }
 
     fn unselectable(&self, name: &str) -> bool {
-        let parsed = crate::cloud_layout::parse_file_name(name).or_else(|| {
-            crate::cloud_layout::parse_compaction_file_name(name)
+        let parsed = cntryl_midge_core::cloud_layout::parse_file_name(name).or_else(|| {
+            cntryl_midge_core::cloud_layout::parse_compaction_file_name(name)
                 .map(|(cf, level, seq, _)| (cf, level, seq))
         });
         let Some((cf, _, generation)) = parsed else {
@@ -173,7 +173,7 @@ pub(crate) fn sweep_sst_orphans_within(
             m.cloud_orphan_delete_attempts
                 .fetch_add(1, Ordering::Relaxed);
         });
-        crate::failpoints::fail_point!("midge::cloud::before_orphan_sweep_delete");
+        cntryl_midge_core::failpoints::fail_point!("midge::cloud::before_orphan_sweep_delete");
         match context
             .storage
             .delete_remote_object_by_identity_blocking_within(&key, &metadata, context.deadline)
@@ -246,24 +246,24 @@ fn selected_names(
     for family in &manifest.column_families {
         names.extend(family.dropped_sst_names.iter().cloned());
     }
-    let fs: std::sync::Arc<dyn crate::io::Fs> = std::sync::Arc::new(crate::io::MockFs::new());
-    if let Some(intents) = bodies.get(crate::metadata::files::INTENT_LOG) {
+    let fs: std::sync::Arc<dyn cntryl_midge_core::io::Fs> = std::sync::Arc::new(cntryl_midge_core::io::MockFs::new());
+    if let Some(intents) = bodies.get(cntryl_midge_durability::metadata::files::INTENT_LOG) {
         let mut file = fs
             .open(
-                &crate::io::FsPath::new(crate::metadata::files::INTENT_LOG),
-                crate::io::OpenOptions {
-                    mode: crate::io::OpenMode::ReadWrite,
+                &cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::INTENT_LOG),
+                cntryl_midge_core::io::OpenOptions {
+                    mode: cntryl_midge_core::io::OpenMode::ReadWrite,
                     create: true,
                     create_new: true,
                     truncate: false,
                 },
             )
-            .map_err(crate::io::FsError::into_midge)?;
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?;
         file.write_at(0, bytes::Bytes::copy_from_slice(intents))
-            .map_err(crate::io::FsError::into_midge)?;
+            .map_err(cntryl_midge_core::io::FsError::into_midge)?;
         let intents = crate::runtime::IntentPersistence::load_with_fs_and_policy(
             &fs,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         )
         .map_err(MidgeError::Corruption)?;
         for intent in &intents {

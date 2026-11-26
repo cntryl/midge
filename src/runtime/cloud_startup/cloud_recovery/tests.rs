@@ -6,97 +6,97 @@ use tracing_subscriber::layer::SubscriberExt;
 /// A real filesystem that refuses deletions, standing in for a disk that
 /// cannot discard a staged file.
 struct RemoveRefusingFs {
-    inner: crate::io::RealFs,
+    inner: cntryl_midge_core::io::RealFs,
 }
 
-impl crate::io::ReadFs for RemoveRefusingFs {
+impl cntryl_midge_core::io::ReadFs for RemoveRefusingFs {
     fn open_read(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
-        crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
+        cntryl_midge_core::io::Fs::open(self, path, cntryl_midge_core::io::OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
-    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+    fn exists(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
     fn metadata(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<cntryl_midge_core::io::traits::Metadata> {
         self.inner.metadata(path)
     }
 
     fn list_dir(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Vec<cntryl_midge_core::io::traits::DirEntry>> {
         self.inner.list_dir(path)
     }
 }
 
-impl crate::io::PersistentHandleFs for RemoveRefusingFs {
+impl cntryl_midge_core::io::PersistentHandleFs for RemoveRefusingFs {
     fn open_persistent(
         &self,
-        path: &crate::io::FsPath,
-        opts: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
-        crate::io::open_persistent_handle(&self.inner, path, opts)
+        path: &cntryl_midge_core::io::FsPath,
+        opts: cntryl_midge_core::io::OpenOptions,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File>> {
+        cntryl_midge_core::io::open_persistent_handle(&self.inner, path, opts)
     }
 }
 
-impl crate::io::Fs for RemoveRefusingFs {
+impl cntryl_midge_core::io::Fs for RemoveRefusingFs {
     fn try_lock_exclusive(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
-            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+            .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
     }
 
     fn open(
         &self,
-        path: &crate::io::FsPath,
-        opts: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        path: &cntryl_midge_core::io::FsPath,
+        opts: cntryl_midge_core::io::OpenOptions,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File + '_>> {
         self.inner.open(path, opts)
     }
 
-    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_file(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
         Err(FsError::Io(format!(
             "injected removal failure for {}",
             path.0
         )))
     }
 
-    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn create_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
 
-    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
 
     fn sync_dir(
         &self,
-        path: &crate::io::FsPath,
-        dur: crate::io::Durability,
-    ) -> crate::io::FsResult<()> {
+        path: &cntryl_midge_core::io::FsPath,
+        dur: cntryl_midge_core::io::Durability,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.sync_dir(path, dur)
     }
 
     fn rename_atomic(
         &self,
-        from: &crate::io::FsPath,
-        to: &crate::io::FsPath,
-    ) -> crate::io::FsResult<()> {
+        from: &cntryl_midge_core::io::FsPath,
+        to: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.rename_atomic(from, to)
     }
 }
@@ -109,15 +109,15 @@ fn should_retain_invalid_restored_sst_when_staging_filesystem_cannot_discard_it(
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::try_new(temp.path(), false, RecoveryPolicy::Salvage)?;
     state.fs = Arc::new(RemoveRefusingFs {
-        inner: crate::io::RealFs::new(temp.path()).map_err(FsError::into_midge)?,
+        inner: cntryl_midge_core::io::RealFs::new(temp.path()).map_err(FsError::into_midge)?,
     });
-    let sst_name = crate::cloud_layout::file_name(0, 0, 3);
-    let cloud = crate::storage::cloud::CloudStorage::new(
-        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+    let sst_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 3);
+    let cloud = cntryl_midge_storage::cloud::CloudStorage::new(
+        Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
         "midge".to_string(),
     );
     BlockingCloudIo::new(&cloud).put(
-        &crate::cloud_layout::object_key(&sst_name),
+        &cntryl_midge_core::cloud_layout::object_key(&sst_name),
         b"not an sst".to_vec(),
     )?;
 
@@ -144,7 +144,7 @@ struct ConcurrentInventory {
     release: std::sync::Condvar,
 }
 
-impl crate::storage::inventory::ObjectInventory for ConcurrentInventory {
+impl cntryl_midge_storage::inventory::ObjectInventory for ConcurrentInventory {
     fn object_size(&self, _key: &str, _scope: Option<&DeadlineScope>) -> MidgeResult<Option<u64>> {
         use std::sync::atomic::Ordering;
         let active = self.active.fetch_add(1, Ordering::AcqRel) + 1;
@@ -184,7 +184,7 @@ fn should_probe_manifest_ssts_with_bounded_concurrency_when_opening_cloud_state(
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::try_new(temp.path(), true, RecoveryPolicy::Strict)?;
     let files = (0..100)
-        .map(|index| crate::metadata::FileMeta {
+        .map(|index| cntryl_midge_durability::metadata::FileMeta {
             name: format!("inventory-{index}.sst"),
             size_bytes: 64,
             ..Default::default()
@@ -224,7 +224,7 @@ fn should_preserve_manifest_order_when_salvage_reconciles_out_of_order_results()
     let mut state = RuntimeState::try_new(temp.path(), true, RecoveryPolicy::Salvage)?;
     let files = ["000001.sst", "000002.sst", "000003.sst"]
         .into_iter()
-        .map(|name| crate::metadata::FileMeta {
+        .map(|name| cntryl_midge_durability::metadata::FileMeta {
             name: name.into(),
             size_bytes: 64,
             ..Default::default()
@@ -266,7 +266,7 @@ fn should_preserve_manifest_order_when_salvage_reconciles_out_of_order_results()
 
 struct FailedInventoryProbe;
 
-impl crate::storage::inventory::ObjectInventory for FailedInventoryProbe {
+impl cntryl_midge_storage::inventory::ObjectInventory for FailedInventoryProbe {
     fn object_size(&self, _key: &str, _scope: Option<&DeadlineScope>) -> MidgeResult<Option<u64>> {
         Err(MidgeError::Internal(
             "injected failed inventory probe".into(),
@@ -330,23 +330,23 @@ fn should_not_report_recovery_progress_when_salvage_retains_local_sst_after_fail
     let temp = tempfile::tempdir()?;
     let mut state = RuntimeState::try_new(temp.path(), false, RecoveryPolicy::Salvage)?;
     let name = "000001.sst";
-    let path = crate::sst::fs::sst_key(name);
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::clone(&state.fs), 4096);
-    let mut writer = crate::sst::traits::SstFactory::create(&factory)?;
+    let path = cntryl_midge_table::sst::fs::sst_key(name);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&state.fs), 4096);
+    let mut writer = cntryl_midge_table::sst::traits::SstFactory::create(&factory)?;
     writer.add_with_meta(
         b"key",
         Some(b"value"),
         7,
-        crate::types::EntryType::Put,
+        cntryl_midge_core::types::EntryType::Put,
         None,
     )?;
-    crate::sst::fs::finish_writer_to_path(writer, std::path::Path::new(&path.0))?;
-    let bytes = crate::io::read_all(state.fs.as_ref(), &path)
+    cntryl_midge_table::sst::fs::finish_writer_to_path(writer, std::path::Path::new(&path.0))?;
+    let bytes = cntryl_midge_core::io::read_all(state.fs.as_ref(), &path)
         .map_err(FsError::into_midge)?
         .to_vec();
     state
         .manifest
-        .replace_files(vec![crate::metadata::FileMeta {
+        .replace_files(vec![cntryl_midge_durability::metadata::FileMeta {
             name: name.into(),
             size_bytes: bytes.len() as u64,
             content_crc32c: Some(crc32c::crc32c(&bytes)),

@@ -1,16 +1,16 @@
 use super::MetadataPublicationLock;
-use crate::common::resource_budget::ResourceBudget;
-use crate::common::OperationDeadline;
-use crate::io::{Fs, FsPath};
-use crate::lease::fs_leader_store::FsLeaderStore;
-use crate::lease::LeaderStore;
-use crate::metadata::{files, Manifest, ManifestEdit, ManifestPersistence};
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_core::common::OperationDeadline;
+use cntryl_midge_core::io::{Fs, FsPath};
+use cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore;
+use cntryl_midge_durability::lease::LeaderStore;
+use cntryl_midge_durability::metadata::{files, Manifest, ManifestEdit, ManifestPersistence};
 use crate::runtime::hybrid_persistence::{
     mirror_captured_control_metadata_within, CloudMetadataMirrorAuthority,
     CloudMetadataMirrorContext,
 };
 use crate::runtime::{IntentLogEntry, IntentPersistence, PublicationPhase};
-use crate::storage::cloud::CloudStorage;
+use cntryl_midge_storage::cloud::CloudStorage;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,17 +18,17 @@ use std::time::Duration;
 /// buffer. Its admitted reservation remains owned until the real mock PUT
 /// completes, allowing the regression's pool to hold exactly one source.
 struct InlineCloudBackend {
-    inner: crate::storage::cloud::MockCloudBackend,
+    inner: cntryl_midge_storage::cloud::MockCloudBackend,
 }
 
-impl crate::storage::cloud::CloudReadCapability for InlineCloudBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
+impl cntryl_midge_storage::cloud::CloudReadCapability for InlineCloudBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_get, submit_get_with_metadata, submit_get_range, submit_get_range_with_identity);
 
     fn read(
         &self,
         key: &str,
-        options: crate::storage::cloud::CloudReadOptions,
-        callback: crate::storage::cloud::CloudCallback,
+        options: cntryl_midge_storage::cloud::CloudReadOptions,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
         // This fixture only requests whole immutable bodies. Its real mock
         // GET sends the complete body synchronously, so no relay stack or
@@ -38,32 +38,32 @@ impl crate::storage::cloud::CloudReadCapability for InlineCloudBackend {
     }
 }
 
-impl crate::storage::cloud::CloudWriteCapability for InlineCloudBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_put);
+impl cntryl_midge_storage::cloud::CloudWriteCapability for InlineCloudBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_put);
 
     fn submit_put_with_reservation(
         &self,
         key: &str,
         data: Vec<u8>,
         headers: Vec<(String, String)>,
-        reservation: Option<Arc<crate::common::resource_budget::ResourceReservation>>,
-        callback: crate::storage::cloud::CloudCallback,
+        reservation: Option<Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
+        callback: cntryl_midge_storage::cloud::CloudCallback,
     ) {
         self.inner.submit_put(key, data, headers, callback);
         drop(reservation);
     }
 }
 
-impl crate::storage::cloud::CloudDeleteCapability for InlineCloudBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+impl cntryl_midge_storage::cloud::CloudDeleteCapability for InlineCloudBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_delete);
 }
-impl crate::storage::cloud::CloudListCapability for InlineCloudBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+impl cntryl_midge_storage::cloud::CloudListCapability for InlineCloudBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_list);
 }
-impl crate::storage::cloud::CloudHeadCapability for InlineCloudBackend {
-    crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+impl cntryl_midge_storage::cloud::CloudHeadCapability for InlineCloudBackend {
+    cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_head);
 }
-impl crate::storage::cloud::CloudBackend for InlineCloudBackend {}
+impl cntryl_midge_storage::cloud::CloudBackend for InlineCloudBackend {}
 
 struct DroppedSource {
     _directory: tempfile::TempDir,
@@ -76,18 +76,18 @@ struct DroppedSource {
 
 fn select_source_before_contended_drop() -> DroppedSource {
     let directory = tempfile::tempdir().unwrap();
-    let fs = crate::io::real::test_root(directory.path());
-    crate::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
+    let fs = cntryl_midge_core::io::real::test_root(directory.path());
+    cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path()).unwrap();
     ManifestPersistence::save_with_fs(&fs, &Manifest::default()).unwrap();
-    let file = crate::metadata::FileMeta {
-        name: crate::cloud_layout::file_name(0, 0, 1),
+    let file = cntryl_midge_durability::metadata::FileMeta {
+        name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
         size_bytes: 3,
         content_crc32c: Some(crc32c::crc32c(b"sst")),
         smallest_seq: Some(1),
         largest_seq: Some(1),
-        ..crate::metadata::FileMeta::default()
+        ..cntryl_midge_durability::metadata::FileMeta::default()
     };
-    crate::metadata::store::ManifestStore::new(Arc::clone(&fs))
+    cntryl_midge_durability::metadata::store::ManifestStore::new(Arc::clone(&fs))
         .append(&ManifestEdit::Batch(vec![
             ManifestEdit::AddSst(file.clone()),
             ManifestEdit::AdvanceFlushFrontier {
@@ -117,11 +117,11 @@ fn select_source_before_contended_drop() -> DroppedSource {
     let cut = lock.capture_control_cut(&fs, 1, &deadline).unwrap();
     let cloud = CloudStorage::new(
         Arc::new(InlineCloudBackend {
-            inner: crate::storage::cloud::MockCloudBackend::new(),
+            inner: cntryl_midge_storage::cloud::MockCloudBackend::new(),
         }),
         "one-cut".into(),
     );
-    let store = FsLeaderStore::new(Arc::clone(&fs), crate::lease::LeaseClock::default());
+    let store = FsLeaderStore::new(Arc::clone(&fs), cntryl_midge_durability::lease::LeaseClock::default());
     store.acquire_leadership("writer").unwrap();
     mirror_captured_control_metadata_within(
         CloudMetadataMirrorContext {
@@ -241,21 +241,21 @@ fn should_bound_cut_witness_storage_before_decoding_announced_members() {
         "digest": super::digest_bodies(&bodies),
         "covers": vec![serde_json::json!({}); 64],
     });
-    let oversized = crate::metadata::codec::encode(5, &raw).unwrap();
+    let oversized = cntryl_midge_durability::metadata::codec::encode(5, &raw).unwrap();
     raw["covers"] = serde_json::json!((1..64)
         .map(|ordinal| serde_json::json!({
             "ordinal": ordinal, "digest": vec![0_u8; 32],
         }))
         .collect::<Vec<_>>());
-    let maximum = crate::metadata::codec::encode(5, &raw).unwrap();
+    let maximum = cntryl_midge_durability::metadata::codec::encode(5, &raw).unwrap();
 
     // Act
-    let rejected = crate::metadata::codec::decode::<super::MetadataCutProof>(5, &oversized);
-    let accepted = crate::metadata::codec::decode::<super::MetadataCutProof>(5, &maximum).unwrap();
+    let rejected = cntryl_midge_durability::metadata::codec::decode::<super::MetadataCutProof>(5, &oversized);
+    let accepted = cntryl_midge_durability::metadata::codec::decode::<super::MetadataCutProof>(5, &maximum).unwrap();
 
     // Assert
     assert!(
-        matches!(rejected, Err(crate::common::MidgeError::Corruption(message))
+        matches!(rejected, Err(cntryl_midge_core::common::MidgeError::Corruption(message))
         if message.contains("witness count exceeds limit"))
     );
     assert_eq!(accepted.covers.len(), 63);

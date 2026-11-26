@@ -7,11 +7,11 @@
 //! later exact edit.
 
 use super::{FloorEdit, WalActor};
-use crate::common::MidgeResult;
+use cntryl_midge_core::common::MidgeResult;
 use crate::config::AmortizedSyncFloor;
 use crate::runtime::state::RuntimeState;
-use crate::wal::format::HEADER_LEN;
-use crate::wal::ledger::SegmentId;
+use cntryl_midge_durability::wal::format::HEADER_LEN;
+use cntryl_midge_durability::wal::ledger::SegmentId;
 use std::time::{Duration, Instant};
 
 /// The end of a completed, acknowledged fsync whose ledger edit was deferred.
@@ -38,7 +38,7 @@ impl WalActor {
     pub(super) fn record_exact_floor(
         &mut self,
         state: &mut RuntimeState,
-        group: Option<&crate::lease::WriterEffectGroup>,
+        group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
         end_offset: Option<u64>,
     ) -> MidgeResult<()> {
         let recorded = self.record_exact_sync_boundary(state, group, end_offset);
@@ -55,7 +55,7 @@ impl WalActor {
     pub(super) fn persist_amortized_sync_boundary(
         &mut self,
         state: &mut RuntimeState,
-        group: Option<&crate::lease::WriterEffectGroup>,
+        group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
         end_offset: Option<u64>,
         policy: AmortizedSyncFloor,
     ) -> MidgeResult<FloorEdit> {

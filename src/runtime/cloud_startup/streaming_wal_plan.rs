@@ -10,19 +10,19 @@
 
 use super::streaming_wal_fs::{validate_wal_source, StreamingWalFs};
 use super::CloudStartupRecovery;
-use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
-use crate::config::RecoveryPolicy;
-use crate::io::{Fs, FsError, FsPath, ReadFs};
-use crate::storage::{StorageBackend, StorageEvent, StorageOutcome};
-use crate::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
-use crate::wal::ledger::{SegmentId, WalLedger};
-use crate::wal::planner::{
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::RecoveryPolicy;
+use cntryl_midge_core::io::{Fs, FsError, FsPath, ReadFs};
+use cntryl_midge_storage::{StorageBackend, StorageEvent, StorageOutcome};
+use cntryl_midge_durability::wal::cloud_catalog::{CatalogEntry, WalPublicationCatalog};
+use cntryl_midge_durability::wal::ledger::{SegmentId, WalLedger};
+use cntryl_midge_durability::wal::planner::{
     Lineage, OpenCut, OpenEnd, OpenProbe, Probe, Probes, RecoveryPlan, Source,
 };
-use crate::wal::recovery::streaming::{
+use cntryl_midge_durability::wal::recovery::streaming::{
     inspect_sealed_wal_file, inspect_wal_file, max_verified_suffix_sequence, StreamingReplayLimits,
 };
-use crate::wal::recovery::{open_tail_action, ReplayErrorAction, ReplayPolicy, ReplaySegments};
+use cntryl_midge_durability::wal::recovery::{open_tail_action, ReplayErrorAction, ReplayPolicy, ReplaySegments};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -79,8 +79,8 @@ impl StreamingCloudWalRecovery {
         scope: &DeadlineScope,
     ) -> MidgeResult<Self> {
         scope.check("cloud WAL planning")?;
-        let local = &crate::io::scope_fs(Arc::clone(local), scope.clone());
-        let lineage = crate::wal::planner::lineage(catalog, ledger);
+        let local = &cntryl_midge_core::io::scope_fs(Arc::clone(local), scope.clone());
+        let lineage = cntryl_midge_durability::wal::planner::lineage(catalog, ledger);
         if let (Lineage::Diverged, Some(ledger)) = (lineage, ledger) {
             tracing::warn!(
                 open_segment = ledger.open_segment(),
@@ -125,7 +125,7 @@ impl StreamingCloudWalRecovery {
                 probes.local.insert(id, probe);
             }
         }
-        let plan = crate::wal::planner::plan(policy, catalog, ledger, &probes)?;
+        let plan = cntryl_midge_durability::wal::planner::plan(policy, catalog, ledger, &probes)?;
         let (fs, segments) =
             assemble_planned_sources(&plan, remote_sources, local, read_window, scope)?;
         scope.check("cloud WAL planning completion")?;
@@ -208,7 +208,7 @@ impl PublishedObject<'_> {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.remote.submit_range_head_request(
-            crate::storage::StorageRequest::new(&key, deadline, self.timeout),
+            cntryl_midge_storage::StorageRequest::new(&key, deadline, self.timeout),
             tx,
         );
         scope.check("cloud WAL HEAD wait")?;
@@ -225,7 +225,7 @@ impl PublishedObject<'_> {
                 // A cataloged segment that no longer exists is lost data,
                 // not a transient failure, so salvage may skip it.
                 return Err(
-                    if error.kind() == crate::storage::StorageErrorKind::Timeout {
+                    if error.kind() == cntryl_midge_storage::StorageErrorKind::Timeout {
                         MidgeError::Timeout(error.message().to_string())
                     } else if error.is_not_found() {
                         MidgeError::Corruption(message)
@@ -250,7 +250,7 @@ impl PublishedObject<'_> {
         };
         scope.check("cloud WAL HEAD completion")?;
         let fs: Arc<dyn Fs> = Arc::new(
-            crate::storage::remote_sst::RemoteSstFs::for_object(
+            cntryl_midge_storage::remote_sst::RemoteSstFs::for_object(
                 Arc::clone(&self.local),
                 Arc::clone(&self.remote),
                 key.clone(),
@@ -259,7 +259,7 @@ impl PublishedObject<'_> {
             )
             .with_deadline(scope.deadline()),
         );
-        let fs = crate::telemetry::recovery_progress::observe_reads(crate::io::scope_fs(
+        let fs = cntryl_midge_core::telemetry::recovery_progress::observe_reads(cntryl_midge_core::io::scope_fs(
             fs,
             scope.clone(),
         ));
@@ -283,7 +283,7 @@ impl PublishedObject<'_> {
         // Inspection also uses the bounded range window even for a large
         // frame.
         let mut buffered = StreamingWalFs::new(self.read_window)?;
-        let canonical = crate::wal::segment_file_name(entry.id());
+        let canonical = cntryl_midge_durability::wal::segment_file_name(entry.id());
         buffered.insert(
             canonical.clone(),
             Arc::clone(&fs) as Arc<dyn ReadFs>,
@@ -329,7 +329,7 @@ fn probe_sealed_member(
     policy: RecoveryPolicy,
     limits: StreamingReplayLimits,
 ) -> MidgeResult<Probe> {
-    let path = crate::wal::segment_key(id);
+    let path = cntryl_midge_durability::wal::segment_key(id);
     let file = match open_member(local, &path) {
         Ok(file) => file,
         Err(error) => return classify(error),
@@ -361,7 +361,7 @@ fn probe_sealed_member(
 /// The highest sequence any verified frame of a damaged segment holds: its
 /// verified prefix, then whatever verifies past the damage.
 fn verified_maximum(
-    file: &dyn crate::io::ReadFile,
+    file: &dyn cntryl_midge_core::io::ReadFile,
     path: &FsPath,
     limits: StreamingReplayLimits,
 ) -> MidgeResult<u64> {
@@ -389,7 +389,7 @@ fn probe_open_member(
     policy: RecoveryPolicy,
     limits: StreamingReplayLimits,
 ) -> MidgeResult<Probe> {
-    let path = crate::wal::segment_key(id);
+    let path = cntryl_midge_durability::wal::segment_key(id);
     let file = match open_member(local, &path) {
         Ok(file) => file,
         Err(error) => return classify(error),
@@ -471,7 +471,7 @@ fn probe_open_member(
 fn open_member<'a>(
     fs: &'a dyn Fs,
     path: &FsPath,
-) -> MidgeResult<Box<dyn crate::io::ReadFile + 'a>> {
+) -> MidgeResult<Box<dyn cntryl_midge_core::io::ReadFile + 'a>> {
     fs.open_read(path).map_err(|error| match error {
         FsError::NotFound(_) => MidgeError::Corruption(format!(
             "WAL segment {path} is history but its file is missing"
@@ -484,13 +484,13 @@ fn open_member<'a>(
 /// copy of the original first when the cut drops what salvage or a crash
 /// cannot explain.
 pub(super) fn apply_open_cut(wal: &dyn Fs, cut: OpenCut) -> MidgeResult<()> {
-    let path = FsPath::new(crate::wal::segment_file_name(cut.id));
+    let path = FsPath::new(cntryl_midge_durability::wal::segment_file_name(cut.id));
     if cut.retain {
         CloudStartupRecovery::retain_local_wal_copy(wal, &path)?;
-        wal.sync_dir(&FsPath::new(""), crate::io::Durability::Durable)
+        wal.sync_dir(&FsPath::new(""), cntryl_midge_core::io::Durability::Durable)
             .map_err(FsError::into_midge)?;
     }
-    crate::io::truncate_durably(wal, &path, cut.valid_bytes)
+    cntryl_midge_core::io::truncate_durably(wal, &path, cut.valid_bytes)
         .map(drop)
         .map_err(FsError::into_midge)
 }
@@ -516,23 +516,23 @@ fn assemble_planned_sources(
             })?,
             Source::Local => (
                 Arc::clone(local) as Arc<dyn ReadFs>,
-                crate::wal::segment_key(planned.id),
+                cntryl_midge_durability::wal::segment_key(planned.id),
             ),
         };
-        replay_fs.insert(crate::wal::segment_file_name(planned.id), fs, path)?;
+        replay_fs.insert(cntryl_midge_durability::wal::segment_file_name(planned.id), fs, path)?;
         if let Some(cut) = plan.open_cut.filter(|cut| cut.id == planned.id) {
-            replay_fs.limit_prefix(&crate::wal::segment_file_name(planned.id), cut.valid_bytes)?;
+            replay_fs.limit_prefix(&cntryl_midge_durability::wal::segment_file_name(planned.id), cut.valid_bytes)?;
         }
     }
     let segments = ReplaySegments::from_plan(plan.anchor, &plan.replay, |id| {
         FsPath::new(format!(
             "{}/{}",
-            crate::wal::WAL_DIR,
-            crate::wal::segment_file_name(id)
+            cntryl_midge_durability::wal::WAL_DIR,
+            cntryl_midge_durability::wal::segment_file_name(id)
         ))
     });
     Ok((
-        crate::io::scope_read_fs(Arc::new(replay_fs), scope.clone()),
+        cntryl_midge_core::io::scope_read_fs(Arc::new(replay_fs), scope.clone()),
         segments,
     ))
 }

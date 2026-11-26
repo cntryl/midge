@@ -1,7 +1,7 @@
 use super::merge::{CompactionEvent, CompactionEventCursor};
-use crate::common::resource_budget::ResourceBudget;
-use crate::common::MidgeResult;
-use crate::metadata::FileMeta;
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_core::common::MidgeResult;
+use cntryl_midge_durability::metadata::FileMeta;
 
 /// Soft overlap budget for one output's intersection with its next level.
 /// A single oversized grandparent or inseparable overlapping grandparent set
@@ -105,7 +105,7 @@ impl GrandparentOverlap {
 pub(super) struct OverlapTracker<'a> {
     policy: &'a GrandparentOverlap,
     budget: &'a ResourceBudget,
-    lower: Option<(Vec<u8>, crate::common::resource_budget::ResourceReservation)>,
+    lower: Option<(Vec<u8>, cntryl_midge_core::common::resource_budget::ResourceReservation)>,
     previous_bytes: u64,
 }
 
@@ -141,7 +141,7 @@ impl OverlapTracker<'_> {
 #[cfg(test)]
 mod tests {
     use super::GrandparentOverlap;
-    use crate::metadata::FileMeta;
+    use cntryl_midge_durability::metadata::FileMeta;
 
     #[test]
     fn should_count_incomplete_grandparent_bounds_in_every_output_interval() {

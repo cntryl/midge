@@ -23,10 +23,10 @@ impl EventLoop {
             .history
             .ledger()
             .retirable_prefix(|cf, sequence| match frontiers.get(cf) {
-                Ok(crate::metadata::FamilyFrontier::Live { through_sequence }) => {
+                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Live { through_sequence }) => {
                     sequence <= through_sequence
                 }
-                Ok(crate::metadata::FamilyFrontier::Dropped) => true,
+                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Dropped) => true,
                 Err(_) => false,
             });
         if let Some(to) = to {
@@ -51,10 +51,10 @@ impl EventLoop {
         &mut self,
         to: u64,
     ) -> Option<crate::runtime::wal_history::RetiredWal> {
-        crate::failpoints::fail_point!("midge::cloud::before_local_wal_retirement");
+        cntryl_midge_core::failpoints::fail_point!("midge::cloud::before_local_wal_retirement");
         match self.actors.wal_actor.retire_wal_below(&mut self.state, to) {
             Ok(retired) => {
-                crate::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
+                cntryl_midge_core::failpoints::fail_point!("midge::cloud::before_local_wal_unlink");
                 self.actors.gc_actor.enqueue_retired_wal(&retired);
                 self.actors.gc_actor.retry_retired_wal(
                     &mut self.state,
@@ -106,7 +106,7 @@ impl EventLoop {
         true
     }
 
-    pub(super) fn validate_runtime_lease_for_wal_prune(&self) -> crate::common::MidgeResult<()> {
+    pub(super) fn validate_runtime_lease_for_wal_prune(&self) -> cntryl_midge_core::common::MidgeResult<()> {
         self.check_lease_health()?;
         if let Some(store) = &self.authority.fencing.leader_store {
             store

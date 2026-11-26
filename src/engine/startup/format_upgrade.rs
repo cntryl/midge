@@ -2,11 +2,11 @@
 //! and manifest writer lock.
 
 use super::{epoch_floor::StartupEpochFloor, StartupLease, StartupStoragePath};
-use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
 use crate::config::Storage;
-use crate::io::{Durability, Fs, FsError, FsPath, OpenOptions};
-use crate::metadata::local_authority::LocalMetadataAuthority;
-use crate::metadata::{codec, files, Manifest, ManifestPersistence};
+use cntryl_midge_core::io::{Durability, Fs, FsError, FsPath, OpenOptions};
+use cntryl_midge_durability::metadata::local_authority::LocalMetadataAuthority;
+use cntryl_midge_durability::metadata::{codec, files, Manifest, ManifestPersistence};
 use crate::runtime::{IntentLogEntry, IntentPersistence};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -42,7 +42,7 @@ fn upgrade_local(opts: &crate::engine::OpenOptions, timeout: Duration) -> MidgeR
         Some(root) => root,
         None => super::existing_host_root(path)?,
     };
-    crate::metadata::validate_format_marker(root.as_ref(), path)?;
+    cntryl_midge_durability::metadata::validate_format_marker(root.as_ref(), path)?;
     let storage_path = StartupStoragePath {
         db_path: path.clone(),
         memory_mode: false,
@@ -53,7 +53,7 @@ fn upgrade_local(opts: &crate::engine::OpenOptions, timeout: Duration) -> MidgeR
     let store = lease.leader_store.as_deref().ok_or_else(|| {
         MidgeError::Fenced("FORMAT 9 upgrade requires a fenced local writer effect".into())
     })?;
-    let root = crate::io::scope_fs(Arc::clone(&storage_path.root), scope.clone());
+    let root = cntryl_midge_core::io::scope_fs(Arc::clone(&storage_path.root), scope.clone());
     let mut result = None;
     store
         .with_writer_epoch(
@@ -61,7 +61,7 @@ fn upgrade_local(opts: &crate::engine::OpenOptions, timeout: Duration) -> MidgeR
             lease.writer_epoch,
             scope.deadline().remaining(),
             &mut || {
-                result = Some(crate::metadata::journal::with_manifest_writer_lock_within(
+                result = Some(cntryl_midge_durability::metadata::journal::with_manifest_writer_lock_within(
                     &root,
                     &scope,
                     || select_upgrade(&root, &lease, &scope),
@@ -84,7 +84,7 @@ fn select_upgrade(
         LocalMetadataAuthority::open(Arc::clone(root))?;
         return Ok(());
     }
-    let source_budget = crate::metadata::cloud_manifest::MAX_CHAIN_BYTES;
+    let source_budget = cntryl_midge_durability::metadata::cloud_manifest::MAX_CHAIN_BYTES;
     let source = Format9UpgradeSource::capture(root.as_ref(), source_budget, scope)?;
     let manifest = codec::encode(codec::MANIFEST, &source.manifest)?;
     let intents = serde_json::to_vec(&source.intents)
@@ -100,7 +100,7 @@ fn select_upgrade(
     )?;
     source.revalidate(root.as_ref(), source_budget, scope)?;
     let candidate_digest = candidate.head_digest();
-    let result = crate::io::staging::stage_bytes_typed(
+    let result = cntryl_midge_core::io::staging::stage_bytes_typed(
         root,
         &FsPath::new("FORMAT.tmp"),
         &FsPath::new(files::FORMAT),
@@ -108,7 +108,7 @@ fn select_upgrade(
         || {
             scope.check("publish FORMAT 10 marker")?;
             lease.ensure_healthy("before FORMAT 10 marker publication")?;
-            crate::failpoints::fail_point!("midge::format10::before_marker_switch", |_| Err(
+            cntryl_midge_core::failpoints::fail_point!("midge::format10::before_marker_switch", |_| Err(
                 MidgeError::Internal("injected failure before FORMAT 10 marker switch".into())
             ));
             Ok(())
@@ -292,8 +292,8 @@ fn digest_body(digest: &mut Sha256, name: &str, bytes: Option<&[u8]>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::OperationDeadline;
-    use crate::metadata::ManifestEdit;
+    use cntryl_midge_core::common::OperationDeadline;
+    use cntryl_midge_durability::metadata::ManifestEdit;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -303,9 +303,9 @@ mod tests {
     fn should_require_directory_sync_when_resolving_visible_format_10_marker() {
         // Arrange: stage a valid candidate, then fail its marker directory
         // sync after the rename has made FORMAT 10 visible.
-        let mock = Arc::new(crate::io::MockFs::new());
+        let mock = Arc::new(cntryl_midge_core::io::MockFs::new());
         let root: Arc<dyn Fs> = mock.clone();
-        crate::metadata::ensure_or_create_format_marker(&root, std::path::Path::new("."))
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&root, std::path::Path::new("."))
             .expect("create legacy marker");
         let base = codec::encode(codec::MANIFEST, &Manifest::default()).expect("encode base");
         let candidate = LocalMetadataAuthority::stage_upgrade_candidate(
@@ -320,7 +320,7 @@ mod tests {
         .expect("stage immutable closure");
         let scope = DeadlineScope::new(OperationDeadline::from_budget(Duration::from_secs(5)));
         mock.set_sync_dir_failure(true);
-        let error = crate::io::staging::stage_bytes_typed(
+        let error = cntryl_midge_core::io::staging::stage_bytes_typed(
             &root,
             &FsPath::new("FORMAT.tmp"),
             &FsPath::new(files::FORMAT),
@@ -363,7 +363,7 @@ mod tests {
             engine.shutdown(timeout)
         };
         write(b"before-first-attempt")?;
-        let failpoint_guard = crate::failpoints::test_failpoint_guard();
+        let failpoint_guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let failpoint = fail::FailScenario::setup();
         fail::cfg("midge::format10::before_marker_switch", "return")
             .expect("inject pre-switch interruption");
@@ -407,10 +407,10 @@ mod tests {
         // Arrange
         let directory = tempfile::tempdir().expect("database directory");
         let fs: Arc<dyn Fs> =
-            Arc::new(crate::io::RealFs::new(directory.path()).expect("open source directory"));
-        crate::metadata::ensure_or_create_format_marker(&fs, directory.path())
+            Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).expect("open source directory"));
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, directory.path())
             .expect("create legacy marker");
-        crate::metadata::append_edit(
+        cntryl_midge_durability::metadata::append_edit(
             directory.path(),
             &ManifestEdit::BumpNextSstSeq {
                 cf_id: 0,
@@ -426,7 +426,7 @@ mod tests {
         let scope = DeadlineScope::new(OperationDeadline::from_budget(Duration::from_secs(5)));
         let source = Format9UpgradeSource::capture(fs.as_ref(), SOURCE_BUDGET, &scope)
             .expect("capture verified legacy metadata");
-        crate::metadata::append_edit(
+        cntryl_midge_durability::metadata::append_edit(
             directory.path(),
             &ManifestEdit::BumpNextSstSeq {
                 cf_id: 0,

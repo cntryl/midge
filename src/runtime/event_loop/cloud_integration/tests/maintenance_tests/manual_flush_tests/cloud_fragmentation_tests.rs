@@ -1,14 +1,14 @@
 //! Source-history preservation through remote compute and conditional publication.
 
 use super::*;
-use crate::common::resource_budget::ResourceBudget;
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
 use crate::compaction::strategy::CompactionPurpose;
 use crate::compaction::LeveledCompactionConfig;
 use crate::runtime::actors::compaction::CompactionActor;
 use crate::runtime::RuntimeState;
-use crate::sst::traits::{DynSstWriter, RawSstVersion};
-use crate::sst::SstFactory as _;
-use crate::types::RangeTombstone;
+use cntryl_midge_table::sst::traits::{DynSstWriter, RawSstVersion};
+use cntryl_midge_table::sst::SstFactory as _;
+use cntryl_midge_core::types::RangeTombstone;
 use std::path::Path;
 
 const POOL: usize = 8 * 1024 * 1024;
@@ -20,7 +20,7 @@ struct SourceHistory {
     ranges: Vec<RangeTombstone>,
 }
 
-fn seed_fragment_layout(el: &mut EventLoop) -> MidgeResult<Vec<crate::metadata::FileMeta>> {
+fn seed_fragment_layout(el: &mut EventLoop) -> MidgeResult<Vec<cntryl_midge_durability::metadata::FileMeta>> {
     let writer = source_writer(el)?;
     let mut files = vec![publish_seed(el, 1, 100, writer)?];
     for (index, key) in [b"a1", b"b1", b"c1", b"d1", b"e1", b"f1"]
@@ -73,9 +73,9 @@ fn source_writer(el: &EventLoop) -> MidgeResult<Box<dyn DynSstWriter>> {
     Ok(writer)
 }
 
-fn local_factory(el: &EventLoop) -> crate::sst::FsSstFactoryIo {
-    crate::sst::FsSstFactoryIo::new(Arc::clone(&el.state.fs), 4096)
-        .with_compression_policy(crate::codec::CompressionPolicy::None)
+fn local_factory(el: &EventLoop) -> cntryl_midge_table::sst::FsSstFactoryIo {
+    cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::clone(&el.state.fs), 4096)
+        .with_compression_policy(cntryl_midge_core::codec::CompressionPolicy::None)
 }
 
 fn publish_seed(
@@ -83,20 +83,20 @@ fn publish_seed(
     level: u32,
     generation: u64,
     writer: Box<dyn DynSstWriter>,
-) -> MidgeResult<crate::metadata::FileMeta> {
-    let name = crate::cloud_layout::file_name(0, level, generation);
+) -> MidgeResult<cntryl_midge_durability::metadata::FileMeta> {
+    let name = cntryl_midge_core::cloud_layout::file_name(0, level, generation);
     writer.finish_to_path(&el.state.host_sst_dir().join(&name))?;
-    let path = crate::sst::fs::sst_key(&name);
-    let summary = crate::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
+    let path = cntryl_midge_table::sst::fs::sst_key(&name);
+    let summary = cntryl_midge_table::sst::fs::SstFileIo::summarize_with_fs_for_compaction(
         &path.0,
         Arc::clone(&el.state.fs),
         ResourceBudget::new(POOL),
     )?;
-    let (_, checksum) = crate::sst::fs::file_identity_with_fs(&el.state.fs, Path::new(&path.0))?;
+    let (_, checksum) = cntryl_midge_table::sst::fs::file_identity_with_fs(&el.state.fs, Path::new(&path.0))?;
     let hybrid = el.actors.cloud_coordinator.hybrid_storage.as_ref().unwrap();
     hybrid.publish_immutable_file(
-        crate::storage::hybrid::backend::ImmutableFileSource {
-            key: &crate::cloud_layout::object_key(&name),
+        cntryl_midge_storage::hybrid::backend::ImmutableFileSource {
+            key: &cntryl_midge_core::cloud_layout::object_key(&name),
             fs: el.state.fs.as_ref(),
             path: &path,
             size: summary.size_bytes,
@@ -109,7 +109,7 @@ fn publish_seed(
         .fs
         .remove_file(&path)
         .map_err(FsError::into_midge)?;
-    let file = crate::metadata::FileMeta {
+    let file = cntryl_midge_durability::metadata::FileMeta {
         name,
         cf_id: 0,
         level,
@@ -130,14 +130,14 @@ fn publish_seed(
 
 fn install_cloud_actor(el: &mut EventLoop, overlap_limit: u64) {
     let storage = Arc::clone(el.actors.cloud_coordinator.hybrid_storage.as_ref().unwrap());
-    let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+    let reads = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&el.state.fs),
         storage.remote_sst_backend(),
         TEST_WAIT,
     ));
     let factory = crate::runtime::event_loop::resources::compaction_sst_factory(
         reads,
-        crate::codec::CompressionPolicy::None,
+        cntryl_midge_core::codec::CompressionPolicy::None,
     );
     let mut actor = CompactionActor::new_with_config(
         Arc::new(factory),
@@ -158,7 +158,7 @@ fn install_cloud_actor(el: &mut EventLoop, overlap_limit: u64) {
 }
 
 fn read_history(
-    factory: &dyn crate::sst::SstFactory,
+    factory: &dyn cntryl_midge_table::sst::SstFactory,
     names: &[String],
 ) -> MidgeResult<SourceHistory> {
     let mut versions = Vec::new();
@@ -183,7 +183,7 @@ fn read_history(
 }
 
 fn read_original_history(el: &EventLoop, source: &str) -> MidgeResult<SourceHistory> {
-    let remote = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+    let remote = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&el.state.fs),
         el.actors
             .cloud_coordinator
@@ -195,7 +195,7 @@ fn read_original_history(el: &EventLoop, source: &str) -> MidgeResult<SourceHist
     ));
     let factory = crate::runtime::event_loop::resources::compaction_sst_factory(
         remote,
-        crate::codec::CompressionPolicy::None,
+        cntryl_midge_core::codec::CompressionPolicy::None,
     );
     read_history(&factory, &[source.to_string()])
 }
@@ -205,7 +205,7 @@ fn recover_remote_history(
     metadata: &MetadataFixture,
     outputs: &[String],
     source: &str,
-    targets: &[crate::metadata::FileMeta],
+    targets: &[cntryl_midge_durability::metadata::FileMeta],
     target_level: u32,
 ) -> MidgeResult<SourceHistory> {
     let remote = el
@@ -224,14 +224,14 @@ fn recover_remote_history(
     crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
         &metadata.cloud,
         store.as_ref(),
-        &crate::io::real::test_root(directory.path()),
+        &cntryl_midge_core::io::real::test_root(directory.path()),
         directory.path(),
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
     let mut recovered = RuntimeState::try_new(
         directory.path(),
         false,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
     recovered.replay_intent_log()?;
     assert!(recovered.intent_log.is_empty());
@@ -255,24 +255,24 @@ fn recover_remote_history(
             .any(|file| file.name == *name && file.level == target_level));
         assert!(!recovered
             .fs
-            .exists(&crate::sst::fs::sst_key(name))
+            .exists(&cntryl_midge_table::sst::fs::sst_key(name))
             .map_err(FsError::into_midge)?);
     }
-    let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+    let reads = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&recovered.fs),
         remote,
         TEST_WAIT,
     ));
     let factory = crate::runtime::event_loop::resources::compaction_sst_factory(
         reads,
-        crate::codec::CompressionPolicy::None,
+        cntryl_midge_core::codec::CompressionPolicy::None,
     );
     read_history(&factory, outputs)
 }
 
 #[test]
 fn should_recover_raw_source_history_when_cloud_fragment_publication_commits() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: disabled overlap policy exercises conservative fragmentation of
         // this broad legacy source before remote targets are compacted.
         let (mut el, worker, _) = cloud_debt(0)?;
@@ -366,7 +366,7 @@ fn should_recover_raw_source_history_when_cloud_fragment_publication_commits() -
 #[test]
 fn should_publish_complete_cloud_merge_when_conforming_overlap_exceeds_soft_work_target(
 ) -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: the overlap is legal under the current output budget. Its
         // input bytes exceed the preferred work target, which is not a hard cap.
         let (mut el, worker, _) = cloud_debt(0)?;

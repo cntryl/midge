@@ -1,7 +1,7 @@
 //! Pin-safe loop capture for a permanently unselectable-key inventory pass.
 
 use super::{EventLoop, MirrorContinuation};
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::hybrid_persistence::{
     sweep_sst_orphans_within, visit_intent_sources, InventoryCursor, OrphanSweepContext,
     OrphanSweepProgress, SstOrphanProtection,
@@ -27,8 +27,8 @@ impl OrphanSweepTask {
 
     pub(super) fn execute(
         &self,
-        storage: &crate::storage::HybridStorage,
-        cloud: &crate::storage::cloud::CloudStorage,
+        storage: &cntryl_midge_storage::HybridStorage,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
         lock: &crate::runtime::MetadataPublicationLock,
         fence: &super::super::fencing::RuntimeFence,
         deadline: &OperationDeadline,

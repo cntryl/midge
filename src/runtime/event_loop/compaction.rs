@@ -2,7 +2,7 @@ use super::cloud_maintenance::MaintenanceTask;
 use super::{
     EventLoop, HandleOutcome, BACKGROUND_COMPACTION_CHECK_INTERVAL, STARTUP_CLOUD_MAINTENANCE_DELAY,
 };
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::actors::compaction::publication::{
     CompactionPublicationToken, CompactionPublishCompletion, CompactionPublishPhase,
     CompactionPublishTask,
@@ -30,7 +30,7 @@ impl EventLoop {
     pub(super) fn assign_compaction_output_sequence(
         &mut self,
         plan: crate::compaction::CompactionPlan,
-    ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
+    ) -> cntryl_midge_core::common::MidgeResult<crate::compaction::CompactionPlan> {
         self.assign_compaction_output_sequence_within(plan, None)
     }
 
@@ -38,7 +38,7 @@ impl EventLoop {
         &mut self,
         mut plan: crate::compaction::CompactionPlan,
         manual_deadline: Option<OperationDeadline>,
-    ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
+    ) -> cntryl_midge_core::common::MidgeResult<crate::compaction::CompactionPlan> {
         CompactionCoordinator::check_manual_deadline(manual_deadline)?;
         if plan.output_seq == 0 {
             plan.output_seq = self.allocate_compaction_sst_name(plan.cf_id)?;
@@ -60,7 +60,7 @@ impl EventLoop {
     pub(super) fn prepare_compaction_plan_for_launch(
         &mut self,
         plan: crate::compaction::CompactionPlan,
-    ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
+    ) -> cntryl_midge_core::common::MidgeResult<crate::compaction::CompactionPlan> {
         self.prepare_compaction_plan_for_launch_within(plan, None)
     }
 
@@ -68,7 +68,7 @@ impl EventLoop {
         &mut self,
         plan: crate::compaction::CompactionPlan,
         manual_deadline: Option<OperationDeadline>,
-    ) -> crate::common::MidgeResult<crate::compaction::CompactionPlan> {
+    ) -> cntryl_midge_core::common::MidgeResult<crate::compaction::CompactionPlan> {
         self.available_compaction_memory()?;
         let memory_limit = self.actors.compaction_actor.memory_limit_for_plan(&plan);
         let mut plan = self.assign_compaction_output_sequence_within(plan, manual_deadline)?;
@@ -86,7 +86,7 @@ impl EventLoop {
         plan.compaction_memory_limit = memory_limit;
 
         if plan.output_seq == 0 {
-            return Err(crate::common::MidgeError::Internal(
+            return Err(cntryl_midge_core::common::MidgeError::Internal(
                 "BUG: compaction output sequence was not assigned before actor launch".to_string(),
             ));
         }
@@ -94,7 +94,7 @@ impl EventLoop {
         Ok(plan)
     }
 
-    pub(super) fn available_compaction_memory(&self) -> crate::common::MidgeResult<usize> {
+    pub(super) fn available_compaction_memory(&self) -> cntryl_midge_core::common::MidgeResult<usize> {
         if self
             .actors
             .cloud_coordinator
@@ -102,7 +102,7 @@ impl EventLoop {
             .is_some()
             || self.publication.publication_gate.is_active()
         {
-            return Err(crate::common::MidgeError::Busy(
+            return Err(cntryl_midge_core::common::MidgeError::Busy(
                 "compaction memory is owned by an active publication turn".into(),
             ));
         }
@@ -112,14 +112,14 @@ impl EventLoop {
     pub(super) fn launch_compaction(
         &mut self,
         plan: crate::compaction::CompactionPlan,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.launch_compaction_disposition(plan).map(|_| ())
     }
 
     fn launch_compaction_disposition(
         &mut self,
         plan: crate::compaction::CompactionPlan,
-    ) -> crate::common::MidgeResult<CompactionLaunch> {
+    ) -> cntryl_midge_core::common::MidgeResult<CompactionLaunch> {
         let had_manual_waiters = !self.state.pending_compaction_waits.is_empty();
         CompactionCoordinator::expire_manual_compaction_waiters(self);
         if self.actors.compaction_actor.active_count().saturating_add(
@@ -135,7 +135,7 @@ impl EventLoop {
             ));
         }
         if self.publication.publication_gate.is_active() {
-            return Err(crate::common::MidgeError::Busy(
+            return Err(cntryl_midge_core::common::MidgeError::Busy(
                 "manifest publication is already in progress".to_string(),
             ));
         }
@@ -155,7 +155,7 @@ impl EventLoop {
         &mut self,
         mut plan: crate::compaction::CompactionPlan,
         manual_deadline: Option<OperationDeadline>,
-    ) -> crate::common::MidgeResult<CompactionLaunch> {
+    ) -> cntryl_midge_core::common::MidgeResult<CompactionLaunch> {
         CompactionCoordinator::check_manual_deadline(manual_deadline)?;
         self.state.retry_metadata_reload()?;
         CompactionCoordinator::check_manual_deadline(manual_deadline)?;
@@ -168,7 +168,7 @@ impl EventLoop {
                     plan.cf_id,
                     plan.output_seq,
                     manual_deadline.as_ref(),
-                    crate::metadata::accounting::Origin::CompactionBeforeGc,
+                    cntryl_midge_durability::metadata::accounting::Origin::CompactionBeforeGc,
                 )?)
         {
             // This accepted plan and its initial caller allowance survive the
@@ -241,7 +241,7 @@ impl EventLoop {
     pub(super) fn schedule_one_background_compaction_if_needed(
         &mut self,
         operation: &str,
-    ) -> crate::common::MidgeResult<bool> {
+    ) -> cntryl_midge_core::common::MidgeResult<bool> {
         if self.cloud_maintenance_enabled()
             && !self.actors.cloud_coordinator.cloud_maintenance.dispatching
         {
@@ -268,7 +268,7 @@ impl EventLoop {
         &mut self,
         operation: &str,
         manual: bool,
-    ) -> crate::common::MidgeResult<bool> {
+    ) -> cntryl_midge_core::common::MidgeResult<bool> {
         if self.publication.publication_gate.is_active()
             || self.actors.compaction_actor.active_count().saturating_add(
                 self.actors
@@ -287,7 +287,7 @@ impl EventLoop {
         // pressure recovery at startup, after flush, and during live maintenance.
         let background_enabled = self.state.compaction_enabled();
         if !background_enabled && !manual {
-            crate::failpoints::fail_point!("midge::compaction::defer_pressure_recovery", |_| {
+            cntryl_midge_core::failpoints::fail_point!("midge::compaction::defer_pressure_recovery", |_| {
                 // Recheck held fixtures promptly when released. This hook and
                 // its scheduling override are absent from ordinary builds.
                 self.pipeline
@@ -300,7 +300,7 @@ impl EventLoop {
             return Ok(false);
         }
         if self.authority.fencing.ddl_authority_ambiguous {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "DDL authority is ambiguous; refusing compaction until reconciliation".into(),
             ));
         }
@@ -389,7 +389,7 @@ impl EventLoop {
             return;
         };
         for name in names {
-            let path = crate::sst::fs::sst_key(name);
+            let path = cntryl_midge_table::sst::fs::sst_key(name);
             let size = self
                 .state
                 .fs
@@ -398,7 +398,7 @@ impl EventLoop {
                 .map(|metadata| metadata.len);
             match self.state.fs.remove_file(&path) {
                 Ok(()) => storage.release_local_sst_bytes(size.unwrap_or(0)),
-                Err(crate::io::FsError::NotFound(_)) => {}
+                Err(cntryl_midge_core::io::FsError::NotFound(_)) => {}
                 Err(error) => {
                     tracing::warn!(%error, sst_name = name, "retaining local SST cache after failed eviction");
                 }
@@ -433,7 +433,7 @@ pub(super) struct CompactionCompleteRequest {
     pub request_id: u64,
     pub input_ssts: Vec<String>,
     pub output_ssts: Vec<String>,
-    pub cf_id: crate::types::ColumnFamilyId,
+    pub cf_id: cntryl_midge_core::types::ColumnFamilyId,
     pub target_level: u32,
     pub succeeded: bool,
 }
@@ -444,7 +444,7 @@ pub(super) struct CompactionCompleteRequest {
 #[derive(Clone)]
 pub(crate) struct PendingCompactionPublication {
     capture_retry: Option<CaptureRetry>,
-    move_sources: Vec<crate::metadata::FileMeta>,
+    move_sources: Vec<cntryl_midge_durability::metadata::FileMeta>,
     manual_deadline: Option<OperationDeadline>,
     token: CompactionPublicationToken,
     outputs: Vec<PreparedCompactionOutput>,
@@ -595,10 +595,10 @@ impl CompactionCoordinator {
 
     fn validate_manual_compaction_request(
         event_loop: &EventLoop,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         event_loop.authority.compaction_fence.admit_compaction()?;
         if event_loop.authority.fencing.ddl_authority_ambiguous {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "DDL authority is ambiguous; refusing compaction until reconciliation".into(),
             ));
         }
@@ -681,7 +681,7 @@ impl CompactionCoordinator {
             .compaction_actor
             .active_same_level_repair();
         let error = worker_error.unwrap_or_else(|| {
-            crate::common::MidgeError::Internal(
+            cntryl_midge_core::common::MidgeError::Internal(
                 "compaction worker failed without an error".to_string(),
             )
         });
@@ -736,9 +736,9 @@ impl CompactionCoordinator {
         request_id: u64,
         input_ssts: &[String],
         output_ssts: &[String],
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         // Outputs rejected before any intent names them are unreferenced and
         // safe to delete. Once intent persistence is attempted, retain them:
         // startup reconciles the residue against whatever reached disk.
@@ -790,7 +790,7 @@ impl CompactionCoordinator {
             .publication_gate
             .try_acquire(publication_owner.clone())
         {
-            return Err(crate::common::MidgeError::Busy(
+            return Err(cntryl_midge_core::common::MidgeError::Busy(
                 "manifest publication is already in progress".to_string(),
             ));
         }
@@ -842,9 +842,9 @@ impl CompactionCoordinator {
         event_loop: &mut EventLoop,
         input_ssts: &[String],
         output_ssts: &[String],
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
-    ) -> crate::common::MidgeResult<(
+    ) -> cntryl_midge_core::common::MidgeResult<(
         u64,
         Vec<PreparedCompactionOutput>,
         Vec<crate::runtime::FileMeta>,
@@ -854,7 +854,7 @@ impl CompactionCoordinator {
             .compaction_actor
             .validate_reserved_inputs(&event_loop.state.manifest.files)?;
         if event_loop.state.get_cf(cf_id).is_none() {
-            return Err(crate::common::MidgeError::Corruption(format!(
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
                 "compaction completed for inactive column family {cf_id}; retained inputs and rejected outputs"
             )));
         }
@@ -927,13 +927,13 @@ impl CompactionCoordinator {
         event_loop: &EventLoop,
         input_ssts: &[String],
         added: &[crate::runtime::FileMeta],
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let removed: std::collections::HashSet<_> = input_ssts.iter().map(String::as_str).collect();
         let added_names: std::collections::HashSet<_> =
             added.iter().map(|file| file.name.as_str()).collect();
-        let added_metadata: Vec<crate::metadata::FileMeta> = added.iter().map(Into::into).collect();
+        let added_metadata: Vec<cntryl_midge_durability::metadata::FileMeta> = added.iter().map(Into::into).collect();
         let level: Vec<_> = event_loop
             .state
             .manifest
@@ -954,7 +954,7 @@ impl CompactionCoordinator {
                     .any(|&index| added_names.contains(level[index].name.as_str()))
             })
         {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "overlap-repair replacement would leave defective target-level coverage".into(),
             ));
         }
@@ -965,9 +965,9 @@ impl CompactionCoordinator {
         event_loop: &EventLoop,
         input_ssts: &[String],
         added: &[crate::runtime::FileMeta],
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let Some(split_key) = event_loop
             .actors
             .compaction_actor
@@ -1015,12 +1015,12 @@ impl CompactionCoordinator {
     }
 
     fn validate_output_names(
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
         output_ssts: &[String],
-    ) -> Result<u64, crate::common::MidgeError> {
+    ) -> Result<u64, cntryl_midge_core::common::MidgeError> {
         if output_ssts.windows(2).any(|names| names[0] >= names[1]) {
-            return Err(crate::common::MidgeError::Corruption(
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(
                 "compaction output set must be sorted and uniquely named".to_string(),
             ));
         }
@@ -1028,13 +1028,13 @@ impl CompactionCoordinator {
         let mut generation = None;
         for (expected_partition, name) in output_ssts.iter().enumerate() {
             let (name_cf, name_level, name_generation, name_partition) =
-                crate::cloud_layout::parse_compaction_file_name(name).ok_or_else(|| {
-                    crate::common::MidgeError::Corruption(format!(
+                cntryl_midge_core::cloud_layout::parse_compaction_file_name(name).ok_or_else(|| {
+                    cntryl_midge_core::common::MidgeError::Corruption(format!(
                         "compaction output has non-canonical partition name: {name}"
                     ))
                 })?;
             let expected_partition = u32::try_from(expected_partition).map_err(|_| {
-                crate::common::MidgeError::ResourceLimit(
+                cntryl_midge_core::common::MidgeError::ResourceLimit(
                     "compaction output count exceeds partition identity capacity".to_string(),
                 )
             })?;
@@ -1043,7 +1043,7 @@ impl CompactionCoordinator {
                 || name_partition != expected_partition
                 || generation.is_some_and(|expected| expected != name_generation)
             {
-                return Err(crate::common::MidgeError::Corruption(format!(
+                return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
                     "compaction output does not belong to expected cf={cf_id} level={target_level} generation/partition set: {name}"
                 )));
             }
@@ -1053,13 +1053,13 @@ impl CompactionCoordinator {
     }
 
     fn validate_prepared_output_metadata(
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
         output_ssts: &[String],
         outputs: &[PreparedCompactionOutput],
-    ) -> Result<Vec<crate::runtime::FileMeta>, crate::common::MidgeError> {
+    ) -> Result<Vec<crate::runtime::FileMeta>, cntryl_midge_core::common::MidgeError> {
         if outputs.len() != output_ssts.len() {
-            return Err(crate::common::MidgeError::Corruption(
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(
                 "compaction publication output metadata count changed".to_string(),
             ));
         }
@@ -1073,7 +1073,7 @@ impl CompactionCoordinator {
                     || output.metadata.content_crc32c.is_none()
                     || !output.metadata.key_bounds_complete
                 {
-                    return Err(crate::common::MidgeError::Corruption(format!(
+                    return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
                         "prepared compaction output metadata is incomplete or mismatched for {name}"
                     )));
                 }
@@ -1085,7 +1085,7 @@ impl CompactionCoordinator {
                 (&pair[0].largest_key, &pair[1].smallest_key)
             {
                 if left_largest > right_smallest {
-                    return Err(crate::common::MidgeError::Corruption(format!(
+                    return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
                         "compaction output key ranges overlap out of order: {} then {}",
                         pair[0].name, pair[1].name
                     )));
@@ -1098,9 +1098,9 @@ impl CompactionCoordinator {
     fn validate_captured_target_span(
         event_loop: &EventLoop,
         input_ssts: &[String],
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
-    ) -> Result<(), crate::common::MidgeError> {
+    ) -> Result<(), cntryl_midge_core::common::MidgeError> {
         let selected: std::collections::HashSet<_> =
             input_ssts.iter().map(String::as_str).collect();
         let selected_files = event_loop
@@ -1111,7 +1111,7 @@ impl CompactionCoordinator {
             .filter(|file| selected.contains(file.name.as_str()))
             .collect::<Vec<_>>();
         if selected_files.len() != selected.len() {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "compaction input authority changed before publication".to_string(),
             ));
         }
@@ -1127,7 +1127,7 @@ impl CompactionCoordinator {
                         .is_none_or(|current| !file.same_identity(current))
                 })
             {
-                return Err(crate::common::MidgeError::Fenced(
+                return Err(cntryl_midge_core::common::MidgeError::Fenced(
                     "compaction input metadata changed before publication".into(),
                 ));
             }
@@ -1162,16 +1162,16 @@ impl CompactionCoordinator {
 
     fn validate_captured_promotion_span(
         event_loop: &EventLoop,
-        selected_files: &[&crate::metadata::FileMeta],
-        cf_id: crate::types::ColumnFamilyId,
+        selected_files: &[&cntryl_midge_durability::metadata::FileMeta],
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let min_key = selected_files
             .iter()
             .filter_map(|file| file.smallest_key.as_ref())
             .min()
             .ok_or_else(|| {
-                crate::common::MidgeError::Corruption(
+                cntryl_midge_core::common::MidgeError::Corruption(
                     "compaction inputs have no smallest-key bound".to_string(),
                 )
             })?;
@@ -1180,7 +1180,7 @@ impl CompactionCoordinator {
             .filter_map(|file| file.largest_key.as_ref())
             .max()
             .ok_or_else(|| {
-                crate::common::MidgeError::Corruption(
+                cntryl_midge_core::common::MidgeError::Corruption(
                     "compaction inputs have no largest-key bound".to_string(),
                 )
             })?;
@@ -1211,7 +1211,7 @@ impl CompactionCoordinator {
             .collect::<Vec<_>>();
         live_target.sort_unstable();
         if live_target != captured_target {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "compaction target-level span changed before publication".to_string(),
             ));
         }
@@ -1220,11 +1220,11 @@ impl CompactionCoordinator {
 
     fn validate_captured_fragment_source(
         event_loop: &EventLoop,
-        selected: &[&crate::metadata::FileMeta],
-        cf_id: crate::types::ColumnFamilyId,
+        selected: &[&cntryl_midge_durability::metadata::FileMeta],
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         level: u32,
         split_key: &[u8],
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let [source] = selected else {
             return Err(MidgeError::Fenced(
                 "source fragmentation must replace one file".into(),
@@ -1276,9 +1276,9 @@ impl CompactionCoordinator {
     fn validate_captured_repair_component(
         event_loop: &EventLoop,
         selected: &std::collections::HashSet<&str>,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         target_level: u32,
-    ) -> Result<(), crate::common::MidgeError> {
+    ) -> Result<(), cntryl_midge_core::common::MidgeError> {
         let level: Vec<_> = event_loop
             .state
             .manifest
@@ -1296,7 +1296,7 @@ impl CompactionCoordinator {
                 names == *selected
             });
         if !matches_component {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "overlap-repair component changed before publication".into(),
             ));
         }
@@ -1342,7 +1342,7 @@ impl CompactionCoordinator {
         if event_loop.authority.fencing.writer_epoch != pending.token.writer_epoch {
             Self::finish_failed_publication(
                 event_loop,
-                &crate::common::MidgeError::Fenced(
+                &cntryl_midge_core::common::MidgeError::Fenced(
                     "compaction publication completed under a stale writer epoch".to_string(),
                 ),
             );
@@ -1373,10 +1373,10 @@ impl CompactionCoordinator {
     fn install_manifest_publication(
         event_loop: &mut EventLoop,
         pending: &PendingCompactionPublication,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         Self::check_manual_deadline(pending.manual_deadline)?;
         if event_loop.state.get_cf(pending.token.cf_id).is_none() {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "compaction column family was removed while publication was pending".to_string(),
             ));
         }
@@ -1415,9 +1415,9 @@ impl CompactionCoordinator {
                 pending.token.target_level,
             )?;
         }
-        crate::failpoints::fail_point!(
+        cntryl_midge_core::failpoints::fail_point!(
             "midge::compaction::inject_failure_after_manifest_batch",
-            |_| Err(crate::common::MidgeError::Internal(
+            |_| Err(cntryl_midge_core::common::MidgeError::Internal(
                 "failpoint: compaction failed after durable manifest batch".to_string()
             ))
         );
@@ -1436,7 +1436,7 @@ impl CompactionCoordinator {
                 Some(crate::runtime::PublicationPhase::ManifestPublished),
             )?;
         }
-        crate::failpoints::fail_point!("slice6::after_compaction_update_before_manifest_persist");
+        cntryl_midge_core::failpoints::fail_point!("slice6::after_compaction_update_before_manifest_persist");
         event_loop.check_lease_health()?;
         Self::check_manual_deadline(pending.manual_deadline)?;
         Self::submit_publication_phase(event_loop, CompactionPublishPhase::ManifestPublished)
@@ -1445,8 +1445,8 @@ impl CompactionCoordinator {
     fn begin_intent_clear_publication(
         event_loop: &mut EventLoop,
         pending: &PendingCompactionPublication,
-    ) -> crate::common::MidgeResult<()> {
-        crate::failpoints::fail_point!("slice6::after_manifest_persist_before_sst_gc");
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
+        cntryl_midge_core::failpoints::fail_point!("slice6::after_manifest_persist_before_sst_gc");
         event_loop.check_lease_health()?;
         Self::check_manual_deadline(pending.manual_deadline)?;
         event_loop.publish_snapshot();
@@ -1476,7 +1476,7 @@ impl CompactionCoordinator {
                 hybrid_storage,
             );
         }
-        crate::failpoints::fail_point!("midge::compaction::after_input_sst_gc");
+        cntryl_midge_core::failpoints::fail_point!("midge::compaction::after_input_sst_gc");
         event_loop.check_lease_health()?;
         if pending.move_sources.is_empty() {
             event_loop.state.clear_compaction_publication_intent(
@@ -1496,7 +1496,7 @@ impl CompactionCoordinator {
     fn submit_publication_phase(
         event_loop: &mut EventLoop,
         phase: CompactionPublishPhase,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let CaptureAdmission::Ready { cut, deadline } =
             Self::admit_publication_capture(event_loop, phase)?
         else {
@@ -1507,7 +1507,7 @@ impl CompactionCoordinator {
             .compaction_publication
             .get_mut()
             .ok_or_else(|| {
-                crate::common::MidgeError::Internal(
+                cntryl_midge_core::common::MidgeError::Internal(
                     "compaction publication state disappeared before worker submission".to_string(),
                 )
             })?;
@@ -1578,7 +1578,7 @@ impl CompactionCoordinator {
         event_loop: &mut EventLoop,
         input_ssts: &[String],
         output_ssts: &[String],
-        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+        reservation: Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken>,
     ) {
         event_loop.authority.compaction_fence.degrade();
         event_loop.publish_snapshot();
@@ -1615,22 +1615,22 @@ impl CompactionCoordinator {
     }
 
     fn resident_output_sizes(
-        fs: &dyn crate::io::Fs,
+        fs: &dyn cntryl_midge_core::io::Fs,
         outputs: &[String],
-    ) -> crate::common::MidgeResult<Vec<u64>> {
+    ) -> cntryl_midge_core::common::MidgeResult<Vec<u64>> {
         outputs
             .iter()
             .map(|name| {
-                let path = crate::sst::fs::sst_key(name);
+                let path = cntryl_midge_table::sst::fs::sst_key(name);
                 match fs.metadata(&path) {
                     Ok(metadata) if !metadata.is_dir => Ok(metadata.len),
-                    Ok(_) => Err(crate::common::MidgeError::Internal(format!(
+                    Ok(_) => Err(cntryl_midge_core::common::MidgeError::Internal(format!(
                         "published compaction output is not a regular file: {}",
                         path.0
                     ))),
                     // A remotely proved output can already have been evicted.
                     // Other metadata errors cannot establish that disk is free.
-                    Err(crate::io::FsError::NotFound(_)) => Ok(0),
+                    Err(cntryl_midge_core::io::FsError::NotFound(_)) => Ok(0),
                     Err(error) => Err(error.into_midge()),
                 }
             })
@@ -1684,7 +1684,7 @@ impl CompactionCoordinator {
         request_id: u64,
         input_ssts: &[String],
         output_ssts: &[String],
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) {
         let repair = event_loop
             .actors
@@ -1721,7 +1721,7 @@ impl CompactionCoordinator {
         event_loop.wake_write_stall_waiters();
     }
 
-    fn finish_failed_publication(event_loop: &mut EventLoop, error: &crate::common::MidgeError) {
+    fn finish_failed_publication(event_loop: &mut EventLoop, error: &cntryl_midge_core::common::MidgeError) {
         // Settling releases the gate here; nothing below reads it before the
         // deferred messages are restored.
         let Some(pending) = event_loop
@@ -1805,7 +1805,7 @@ impl CompactionCoordinator {
     /// The manifest is published, inputs were handed to GC, and the local
     /// intent is cleared; only its mirror failed. Everything is settled except
     /// the remote record, so degrade instead of re-running the failure settle.
-    fn finish_failed_intent_clear(event_loop: &mut EventLoop, error: &crate::common::MidgeError) {
+    fn finish_failed_intent_clear(event_loop: &mut EventLoop, error: &cntryl_midge_core::common::MidgeError) {
         Self::record_compaction_failure(event_loop);
         tracing::error!(
             ?error,
@@ -1837,7 +1837,7 @@ impl CompactionCoordinator {
         request_id: u64,
         input_ssts: &[String],
         output_ssts: &[String],
-        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
+        reservation: Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken>,
     ) -> bool {
         event_loop.publish_snapshot();
         let hybrid_storage = event_loop.actors.cloud_coordinator.hybrid_storage.clone();
@@ -1906,7 +1906,7 @@ impl CompactionCoordinator {
     fn record_publish_failure(
         event_loop: &mut EventLoop,
         request_id: u64,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) -> bool {
         Self::record_compaction_failure(event_loop);
         tracing::error!(notification_id = request_id, error = ?error, "failed to apply compaction to manifest");
@@ -1916,7 +1916,7 @@ impl CompactionCoordinator {
     fn complete_pending_waits(
         event_loop: &mut EventLoop,
         allow_emergent_followup: bool,
-        completion_error: Option<&crate::common::MidgeError>,
+        completion_error: Option<&cntryl_midge_core::common::MidgeError>,
     ) {
         let active = event_loop
             .state
@@ -2087,7 +2087,7 @@ impl CompactionCoordinator {
 
     pub(super) fn fail_pending_compaction_waits(
         event_loop: &mut EventLoop,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) {
         for request_id in std::mem::take(&mut event_loop.state.pending_compaction_waits).into_keys()
         {

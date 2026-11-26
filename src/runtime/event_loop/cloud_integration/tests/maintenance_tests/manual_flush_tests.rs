@@ -1,6 +1,6 @@
 use super::*;
-use crate::common::{MidgeError, MidgeResult};
-use crate::types::KeyState;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::types::KeyState;
 
 mod automatic_flush_tests;
 mod automatic_retry_tests;
@@ -131,7 +131,7 @@ fn journal_len(el: &EventLoop) -> MidgeResult<u64> {
     match el
         .state
         .fs
-        .metadata(&crate::io::FsPath::new(crate::metadata::files::JOURNAL))
+        .metadata(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::metadata::files::JOURNAL))
     {
         Ok(metadata) => Ok(metadata.len),
         Err(FsError::NotFound(_)) => Ok(0),
@@ -304,7 +304,7 @@ fn assert_acknowledged_and_recovered_rows(el: &EventLoop, cf_id: u32, sequence: 
 
 #[test]
 fn should_complete_manual_cloud_flush_while_compaction_compute_waits() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: align seeded durable metadata with the next real write's allocator.
         let (mut el, worker, _) = cloud_debt(4)?;
         el.state.sequence = test_flush_frontier(&el.state.manifest, 0);
@@ -378,7 +378,7 @@ fn should_complete_manual_cloud_flush_while_compaction_compute_waits() -> MidgeR
 #[test]
 fn should_keep_optional_maintenance_blocked_when_compaction_has_no_due_immutable() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let (mut el, worker, _) = cloud_debt(4)?;
         el.state.sequence = test_flush_frontier(&el.state.manifest, 0);

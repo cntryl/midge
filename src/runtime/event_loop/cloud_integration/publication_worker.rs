@@ -3,16 +3,16 @@
 
 use super::super::fencing::RuntimeFence;
 use super::super::EventLoop;
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::hybrid_persistence::{CloudPersistence, PublicationError};
-use crate::wal::cloud_catalog::CatalogEntry;
-use crate::wal::publish::OwedSegment;
+use cntryl_midge_durability::wal::cloud_catalog::CatalogEntry;
+use cntryl_midge_durability::wal::publish::OwedSegment;
 use std::collections::BTreeMap;
 
 const MAX_PENDING_ACKS: usize = 4096;
 
 enum Work {
-    Verify(crate::io::FsLocation, u64),
+    Verify(cntryl_midge_core::io::FsLocation, u64),
     Publish(Vec<CatalogEntry>),
 }
 
@@ -42,12 +42,12 @@ pub(in crate::runtime::event_loop) struct CloudPublicationPipeline {
 impl CloudPublicationPipeline {
     pub(in crate::runtime::event_loop) fn held_uploads(
         &self,
-    ) -> crate::storage::hybrid::backend::HeldUploads {
+    ) -> cntryl_midge_storage::hybrid::backend::HeldUploads {
         let running = self
             .running
             .as_ref()
             .map_or(0, |job| job.verification_bytes);
-        crate::storage::hybrid::backend::HeldUploads {
+        cntryl_midge_storage::hybrid::backend::HeldUploads {
             entries: self.pending.len().saturating_add(usize::from(running > 0)),
             bytes: self
                 .pending
@@ -79,7 +79,7 @@ impl EventLoop {
         let size = match self
             .state
             .fs
-            .metadata(&crate::wal::segment_key(acknowledged.segment_id))
+            .metadata(&cntryl_midge_durability::wal::segment_key(acknowledged.segment_id))
         {
             Ok(metadata) => metadata.len,
             Err(error) => {
@@ -130,9 +130,9 @@ impl EventLoop {
             segment_id,
             max_sequence,
         };
-        let source = crate::io::FsLocation::new(
+        let source = cntryl_midge_core::io::FsLocation::new(
             std::sync::Arc::clone(&self.state.fs),
-            crate::wal::segment_key(segment_id),
+            cntryl_midge_durability::wal::segment_key(segment_id),
         );
         self.start_cloud_publication_job(segment, Vec::new(), deadline, Work::Verify(source, size));
     }
@@ -204,7 +204,7 @@ impl EventLoop {
         };
         let epoch = self.state.writer_epoch;
         let (result_tx, result) = crossbeam::channel::bounded(1);
-        let failpoint_gate = crate::failpoints::worker_gate();
+        let failpoint_gate = cntryl_midge_core::failpoints::worker_gate();
         let worker = std::thread::Builder::new()
             .name("midge-wal-publication".into())
             .spawn(move || {
@@ -354,7 +354,7 @@ fn run_work(
     deadline: OperationDeadline,
     work: Work,
 ) -> Result<Completion, PublicationError> {
-    crate::failpoints::fail_point!("midge::cloud::before_wal_publication_work");
+    cntryl_midge_core::failpoints::fail_point!("midge::cloud::before_wal_publication_work");
     fence
         .validate_within(&deadline)
         .map_err(authority_failure)?;
@@ -372,7 +372,7 @@ fn run_work(
             .map(|()| Completion::Published),
     };
     let completion = result?;
-    crate::failpoints::fail_point!("midge::cloud::after_wal_publication_work");
+    cntryl_midge_core::failpoints::fail_point!("midge::cloud::after_wal_publication_work");
     fence
         .validate_within(&deadline)
         .map_err(authority_failure)?;

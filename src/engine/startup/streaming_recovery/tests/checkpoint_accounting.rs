@@ -1,7 +1,7 @@
 //! Actual bounded WAL replay checkpoint accounting; seeded rows are not public ACK claims.
 
 use super::*;
-use crate::metadata::accounting::{Medium, Origin};
+use cntryl_midge_durability::metadata::accounting::{Medium, Origin};
 use std::time::Duration;
 
 fn verify_recovered(engine: &Engine, records: u64) {
@@ -16,7 +16,7 @@ fn verify_recovered(engine: &Engine, records: u64) {
     let rows = tx
         .scan(&crate::Query::new())
         .unwrap()
-        .collect::<crate::common::MidgeResult<Vec<_>>>()
+        .collect::<cntryl_midge_core::common::MidgeResult<Vec<_>>>()
         .unwrap();
     assert_eq!(rows.len(), usize::try_from(records).unwrap());
     for (index, (key, observed)) in rows.iter().enumerate() {
@@ -28,7 +28,7 @@ fn verify_recovered(engine: &Engine, records: u64) {
 
 #[test]
 fn should_attribute_recovery_publication_when_real_wal_exceeds_local_capacity() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: the existing fixture encodes real records and authoritative catalog proofs.
         let directory = tempfile::tempdir().unwrap();
         let budget = 256 * 1024_u64;

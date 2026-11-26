@@ -2,8 +2,8 @@
 
 use super::write_batch::CoalescedTransactionBatch;
 use super::EventLoop;
-use crate::common::resource_budget::ResourceReservation;
-use crate::common::{MidgeError, OperationDeadline};
+use cntryl_midge_core::common::resource_budget::ResourceReservation;
+use cntryl_midge_core::common::{MidgeError, OperationDeadline};
 use crate::runtime::actors::wal::{MemtableApplyAuthority, MemtableApplyPlan};
 use crossbeam::channel::{Receiver, Sender, TrySendError};
 use std::collections::HashSet;

@@ -48,7 +48,7 @@ impl EventLoop {
     /// as `Reject` in the first place.
     fn reject_under_verification_barrier(&mut self, msg: RuntimeMsg, request_id: u64) {
         let error =
-            crate::common::MidgeError::Busy("storage verification barrier is active".to_string());
+            cntryl_midge_core::common::MidgeError::Busy("storage verification barrier is active".to_string());
         let response = RuntimeResponse::Error { request_id, error };
         match msg {
             RuntimeMsg::ApplyTransaction {
@@ -114,7 +114,7 @@ impl EventLoop {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::Busy(
+                    error: cntryl_midge_core::common::MidgeError::Busy(
                         "cloud storage work is active during backup capture".to_string(),
                     ),
                 },
@@ -142,7 +142,7 @@ impl EventLoop {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::Busy(
+                    error: cntryl_midge_core::common::MidgeError::Busy(
                         "storage layout is busy or already being verified".to_string(),
                     ),
                 },
@@ -165,7 +165,7 @@ impl EventLoop {
 
         let activated = self.publication.verification_barrier.activate(request_id);
         debug_assert!(activated);
-        crate::failpoints::fail_point!("midge::verification::before_barrier_response");
+        cntryl_midge_core::failpoints::fail_point!("midge::verification::before_barrier_response");
         self.respond(
             request_id,
             RuntimeResponse::StorageVerificationBarrier {
@@ -188,7 +188,7 @@ impl EventLoop {
                 request_id,
                 RuntimeResponse::Error {
                     request_id,
-                    error: crate::common::MidgeError::InvalidArgument(
+                    error: cntryl_midge_core::common::MidgeError::InvalidArgument(
                         "storage verification barrier token does not match".to_string(),
                     ),
                 },

@@ -1,7 +1,7 @@
 //! Forced origins from real Engine publication and same-path exact recovery.
 
 use super::*;
-use crate::metadata::accounting::{Medium, Origin};
+use cntryl_midge_durability::metadata::accounting::{Medium, Origin};
 
 fn write_rows(engine: &Engine, start: u8, end: u8) {
     let cf = engine.get_column_family("default").expect("default family");
@@ -47,7 +47,7 @@ fn verify_rows(engine: &Engine) {
 
 #[test]
 fn should_attribute_cloud_shutdown_flush_when_acknowledged_rows_remain_active() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: actual strict-ack cloud rows stay below the normal threshold.
         let directory = tempfile::tempdir().unwrap();
         let options = OpenOptions::cloud_simulated(directory.path(), "accounting", "shutdown")
@@ -109,7 +109,7 @@ fn should_attribute_cloud_shutdown_flush_when_acknowledged_rows_remain_active() 
 
 #[test]
 fn should_attribute_compaction_publication_when_overlapping_local_inputs_are_rewritten() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: overlapping strict-ack flushes require physical replacement,
         // rather than a metadata-only promotion of disjoint immutable inputs.
         let directory = tempfile::tempdir().unwrap();

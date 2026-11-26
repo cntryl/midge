@@ -1,8 +1,8 @@
 //! Actual aborts at salvage floor, ledger set-aside, and catalog boundaries.
 use super::*;
 use crate::runtime::hybrid_persistence::CloudPersistence;
-use crate::storage::HybridStorage;
-use crate::wal::cloud_catalog::CatalogEntry;
+use cntryl_midge_storage::HybridStorage;
+use cntryl_midge_durability::wal::cloud_catalog::CatalogEntry;
 use std::path::PathBuf;
 
 #[allow(dead_code)]
@@ -28,14 +28,14 @@ fn commit(
         crate::runtime::cloud_startup::CacheHistory::Existing(history),
         None,
         &|| Ok(()),
-        &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
+        &cntryl_midge_core::common::DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::unbounded()),
     )
 }
 
 fn persistence(fixture: &Fixture) -> CloudPersistence {
     CloudPersistence::new(Arc::new(HybridStorage::with_policy(
         Arc::clone(&fixture.cloud),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )))
 }
 
@@ -53,25 +53,25 @@ fn should_abort_salvage_when_child_requested() -> MidgeResult<()> {
         return Ok(());
     };
     let case: Case = serde_json::from_slice(&std::fs::read(path)?).unwrap();
-    let cloud: Arc<dyn StorageBackend> = Arc::new(crate::storage::filesystem::FileSystem::new(
+    let cloud: Arc<dyn StorageBackend> = Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
         case.root.join("cloud"),
     )?);
     let catalog = WalPublicationCatalog::decode(&std::fs::read(
         case.root
             .join("cloud")
-            .join(crate::wal::cloud_catalog::OBJECT_KEY),
+            .join(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY),
     )?)
     .unwrap();
     let persistence = CloudPersistence::new(Arc::new(HybridStorage::with_policy(
         Arc::clone(&cloud),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )));
     let wal: Arc<dyn Fs> =
-        Arc::new(crate::io::RealFs::new(case.root.join("local/wal")).map_err(FsError::into_midge)?);
+        Arc::new(cntryl_midge_core::io::RealFs::new(case.root.join("local/wal")).map_err(FsError::into_midge)?);
     // Startup opens the ledger under its lease, epoch 9.
     let history = crate::runtime::wal_history::WalHistory::open(wal, 1, 9)?;
     let recovered = StreamingCloudWalRecovery::build(
-        &crate::io::real::test_root(case.root.join("local")),
+        &cntryl_midge_core::io::real::test_root(case.root.join("local")),
         Some(history.ledger()),
         &cloud,
         &catalog,
@@ -213,7 +213,7 @@ fn record_case(
         .directory
         .path()
         .join("cloud")
-        .join(crate::wal::cloud_catalog::OBJECT_KEY);
+        .join(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY);
     // The child reads the catalog the fixture keeps in the cloud store.
     let case = Case {
         root: fixture.directory.path().to_path_buf(),
@@ -236,11 +236,11 @@ fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floo
 ) -> MidgeResult<()> {
     // Arrange: salvage's one catalog change lands, then the writer's validity
     // expires and a successor writes into the open segment's path.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let _scenario = fail::FailScenario::setup();
     let (fixture, catalog_path, _command) = prepare_case("unused", 1)?;
     let recovered = fixture.plan_only(RecoveryPolicy::Salvage, limits())?;
-    let validity = Arc::new(crate::lease::LeaseValidity::new());
+    let validity = Arc::new(cntryl_midge_durability::lease::LeaseValidity::new());
     validity
         .activate(9, std::time::Instant::now() + Duration::from_mins(1))
         .unwrap();
@@ -274,7 +274,7 @@ fn should_preserve_successor_active_wal_when_validity_expires_after_salvage_floo
                 .map(|_| ())
                 .map_err(|error| error.into_validation_error("salvage writer validity"))
         },
-        &crate::common::DeadlineScope::new(crate::common::OperationDeadline::unbounded()),
+        &cntryl_midge_core::common::DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::unbounded()),
     );
 
     // Assert: the expired writer stops before touching its ledger, so the

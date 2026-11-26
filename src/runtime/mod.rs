@@ -49,7 +49,7 @@ pub use event_loop::EventLoop;
 pub use intent_persistence::IntentPersistence;
 pub use read_snapshot::ReadSnapshot;
 
-pub use crate::types::ConflictPolicy;
+pub use cntryl_midge_core::types::ConflictPolicy;
 pub use state::RuntimeState;
 
 pub(crate) use config::RecoveredCloudWalSegment;
@@ -79,5 +79,7 @@ pub use startup_observer::{StartupEvent, StartupObserver};
 
 #[cfg(test)]
 mod cardinality_proof_tests;
+#[cfg(all(test, feature = "internal-testing"))]
+mod recovery_progress_tests;
 #[cfg(test)]
 mod tests;

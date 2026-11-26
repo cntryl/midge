@@ -2,17 +2,17 @@ use super::*;
 
 #[test]
 fn should_preserve_ack_when_retirement_completion_has_no_matching_admission(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     seed_cloud_prune_candidate(&mut el, 1, 10);
 
     // Act: a stale success must not erase published authority.
-    el.handle_storage_event(crate::storage::StorageEvent::CloudWalPruneComplete {
+    el.handle_storage_event(cntryl_midge_storage::StorageEvent::CloudWalPruneComplete {
         segment_id: 1,
-        result: crate::storage::StorageOutcome::Ok(()),
+        result: cntryl_midge_storage::StorageOutcome::Ok(()),
     });
 
     // Assert
@@ -25,10 +25,10 @@ fn should_preserve_ack_when_retirement_completion_has_no_matching_admission(
 
 #[test]
 fn should_preserve_wal_when_only_the_local_flush_frontier_advanced(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     seed_cloud_prune_candidate(&mut el, 1, 10);
     el.state.wal.frontiers.set_cloud_durable_for_test(10);
@@ -46,10 +46,10 @@ fn should_preserve_wal_when_only_the_local_flush_frontier_advanced(
 
 #[test]
 fn should_preserve_wal_when_catalog_retirement_uses_a_stale_writer_epoch(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     seed_cloud_prune_candidate(&mut el, 1, 10);
     el.state.wal.frontiers.set_cloud_durable_for_test(10);
@@ -68,25 +68,25 @@ fn should_preserve_wal_when_catalog_retirement_uses_a_stale_writer_epoch(
 }
 
 #[test]
-fn should_keep_retired_wal_out_of_history_when_gc_unlink_fails() -> crate::common::MidgeResult<()> {
+fn should_keep_retired_wal_out_of_history_when_gc_unlink_fails() -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: a non-empty directory takes the sealed segment's name, so its
     // unlink fails after the ledger stops naming it.
     let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     seed_cloud_prune_candidate(&mut el, 1, 10);
     let path = el
         .state
         .host_wal_dir()
-        .join(crate::wal::segment_file_name(1));
+        .join(cntryl_midge_durability::wal::segment_file_name(1));
     std::fs::remove_file(&path)?;
     std::fs::create_dir_all(path.join("blocker"))?;
     el.actors.cloud_coordinator.cloud_wal.admit_prunes([1]);
 
     // Act
-    el.handle_storage_event(crate::storage::StorageEvent::CloudWalPruneComplete {
+    el.handle_storage_event(cntryl_midge_storage::StorageEvent::CloudWalPruneComplete {
         segment_id: 1,
-        result: crate::storage::StorageOutcome::Ok(()),
+        result: cntryl_midge_storage::StorageOutcome::Ok(()),
     });
 
     // Assert: the ledger retired segment 1, so recovery never replays the

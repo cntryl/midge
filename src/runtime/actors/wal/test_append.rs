@@ -7,16 +7,16 @@
 //! transaction instead, so every test exercises the code release builds run.
 
 use super::{TransactionAppendParams, WalActor};
-use crate::common::MidgeResult;
+use cntryl_midge_core::common::MidgeResult;
 use crate::runtime::state::RuntimeState;
 use crate::runtime::TransactionOp;
-use crate::wal::DurabilityPolicy;
+use cntryl_midge_durability::wal::DurabilityPolicy;
 use bytes::Bytes;
 
 /// One put (or, with `value: None`, one delete) to append.
 pub struct AppendParams {
     pub request_id: u64,
-    pub cf_id: crate::types::ColumnFamilyId,
+    pub cf_id: cntryl_midge_core::types::ColumnFamilyId,
     pub key: Bytes,
     pub value: Option<Bytes>,
     pub insert_only: bool,
@@ -57,7 +57,7 @@ impl WalActor {
         &mut self,
         state: &mut RuntimeState,
         request_id: u64,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start_key: Bytes,
         end_key: Bytes,
         durability_policy: Option<DurabilityPolicy>,

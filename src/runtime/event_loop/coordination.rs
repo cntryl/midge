@@ -1,6 +1,6 @@
 use super::RuntimeMsg;
-use crate::wal::cloud_catalog::CatalogEntry;
-use crate::wal::publish::{AckSet, OwedSegment};
+use cntryl_midge_durability::wal::cloud_catalog::CatalogEntry;
+use cntryl_midge_durability::wal::publish::{AckSet, OwedSegment};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
@@ -78,7 +78,7 @@ impl UploadBacklog {
         &mut self,
         segment_id: u64,
         max_sequence: u64,
-        ledger: &crate::wal::ledger::WalLedger,
+        ledger: &cntryl_midge_durability::wal::ledger::WalLedger,
     ) -> Result<(), NotMember> {
         if !ledger.is_member(segment_id) || segment_id == ledger.open_segment() {
             return Err(NotMember { segment_id });
@@ -199,7 +199,7 @@ impl LocalRetirementQueue {
 
     /// One past the leading run of `ledger`'s sealed members that are
     /// queued: the log start that run retires to.
-    pub(crate) fn retire_point(&self, ledger: &crate::wal::ledger::WalLedger) -> u64 {
+    pub(crate) fn retire_point(&self, ledger: &cntryl_midge_durability::wal::ledger::WalLedger) -> u64 {
         ledger
             .sealed()
             .find(|segment_id| !self.queued.contains_key(segment_id))
@@ -259,7 +259,7 @@ impl CloudWalUploadTracker {
         &self.acks
     }
 
-    pub(super) fn oldest_published_facts(&self) -> Option<&crate::wal::format::SealedFacts> {
+    pub(super) fn oldest_published_facts(&self) -> Option<&cntryl_midge_durability::wal::format::SealedFacts> {
         self.acks.oldest_published_facts()
     }
 
@@ -303,9 +303,9 @@ impl CloudWalUploadTracker {
     /// The verified uploads still waiting to be published: they hold local
     /// WAL the writer owes the cloud, and count against the upload queue's
     /// limits.
-    pub(super) fn held_uploads(&self) -> crate::storage::hybrid::backend::HeldUploads {
+    pub(super) fn held_uploads(&self) -> cntryl_midge_storage::hybrid::backend::HeldUploads {
         let (entries, bytes) = self.acks.held();
-        crate::storage::hybrid::backend::HeldUploads { entries, bytes }
+        cntryl_midge_storage::hybrid::backend::HeldUploads { entries, bytes }
     }
 
     /// Queue a freshly sealed segment for its first upload.
@@ -322,7 +322,7 @@ impl CloudWalUploadTracker {
         &mut self,
         segment_id: u64,
         max_sequence: u64,
-        ledger: &crate::wal::ledger::WalLedger,
+        ledger: &cntryl_midge_durability::wal::ledger::WalLedger,
     ) -> Result<(), NotMember> {
         self.backlog.requeue(segment_id, max_sequence, ledger)
     }
@@ -365,7 +365,7 @@ impl CloudWalUploadTracker {
 
     /// The log start the leading run of queued local retirements retires
     /// `ledger` to.
-    pub(super) fn local_retire_point(&self, ledger: &crate::wal::ledger::WalLedger) -> u64 {
+    pub(super) fn local_retire_point(&self, ledger: &cntryl_midge_durability::wal::ledger::WalLedger) -> u64 {
         self.local_retirement.retire_point(ledger)
     }
 
@@ -466,7 +466,7 @@ impl ManifestPublicationGate {
     /// FIFO order so a create never overtakes a pending drop.
     pub(super) fn next_restorable_index(
         &self,
-        pipeline_active: impl Fn(crate::types::ColumnFamilyId) -> bool,
+        pipeline_active: impl Fn(cntryl_midge_core::types::ColumnFamilyId) -> bool,
     ) -> Option<usize> {
         let mut ddl_blocked = false;
         for (index, message) in self.deferred_messages.iter().enumerate() {
@@ -507,7 +507,7 @@ pub(crate) struct VerificationBarrier {
     /// barrier, because verification is replaying those files.
     deferred_wal_retirements: Vec<u64>,
     /// Storage events that would change the layout being verified.
-    deferred_storage_events: VecDeque<crate::storage::StorageEvent>,
+    deferred_storage_events: VecDeque<cntryl_midge_storage::StorageEvent>,
 }
 
 impl VerificationBarrier {
@@ -531,14 +531,14 @@ impl VerificationBarrier {
         }
     }
 
-    pub(super) fn defer_storage_event(&mut self, event: crate::storage::StorageEvent) {
+    pub(super) fn defer_storage_event(&mut self, event: cntryl_midge_storage::StorageEvent) {
         self.deferred_storage_events.push_back(event);
     }
 
     /// Take the storage events deferred while the barrier was held.
     pub(super) fn take_deferred_storage_events(
         &mut self,
-    ) -> VecDeque<crate::storage::StorageEvent> {
+    ) -> VecDeque<cntryl_midge_storage::StorageEvent> {
         std::mem::take(&mut self.deferred_storage_events)
     }
 
@@ -559,12 +559,12 @@ impl VerificationBarrier {
 /// Owns both indexes for requests waiting on per-column-family write pressure.
 #[derive(Default)]
 pub(crate) struct WriteStallWaiters {
-    by_request: HashMap<u64, crate::types::ColumnFamilyId>,
-    by_column_family: HashMap<crate::types::ColumnFamilyId, VecDeque<u64>>,
+    by_request: HashMap<u64, cntryl_midge_core::types::ColumnFamilyId>,
+    by_column_family: HashMap<cntryl_midge_core::types::ColumnFamilyId, VecDeque<u64>>,
 }
 
 impl WriteStallWaiters {
-    pub(super) fn register(&mut self, request_id: u64, cf_id: crate::types::ColumnFamilyId) {
+    pub(super) fn register(&mut self, request_id: u64, cf_id: cntryl_midge_core::types::ColumnFamilyId) {
         if let Some(previous_cf) = self.by_request.insert(request_id, cf_id) {
             self.remove_from_queue(previous_cf, request_id);
         }
@@ -582,11 +582,11 @@ impl WriteStallWaiters {
         true
     }
 
-    pub(super) fn column_families(&self) -> Vec<crate::types::ColumnFamilyId> {
+    pub(super) fn column_families(&self) -> Vec<cntryl_midge_core::types::ColumnFamilyId> {
         self.by_column_family.keys().copied().collect()
     }
 
-    pub(super) fn take_column_family(&mut self, cf_id: crate::types::ColumnFamilyId) -> Vec<u64> {
+    pub(super) fn take_column_family(&mut self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> Vec<u64> {
         self.by_column_family
             .remove(&cf_id)
             .into_iter()
@@ -603,7 +603,7 @@ impl WriteStallWaiters {
             .collect()
     }
 
-    fn remove_from_queue(&mut self, cf_id: crate::types::ColumnFamilyId, request_id: u64) {
+    fn remove_from_queue(&mut self, cf_id: cntryl_midge_core::types::ColumnFamilyId, request_id: u64) {
         let remove_queue = if let Some(queue) = self.by_column_family.get_mut(&cf_id) {
             queue.retain(|queued| *queued != request_id);
             queue.is_empty()
@@ -624,14 +624,14 @@ impl WriteStallWaiters {
     pub(super) fn column_family_for(
         &self,
         request_id: u64,
-    ) -> Option<crate::types::ColumnFamilyId> {
+    ) -> Option<cntryl_midge_core::types::ColumnFamilyId> {
         self.by_request.get(&request_id).copied()
     }
 
     #[cfg(test)]
     pub(super) fn column_family_queue(
         &self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> Option<&VecDeque<u64>> {
         self.by_column_family.get(&cf_id)
     }
@@ -658,20 +658,20 @@ mod tests {
     #[test]
     fn should_retain_cloud_wal_state_when_constructed() {
         // Arrange
-        let record = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
+        let record = cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::WalOpKind::Put,
             bytes::Bytes::from_static(b"key"),
             Some(bytes::Bytes::from_static(b"value")),
             41,
         );
-        let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(
+        let (bytes, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(
             3,
             1,
-            crate::wal::format::ChainLink::GENESIS,
+            cntryl_midge_durability::wal::format::ChainLink::GENESIS,
         )
         .record(&record)
         .seal();
-        let entry = crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes).unwrap();
+        let entry = cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes).unwrap();
         let recovered = BTreeMap::from([(3, entry)]);
 
         // Act

@@ -1,7 +1,7 @@
 use super::*;
-use crate::common::MidgeError;
+use cntryl_midge_core::common::MidgeError;
 use crate::runtime::TestRuntimeMsg;
-use crate::wal::DurabilityPolicy;
+use cntryl_midge_durability::wal::DurabilityPolicy;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 mod compaction_deadline_tests;
 
 #[test]
-fn should_slow_commit_inside_l0_soft_band_without_hard_stall() -> crate::common::MidgeResult<()> {
+fn should_slow_commit_inside_l0_soft_band_without_hard_stall() -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let directory = tempfile::tempdir()?;
     let state = RuntimeState::new(directory.path().to_path_buf(), false);
@@ -36,7 +36,7 @@ fn should_slow_commit_inside_l0_soft_band_without_hard_stall() -> crate::common:
         assertions: Vec::new(),
         durability_policy: Some(DurabilityPolicy::Strict),
         start_sequence: None,
-        conflict_policy: crate::types::ConflictPolicy::LastWriteWins,
+        conflict_policy: cntryl_midge_core::types::ConflictPolicy::LastWriteWins,
     };
     assert!(matches!(
         handle.send_apply_transaction_and_wait(730_001, submission(b"seed"))?,
@@ -156,7 +156,7 @@ struct SpilledRuntime {
 
 #[cfg(feature = "failpoints")]
 impl SpilledRuntime {
-    fn new() -> crate::common::MidgeResult<Self> {
+    fn new() -> cntryl_midge_core::common::MidgeResult<Self> {
         let directory = tempfile::tempdir().expect("runtime directory");
         let db_path = directory.path().join("db");
         std::fs::create_dir_all(&db_path).expect("create db directory");
@@ -176,13 +176,13 @@ impl SpilledRuntime {
         request_id: u64,
         key: &'static [u8],
         value: &'static [u8],
-    ) -> crate::common::MidgeResult<crate::runtime::transaction_spill::TransactionOpSource> {
+    ) -> cntryl_midge_core::common::MidgeResult<crate::runtime::transaction_spill::TransactionOpSource> {
         use crate::runtime::transaction_spill::{TransactionMemoryPool, TransactionWriteSet};
         use bytes::Bytes;
 
         let mut writes = TransactionWriteSet::new(
             Arc::new(TransactionMemoryPool::new(0)),
-            &crate::io::real::test_root(&self.db_path),
+            &cntryl_midge_core::io::real::test_root(&self.db_path),
             false,
             request_id,
         );
@@ -202,42 +202,42 @@ struct CloudAsyncRuntime {
     runtime: Option<Runtime>,
     handle: RuntimeHandle,
     db_path: std::path::PathBuf,
-    store: Arc<crate::lease::fs_leader_store::FsLeaderStore>,
+    store: Arc<cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore>,
     _directory: tempfile::TempDir,
 }
 
 #[cfg(feature = "failpoints")]
 impl CloudAsyncRuntime {
-    fn new() -> crate::common::MidgeResult<Self> {
-        use crate::lease::LeaderStore as _;
+    fn new() -> cntryl_midge_core::common::MidgeResult<Self> {
+        use cntryl_midge_durability::lease::LeaderStore as _;
 
         let directory = tempfile::tempdir().expect("CloudAsync runtime directory");
         let db_path = directory.path().join("db");
         std::fs::create_dir_all(&db_path).expect("create CloudAsync database");
         let state = RuntimeState::new_in_epoch(&db_path, false, 1);
-        let cloud = Arc::new(crate::storage::filesystem::FileSystem::new(
+        let cloud = Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
             db_path.join("cloud-store"),
         )?);
-        let shared_metadata = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+        let shared_metadata = Arc::new(cntryl_midge_storage::cloud::CloudStorage::from_object_store(
             cloud.clone(),
             Duration::from_secs(5),
         ));
-        let inventory: Arc<dyn crate::storage::inventory::ObjectInventory> = cloud.clone();
-        let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+        let inventory: Arc<dyn cntryl_midge_storage::inventory::ObjectInventory> = cloud.clone();
+        let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
             cloud,
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         hybrid.configure_object_inventories(Arc::clone(&inventory), inventory)?;
-        let store = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
-            crate::io::real::test_root(db_path.join("cloud-store")),
-            crate::lease::LeaseClock::default(),
+        let store = Arc::new(cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
+            cntryl_midge_core::io::real::test_root(db_path.join("cloud-store")),
+            cntryl_midge_durability::lease::LeaseClock::default(),
         ));
-        let leader_store: Arc<dyn crate::lease::LeaderStore> = store.clone();
+        let leader_store: Arc<dyn cntryl_midge_durability::lease::LeaderStore> = store.clone();
         store.acquire_leadership("test-writer")?;
-        crate::metadata::ensure_or_create_format_marker(&state.fs, &db_path)?;
-        crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
-            .map_err(crate::common::MidgeError::Internal)?;
-        let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&state.fs, &db_path)?;
+        cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
+            .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
         crate::runtime::ddl::fence_remote_registry_on_startup(
             &hybrid,
             &crate::runtime::ddl::DdlLeaseAuthority {
@@ -295,7 +295,7 @@ impl CloudAsyncRuntime {
         })
     }
 
-    fn shutdown(mut self) -> crate::common::MidgeResult<()> {
+    fn shutdown(mut self) -> cntryl_midge_core::common::MidgeResult<()> {
         let result = self.handle.shutdown(Duration::from_secs(10));
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown();
@@ -309,7 +309,7 @@ fn apply_cloud_async_put(
     fixture: &CloudAsyncRuntime,
     request_id: u64,
     key: &'static [u8],
-) -> crate::common::MidgeResult<u64> {
+) -> cntryl_midge_core::common::MidgeResult<u64> {
     use bytes::Bytes;
 
     let write = fixture
@@ -342,7 +342,7 @@ fn request_cloud_async_seal(
     fixture: &CloudAsyncRuntime,
     request_id: u64,
     sequence: u64,
-) -> crate::common::MidgeResult<crossbeam::channel::Receiver<RuntimeResponse>> {
+) -> cntryl_midge_core::common::MidgeResult<crossbeam::channel::Receiver<RuntimeResponse>> {
     let response = fixture
         .handle
         .router
@@ -357,9 +357,9 @@ fn request_cloud_async_seal(
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_progress_control_while_cloud_seal_fsync_is_held() -> crate::common::MidgeResult<()> {
+fn should_progress_control_while_cloud_seal_fsync_is_held() -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: start a real CloudAsync runtime before holding its physical WAL sync.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let fixture = CloudAsyncRuntime::new()?;
     let held = HeldTwoSyncs::new();
     let last_sequence = apply_cloud_async_put(&fixture, 96_200, b"cloud-seal-prefix")?;
@@ -469,7 +469,7 @@ fn cloud_seal_control_and_read(
             cf_id: 0,
             key: b"cloud-seal-prefix".to_vec(),
             sequence: 0,
-            requested_durability: crate::types::ReadDurability::Strict,
+            requested_durability: cntryl_midge_core::types::ReadDurability::Strict,
         }))
         .expect("send local read during seal");
     (
@@ -481,16 +481,16 @@ fn cloud_seal_control_and_read(
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_cancel_cloud_footer_when_lease_is_lost_after_prefix_sync(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: append a CloudAsync record and release its lease after the
     // accepted prefix sync, before the event loop admits the footer.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let fixture = CloudAsyncRuntime::new()?;
     let sequence = apply_cloud_async_put(&fixture, 96_300, b"stale-footer-lease")?;
     let wal_path = fixture
         .db_path
-        .join(crate::wal::WAL_DIR)
-        .join(crate::wal::segment_file_name(1));
+        .join(cntryl_midge_durability::wal::WAL_DIR)
+        .join(cntryl_midge_durability::wal::segment_file_name(1));
     let before = std::fs::metadata(&wal_path)?.len();
     let store = Arc::clone(&fixture.store);
     let (released, release_observed) = crossbeam::channel::bounded(1);
@@ -533,9 +533,9 @@ fn should_cancel_cloud_footer_when_lease_is_lost_after_prefix_sync(
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_fence_cloud_seal_when_footer_transition_fails_after_async_sync(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: fail after the accepted footer append and its durability barrier.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let fixture = CloudAsyncRuntime::new()?;
     let sequence = apply_cloud_async_put(&fixture, 96_310, b"footer-accepted-failure")?;
     fail::cfg("midge::wal_transition::after_footer", "return")
@@ -583,7 +583,7 @@ fn spilled_strict_message(
 fn begin_runtime_snapshot(
     handle: &RuntimeHandle,
     request_id: u64,
-) -> crate::common::MidgeResult<(u64, Arc<crate::runtime::read_snapshot::ReadSnapshot>)> {
+) -> cntryl_midge_core::common::MidgeResult<(u64, Arc<crate::runtime::read_snapshot::ReadSnapshot>)> {
     let response = handle
         .router
         .register(request_id, "test transaction snapshot");
@@ -618,11 +618,11 @@ fn await_transaction_applied(
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_progress_control_while_spilled_strict_sync_is_held() -> crate::common::MidgeResult<()> {
+fn should_progress_control_while_spilled_strict_sync_is_held() -> cntryl_midge_core::common::MidgeResult<()> {
     use bytes::Bytes;
 
     // Arrange: start the runtime before holding its physical sync worker.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let fixture = SpilledRuntime::new()?;
     let held = HeldSync::new();
     let strict = fixture
@@ -703,9 +703,9 @@ fn should_progress_control_while_spilled_strict_sync_is_held() -> crate::common:
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_recover_spilled_strict_commit_after_post_sync_apply_failure(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let fixture = SpilledRuntime::new()?;
     fail::cfg("midge::wal::spilled_apply_op", "return")
         .expect("fail streamed apply after WAL sync");
@@ -735,7 +735,7 @@ fn should_recover_spilled_strict_commit_after_post_sync_apply_failure(
     let recovered = RuntimeState::try_new(
         fixture.db_path.clone(),
         false,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
     assert_eq!(recovered.applied_sequence, 3);
     let family = recovered.get_cf(0).expect("recovered column family");
@@ -744,7 +744,7 @@ fn should_recover_spilled_strict_commit_after_post_sync_apply_failure(
         family.immutable_memtables.clone(),
         recovered.manifest.files.clone(),
         Arc::clone(&recovered.fs),
-        std::path::PathBuf::from(crate::sst::fs::SST_DIR),
+        std::path::PathBuf::from(cntryl_midge_table::sst::fs::SST_DIR),
         false,
         u64::MAX,
     );
@@ -757,10 +757,10 @@ fn should_recover_spilled_strict_commit_after_post_sync_apply_failure(
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_return_unknown_outcome_when_spilled_strict_sync_fails() -> crate::common::MidgeResult<()>
+fn should_return_unknown_outcome_when_spilled_strict_sync_fails() -> cntryl_midge_core::common::MidgeResult<()>
 {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let fixture = SpilledRuntime::new()?;
     fail::cfg("midge::wal::inject_no_space_on_sync", "return")
         .expect("inject Strict spill sync failure");
@@ -916,7 +916,7 @@ fn should_count_transaction_queue_rejections_once_without_retaining_requests() {
     let directory = tempfile::tempdir().expect("spill directory");
     let mut writes = transaction_spill::TransactionWriteSet::new(
         Arc::new(transaction_spill::TransactionMemoryPool::new(512)),
-        &crate::io::real::test_root(directory.path()),
+        &cntryl_midge_core::io::real::test_root(directory.path()),
         false,
         7003,
     );
@@ -1192,7 +1192,7 @@ fn create_column_family_during_write_flood(
 
 #[test]
 fn should_process_shutdown_promptly_given_continuous_write_flood_when_shutdown_requested() {
-    crate::failpoints::with_read_gate(verify_shutdown_during_continuous_write_flood);
+    cntryl_midge_core::failpoints::with_read_gate(verify_shutdown_during_continuous_write_flood);
 }
 
 fn verify_shutdown_during_continuous_write_flood() {
@@ -1532,7 +1532,7 @@ fn assert_strict_runtime_value(handle: &RuntimeHandle, key: &[u8], expected: &[u
                 cf_id: 0,
                 key: key.to_vec(),
                 sequence,
-                requested_durability: crate::types::ReadDurability::Strict,
+                requested_durability: cntryl_midge_core::types::ReadDurability::Strict,
             }),
             Duration::from_secs(1),
         )
@@ -1790,7 +1790,7 @@ fn read_side_request_response_messages() -> Vec<RuntimeMsg> {
             cf_id: 0,
             key: b"k".to_vec(),
             sequence: 1,
-            requested_durability: crate::types::ReadDurability::Strict,
+            requested_durability: cntryl_midge_core::types::ReadDurability::Strict,
         }),
         RuntimeMsg::Test(TestRuntimeMsg::RangeScan {
             request_id: 21,
@@ -1798,7 +1798,7 @@ fn read_side_request_response_messages() -> Vec<RuntimeMsg> {
             start: b"a".to_vec(),
             end: b"z".to_vec(),
             sequence: 1,
-            requested_durability: crate::types::ReadDurability::Strict,
+            requested_durability: cntryl_midge_core::types::ReadDurability::Strict,
         }),
         RuntimeMsg::Test(TestRuntimeMsg::CaptureReadSnapshot {
             request_id: 22,
@@ -1887,10 +1887,10 @@ fn should_extract_request_id_from_response() {
 
 fn runtime_response_fixtures() -> Vec<RuntimeResponse> {
     let snapshot = Arc::new(crate::runtime::read_snapshot::ReadSnapshot::new(
-        Arc::new(crate::memtable::SkipListMemtable::new()),
+        Arc::new(cntryl_midge_table::memtable::SkipListMemtable::new()),
         vec![],
         vec![],
-        Arc::new(crate::io::MockFs::new()),
+        Arc::new(cntryl_midge_core::io::MockFs::new()),
         std::path::PathBuf::new(),
         true,
         0,
@@ -1899,7 +1899,7 @@ fn runtime_response_fixtures() -> Vec<RuntimeResponse> {
         RuntimeResponse::Ok { request_id: 1 },
         RuntimeResponse::Error {
             request_id: 2,
-            error: crate::common::MidgeError::Internal("error".to_string()),
+            error: cntryl_midge_core::common::MidgeError::Internal("error".to_string()),
         },
         RuntimeResponse::ReadValue {
             request_id: 3,
@@ -1946,7 +1946,7 @@ fn runtime_response_fixtures() -> Vec<RuntimeResponse> {
             enable_compaction: true,
             l0_compaction_trigger: 4,
             wal_durability_policy: DurabilityPolicy::Batched,
-            wal_batch_config: crate::wal::policy::BatchConfig::default(),
+            wal_batch_config: cntryl_midge_durability::wal::policy::BatchConfig::default(),
         },
     ]
 }
@@ -1979,7 +1979,7 @@ fn assert_response_payloads(responses: Vec<RuntimeResponse>) {
                 assert!(enable_compaction);
                 assert_eq!(l0_compaction_trigger, 4);
                 assert_eq!(wal_durability_policy, DurabilityPolicy::Batched);
-                let default_batch = crate::wal::policy::BatchConfig::default();
+                let default_batch = cntryl_midge_durability::wal::policy::BatchConfig::default();
                 assert_eq!(wal_batch_config.max_delay_ms, default_batch.max_delay_ms);
                 assert_eq!(wal_batch_config.max_bytes, default_batch.max_bytes);
             }
@@ -2229,7 +2229,7 @@ fn should_shutdown_runtime() {
 #[test]
 fn should_clone_compaction_plan_preserving_all_fields() {
     // Arrange
-    let sst_name = crate::cloud_layout::file_name(0, 0, 1);
+    let sst_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
     let plan = CompactionPlan {
         input_files: vec![sst_name.clone()],
         source_level: 0,
@@ -2376,7 +2376,7 @@ fn should_defer_layout_mutating_messages_when_publication_gate_classifies() {
     let deferred = vec![
         RuntimeMsg::ManifestPersist {
             request_id: 1,
-            origin: crate::metadata::accounting::Origin::Unclassified,
+            origin: cntryl_midge_durability::metadata::accounting::Origin::Unclassified,
         },
         RuntimeMsg::ManifestCreateColumnFamily {
             request_id: 2,
@@ -2491,7 +2491,7 @@ fn should_classify_messages_when_verification_barrier_is_active() {
         },
         RuntimeMsg::ManifestPersist {
             request_id: 5,
-            origin: crate::metadata::accounting::Origin::Unclassified,
+            origin: cntryl_midge_durability::metadata::accounting::Origin::Unclassified,
         },
         RuntimeMsg::CompactAll { request_id: 6 },
     ];

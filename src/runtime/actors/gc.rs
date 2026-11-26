@@ -6,7 +6,7 @@
 //! - Coordinating with snapshots to avoid deleting live data
 
 use super::super::state::RuntimeState;
-use crate::common::MidgeResult;
+use cntryl_midge_core::common::MidgeResult;
 use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::RuntimeMsg;
 use std::collections::HashSet;
@@ -25,7 +25,7 @@ struct SstDeleteWorker {
 
 struct SstDeleteWorkerState {
     failed: Arc<parking_lot::Mutex<VecDeque<String>>>,
-    completed: Arc<parking_lot::Mutex<VecDeque<crate::metadata::FileMeta>>>,
+    completed: Arc<parking_lot::Mutex<VecDeque<cntryl_midge_durability::metadata::FileMeta>>>,
     inflight: Arc<parking_lot::Mutex<HashSet<String>>>,
     notifier: Option<crossbeam::channel::Sender<RuntimeMsg>>,
     publication_lock: crate::runtime::MetadataPublicationLock,
@@ -55,7 +55,7 @@ pub struct GcActor {
     /// event loop imports it for a delayed retry, so a failed provider request
     /// cannot be lost when the worker exits.
     failed_cloud_deletes: Arc<parking_lot::Mutex<VecDeque<String>>>,
-    completed_sst_deletes: Arc<parking_lot::Mutex<VecDeque<crate::metadata::FileMeta>>>,
+    completed_sst_deletes: Arc<parking_lot::Mutex<VecDeque<cntryl_midge_durability::metadata::FileMeta>>>,
     inflight_sst_deletes: Arc<parking_lot::Mutex<HashSet<String>>>,
     durable_reclamation_restored: bool,
     /// Earliest time at which the failed cloud-delete queue may be retried.
@@ -135,7 +135,7 @@ impl GcActor {
         // List actual files on disk
         let listed = state
             .fs
-            .list_dir(&crate::io::FsPath::new(crate::sst::fs::SST_DIR));
+            .list_dir(&cntryl_midge_core::io::FsPath::new(cntryl_midge_table::sst::fs::SST_DIR));
         let disk_ssts = match listed {
             Ok(entries) => entries
                 .into_iter()
@@ -185,7 +185,7 @@ impl GcActor {
         &mut self,
         state: &mut RuntimeState,
         sst_names: &[String],
-        hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
+        hybrid_storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
     ) {
         if hybrid_storage.is_some()
             && state.manifest_store.uses_format_10()
@@ -216,7 +216,7 @@ impl GcActor {
         &mut self,
         state: &mut RuntimeState,
         sst_names: &[String],
-        hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
+        hybrid_storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
     ) {
         self.reap_finished_cloud_delete_workers();
 
@@ -311,9 +311,9 @@ impl GcActor {
     }
 
     fn try_delete_local_sst(&mut self, state: &RuntimeState, name: &str) -> bool {
-        let path = crate::sst::fs::sst_key(name);
+        let path = cntryl_midge_table::sst::fs::sst_key(name);
         match state.fs.remove_file(&path) {
-            Ok(()) | Err(crate::io::FsError::NotFound(_)) => true,
+            Ok(()) | Err(cntryl_midge_core::io::FsError::NotFound(_)) => true,
             Err(error) => {
                 tracing::warn!(name, %error, "failed to delete obsolete local SST");
                 self.queue_failed_cloud_deletes(std::iter::once(name.to_owned()));
@@ -331,9 +331,9 @@ impl GcActor {
 
     fn schedule_cloud_sst_deletes(
         &mut self,
-        storage: Arc<crate::storage::HybridStorage>,
-        fs: Arc<dyn crate::io::Fs>,
-        files: Vec<crate::metadata::FileMeta>,
+        storage: Arc<cntryl_midge_storage::HybridStorage>,
+        fs: Arc<dyn cntryl_midge_core::io::Fs>,
+        files: Vec<cntryl_midge_durability::metadata::FileMeta>,
     ) -> (usize, usize) {
         let scheduled = files.len();
         if files.is_empty() {
@@ -403,7 +403,7 @@ impl GcActor {
     pub fn retry_pending(
         &mut self,
         state: &mut RuntimeState,
-        hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
+        hybrid_storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
     ) {
         self.confirm_completed_sst_deletes(state);
         self.retry_retired_wal(state, hybrid_storage.as_deref());
@@ -457,26 +457,26 @@ impl GcActor {
 
     fn persist_delete_confirmations(
         state: &mut RuntimeState,
-        files: &[crate::metadata::FileMeta],
+        files: &[cntryl_midge_durability::metadata::FileMeta],
     ) -> MidgeResult<()> {
         state.retry_metadata_reload()?;
         let edits = files
             .iter()
             .filter(|file| state.manifest.retired_ssts.contains_key(&file.name))
-            .map(|file| crate::metadata::ManifestEdit::CompleteSstDelete { file: file.clone() })
+            .map(|file| cntryl_midge_durability::metadata::ManifestEdit::CompleteSstDelete { file: file.clone() })
             .collect::<Vec<_>>();
         if edits.is_empty() {
             return Ok(());
         }
         let memory = state.is_memory_mode();
-        let edit = crate::metadata::ManifestEdit::Batch(edits);
+        let edit = cntryl_midge_durability::metadata::ManifestEdit::Batch(edits);
         let prepared = state.manifest.prepare_edit(&edit)?;
         let appended = if memory {
             Ok(None)
         } else {
             state
                 .manifest_store
-                .append_for(crate::metadata::accounting::Origin::Administration, &edit)
+                .append_for(cntryl_midge_durability::metadata::accounting::Origin::Administration, &edit)
                 .map(Some)
         };
         match appended {
@@ -506,7 +506,7 @@ impl GcActor {
     pub(crate) fn retry_retired_wal(
         &mut self,
         state: &mut RuntimeState,
-        storage: Option<&crate::storage::HybridStorage>,
+        storage: Option<&cntryl_midge_storage::HybridStorage>,
     ) {
         let publication_lock = self.publication_lock.clone();
         let turn = publication_lock.lock_for(Duration::ZERO);
@@ -522,7 +522,7 @@ impl GcActor {
     fn retry_retired_wal_under_local_turn(
         &mut self,
         state: &mut RuntimeState,
-        storage: Option<&crate::storage::HybridStorage>,
+        storage: Option<&cntryl_midge_storage::HybridStorage>,
     ) {
         let Some(wal) = state.wal.history.segment_files() else {
             return;
@@ -535,8 +535,8 @@ impl GcActor {
                 retained.push_back((id, bytes));
                 continue;
             }
-            match wal.remove_file(&crate::io::FsPath::new(crate::wal::segment_file_name(id))) {
-                Ok(()) | Err(crate::io::FsError::NotFound(_)) => {
+            match wal.remove_file(&cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::wal::segment_file_name(id))) {
+                Ok(()) | Err(cntryl_midge_core::io::FsError::NotFound(_)) => {
                     if let Some(storage) = storage {
                         storage.release_local_wal_bytes(bytes);
                     }
@@ -646,7 +646,7 @@ impl GcActor {
     pub fn retry_failed_cloud_deletes_if_due(
         &mut self,
         state: &mut RuntimeState,
-        hybrid_storage: Option<Arc<crate::storage::HybridStorage>>,
+        hybrid_storage: Option<Arc<cntryl_midge_storage::HybridStorage>>,
     ) {
         self.restore_durable_sst_deletes(state, hybrid_storage.is_some());
         self.confirm_completed_sst_deletes(state);
@@ -751,12 +751,12 @@ impl GcActor {
     }
 
     fn spawn_cloud_sst_delete_worker(
-        storage: Arc<crate::storage::HybridStorage>,
-        fs: Arc<dyn crate::io::Fs>,
-        ssts: Vec<crate::metadata::FileMeta>,
+        storage: Arc<cntryl_midge_storage::HybridStorage>,
+        fs: Arc<dyn cntryl_midge_core::io::Fs>,
+        ssts: Vec<cntryl_midge_durability::metadata::FileMeta>,
         completion: SstDeleteWorkerState,
     ) -> MidgeResult<JoinHandle<()>> {
-        let failpoint_gate = crate::failpoints::worker_gate();
+        let failpoint_gate = cntryl_midge_core::failpoints::worker_gate();
         std::thread::Builder::new()
             .name("midge-sst-gc".to_string())
             .spawn(move || failpoint_gate.run(|| {
@@ -785,36 +785,36 @@ impl GcActor {
                     }
                 }
             }))
-            .map_err(|error| crate::common::MidgeError::Internal(error.to_string()))
+            .map_err(|error| cntryl_midge_core::common::MidgeError::Internal(error.to_string()))
     }
 
     fn delete_cloud_and_local_sst(
         storage: &CloudPersistence,
-        fs: &Arc<dyn crate::io::Fs>,
-        file: &crate::metadata::FileMeta,
+        fs: &Arc<dyn cntryl_midge_core::io::Fs>,
+        file: &cntryl_midge_durability::metadata::FileMeta,
         publication_lock: &crate::runtime::MetadataPublicationLock,
     ) -> MidgeResult<()> {
-        let deadline = crate::common::OperationDeadline::from_budget(storage.storage_io_timeout());
+        let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(storage.storage_io_timeout());
         let _turn = publication_lock
             .lock_for(deadline.remaining())
             .ok_or_else(|| {
-                crate::common::MidgeError::Timeout(
+                cntryl_midge_core::common::MidgeError::Timeout(
                     "SST reclamation waits for metadata capture".into(),
                 )
             })?;
         if publication_lock.pending_captures() != 0 {
-            return Err(crate::common::MidgeError::Busy(
+            return Err(cntryl_midge_core::common::MidgeError::Busy(
                 "SST reclamation retains admitted metadata cuts".into(),
             ));
         }
         // Admission cannot begin between the final pending-cut check and
         // either physical effect. An already admitted cut retains both copies.
         storage.delete_retired_sst_object_within(file, &deadline)?;
-        let path = crate::sst::fs::sst_key(&file.name);
+        let path = cntryl_midge_table::sst::fs::sst_key(&file.name);
         let resident = fs.metadata(&path).ok().map_or(0, |metadata| metadata.len);
         match fs.remove_file(&path) {
             Ok(()) => storage.release_local_sst_bytes(resident),
-            Err(crate::io::FsError::NotFound(_)) => {}
+            Err(cntryl_midge_core::io::FsError::NotFound(_)) => {}
             Err(error) => return Err(error.into_midge()),
         }
         Ok(())
@@ -859,19 +859,19 @@ mod durable_delete_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{cloud::CloudStorage, HybridStorage};
+    use cntryl_midge_storage::{cloud::CloudStorage, HybridStorage};
     use std::time::Instant;
 
     #[test]
     fn should_unlink_wal_only_below_the_durable_ledger_log_start() {
         // Arrange
-        let device = crate::simulation::crash_fs::CrashDevice::new();
-        let wal = crate::io::subdirectory(Arc::new(device.fs()), crate::wal::WAL_DIR);
+        let device = cntryl_midge_core::simulation::crash_fs::CrashDevice::new();
+        let wal = cntryl_midge_core::io::subdirectory(Arc::new(device.fs()), cntryl_midge_durability::wal::WAL_DIR);
         let mut state = RuntimeState::new("/tmp/midge-gc-retirement".into(), true);
         state.wal.history =
             crate::runtime::wal_history::WalHistory::open(wal.clone(), 1, 0).unwrap();
         crate::runtime::wal_history::fixture::rotate(&mut state.wal.history).unwrap();
-        let name = crate::io::FsPath::new(crate::wal::segment_file_name(1));
+        let name = cntryl_midge_core::io::FsPath::new(cntryl_midge_durability::wal::segment_file_name(1));
         let mut actor = GcActor::new();
         actor.enqueue_retired_wal(&crate::runtime::wal_history::RetiredWal {
             pending: vec![(1, 0)],
@@ -894,10 +894,10 @@ mod tests {
 
     #[test]
     fn should_release_local_wal_bytes_once_after_a_failed_unlink_is_retried() {
-        use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
+        use cntryl_midge_core::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
         // Arrange
         let device = CrashDevice::new();
-        let wal = crate::io::subdirectory(Arc::new(device.fs()), crate::wal::WAL_DIR);
+        let wal = cntryl_midge_core::io::subdirectory(Arc::new(device.fs()), cntryl_midge_durability::wal::WAL_DIR);
         let mut state = RuntimeState::new("/tmp/midge-gc-accounting".into(), true);
         state.wal.history =
             crate::runtime::wal_history::WalHistory::open(wal.clone(), 1, 0).unwrap();
@@ -906,14 +906,14 @@ mod tests {
         let bytes = retired.pending[0].1;
         let storage = HybridStorage::with_policy(
             Arc::new(CloudStorage::with_mock()),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         );
         storage.enable_ephemeral_sst_cache(1024);
         storage.admit_local_wal_bytes(bytes).unwrap();
         assert_eq!(storage.budget_snapshot().usage.wal_bytes, bytes);
         let fault = device.inject(Fault {
             op: FaultOp::RemoveFile,
-            path: format!("wal/{}", crate::wal::segment_file_name(1)),
+            path: format!("wal/{}", cntryl_midge_durability::wal::segment_file_name(1)),
             nth: 1,
             effect: FaultEffect::Before,
             error: FaultError::Io,
@@ -974,7 +974,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let mut state = RuntimeState::new(temp.path().to_path_buf(), false);
         std::fs::create_dir_all(state.host_sst_dir()).expect("sst dir");
-        let name = crate::cloud_layout::file_name(0, 0, 1);
+        let name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
         let path = state.host_sst_dir().join(&name);
         std::fs::write(&path, b"obsolete").expect("obsolete SST");
         let (notifier, notifications) = crossbeam::channel::unbounded();

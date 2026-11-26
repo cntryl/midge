@@ -1,6 +1,6 @@
 //! Concurrent snapshot pin registry shared by API threads and the runtime.
 
-use crate::types::SnapshotPinSnapshot;
+use cntryl_midge_core::types::SnapshotPinSnapshot;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -239,9 +239,9 @@ impl SnapshotPinRegistry {
         sequence: u64,
         pinned_ssts: Arc<HashSet<String>>,
         acquisition: &SnapshotAcquisitionGuard<'_>,
-    ) -> crate::common::MidgeResult<OwnedSnapshotPin> {
+    ) -> cntryl_midge_core::common::MidgeResult<OwnedSnapshotPin> {
         if !std::ptr::eq(self.as_ref(), acquisition.registry) {
-            return Err(crate::common::MidgeError::Internal(
+            return Err(cntryl_midge_core::common::MidgeError::Internal(
                 "validation pin belongs to a different snapshot registry".into(),
             ));
         }
@@ -251,7 +251,7 @@ impl SnapshotPinRegistry {
                 current.checked_add(1)
             })
             .map_err(|_| {
-                crate::common::MidgeError::ResourceLimit(
+                cntryl_midge_core::common::MidgeError::ResourceLimit(
                     "validation pin identity space exhausted".into(),
                 )
             })?;

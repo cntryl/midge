@@ -6,7 +6,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
     // Arrange
     let directory = tempfile::tempdir()?;
     let setup =
-        crate::storage::simulated::host_simulated_cloud(directory.path(), Some(1024 * 1024))?;
+        cntryl_midge_storage::simulated::host_simulated_cloud(directory.path(), Some(1024 * 1024))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(1024 * 1024);
     let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
     crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 7)?;
@@ -16,7 +16,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
         DurabilityPolicy::CloudAsync,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     actor.set_storage_budget(setup.hybrid_storage.clone());
     // A transaction is single-family (#843): one spilled transaction per
@@ -25,7 +25,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
     for (txn_id, cf_id) in (1..).zip([0, secondary]) {
         let mut writes = crate::runtime::transaction_spill::TransactionWriteSet::new(
             Arc::new(crate::runtime::transaction_spill::TransactionMemoryPool::new(0)),
-            &crate::io::real::test_root(directory.path()),
+            &cntryl_midge_core::io::real::test_root(directory.path()),
             false,
             txn_id,
         )
@@ -50,10 +50,10 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
     let wal_path = directory
         .path()
         .join("wal")
-        .join(crate::wal::segment_file_name(7));
+        .join(cntryl_midge_durability::wal::segment_file_name(7));
     assert_eq!(
         std::fs::metadata(&wal_path)?.len(),
-        crate::wal::format::HEADER_LEN as u64,
+        cntryl_midge_durability::wal::format::HEADER_LEN as u64,
         "an open caller transaction has not emitted WAL frames"
     );
 
@@ -71,9 +71,9 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
             },
         )?;
     }
-    let observed = crate::wal::format::segment::records(&std::fs::read(wal_path)?)?
+    let observed = cntryl_midge_durability::wal::format::segment::records(&std::fs::read(wal_path)?)?
         .into_iter()
-        .filter(|record| record.op == crate::wal::WalOpKind::Put)
+        .filter(|record| record.op == cntryl_midge_durability::wal::WalOpKind::Put)
         .count();
     crate::runtime::wal_history::fixture::rotate_to(&mut state.wal.history, 9)?;
     let sequence = state.sequence;
@@ -84,7 +84,7 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
             .track_new_immutable_flush(cf_id, table.clone(), sequence)
             .unwrap();
         state.get_cf_mut(cf_id).unwrap().memtable =
-            Arc::new(crate::memtable::SkipListMemtable::new());
+            Arc::new(cntryl_midge_table::memtable::SkipListMemtable::new());
         frozen.push((cf_id, table));
     }
     let before_publication = retirable(&state);
@@ -103,20 +103,20 @@ fn should_protect_spilled_transaction_participants_until_all_generations_publish
 fn publish_frozen_family(
     state: &mut RuntimeState,
     cf_id: u32,
-    table: &Arc<crate::memtable::SkipListMemtable>,
+    table: &Arc<cntryl_midge_table::memtable::SkipListMemtable>,
     sequence: u64,
 ) -> MidgeResult<()> {
     state.complete_immutable_flush(cf_id, table).unwrap();
     state
         .manifest
-        .apply_edit(&crate::metadata::ManifestEdit::Batch(vec![
-            crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+        .apply_edit(&cntryl_midge_durability::metadata::ManifestEdit::Batch(vec![
+            cntryl_midge_durability::metadata::ManifestEdit::AddSst(cntryl_midge_durability::metadata::FileMeta {
                 name: format!("flushed-family-{cf_id}.sst"),
                 cf_id,
                 largest_seq: Some(sequence),
                 ..Default::default()
             }),
-            crate::metadata::ManifestEdit::AdvanceFlushFrontier {
+            cntryl_midge_durability::metadata::ManifestEdit::AdvanceFlushFrontier {
                 cf_id,
                 freeze_sequence: sequence,
             },
@@ -125,6 +125,6 @@ fn publish_frozen_family(
 
 fn retirable(state: &RuntimeState) -> Option<u64> {
     state.wal.history.ledger().retirable_prefix(|cf, sequence| {
-        matches!(state.manifest.flush_frontiers().get(cf), Ok(crate::metadata::FamilyFrontier::Live { through_sequence }) if sequence <= through_sequence)
+        matches!(state.manifest.flush_frontiers().get(cf), Ok(cntryl_midge_durability::metadata::FamilyFrontier::Live { through_sequence }) if sequence <= through_sequence)
     })
 }

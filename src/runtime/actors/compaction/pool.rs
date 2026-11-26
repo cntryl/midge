@@ -1,5 +1,5 @@
 //! Bounded reusable compute workers. Tickets retain owned work through join.
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crossbeam::channel::{Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -10,7 +10,7 @@ type Completion = std::thread::Result<Vec<String>>;
 struct Work {
     compute: Compute,
     completed: Sender<Completion>,
-    gate: crate::failpoints::WorkerGate,
+    gate: cntryl_midge_core::failpoints::WorkerGate,
 }
 
 pub(super) struct CompactionPool {
@@ -58,7 +58,7 @@ impl CompactionPool {
         let work = Work {
             compute: Box::new(compute),
             completed,
-            gate: crate::failpoints::worker_gate(),
+            gate: cntryl_midge_core::failpoints::worker_gate(),
         };
         self.requests
             .as_ref()
@@ -121,7 +121,7 @@ mod tests {
     {
         // Arrange: the reusable thread predates the caller's isolated scope.
         let pool = CompactionPool::new(1)?;
-        let guard = crate::failpoints::test_failpoint_guard();
+        let guard = cntryl_midge_core::failpoints::test_failpoint_guard();
         let scenario = fail::FailScenario::setup();
         let (observed, reached) = crossbeam::channel::bounded(1);
         fail::cfg_callback("midge::compaction_pool::caller_gate", move || {
@@ -131,7 +131,7 @@ mod tests {
 
         // Act: actual submitted work evaluates a configured failpoint.
         let ticket = pool.submit(|| {
-            crate::failpoints::fail_point!("midge::compaction_pool::caller_gate");
+            cntryl_midge_core::failpoints::fail_point!("midge::compaction_pool::caller_gate");
             Vec::new()
         })?;
         let inherited = reached.recv_timeout(Duration::from_secs(5));

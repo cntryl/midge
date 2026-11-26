@@ -7,8 +7,8 @@ use super::{
 };
 #[cfg(test)]
 use super::{KeyState, SstStateReader};
-use crate::sst::cache::CacheFill;
-use crate::sst::read_path_metrics::SstReadObserver as _;
+use cntryl_midge_table::sst::cache::CacheFill;
+use cntryl_midge_table::sst::read_path_metrics::SstReadObserver as _;
 
 impl ReadSnapshot {
     /// Create a read snapshot that opens SST readers directly, bypassing the
@@ -64,7 +64,7 @@ impl ReadSnapshot {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_view_resources(
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         memtable: Arc<SkipListMemtable>,
         immutable_memtables: Vec<Arc<SkipListMemtable>>,
         sst_view: Arc<SstReadView>,
@@ -143,7 +143,7 @@ impl ReadSnapshot {
     pub(super) fn sst_reader(
         &self,
         file_meta: &FileMeta,
-    ) -> crate::common::MidgeResult<Arc<SstFileIo>> {
+    ) -> cntryl_midge_core::common::MidgeResult<Arc<SstFileIo>> {
         if let Some(resources) = &self.read_resources {
             return resources.reader_for(file_meta);
         }
@@ -152,7 +152,7 @@ impl ReadSnapshot {
         let path_str = sst_path.to_string_lossy().to_string();
         self.diagnostics.sst_metrics().record_reader_cache_miss();
         Ok(Arc::new(
-            crate::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))?
+            cntryl_midge_table::sst::fs::SstFileIo::open(&path_str, Arc::clone(&self.sst_fs))?
                 .with_read_path_diagnostics(self.diagnostics.clone()),
         ))
     }
@@ -364,7 +364,7 @@ impl ReadSnapshot {
 
                 match state {
                     KeyState::Value(value, _, exp, _)
-                        if !crate::common::time::is_expired_at(exp, self.read_time_millis) =>
+                        if !cntryl_midge_core::common::time::is_expired_at(exp, self.read_time_millis) =>
                     {
                         Some((key, value.to_vec()))
                     }

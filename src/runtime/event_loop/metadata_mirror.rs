@@ -1,5 +1,5 @@
 use super::EventLoop;
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 
 mod orphans;
 mod retention;
@@ -162,14 +162,14 @@ impl EventLoop {
     }
 
     #[cfg(test)]
-    pub(super) fn mirror_metadata_to_authoritative_cloud(&self) -> crate::common::MidgeResult<()> {
+    pub(super) fn mirror_metadata_to_authoritative_cloud(&self) -> cntryl_midge_core::common::MidgeResult<()> {
         self.mirror_metadata_to_authoritative_cloud_within(&self.event_loop_cloud_deadline())
     }
 
     pub(super) fn mirror_metadata_to_authoritative_cloud_within(
         &self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let started = std::time::Instant::now();
         let result = self.mirror_metadata_within(deadline);
         // Local-only engines take this path as a no-op; only a real provider
@@ -184,8 +184,8 @@ impl EventLoop {
 
     fn mirror_metadata_within(
         &self,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         self.actors.cloud_coordinator.mirror_metadata_within(
             self.state.fs.as_ref(),
             &self.publication.metadata_publication_lock,
@@ -209,8 +209,8 @@ impl EventLoop {
     pub(super) fn mirror_metadata_after_local_commit_within(
         &mut self,
         context: &str,
-        deadline: &crate::common::OperationDeadline,
-    ) -> crate::common::MidgeResult<()> {
+        deadline: &cntryl_midge_core::common::OperationDeadline,
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         let result = self
             .start_metadata_mirror(
                 MirrorContinuation::Auxiliary {
@@ -230,7 +230,7 @@ impl EventLoop {
         match result {
             Ok(()) => Ok(()),
             Err(error)
-                if self.state.recovery_policy() == crate::config::RecoveryPolicy::Salvage =>
+                if self.state.recovery_policy() == cntryl_midge_durability::RecoveryPolicy::Salvage =>
             {
                 self.state.mark_persistence_anomaly();
                 tracing::warn!(%error, context, "cloud metadata mirror failed during salvage-capable operation");

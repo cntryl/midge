@@ -1,15 +1,15 @@
 [package]
 name = "cntryl-midge-core"
-version = "0.6.0"
-edition = "2021"
-rust-version = "1.97"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Foundational filesystem, codec, clock, deadline, and instrumentation types for Midge"
-license = "Apache-2.0"
-repository = "https://github.com/cntryl/midge"
+license.workspace = true
+repository.workspace = true
+autobenches = false
 
-# Standalone during the staged extraction; the coordinator folds this package
-# into the repository workspace when integrating the wave.
-[workspace]
+[lib]
+bench = false
 
 [features]
 default = []
@@ -53,3 +53,6 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["fileapi", "winbase"] }
+
+[lints]
+workspace = true

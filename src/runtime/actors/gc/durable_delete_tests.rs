@@ -1,18 +1,18 @@
 use super::*;
-use crate::common::OperationDeadline;
-use crate::lease::fs_leader_store::FsLeaderStore;
-use crate::lease::LeaderStore;
-use crate::metadata::{FileMeta, ManifestEdit, ManifestPersistence};
+use cntryl_midge_core::common::OperationDeadline;
+use cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore;
+use cntryl_midge_durability::lease::LeaderStore;
+use cntryl_midge_durability::metadata::{FileMeta, ManifestEdit, ManifestPersistence};
 use crate::runtime::hybrid_persistence::{
     mirror_control_metadata_within, CloudMetadataMirrorAuthority, CloudMetadataMirrorContext,
 };
-use crate::storage::cloud::{BlockingCloud, CloudStorage};
+use cntryl_midge_storage::cloud::{BlockingCloud, CloudStorage};
 
 struct Fixture {
     _directory: tempfile::TempDir,
     state: RuntimeState,
     cloud: Arc<CloudStorage>,
-    storage: Arc<crate::storage::HybridStorage>,
+    storage: Arc<cntryl_midge_storage::HybridStorage>,
     store: Arc<FsLeaderStore>,
     file: FileMeta,
     publication_lock: crate::runtime::MetadataPublicationLock,
@@ -22,12 +22,12 @@ struct Fixture {
 fn should_defer_cloud_sst_deletion_when_v10_metadata_reload_is_required() {
     // Arrange
     let mut fixture = Fixture::new();
-    let format_10 = crate::metadata::format::CURRENT_FORMAT_VERSION + 1;
+    let format_10 = cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION + 1;
     fixture.state.manifest_store =
-        Arc::new(crate::metadata::store::ManifestStore::new_with_format(
+        Arc::new(cntryl_midge_durability::metadata::store::ManifestStore::new_with_format(
             Arc::clone(&fixture.state.fs),
-            crate::metadata::accounting::Owner::new(),
-            crate::metadata::accounting::Medium::Persistent,
+            cntryl_midge_durability::metadata::accounting::Owner::new(),
+            cntryl_midge_durability::metadata::accounting::Medium::Persistent,
             format_10,
         ));
     fixture.state.fence_metadata_until_reloaded();
@@ -54,11 +54,11 @@ impl Fixture {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let mut state = RuntimeState::new(directory.path().to_path_buf(), false);
-        crate::metadata::ensure_or_create_format_marker(&state.fs, directory.path()).unwrap();
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&state.fs, directory.path()).unwrap();
         std::fs::create_dir_all(state.host_sst_dir()).unwrap();
         let original = b"original";
         let file = FileMeta {
-            name: crate::cloud_layout::file_name(0, 1, 7),
+            name: cntryl_midge_core::cloud_layout::file_name(0, 1, 7),
             level: 1,
             cf_id: 0,
             sst_seq: 7,
@@ -73,7 +73,7 @@ impl Fixture {
         };
         let id = state
             .manifest_store
-            .append_for(crate::metadata::accounting::Origin::Administration, &edit)
+            .append_for(cntryl_midge_durability::metadata::accounting::Origin::Administration, &edit)
             .unwrap();
         state.manifest.apply_edit(&edit).unwrap();
         state.manifest.note_applied_journal_edit(id);
@@ -81,20 +81,20 @@ impl Fixture {
         state.manifest.adopt_checkpoint(checkpoint);
         std::fs::write(state.host_sst_dir().join(&file.name), original).unwrap();
         let cloud = Arc::new(CloudStorage::with_mock());
-        let storage = Arc::new(crate::storage::HybridStorage::with_policy(
+        let storage = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
             cloud.clone(),
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         ));
         let store = Arc::new(FsLeaderStore::new(
             Arc::clone(&state.fs),
-            crate::lease::LeaseClock::default(),
+            cntryl_midge_durability::lease::LeaseClock::default(),
         ));
         store.acquire_leadership("writer").unwrap();
         let deadline = OperationDeadline::from_budget(Duration::from_secs(5));
         let publication_lock = crate::runtime::MetadataPublicationLock::default();
         BlockingCloud::new(&cloud, &deadline)
             .put_with_headers(
-                &crate::cloud_layout::object_key(&file.name),
+                &cntryl_midge_core::cloud_layout::object_key(&file.name),
                 original.to_vec(),
                 Vec::new(),
             )
@@ -131,7 +131,7 @@ impl Fixture {
             &self.cloud,
             &OperationDeadline::from_budget(Duration::from_secs(5)),
         )
-        .get_optional(&crate::cloud_layout::object_key(&self.file.name))
+        .get_optional(&cntryl_midge_core::cloud_layout::object_key(&self.file.name))
         .unwrap()
     }
 }
@@ -218,7 +218,7 @@ fn should_recheck_pending_cuts_inside_physical_retired_sst_worker() {
     );
 
     // Assert: the final worker-owned check prevents both physical effects.
-    assert!(matches!(result, Err(crate::common::MidgeError::Busy(_))));
+    assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Busy(_))));
     assert_eq!(fixture.remote().unwrap(), b"original");
     assert!(fixture
         .state
@@ -235,7 +235,7 @@ fn should_rediscover_original_delete_obligation_when_cloud_recovery_loses_local_
     // not run before the cache and process-local queue were lost.
     let mut fixture = Fixture::new();
     let cold = tempfile::tempdir().unwrap();
-    let fs = crate::io::real::test_root(cold.path());
+    let fs = cntryl_midge_core::io::real::test_root(cold.path());
 
     // Act
     crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
@@ -243,11 +243,11 @@ fn should_rediscover_original_delete_obligation_when_cloud_recovery_loses_local_
         fixture.store.as_ref(),
         &fs,
         cold.path(),
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )
     .unwrap();
     let recovered =
-        ManifestPersistence::load_with_fs_and_policy(&fs, crate::config::RecoveryPolicy::Strict)
+        ManifestPersistence::load_with_fs_and_policy(&fs, cntryl_midge_durability::RecoveryPolicy::Strict)
             .unwrap();
     fixture.state.manifest.replace(recovered);
     let mut restarted = GcActor::new();
@@ -274,7 +274,7 @@ fn should_rediscover_original_delete_obligation_when_cloud_recovery_loses_local_
         .exists());
     let confirmed = ManifestPersistence::load_with_fs_and_policy(
         &fixture.state.fs,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )
     .unwrap();
     assert!(confirmed.retired_ssts.is_empty());
@@ -289,7 +289,7 @@ fn should_keep_durable_obligation_when_remote_identity_is_replaced() {
         &OperationDeadline::from_budget(Duration::from_secs(5)),
     )
     .put_with_headers(
-        &crate::cloud_layout::object_key(&fixture.file.name),
+        &cntryl_midge_core::cloud_layout::object_key(&fixture.file.name),
         b"replaced".to_vec(),
         Vec::new(),
     )
@@ -314,7 +314,7 @@ fn should_keep_durable_obligation_when_remote_identity_is_replaced() {
         .exists());
     let recovered = ManifestPersistence::load_with_fs_and_policy(
         &fixture.state.fs,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )
     .unwrap();
     assert!(recovered.retired_ssts[&fixture.file.name].same_identity(&fixture.file));
@@ -378,7 +378,7 @@ fn should_defer_retired_identity_tail_when_delete_batch_exceeds_eight() {
     let mut names = vec![fixture.file.name.clone()];
     for sequence in 20..28 {
         let mut file = fixture.file.clone();
-        file.name = crate::cloud_layout::file_name(0, 1, sequence);
+        file.name = cntryl_midge_core::cloud_layout::file_name(0, 1, sequence);
         file.sst_seq = sequence;
         names.push(file.name.clone());
         fixture

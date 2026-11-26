@@ -1,9 +1,9 @@
 //! Physical deletion consumes the original retired identity, never a new HEAD.
 
 use super::CloudPersistence;
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crate::metadata::FileMeta;
-use crate::storage::{StorageObjectMetadata, StoragePrecondition, StorageRequest};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::metadata::FileMeta;
+use cntryl_midge_storage::{StorageObjectMetadata, StoragePrecondition, StorageRequest};
 
 const READ_CHUNK: u64 = 256 * 1024;
 
@@ -16,7 +16,7 @@ impl CloudPersistence {
         file: &FileMeta,
         deadline: &OperationDeadline,
     ) -> MidgeResult<()> {
-        crate::failpoints::fail_point!("midge::cloud::inject_fail_sst_delete", |_| Err(
+        cntryl_midge_core::failpoints::fail_point!("midge::cloud::inject_fail_sst_delete", |_| Err(
             MidgeError::Internal("failpoint: cloud SST delete failed".to_string())
         ));
         let expected = file.content_crc32c.ok_or_else(|| {
@@ -25,8 +25,8 @@ impl CloudPersistence {
                 file.name
             ))
         })?;
-        crate::cloud_layout::PersistedSstName::parse(&file.name)?;
-        let key = crate::cloud_layout::object_key(&file.name);
+        cntryl_midge_core::cloud_layout::PersistedSstName::parse(&file.name)?;
+        let key = cntryl_midge_core::cloud_layout::object_key(&file.name);
         let Some(metadata) = self.remote_range_metadata_optional_within(&key, deadline)? else {
             return Ok(());
         };

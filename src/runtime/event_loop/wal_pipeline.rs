@@ -4,8 +4,8 @@
 use super::durability_sync::CompletionSource;
 use super::write_batch::CoalescedTransactionBatch;
 use super::EventLoop;
-use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::actors::wal::{PendingStrictIo, StrictIoCompletion};
 use crate::runtime::wal_transition::WalSyncTicket;
 use crate::runtime::{RuntimeMsg, RuntimeResponse, TransactionOp};
@@ -383,7 +383,7 @@ impl EventLoop {
         source: crate::runtime::transaction_spill::TransactionOpSource,
         params: &crate::runtime::actors::wal::SpilledTransactionAppendParams,
         proof: Option<&std::sync::Arc<crate::runtime::actors::wal::SpilledValidationProof>>,
-        touched_cfs: Vec<crate::types::ColumnFamilyId>,
+        touched_cfs: Vec<cntryl_midge_core::types::ColumnFamilyId>,
     ) {
         let workspace = match source.streaming_memory_bound() {
             Ok(bound) => ResourceBudget::new(bound),
@@ -601,7 +601,7 @@ impl EventLoop {
                 group.ticket,
                 receipt,
             )
-            .map_err(|error| crate::common::error::classify_commit_error(error, false))
+            .map_err(|error| cntryl_midge_core::common::error::classify_commit_error(error, false))
         });
         let PendingGroup {
             batch,

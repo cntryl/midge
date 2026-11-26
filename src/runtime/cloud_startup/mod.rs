@@ -30,7 +30,7 @@ impl CloudSstRecoveryProof {
         }
     }
 
-    pub(crate) fn from_manifest(file: &crate::metadata::FileMeta) -> Self {
+    pub(crate) fn from_manifest(file: &cntryl_midge_durability::metadata::FileMeta) -> Self {
         Self {
             name: file.name.clone(),
             expected_size_bytes: Some(file.size_bytes),
@@ -62,7 +62,7 @@ pub(crate) struct CloudStartupRecovery;
 pub(crate) enum CacheHistory {
     /// No ledger yet: a new cache, or one whose genesis did not finish. The
     /// WAL directory it will start in.
-    Fresh(std::sync::Arc<dyn crate::io::Fs>),
+    Fresh(std::sync::Arc<dyn cntryl_midge_core::io::Fs>),
     /// The ledger the cache already has.
     Existing(crate::runtime::wal_history::WalHistory),
 }
@@ -90,16 +90,16 @@ pub(crate) enum CacheHistory {
 /// and the next open re-plans from what landed.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn commit_recovery_plan_within(
-    plan: &crate::wal::planner::RecoveryPlan,
+    plan: &cntryl_midge_durability::wal::planner::RecoveryPlan,
     persistence: &crate::runtime::hybrid_persistence::CloudPersistence,
     writer_epoch: u64,
-    catalog: &crate::wal::cloud_catalog::WalPublicationCatalog,
+    catalog: &cntryl_midge_durability::wal::cloud_catalog::WalPublicationCatalog,
     mut history: CacheHistory,
     wal_fence: Option<&crate::runtime::wal_history::WalHistoryFence>,
-    validate: &dyn Fn() -> crate::common::MidgeResult<()>,
-    scope: &crate::common::DeadlineScope,
-) -> crate::common::MidgeResult<crate::runtime::wal_history::WalHistory> {
-    use crate::wal::planner::HistoryAction;
+    validate: &dyn Fn() -> cntryl_midge_core::common::MidgeResult<()>,
+    scope: &cntryl_midge_core::common::DeadlineScope,
+) -> cntryl_midge_core::common::MidgeResult<crate::runtime::wal_history::WalHistory> {
+    use cntryl_midge_durability::wal::planner::HistoryAction;
     let deadline = scope.deadline();
     let validate = &|| {
         scope.check("cloud WAL salvage authority")?;
@@ -116,18 +116,18 @@ pub(crate) fn commit_recovery_plan_within(
             &deadline,
         )?;
     }
-    crate::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
+    cntryl_midge_core::failpoints::fail_point!("midge::recovery::after_salvage_floor_before_quarantine");
     validate()?;
     if let Some(cut) = plan.open_cut {
         let CacheHistory::Existing(history) = &mut history else {
-            return Err(crate::common::MidgeError::Internal(
+            return Err(cntryl_midge_core::common::MidgeError::Internal(
                 "open WAL cut without local history".into(),
             ));
         };
         let wal = history.segment_files().ok_or_else(|| {
-            crate::common::MidgeError::Internal("open WAL cut without segment files".into())
+            cntryl_midge_core::common::MidgeError::Internal("open WAL cut without segment files".into())
         })?;
-        let wal = crate::io::scope_fs(wal, scope.clone());
+        let wal = cntryl_midge_core::io::scope_fs(wal, scope.clone());
         history.prepare_open_cut(cut, plan.max_unreplayed_sequence)?;
         let truncate = || streaming_wal_plan::apply_open_cut(wal.as_ref(), cut);
         match wal_fence {
@@ -188,7 +188,7 @@ pub(crate) fn commit_recovery_plan_within(
             history
         }
         (action, _) => {
-            return Err(crate::common::MidgeError::Internal(format!(
+            return Err(cntryl_midge_core::common::MidgeError::Internal(format!(
                 "the cloud WAL recovery plan's {action:?} does not fit the cache's history"
             )))
         }

@@ -8,20 +8,20 @@
 #[derive(Debug)]
 pub enum TransactionApplyOp {
     Put {
-        op: crate::wal::WalOpKind,
-        cf_id: crate::types::ColumnFamilyId,
+        op: cntryl_midge_durability::wal::WalOpKind,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: bytes::Bytes,
         value: bytes::Bytes,
         expiration: Option<u64>,
         sequence: u64,
     },
     Delete {
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         key: bytes::Bytes,
         sequence: u64,
     },
     DeleteRange {
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         start_key: bytes::Bytes,
         end_key: bytes::Bytes,
         sequence: u64,
@@ -29,8 +29,8 @@ pub enum TransactionApplyOp {
 }
 
 struct TransactionRecordFields<'a> {
-    cf_id: crate::types::ColumnFamilyId,
-    op: crate::wal::WalOpKind,
+    cf_id: cntryl_midge_core::types::ColumnFamilyId,
+    op: cntryl_midge_durability::wal::WalOpKind,
     key: &'a bytes::Bytes,
     value: Option<&'a bytes::Bytes>,
     expiration: Option<u64>,
@@ -55,14 +55,14 @@ impl TransactionApplyOp {
                 insert_only,
             } => Self::Put {
                 op: if insert_only {
-                    crate::wal::WalOpKind::Insert
+                    cntryl_midge_durability::wal::WalOpKind::Insert
                 } else {
-                    crate::wal::WalOpKind::Put
+                    cntryl_midge_durability::wal::WalOpKind::Put
                 },
                 cf_id,
                 key,
                 value,
-                expiration: crate::common::time::expiration_from_ttl(
+                expiration: cntryl_midge_core::common::time::expiration_from_ttl(
                     ttl_seconds,
                     commit_time_millis,
                 ),
@@ -110,7 +110,7 @@ impl TransactionApplyOp {
                 sequence,
             } => TransactionRecordFields {
                 cf_id: *cf_id,
-                op: crate::wal::WalOpKind::Delete,
+                op: cntryl_midge_durability::wal::WalOpKind::Delete,
                 key,
                 value: None,
                 expiration: None,
@@ -124,7 +124,7 @@ impl TransactionApplyOp {
                 sequence,
             } => TransactionRecordFields {
                 cf_id: *cf_id,
-                op: crate::wal::WalOpKind::DeleteRange,
+                op: cntryl_midge_durability::wal::WalOpKind::DeleteRange,
                 key: start_key,
                 value: None,
                 expiration: None,
@@ -138,9 +138,9 @@ impl TransactionApplyOp {
     pub(super) fn batch_record(
         &self,
         txn_id: u64,
-    ) -> crate::wal::encoding::TxnBatchEncodeRecord<'_> {
+    ) -> cntryl_midge_durability::wal::encoding::TxnBatchEncodeRecord<'_> {
         let fields = self.record_fields();
-        crate::wal::encoding::TxnBatchEncodeRecord {
+        cntryl_midge_durability::wal::encoding::TxnBatchEncodeRecord {
             cf_id: fields.cf_id,
             op: fields.op,
             key: fields.key.as_ref(),
@@ -152,9 +152,9 @@ impl TransactionApplyOp {
         }
     }
 
-    pub(super) fn wal_record(&self, txn_id: u64) -> crate::wal::WalRecord {
+    pub(super) fn wal_record(&self, txn_id: u64) -> cntryl_midge_durability::wal::WalRecord {
         let fields = self.record_fields();
-        let mut record = crate::wal::WalRecord::new_cf(
+        let mut record = cntryl_midge_durability::wal::WalRecord::new_cf(
             fields.cf_id,
             fields.op,
             fields.key.clone(),

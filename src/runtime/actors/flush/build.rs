@@ -1,10 +1,10 @@
 //! Bounded construction from an immutable memtable; output stays local until publication.
 
 use super::{FlushActor, FlushBuildTask};
-use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::FsError;
-use crate::sst::SstFactory;
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::FsError;
+use cntryl_midge_table::sst::SstFactory;
 
 #[derive(Default)]
 struct Bounds {
@@ -32,7 +32,7 @@ impl Bounds {
 }
 
 pub(super) fn write(
-    factory: &crate::sst::FsSstFactoryIo,
+    factory: &cntryl_midge_table::sst::FsSstFactoryIo,
     task: &mut FlushBuildTask,
     budget: &ResourceBudget,
 ) -> MidgeResult<crate::runtime::FileMeta> {
@@ -43,9 +43,9 @@ pub(super) fn write(
         ));
     }
     let fs = factory.output_fs();
-    let staging_path = crate::sst::fs::fs_relative_sst_path(&fs, &task.staging_path)?;
+    let staging_path = cntryl_midge_table::sst::fs::fs_relative_sst_path(&fs, &task.staging_path)?;
     if let Some(parent) = std::path::Path::new(&staging_path.0).parent() {
-        fs.create_dir_all(&crate::io::FsPath::new(parent.to_string_lossy()))
+        fs.create_dir_all(&cntryl_midge_core::io::FsPath::new(parent.to_string_lossy()))
             .map_err(FsError::into_midge)?;
     }
     // Streaming scratch and final output can coexist. Admission must precede
@@ -53,10 +53,10 @@ pub(super) fn write(
     task.reservation = FlushActor::reserve_flush(
         task.hybrid_storage.as_ref(),
         task.identity.cf_id,
-        crate::memtable::size_bound::flush_staging_bytes(task.memtable.encoded_size_upper_bound()),
+        cntryl_midge_table::memtable::size_bound::flush_staging_bytes(task.memtable.encoded_size_upper_bound()),
     )?;
     let mut writer = factory.create_for_flush(budget.clone())?;
-    crate::failpoints::fail_point!("midge::flush_worker::after_scratch_creation");
+    cntryl_midge_core::failpoints::fail_point!("midge::flush_worker::after_scratch_creation");
     let mut bounds = Bounds::default();
     let mut smallest_seq = u64::MAX;
     let mut largest_seq = 0;
@@ -72,7 +72,7 @@ pub(super) fn write(
                         .map_or(expiration, |previous: u64| previous.min(expiration)),
                 );
             }
-            let entry_type = crate::memtable::entry_type_of(op_type);
+            let entry_type = cntryl_midge_table::memtable::entry_type_of(op_type);
             writer.add_sorted_with_meta(key, value, sequence, entry_type, expiration)
         })?;
     task.memtable.visit_frozen_ranges(|range| {
@@ -88,8 +88,8 @@ pub(super) fn write(
         ));
     };
     let (largest_key, _last_charge) = bounds.last.expect("first key implies last key");
-    crate::sst::fs::finish_writer_to_path(writer, &task.staging_path)?;
-    let (size_bytes, checksum) = crate::sst::fs::file_identity_with_fs(&fs, &task.staging_path)?;
+    cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &task.staging_path)?;
+    let (size_bytes, checksum) = cntryl_midge_table::sst::fs::file_identity_with_fs(&fs, &task.staging_path)?;
     Ok(crate::runtime::FileMeta {
         name: String::new(),
         level: 0,

@@ -144,7 +144,7 @@ fn should_fence_scan_instead_of_ending_range_when_authority_expires_after_last_r
 #[test]
 fn should_preserve_read_authority_after_wal_io_fence_with_live_lease() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     for cloud in [false, true] {
         let directory = tempfile::tempdir()?;
         let options = if cloud {

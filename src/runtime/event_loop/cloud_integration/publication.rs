@@ -3,10 +3,10 @@
 //! owes it (#841).
 
 use super::super::EventLoop;
-use crate::common::{MidgeError, OperationDeadline};
+use cntryl_midge_core::common::{MidgeError, OperationDeadline};
 use crate::runtime::hybrid_persistence::{CloudPersistence, PublicationError};
-use crate::wal::cloud_catalog::CatalogEntry;
-use crate::wal::publish::OwedSegment;
+use cntryl_midge_durability::wal::cloud_catalog::CatalogEntry;
+use cntryl_midge_durability::wal::publish::OwedSegment;
 
 impl EventLoop {
     #[tracing::instrument(level = "debug", skip_all, fields(segment_id, max_sequence))]
@@ -243,9 +243,9 @@ impl EventLoop {
         segment: OwedSegment,
         deadline: &OperationDeadline,
     ) -> Result<CatalogEntry, PublicationError> {
-        let source = crate::io::FsLocation::new(
+        let source = cntryl_midge_core::io::FsLocation::new(
             std::sync::Arc::clone(&self.state.fs),
-            crate::wal::segment_key(segment.segment_id),
+            cntryl_midge_durability::wal::segment_key(segment.segment_id),
         );
         self.cloud_persistence()?.verify_uploaded_wal_segment(
             segment.segment_id,

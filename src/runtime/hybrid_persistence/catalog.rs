@@ -4,19 +4,19 @@ use super::{
     contextualize_cloud_error, ControlObject, HybridStorage, MidgeError, MidgeResult,
     WalPublicationCatalog,
 };
-use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-use crate::storage::StorageObjectMetadata;
-use crate::wal::cloud_catalog::{CatalogDecodeError, CatalogRefusal};
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_storage::StorageObjectMetadata;
+use cntryl_midge_durability::wal::cloud_catalog::{CatalogDecodeError, CatalogRefusal};
 
 /// The expected rows kept through retirement CAS, including their cloned
 /// family-frontier vectors. Their original catalog can be released meanwhile.
 pub(super) struct RetirementEvidence {
-    entries: Vec<crate::wal::cloud_catalog::CatalogEntry>,
+    entries: Vec<cntryl_midge_durability::wal::cloud_catalog::CatalogEntry>,
     _memory: ResourceReservation,
 }
 
 impl RetirementEvidence {
-    pub(super) fn entries(&self) -> &[crate::wal::cloud_catalog::CatalogEntry] {
+    pub(super) fn entries(&self) -> &[cntryl_midge_durability::wal::cloud_catalog::CatalogEntry] {
         &self.entries
     }
 }
@@ -97,8 +97,8 @@ impl AdmittedCatalog {
     pub(super) fn set_aside_suffix(
         &mut self,
         fencing_epoch: u64,
-        from: Option<crate::wal::format::SegmentId>,
-        expected: &[crate::wal::cloud_catalog::CatalogEntry],
+        from: Option<cntryl_midge_durability::wal::format::SegmentId>,
+        expected: &[cntryl_midge_durability::wal::cloud_catalog::CatalogEntry],
         floor: u64,
     ) -> Result<bool, CatalogRefusal> {
         let changed = self
@@ -111,9 +111,9 @@ impl AdmittedCatalog {
     pub(super) fn retire_prefix(
         &mut self,
         fencing_epoch: u64,
-        expected: &[crate::wal::cloud_catalog::CatalogEntry],
-        generation: crate::types::SharedGenerationId,
-    ) -> Result<Vec<crate::wal::format::SegmentId>, CatalogRefusal> {
+        expected: &[cntryl_midge_durability::wal::cloud_catalog::CatalogEntry],
+        generation: cntryl_midge_core::types::SharedGenerationId,
+    ) -> Result<Vec<cntryl_midge_durability::wal::format::SegmentId>, CatalogRefusal> {
         let retired = self
             .catalog
             .retire_prefix(fencing_epoch, expected, generation)?;
@@ -126,7 +126,7 @@ impl AdmittedCatalog {
     pub(super) fn append_run(
         &mut self,
         epoch: u64,
-        run: &[crate::wal::cloud_catalog::CatalogEntry],
+        run: &[cntryl_midge_durability::wal::cloud_catalog::CatalogEntry],
     ) -> Result<bool, super::PublicationError> {
         let added = self
             .catalog
@@ -204,7 +204,7 @@ impl AdmittedEncoding {
         catalog.validate().map_err(MidgeError::Corruption)?;
         // JSON whitespace is not part of version-1 authority. Keep the counting
         // and writing serializers identical so admission precedes allocation.
-        let mut count = crate::common::resource_budget::ByteCounter::default();
+        let mut count = cntryl_midge_core::common::resource_budget::ByteCounter::default();
         serde_json::to_writer(&mut count, catalog)
             .map_err(|error| MidgeError::Internal(error.to_string()))?;
         let memory = budget.reserve(count.0, "encoded WAL catalog")?;
@@ -230,7 +230,7 @@ pub(super) fn cached_wal_catalog(storage: &HybridStorage) -> Option<MidgeResult<
 
 pub(super) fn load_and_repair_catalog_within(
     storage: &HybridStorage,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<Option<CatalogAuthority>> {
     load_and_repair_catalog_with_authority(storage, deadline, &|| storage.check_write_authority())
 }
@@ -246,13 +246,13 @@ fn unrepairable(error: &MidgeError) -> bool {
 
 pub(super) fn load_and_repair_catalog_with_authority(
     storage: &HybridStorage,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
     validate: &dyn Fn() -> MidgeResult<()>,
 ) -> MidgeResult<Option<CatalogAuthority>> {
     validate()?;
     let budget = catalog_budget(storage);
     let primary = storage
-        .read_control_object(crate::wal::cloud_catalog::OBJECT_KEY, &budget, deadline)
+        .read_control_object(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY, &budget, deadline)
         .map_err(|error| {
             contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
         })?;
@@ -263,7 +263,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
             Ok(catalog) => {
                 sync_catalog_copy_with_authority(
                     storage,
-                    crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+                    cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
                     primary.bytes(),
                     deadline,
                     validate,
@@ -274,7 +274,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
             Err(primary_error) => {
                 let mirror = storage
                     .read_control_object(
-                        crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+                        cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
                         &budget,
                         deadline,
                     )
@@ -302,7 +302,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
                 );
                 let repaired = sync_catalog_copy_with_authority(
                     storage,
-                    crate::wal::cloud_catalog::OBJECT_KEY,
+                    cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
                     mirror.bytes(),
                     deadline,
                     validate,
@@ -317,7 +317,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
 
     let mirror = storage
         .read_control_object(
-            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
             &budget,
             deadline,
         )
@@ -339,7 +339,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
     tracing::warn!("restoring missing cloud WAL publication catalog from validated mirror");
     let repaired = sync_catalog_copy_with_authority(
         storage,
-        crate::wal::cloud_catalog::OBJECT_KEY,
+        cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
         mirror.bytes(),
         deadline,
         validate,
@@ -395,7 +395,7 @@ pub(super) enum Missing {
 pub(super) fn mutate_wal_catalog_within<T, R>(
     storage: &HybridStorage,
     label: &'static str,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
     validate: &dyn Fn() -> MidgeResult<()>,
     missing: Missing,
     mutate: impl FnOnce(&mut AdmittedCatalog) -> Result<Mutation<T>, R>,
@@ -463,11 +463,11 @@ pub(super) fn mutate_wal_catalog_within<T, R>(
 /// repairing either copy: `None` when it is missing or does not decode.
 fn current_fencing_epoch(
     storage: &HybridStorage,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
 ) -> MidgeResult<Option<u64>> {
     let budget = catalog_budget(storage);
     let primary = storage
-        .read_control_object(crate::wal::cloud_catalog::OBJECT_KEY, &budget, deadline)
+        .read_control_object(cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY, &budget, deadline)
         .map_err(|error| {
             contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
         })?;
@@ -491,7 +491,7 @@ fn commit_catalog_with_authority(
     expected_primary: Option<ControlObject>,
     expected_mirror: Option<StorageObjectMetadata>,
     catalog: &WalPublicationCatalog,
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
     validate: &dyn Fn() -> MidgeResult<()>,
 ) -> MidgeResult<(ControlObject, ControlObject)> {
     let budget = catalog_budget(storage);
@@ -501,33 +501,33 @@ fn commit_catalog_with_authority(
     validate()?;
     let primary = storage
         .write_control_object_with_authority(
-            crate::wal::cloud_catalog::OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
             expected_primary.as_ref(),
             &encoded.bytes,
             &budget,
             deadline,
             validate,
         )
-        .map_err(crate::storage::hybrid::backend::ControlWriteFailure::into_error)?;
+        .map_err(cntryl_midge_storage::hybrid::backend::ControlWriteFailure::into_error)?;
     // The confirmed primary holds exactly the encoded bytes. Upload the mirror
     // from it so the encoding is not held through the mirror workspace.
     drop(encoded);
-    crate::failpoints::fail_point!("midge::cloud::after_catalog_primary_before_mirror");
+    cntryl_midge_core::failpoints::fail_point!("midge::cloud::after_catalog_primary_before_mirror");
     let mirror = if let Some(expected) = expected_mirror {
         storage
             .write_control_object_with_authority(
-                crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+                cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
                 Some(&expected),
                 primary.bytes(),
                 &budget,
                 deadline,
                 validate,
             )
-            .map_err(crate::storage::hybrid::backend::ControlWriteFailure::into_error)?
+            .map_err(cntryl_midge_storage::hybrid::backend::ControlWriteFailure::into_error)?
     } else {
         sync_catalog_copy_with_authority(
             storage,
-            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
             primary.bytes(),
             deadline,
             validate,
@@ -540,7 +540,7 @@ fn sync_catalog_copy_with_authority(
     storage: &HybridStorage,
     key: &str,
     bytes: &[u8],
-    deadline: &crate::common::OperationDeadline,
+    deadline: &cntryl_midge_core::common::OperationDeadline,
     validate: &dyn Fn() -> MidgeResult<()>,
 ) -> MidgeResult<ControlObject> {
     validate()?;
@@ -566,8 +566,8 @@ fn sync_catalog_copy_with_authority(
             validate,
         )
         .map_err(|failure| match failure {
-            crate::storage::hybrid::backend::ControlWriteFailure::Authority(error) => error,
-            crate::storage::hybrid::backend::ControlWriteFailure::Operation(error) => {
+            cntryl_midge_storage::hybrid::backend::ControlWriteFailure::Authority(error) => error,
+            cntryl_midge_storage::hybrid::backend::ControlWriteFailure::Operation(error) => {
                 contextualize_cloud_error(error, "cloud WAL catalog copy update failed")
             }
         })

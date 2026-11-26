@@ -28,9 +28,9 @@ impl CompactionPublicationFence {
     /// Refuse a new compaction while an earlier publication is unsettled.
     pub(in crate::runtime::event_loop) fn admit_compaction(
         &self,
-    ) -> crate::common::MidgeResult<()> {
+    ) -> cntryl_midge_core::common::MidgeResult<()> {
         if self.degraded {
-            return Err(crate::common::MidgeError::Fenced(
+            return Err(cntryl_midge_core::common::MidgeError::Fenced(
                 "compaction publication is unsettled; refusing another compaction until recovery"
                     .into(),
             ));
@@ -69,7 +69,7 @@ mod tests {
         assert!(fence.is_degraded());
         assert!(matches!(
             admitted,
-            Err(crate::common::MidgeError::Fenced(_))
+            Err(cntryl_midge_core::common::MidgeError::Fenced(_))
         ));
     }
 

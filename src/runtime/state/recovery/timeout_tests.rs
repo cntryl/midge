@@ -1,9 +1,9 @@
 //! Actual local metadata reads must not select salvage/default state on timeout.
 
 use super::*;
-use crate::config::RecoveryPolicy;
-use crate::io::traits::{DirEntry, HostAddressing, Metadata};
-use crate::io::{Durability, File, FsPath, FsResult, OpenOptions, ReadFs};
+use cntryl_midge_durability::RecoveryPolicy;
+use cntryl_midge_core::io::traits::{DirEntry, HostAddressing, Metadata};
+use cntryl_midge_core::io::{Durability, File, FsPath, FsResult, OpenOptions, ReadFs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -21,12 +21,12 @@ struct ReadEvidence {
 #[derive(Clone, Copy)]
 enum ReadDelivery {
     Timeout,
-    SuccessfulUntilExpiry(crate::common::OperationDeadline),
+    SuccessfulUntilExpiry(cntryl_midge_core::common::OperationDeadline),
     IoBeforeQuarantine,
 }
 
 struct TimedReadFs {
-    inner: crate::io::RealFs,
+    inner: cntryl_midge_core::io::RealFs,
     target: &'static str,
     evidence: ReadEvidence,
     delay: Duration,
@@ -40,7 +40,7 @@ struct TimedReadFile<'a> {
     delivery: ReadDelivery,
 }
 
-impl crate::io::ReadFile for TimedReadFile<'_> {
+impl cntryl_midge_core::io::ReadFile for TimedReadFile<'_> {
     fn read_at(&self, offset: u64, len: u64) -> FsResult<bytes::Bytes> {
         let started = Instant::now();
         let bytes = self.inner.read_at(offset, len)?;
@@ -99,9 +99,9 @@ impl File for TimedReadFile<'_> {
 }
 
 impl ReadFs for TimedReadFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -123,7 +123,7 @@ impl ReadFs for TimedReadFs {
 }
 
 impl Fs for TimedReadFs {
-    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+    fn try_lock_exclusive(&self, path: &FsPath) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
@@ -186,7 +186,7 @@ fn read_fs(
 ) -> (Arc<dyn Fs>, ReadEvidence) {
     let evidence = ReadEvidence::default();
     let fs = TimedReadFs {
-        inner: crate::io::RealFs::new(root).expect("open real metadata filesystem"),
+        inner: cntryl_midge_core::io::RealFs::new(root).expect("open real metadata filesystem"),
         target,
         evidence: evidence.clone(),
         delay,
@@ -211,9 +211,9 @@ fn assert_manifest_timeout(policy: RecoveryPolicy) {
     let directory = tempfile::tempdir().expect("create actual manifest directory");
     let mut manifest = Manifest::default();
     manifest.edit_checkpoint_id = 7;
-    crate::metadata::ManifestPersistence::save(directory.path(), &manifest)
+    cntryl_midge_durability::metadata::ManifestPersistence::save(directory.path(), &manifest)
         .expect("persist actual manifest");
-    let target = crate::metadata::files::MANIFEST_SNAPSHOT;
+    let target = cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT;
     let before = std::fs::read(directory.path().join(target)).unwrap();
     let (fs, evidence) = timed_fs(directory.path(), target);
     let mut opened_in_salvage_mode = false;
@@ -246,7 +246,7 @@ fn assert_intent_timeout(policy: RecoveryPolicy) {
     }];
     crate::runtime::IntentPersistence::save(directory.path(), &intents)
         .expect("persist actual intent log");
-    let target = crate::metadata::files::INTENT_LOG;
+    let target = cntryl_midge_durability::metadata::files::INTENT_LOG;
     let before = std::fs::read(directory.path().join(target)).unwrap();
     let (fs, evidence) = timed_fs(directory.path(), target);
     let mut opened_in_salvage_mode = false;
@@ -285,13 +285,13 @@ fn should_preserve_intent_log_when_salvage_recovery_read_exceeds_budget() {
 }
 
 fn seed_journal(root: &std::path::Path) -> Vec<u8> {
-    let fs: Arc<dyn Fs> = Arc::new(crate::io::RealFs::new(root).unwrap());
-    let store = crate::metadata::store::ManifestStore::new(fs);
+    let fs: Arc<dyn Fs> = Arc::new(cntryl_midge_core::io::RealFs::new(root).unwrap());
+    let store = cntryl_midge_durability::metadata::store::ManifestStore::new(fs);
     for id in 1..=16 {
         assert_eq!(
             store
                 .append(
-                    &crate::metadata::journal::ManifestEdit::CreateColumnFamily {
+                    &cntryl_midge_durability::metadata::journal::ManifestEdit::CreateColumnFamily {
                         id,
                         name: format!("deadline-cf-{id}"),
                         created_at: u64::from(id),
@@ -301,13 +301,13 @@ fn seed_journal(root: &std::path::Path) -> Vec<u8> {
             u64::from(id)
         );
     }
-    std::fs::read(root.join(crate::metadata::files::JOURNAL)).unwrap()
+    std::fs::read(root.join(cntryl_midge_durability::metadata::files::JOURNAL)).unwrap()
 }
 
 fn assert_journal_timeout(policy: RecoveryPolicy, aggregate: bool) {
     // Arrange: seed sixteen genuine durable edits and their fsync markers.
     let directory = tempfile::tempdir().unwrap();
-    let target = crate::metadata::files::JOURNAL;
+    let target = cntryl_midge_durability::metadata::files::JOURNAL;
     let before = seed_journal(directory.path());
     // Act: successful individual reads still consume one aggregate budget.
     let (result, evidence, salvaged, scope) =
@@ -326,10 +326,10 @@ fn assert_journal_timeout(policy: RecoveryPolicy, aggregate: bool) {
     }
     assert!(!directory
         .path()
-        .join(crate::metadata::files::MANIFEST_SNAPSHOT)
+        .join(cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT)
         .exists());
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
-    let healthy = crate::metadata::ManifestPersistence::load(directory.path()).unwrap();
+    let healthy = cntryl_midge_durability::metadata::ManifestPersistence::load(directory.path()).unwrap();
     assert_eq!(healthy.edit_checkpoint_id, 16);
     assert_eq!(healthy.column_families.len(), 16);
     for id in 1..=16 {
@@ -345,12 +345,12 @@ fn run_journal_with_controlled_read_expiry(
     policy: RecoveryPolicy,
     aggregate: bool,
 ) -> (MidgeResult<Manifest>, ReadEvidence, bool, DeadlineScope) {
-    crate::failpoints::with_read_gate(|| {
-        let inner = crate::io::RealFs::new(root).unwrap();
+    cntryl_midge_core::failpoints::with_read_gate(|| {
+        let inner = cntryl_midge_core::io::RealFs::new(root).unwrap();
         let evidence = ReadEvidence::default();
         // Admit setup before capturing the real budget; a successful second
         // read forces its expiry without depending on per-read sleep timing.
-        let scope = DeadlineScope::new(crate::common::OperationDeadline::from_budget(
+        let scope = DeadlineScope::new(cntryl_midge_core::common::OperationDeadline::from_budget(
             Duration::from_secs(5),
         ));
         let (delivery, delay) = if aggregate {
@@ -363,12 +363,12 @@ fn run_journal_with_controlled_read_expiry(
         };
         let fs: Arc<dyn Fs> = Arc::new(TimedReadFs {
             inner,
-            target: crate::metadata::files::JOURNAL,
+            target: cntryl_midge_durability::metadata::files::JOURNAL,
             evidence: evidence.clone(),
             delay,
             delivery,
         });
-        let fs = crate::io::scope_fs(fs, scope.clone());
+        let fs = cntryl_midge_core::io::scope_fs(fs, scope.clone());
         let mut salvaged = false;
         let result = RuntimeState::load_manifest_within(
             root,
@@ -409,17 +409,17 @@ fn should_preserve_read_failure_without_quarantine_when_salvage_cannot_read_loca
     let directory = tempfile::tempdir().unwrap();
     let wal_dir = directory.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
-    let record = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
+    let record = cntryl_midge_durability::wal::WalRecord::new(
+        cntryl_midge_durability::wal::WalOpKind::Put,
         bytes::Bytes::from_static(b"acknowledged"),
         Some(bytes::Bytes::from_static(b"value")),
         7,
     );
-    let payload = crate::wal::encoding::encode(&record).unwrap();
+    let payload = cntryl_midge_durability::wal::encoding::encode(&record).unwrap();
     let mut before = Vec::new();
-    crate::wal::frame::append_frame(&mut before, &payload).unwrap();
+    cntryl_midge_durability::wal::frame::append_frame(&mut before, &payload).unwrap();
     let target = "00000000000000000001.wal";
-    assert_eq!(target, crate::wal::segment_file_name(1));
+    assert_eq!(target, cntryl_midge_durability::wal::segment_file_name(1));
     std::fs::write(wal_dir.join(target), &before).unwrap();
     crate::runtime::wal_history::fixture::record_at(directory.path(), &[], 1).unwrap();
     // The recorded segment: the frame behind its header.
@@ -436,7 +436,7 @@ fn should_preserve_read_failure_without_quarantine_when_salvage_cannot_read_loca
     // Act: exercise the actual replay and its production salvage boundary.
     let result = RuntimeState::replay_wal_storage_within(
         &wal_dir,
-        &crate::io::real::test_root(directory.path()),
+        &cntryl_midge_core::io::real::test_root(directory.path()),
         RecoveryPolicy::Salvage,
         &Manifest::default(),
         HashMap::new(),
@@ -461,12 +461,12 @@ fn should_preserve_read_failure_without_quarantine_when_salvage_cannot_read_loca
 }
 
 /// Forwards to the host, except that every directory listing fails.
-struct ListingFailsFs(crate::io::RealFs);
+struct ListingFailsFs(cntryl_midge_core::io::RealFs);
 
 impl ReadFs for ListingFailsFs {
-    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn crate::io::ReadFile + '_>> {
+    fn open_read(&self, path: &FsPath) -> FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
         self.open(path, OpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
@@ -483,7 +483,7 @@ impl ReadFs for ListingFailsFs {
 }
 
 impl Fs for ListingFailsFs {
-    fn try_lock_exclusive(&self, path: &FsPath) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+    fn try_lock_exclusive(&self, path: &FsPath) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.0.try_lock_exclusive(path)
     }
 
@@ -514,10 +514,10 @@ fn should_not_regress_next_segment_id_when_wal_directory_listing_fails() {
     let directory = tempfile::tempdir().unwrap();
     let wal_dir = directory.path().join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
-    std::fs::write(wal_dir.join(crate::wal::segment_file_name(5)), b"x").unwrap();
-    std::fs::write(wal_dir.join(crate::wal::segment_file_name(6)), b"").unwrap();
+    std::fs::write(wal_dir.join(cntryl_midge_durability::wal::segment_file_name(5)), b"x").unwrap();
+    std::fs::write(wal_dir.join(cntryl_midge_durability::wal::segment_file_name(6)), b"").unwrap();
     crate::runtime::wal_history::fixture::record_at(directory.path(), &[5], 6).unwrap();
-    let wal: Arc<dyn Fs> = Arc::new(ListingFailsFs(crate::io::RealFs::new(&wal_dir).unwrap()));
+    let wal: Arc<dyn Fs> = Arc::new(ListingFailsFs(cntryl_midge_core::io::RealFs::new(&wal_dir).unwrap()));
 
     // Act: open the WAL history the way recovery does.
     let result = crate::runtime::wal_history::WalHistory::open(wal, 1, 0).map(|history| {

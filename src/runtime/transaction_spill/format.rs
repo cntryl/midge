@@ -4,10 +4,10 @@ use super::{
     SpillDiskCharge, SpillReaderCache, SpillRoot, SpillRun, TransactionMemoryPool, TransactionOp,
     MAX_FRAME_BYTES, RUN_HEADER_LEN, RUN_MAGIC, RUN_VERSION, SPARSE_INDEX_STRIDE,
 };
-use crate::common::resource_budget::{ResourceBudget, ResourceReservation};
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::stream::{FileReader, FileWriter};
-use crate::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
+use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::stream::{FileReader, FileWriter};
+use cntryl_midge_core::io::{File, Fs, FsError, FsPath, OpenMode, OpenOptions};
 use bytes::Bytes;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -130,7 +130,7 @@ impl RunFile {
         budget: Option<&ResourceBudget>,
         frame_limit: usize,
     ) -> MidgeResult<Self> {
-        let file = crate::io::open_persistent_handle(
+        let file = cntryl_midge_core::io::open_persistent_handle(
             root,
             path,
             OpenOptions {
@@ -522,7 +522,7 @@ fn spill_size_bound(ops: &[OrdinalOp]) -> MidgeResult<u64> {
 
 /// Create a spill file that must not already exist.
 pub(super) fn create_spill_file(root: &dyn Fs, path: &FsPath) -> MidgeResult<FileWriter> {
-    let file = crate::io::open_persistent_handle(
+    let file = cntryl_midge_core::io::open_persistent_handle(
         root,
         path,
         OpenOptions {

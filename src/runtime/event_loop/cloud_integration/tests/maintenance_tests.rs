@@ -1,5 +1,5 @@
 use super::*;
-use crate::io::FsError;
+use cntryl_midge_core::io::FsError;
 use crate::runtime::event_loop::compaction::CompactionCoordinator;
 
 mod compaction_notification_tests;
@@ -9,7 +9,7 @@ mod wake_tests;
 
 fn cloud_debt(
     files_per_cf: u64,
-) -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>, u32)> {
+) -> cntryl_midge_core::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>, u32)> {
     cloud_debt_with_wal_records(files_per_cf, 1)
 }
 
@@ -22,9 +22,9 @@ fn wal_debt_last_sequence(records: usize) -> u64 {
 fn cloud_debt_with_wal_records(
     files_per_cf: u64,
     wal_record_count: usize,
-) -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>, u32)> {
+) -> cntryl_midge_core::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>, u32)> {
     let mut el = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     el.actors
         .cloud_coordinator
@@ -32,7 +32,7 @@ fn cloud_debt_with_wal_records(
         .as_ref()
         .unwrap()
         .enable_ephemeral_sst_cache(64 * 1024 * 1024);
-    let reads = Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
+    let reads = Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
         Arc::clone(&el.state.fs),
         el.actors
             .cloud_coordinator
@@ -45,7 +45,7 @@ fn cloud_debt_with_wal_records(
     el.actors.compaction_actor = crate::runtime::actors::CompactionActor::new(Arc::new(
         crate::runtime::event_loop::resources::compaction_sst_factory(
             reads,
-            crate::codec::CompressionPolicy::default(),
+            cntryl_midge_core::codec::CompressionPolicy::default(),
         ),
     ));
     let other = el.state.create_cf("remaining-debt".into())?;
@@ -55,8 +55,8 @@ fn cloud_debt_with_wal_records(
     let last = wal_debt_last_sequence(wal_record_count);
     let records = (81..=last)
         .map(|sequence| {
-            crate::wal::WalRecord::new(
-                crate::wal::WalOpKind::Put,
+            cntryl_midge_durability::wal::WalRecord::new(
+                cntryl_midge_durability::wal::WalOpKind::Put,
                 Bytes::from_static(b"prune-candidate"),
                 Some(Bytes::from_static(b"value")),
                 sequence,
@@ -78,7 +78,7 @@ fn cloud_debt_with_wal_records(
             .next_sst_seqs
             .insert(cf_id, files_per_cf + 1);
         for number in 1..=files_per_cf {
-            let name = crate::cloud_layout::file_name(cf_id, 0, number);
+            let name = cntryl_midge_core::cloud_layout::file_name(cf_id, 0, number);
             let bytes = add_valid_manifest_sst_for_test(&mut el, &name, 81);
             el.state.manifest.test_mut().files.last_mut().unwrap().cf_id = cf_id;
             write_test_file(el.state.host_sst_dir().join(&name), &bytes);
@@ -133,7 +133,7 @@ fn complete_flush(el: &mut EventLoop) {
 
 #[test]
 fn should_resume_due_flush_when_compaction_debt_remains_in_another_family(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let (mut el, worker, other) = cloud_debt(4)?;
     el.state.set_compaction_enabled(true);
@@ -173,7 +173,7 @@ fn should_resume_due_flush_when_compaction_debt_remains_in_another_family(
 
 #[test]
 fn should_keep_compact_all_pending_while_fair_turns_service_other_work(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let (mut el, worker, _) = cloud_debt(1)?;
     el.state.set_compaction_enabled(false);
@@ -213,7 +213,7 @@ fn should_keep_compact_all_pending_while_fair_turns_service_other_work(
 
 #[test]
 fn should_fail_queued_manual_waiter_when_compaction_cannot_launch_after_its_turn(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let (mut el, _, _) = cloud_debt(1)?;
     queue_generation_for_maintenance_test(&mut el, 82)?;
@@ -229,7 +229,7 @@ fn should_fail_queued_manual_waiter_when_compaction_cannot_launch_after_its_turn
     assert!(matches!(
         response.recv_timeout(Duration::from_secs(1)),
         Ok(RuntimeResponse::Error {
-            error: crate::common::MidgeError::Fenced(_),
+            error: cntryl_midge_core::common::MidgeError::Fenced(_),
             ..
         })
     ));
@@ -237,19 +237,19 @@ fn should_fail_queued_manual_waiter_when_compaction_cannot_launch_after_its_turn
     Ok(())
 }
 
-fn local_debt() -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>)>
+fn local_debt() -> cntryl_midge_core::common::MidgeResult<(EventLoop, crossbeam::channel::Receiver<RuntimeMsg>)>
 {
     let mut el = crate::runtime::event_loop::tests::create_test_local_event_loop()?;
     let other = el.state.create_cf("remaining-debt".into())?;
     for cf_id in [0, other] {
-        let name = crate::cloud_layout::file_name(cf_id, 0, 1);
+        let name = cntryl_midge_core::cloud_layout::file_name(cf_id, 0, 1);
         let bytes = valid_sst_bytes_for_test(b"local-debt", b"value", 81);
         write_test_file(el.state.host_sst_dir().join(&name), &bytes);
         el.state
             .manifest
             .test_mut()
             .files
-            .push(crate::metadata::FileMeta {
+            .push(cntryl_midge_durability::metadata::FileMeta {
                 name,
                 cf_id,
                 level: 0,
@@ -271,8 +271,8 @@ fn local_debt() -> crate::common::MidgeResult<(EventLoop, crossbeam::channel::Re
 
 #[test]
 fn should_leave_below_threshold_local_debt_when_no_manual_obligation_exists(
-) -> crate::common::MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+) -> cntryl_midge_core::common::MidgeResult<()> {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let (mut el, worker) = local_debt()?;
         el.state.set_compaction_enabled(true);
@@ -306,8 +306,8 @@ fn should_leave_below_threshold_local_debt_when_no_manual_obligation_exists(
 
 #[test]
 fn should_finish_requested_local_debt_when_background_compaction_is_disabled(
-) -> crate::common::MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+) -> cntryl_midge_core::common::MidgeResult<()> {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let (mut el, worker) = local_debt()?;
         el.state.set_compaction_enabled(false);

@@ -1,9 +1,9 @@
 use super::*;
-use crate::io::{Durability, FsError, FsPath, FsResult, OpenOptions, ReadFile, ReadFs};
+use cntryl_midge_core::io::{Durability, FsError, FsPath, FsResult, OpenOptions, ReadFile, ReadFs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct RefuseSstReads {
-    inner: crate::io::RealFs,
+    inner: cntryl_midge_core::io::RealFs,
     attempts: AtomicUsize,
 }
 
@@ -31,44 +31,44 @@ impl ReadFs for RefuseSstReads {
     fn exists(&self, path: &FsPath) -> FsResult<bool> {
         self.inner.exists(path)
     }
-    fn metadata(&self, path: &FsPath) -> FsResult<crate::io::traits::Metadata> {
+    fn metadata(&self, path: &FsPath) -> FsResult<cntryl_midge_core::io::traits::Metadata> {
         self.inner.metadata(path)
     }
-    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<crate::io::traits::DirEntry>> {
+    fn list_dir(&self, path: &FsPath) -> FsResult<Vec<cntryl_midge_core::io::traits::DirEntry>> {
         self.inner.list_dir(path)
     }
 }
 
-impl crate::io::PersistentHandleFs for RefuseSstReads {
+impl cntryl_midge_core::io::PersistentHandleFs for RefuseSstReads {
     fn open_persistent(
         &self,
         path: &FsPath,
         options: OpenOptions,
-    ) -> FsResult<Box<dyn crate::io::File>> {
+    ) -> FsResult<Box<dyn cntryl_midge_core::io::File>> {
         self.check(path)?;
-        crate::io::open_persistent_handle(&self.inner, path, options)
+        cntryl_midge_core::io::open_persistent_handle(&self.inner, path, options)
     }
 }
 
 impl Fs for RefuseSstReads {
     fn try_lock_exclusive(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
-    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         self.inner
             .persistent_handle_capability()
-            .map(|_| self as &dyn crate::io::PersistentHandleFs)
+            .map(|_| self as &dyn cntryl_midge_core::io::PersistentHandleFs)
     }
 
-    fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn crate::io::File + '_>> {
+    fn open(&self, path: &FsPath, options: OpenOptions) -> FsResult<Box<dyn cntryl_midge_core::io::File + '_>> {
         self.check(path)?;
         self.inner.open(path, options)
     }
-    fn host_addressing(&self) -> Option<crate::io::HostAddressing<'_>> {
+    fn host_addressing(&self) -> Option<cntryl_midge_core::io::HostAddressing<'_>> {
         self.inner.host_addressing()
     }
     fn coordination_key(&self) -> u64 {
@@ -92,19 +92,19 @@ impl Fs for RefuseSstReads {
 }
 
 fn append_record(state: &RuntimeState, sequence: u64, key: &'static [u8]) {
-    let record = crate::wal::WalRecord::new_cf(
+    let record = cntryl_midge_durability::wal::WalRecord::new_cf(
         0,
-        crate::wal::WalOpKind::Put,
+        cntryl_midge_durability::wal::WalOpKind::Put,
         bytes::Bytes::from_static(key),
         Some(bytes::Bytes::from_static(b"value")),
         sequence,
     );
     let mut frame = Vec::new();
-    crate::wal::frame::append_frame(&mut frame, &crate::wal::encoding::encode(&record).unwrap())
+    cntryl_midge_durability::wal::frame::append_frame(&mut frame, &cntryl_midge_durability::wal::encoding::encode(&record).unwrap())
         .unwrap();
     let mut file = std::fs::OpenOptions::new()
         .append(true)
-        .open(state.host_wal_dir().join(crate::wal::segment_file_name(
+        .open(state.host_wal_dir().join(cntryl_midge_durability::wal::segment_file_name(
             state.wal.history.ledger().open_segment(),
         )))
         .unwrap();
@@ -122,7 +122,7 @@ fn should_not_read_ssts_to_decide_wal_replay_or_retention() {
     crate::runtime::wal_history::fixture::rotate(&mut state.wal.history).unwrap();
     append_record(&state, 3, b"replay");
     let output = crate::runtime::FileMeta {
-        name: crate::cloud_layout::file_name(0, 0, 1),
+        name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
         level: 0,
         size_bytes: 10,
         content_crc32c: None,
@@ -140,7 +140,7 @@ fn should_not_read_ssts_to_decide_wal_replay_or_retention() {
     assert!(!state.host_sst_dir().join(&output.name).exists());
     drop(state);
     let observed = Arc::new(RefuseSstReads {
-        inner: crate::io::RealFs::new(directory.path()).unwrap(),
+        inner: cntryl_midge_core::io::RealFs::new(directory.path()).unwrap(),
         attempts: AtomicUsize::new(0),
     });
     let fs: Arc<dyn Fs> = observed.clone();
@@ -151,7 +151,7 @@ fn should_not_read_ssts_to_decide_wal_replay_or_retention() {
         directory.path(),
         false,
         fs,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
         super::super::recovery::RecoveryWal::Replay { writer_epoch: 0 },
         None,
         None,
@@ -159,7 +159,7 @@ fn should_not_read_ssts_to_decide_wal_replay_or_retention() {
     .unwrap();
     let below = recovered.wal.history.ledger().retirable_prefix(|cf, sequence| {
         matches!(recovered.manifest.flush_frontiers().get(cf),
-            Ok(crate::metadata::FamilyFrontier::Live { through_sequence }) if sequence <= through_sequence)
+            Ok(cntryl_midge_durability::metadata::FamilyFrontier::Live { through_sequence }) if sequence <= through_sequence)
     });
     recovered.wal.history.retire_below(below.unwrap()).unwrap();
 

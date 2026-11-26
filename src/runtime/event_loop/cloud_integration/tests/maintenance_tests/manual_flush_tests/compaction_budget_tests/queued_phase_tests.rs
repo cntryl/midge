@@ -6,7 +6,7 @@ use crate::runtime::actors::compaction::publication::CompactionPublishCompletion
 struct QueuedEvidence {
     outcome: Result<RuntimeResponse, crossbeam::channel::RecvTimeoutError>,
     rows: MidgeResult<Vec<(Bytes, KeyState)>>,
-    committed: MidgeResult<crate::metadata::Manifest>,
+    committed: MidgeResult<cntryl_midge_durability::metadata::Manifest>,
     local_files: std::collections::BTreeSet<String>,
     inputs: Vec<String>,
     outputs: Vec<String>,
@@ -129,7 +129,7 @@ fn receive_live_success(
 }
 
 fn delayed_success_case(phase: CompactionPublishPhase) -> MidgeResult<QueuedEvidence> {
-    crate::failpoints::with_read_gate(|| delayed_success_case_inner(phase))
+    cntryl_midge_core::failpoints::with_read_gate(|| delayed_success_case_inner(phase))
 }
 
 fn delayed_success_case_inner(phase: CompactionPublishPhase) -> MidgeResult<QueuedEvidence> {
@@ -189,7 +189,7 @@ fn assert_common_queued_evidence(evidence: &QueuedEvidence) {
     );
 }
 
-fn names(files: &[crate::metadata::FileMeta]) -> std::collections::BTreeSet<String> {
+fn names(files: &[cntryl_midge_durability::metadata::FileMeta]) -> std::collections::BTreeSet<String> {
     files.iter().map(|file| file.name.clone()).collect()
 }
 
@@ -328,7 +328,7 @@ fn complete_manifest_after_real_input_retirement(
         })
         .collect::<Vec<_>>();
     let original = OperationDeadline::from_start(started, CALLER_BUDGET);
-    let inherited = crate::failpoints::worker_gate();
+    let inherited = cntryl_midge_core::failpoints::worker_gate();
     let (ready, entered) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         // The actual MMP worker has finished its checkpoint. Holding this
@@ -336,10 +336,10 @@ fn complete_manifest_after_real_input_retirement(
         // GC's physical effects, which use the separate publication lock.
         let observer = scope.spawn(move || {
             inherited.run(|| {
-                crate::metadata::journal::with_manifest_writer_lock(&fs, || {
+                cntryl_midge_durability::metadata::journal::with_manifest_writer_lock(&fs, || {
                     ready.send(()).unwrap();
                     while paths.iter().any(|path| path.exists()) {
-                        crate::common::DeadlineScope::new(original)
+                        cntryl_midge_core::common::DeadlineScope::new(original)
                             .check("actual input GC before clear admission")?;
                         std::thread::sleep(Duration::from_millis(1));
                     }
@@ -373,7 +373,7 @@ fn should_keep_typed_timeout_when_actual_final_clear_mirror_exhausts_original_bu
 ) -> MidgeResult<()> {
     // Arrange: real output/manifest phases leave less than the ordinary I/O cap.
     // Act: the final metadata write returns late; replay its actual error receipt.
-    let (evidence, reads, phase) = crate::failpoints::with_read_gate(final_clear_timeout_case)?;
+    let (evidence, reads, phase) = cntryl_midge_core::failpoints::with_read_gate(final_clear_timeout_case)?;
 
     // Assert: safe settled authority and exact row precede error classification.
     assert_common_queued_evidence(&evidence);

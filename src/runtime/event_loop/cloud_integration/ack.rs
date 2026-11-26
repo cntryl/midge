@@ -2,9 +2,9 @@
 
 use super::super::durability_sync::CompletionSource;
 use super::super::EventLoop;
-use crate::common::OperationDeadline;
+use cntryl_midge_core::common::OperationDeadline;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
-use crate::wal::publish::OwedSegment;
+use cntryl_midge_durability::wal::publish::OwedSegment;
 
 /// Failed upload attempts a cloud-durability waiter waits through. From then
 /// on every failure fails the waiters it blocks, while the storage queue
@@ -64,28 +64,28 @@ impl EventLoop {
         }
     }
 
-    pub(crate) fn handle_storage_event(&mut self, event: crate::storage::StorageEvent) {
+    pub(crate) fn handle_storage_event(&mut self, event: cntryl_midge_storage::StorageEvent) {
         self.handle_storage_event_with_deadline(event, None);
     }
 
     /// Whether an event only affects WAL durability accounting, and so can be
     /// handled while storage verification holds its barrier. Anything that
     /// can move SST or WAL files waits for the barrier instead.
-    fn is_verification_safe_storage_event(event: &crate::storage::StorageEvent) -> bool {
+    fn is_verification_safe_storage_event(event: &cntryl_midge_storage::StorageEvent) -> bool {
         matches!(
             event,
-            crate::storage::StorageEvent::CloudAck { .. }
-                | crate::storage::StorageEvent::CloudWalPublicationComplete { .. }
-                | crate::storage::StorageEvent::CloudMetadataMirrorComplete { .. }
-                | crate::storage::StorageEvent::CloudFail { .. }
-                | crate::storage::StorageEvent::CloudWalPruneAttemptFailed { .. }
-                | crate::storage::StorageEvent::BackpressureOn
+            cntryl_midge_storage::StorageEvent::CloudAck { .. }
+                | cntryl_midge_storage::StorageEvent::CloudWalPublicationComplete { .. }
+                | cntryl_midge_storage::StorageEvent::CloudMetadataMirrorComplete { .. }
+                | cntryl_midge_storage::StorageEvent::CloudFail { .. }
+                | cntryl_midge_storage::StorageEvent::CloudWalPruneAttemptFailed { .. }
+                | cntryl_midge_storage::StorageEvent::BackpressureOn
         )
     }
 
     fn handle_storage_event_with_deadline(
         &mut self,
-        event: crate::storage::StorageEvent,
+        event: cntryl_midge_storage::StorageEvent,
         deadline: Option<&OperationDeadline>,
     ) {
         if self.publication.verification_barrier.is_active()
@@ -97,25 +97,25 @@ impl EventLoop {
             return;
         }
         match event {
-            crate::storage::StorageEvent::CloudMetadataMirrorComplete {
+            cntryl_midge_storage::StorageEvent::CloudMetadataMirrorComplete {
                 operation_id,
                 writer_epoch,
             } => {
                 self.complete_metadata_mirror(operation_id, writer_epoch);
             }
-            crate::storage::StorageEvent::CloudWalPublicationComplete {
+            cntryl_midge_storage::StorageEvent::CloudWalPublicationComplete {
                 operation_id,
                 writer_epoch,
             } => {
                 self.complete_cloud_publication(operation_id, writer_epoch);
             }
-            crate::storage::StorageEvent::CloudAck {
+            cntryl_midge_storage::StorageEvent::CloudAck {
                 segment_id,
                 max_sequence,
             } => {
                 self.handle_storage_event_cloud_ack(segment_id, max_sequence, deadline);
             }
-            crate::storage::StorageEvent::CloudFail {
+            cntryl_midge_storage::StorageEvent::CloudFail {
                 segment_id,
                 error,
                 failures,
@@ -123,10 +123,10 @@ impl EventLoop {
             } => {
                 self.handle_storage_event_cloud_fail(segment_id, &error, failures, failure_kind);
             }
-            crate::storage::StorageEvent::CloudWalPruneComplete { segment_id, result } => {
+            cntryl_midge_storage::StorageEvent::CloudWalPruneComplete { segment_id, result } => {
                 self.handle_storage_event_cloud_wal_prune_complete(segment_id, result);
             }
-            crate::storage::StorageEvent::CloudWalPruneAttemptFailed { segment_id, error } => {
+            cntryl_midge_storage::StorageEvent::CloudWalPruneAttemptFailed { segment_id, error } => {
                 self.actors
                     .cloud_coordinator
                     .cloud_wal
@@ -137,11 +137,11 @@ impl EventLoop {
                     "Cloud WAL prune preflight failed; retaining authority for retry"
                 );
             }
-            crate::storage::StorageEvent::BackpressureOn => {
+            cntryl_midge_storage::StorageEvent::BackpressureOn => {
                 tracing::warn!("storage backpressure activated — pausing flushes");
                 self.state.set_write_stalled(true);
             }
-            crate::storage::StorageEvent::BackpressureOff => {
+            cntryl_midge_storage::StorageEvent::BackpressureOff => {
                 tracing::info!("storage backpressure released — resuming normal operation");
                 if self.state.write_stalled() {
                     self.state.set_write_stalled(false);
@@ -162,9 +162,9 @@ impl EventLoop {
         segment_id: u64,
         error: &str,
         failures: u32,
-        failure_kind: crate::storage::CloudUploadFailureKind,
+        failure_kind: cntryl_midge_storage::CloudUploadFailureKind,
     ) {
-        use crate::storage::CloudUploadFailureKind;
+        use cntryl_midge_storage::CloudUploadFailureKind;
         if !failure_kind.ends_upload() && failures < WAL_UPLOAD_ATTEMPTS_OWED_TO_WAITERS {
             tracing::warn!(
                 segment_id,
@@ -177,15 +177,15 @@ impl EventLoop {
             // The commit is applied and its upload keeps retrying, so it may
             // still become durable: the outcome is unknown, never a failure.
             CloudUploadFailureKind::Timeout | CloudUploadFailureKind::Other => {
-                crate::common::MidgeError::Timeout(format!(
+                cntryl_midge_core::common::MidgeError::Timeout(format!(
                     "Cloud durability unconfirmed after {failures} failed upload attempts; \
                      the upload keeps retrying, so treat the outcome as unknown: {error}"
                 ))
             }
-            CloudUploadFailureKind::Corruption => crate::common::MidgeError::Corruption(format!(
+            CloudUploadFailureKind::Corruption => cntryl_midge_core::common::MidgeError::Corruption(format!(
                 "cloud WAL segment {segment_id} cannot be uploaded: {error}"
             )),
-            CloudUploadFailureKind::Fenced => crate::common::MidgeError::Fenced(format!(
+            CloudUploadFailureKind::Fenced => cntryl_midge_core::common::MidgeError::Fenced(format!(
                 "cloud WAL segment {segment_id} upload stopped: {error}"
             )),
         };
@@ -208,10 +208,10 @@ impl EventLoop {
     pub(super) fn defer_cloud_ack_for_memory(
         &mut self,
         segment_id: u64,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
         deadline: &OperationDeadline,
     ) -> bool {
-        let contention = crate::common::resource_budget::ResourceContention::from_error(error);
+        let contention = cntryl_midge_core::common::resource_budget::ResourceContention::from_error(error);
         if !deadline.is_expired()
             && contention.is_some_and(|contention| {
                 self.actors
@@ -344,7 +344,7 @@ impl EventLoop {
     fn fence_cloud_ack_transition(
         &mut self,
         ready_segments: &[OwedSegment],
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) {
         let first_segment = ready_segments.first().map(|segment| segment.segment_id);
         // Fencing fails every queued waiter exactly once; nothing keyed at or
@@ -356,7 +356,7 @@ impl EventLoop {
     fn handle_storage_event_cloud_wal_prune_complete(
         &mut self,
         segment_id: u64,
-        result: crate::storage::StorageOutcome<()>,
+        result: cntryl_midge_storage::StorageOutcome<()>,
     ) {
         let admitted = self
             .actors
@@ -377,14 +377,14 @@ impl EventLoop {
         }
         self.pipeline.background_compaction_schedule.mark_due();
         match result {
-            crate::storage::StorageOutcome::Ok(()) => {
+            cntryl_midge_storage::StorageOutcome::Ok(()) => {
                 self.actors
                     .cloud_coordinator
                     .cloud_wal
                     .retire_pruned(segment_id);
                 tracing::debug!(segment_id, "Pruned cloud-covered remote WAL segment");
             }
-            crate::storage::StorageOutcome::Err(error) => {
+            cntryl_midge_storage::StorageOutcome::Err(error) => {
                 // The authoritative catalog entry is retired before physical
                 // deletion is attempted. A failed delete is therefore a safe
                 // ignored orphan. Storage owns its bounded conditional retry
@@ -402,7 +402,7 @@ impl EventLoop {
             }
         }
         // Tests observe delivery after authority and the local cache retire.
-        crate::failpoints::fail_point!("midge::cloud::after_wal_prune_complete");
+        cntryl_midge_core::failpoints::fail_point!("midge::cloud::after_wal_prune_complete");
     }
 
     /// Shared cloud budget for the work that answers `segment_id`.
@@ -440,9 +440,9 @@ impl EventLoop {
     /// handed a defect. Only kinds with no retry meaning become `Internal`.
     pub(super) fn cloud_ack_error(
         context: &str,
-        error: crate::common::MidgeError,
-    ) -> crate::common::MidgeError {
-        use crate::common::MidgeError;
+        error: cntryl_midge_core::common::MidgeError,
+    ) -> cntryl_midge_core::common::MidgeError {
+        use cntryl_midge_core::common::MidgeError;
         match error {
             MidgeError::Timeout(message) => MidgeError::Timeout(format!("{context}: {message}")),
             MidgeError::Fenced(message) => MidgeError::Fenced(format!("{context}: {message}")),
@@ -487,7 +487,7 @@ impl EventLoop {
     pub(super) fn requeue_failed_cloud_upload(
         &mut self,
         segment_id: u64,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) {
         if self.settle_failed_cloud_upload(segment_id, error) {
             self.requeue_cloud_upload(segment_id);
@@ -500,7 +500,7 @@ impl EventLoop {
     pub(super) fn settle_failed_cloud_upload(
         &mut self,
         segment_id: u64,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) -> bool {
         if !self.owns_cloud_upload(segment_id) {
             tracing::warn!(
@@ -545,7 +545,7 @@ impl EventLoop {
             );
             return;
         };
-        let local_path = crate::wal::segment_key(segment_id);
+        let local_path = cntryl_midge_durability::wal::segment_key(segment_id);
         let history = &self.state.wal.history;
         if history.segment_files().is_none()
             || !matches!(self.state.fs.exists(&local_path), Ok(true))
@@ -564,7 +564,7 @@ impl EventLoop {
             max_sequence,
             history.ledger(),
         ) {
-            let error = crate::common::MidgeError::Internal(format!(
+            let error = cntryl_midge_core::common::MidgeError::Internal(format!(
                 "could not requeue failed cloud WAL upload: {not_member}"
             ));
             self.fence_wal_transition(&error, Some(segment_id));
@@ -574,7 +574,7 @@ impl EventLoop {
 
     /// A storage-owned upload of `segment_id` spent the attempts its waiters
     /// are owed. Fail them; the storage queue keeps the upload and retries it.
-    fn fail_cloud_upload_waiters(&mut self, segment_id: u64, error: &crate::common::MidgeError) {
+    fn fail_cloud_upload_waiters(&mut self, segment_id: u64, error: &cntryl_midge_core::common::MidgeError) {
         if !self.owns_cloud_upload(segment_id) {
             tracing::warn!(
                 segment_id,
@@ -590,7 +590,7 @@ impl EventLoop {
     /// of every later cloud durability generation. An earlier sealed
     /// generation can still close independently when its acknowledgement
     /// arrives.
-    fn fail_blocked_waiters(&mut self, segment_id: u64, error: &crate::common::MidgeError) {
+    fn fail_blocked_waiters(&mut self, segment_id: u64, error: &cntryl_midge_core::common::MidgeError) {
         self.state.mark_persistence_anomaly();
         tracing::error!(segment_id, error = %error, "Cloud upload failed");
         let waiters = self
@@ -604,7 +604,7 @@ impl EventLoop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::MidgeError;
+    use cntryl_midge_core::common::MidgeError;
     use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 
     #[test]
@@ -629,7 +629,7 @@ mod tests {
             assert!(
                 matches!(
                     error.severity(),
-                    crate::common::Severity::Backpressure | crate::common::Severity::Transient
+                    cntryl_midge_core::common::Severity::Backpressure | cntryl_midge_core::common::Severity::Transient
                 ),
                 "retryable failure must stay retryable: {error:?}"
             );
@@ -645,7 +645,7 @@ mod tests {
     fn should_reject_unrelated_resource_failure_when_shared_budget_is_in_use() {
         // Arrange
         let mut el = create_test_cloud_event_loop(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         )
         .unwrap();
         let budget = el
@@ -670,7 +670,7 @@ mod tests {
     fn should_reject_oversized_reservation_when_shared_budget_is_in_use() {
         // Arrange
         let mut el = create_test_cloud_event_loop(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         )
         .unwrap();
         let budget = el
@@ -697,7 +697,7 @@ mod tests {
     fn should_reject_contention_when_it_belongs_to_another_budget() {
         // Arrange
         let mut el = create_test_cloud_event_loop(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         )
         .unwrap();
         let shared = el
@@ -712,7 +712,7 @@ mod tests {
             .reserve(shared.limit(), "shared maintenance")
             .unwrap();
         let other =
-            crate::common::resource_budget::ResourceBudget::new(10).with_contention_errors();
+            cntryl_midge_core::common::resource_budget::ResourceBudget::new(10).with_contention_errors();
         let _other_held = other.reserve(10, "other pool").unwrap();
         let error = other.reserve(1, "other request").unwrap_err();
 
@@ -727,7 +727,7 @@ mod tests {
     fn should_reject_contention_when_ack_deadline_has_expired() {
         // Arrange
         let mut el = create_test_cloud_event_loop(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         )
         .unwrap();
         let budget = el
@@ -769,7 +769,7 @@ mod tests {
     fn should_defer_ack_when_sibling_reservation_succeeds_after_admission_failure() {
         // Arrange
         let mut el = create_test_cloud_event_loop(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         )
         .unwrap();
         let budget = el

@@ -1,14 +1,14 @@
 //! Metadata-only promotion through real publication and restart.
 use super::*;
-use crate::common::resource_budget::ResourceBudget;
-use crate::sst::traits::{DynSstWriter, SstReaderExt};
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
+use cntryl_midge_table::sst::traits::{DynSstWriter, SstReaderExt};
 use std::path::Path;
 
 /// A move must never ask for an SST reader or writer. Other filesystem work
 /// still uses the real database so journal/intent durability is exercised.
-struct NoRewriteFactory(Arc<dyn crate::io::Fs>);
-impl crate::sst::SstFactory for NoRewriteFactory {
-    fn output_fs(&self) -> Arc<dyn crate::io::Fs> {
+struct NoRewriteFactory(Arc<dyn cntryl_midge_core::io::Fs>);
+impl cntryl_midge_table::sst::SstFactory for NoRewriteFactory {
+    fn output_fs(&self) -> Arc<dyn cntryl_midge_core::io::Fs> {
         Arc::clone(&self.0)
     }
     fn compaction_scratch_cleanup_verified(&self) -> bool {
@@ -36,7 +36,7 @@ fn move_fixture() -> MidgeResult<(ConcurrentFixture, String)> {
     let mut fixture = ConcurrentFixture::new(16 * 1024 * 1024, false)?;
     let name = fixture.file(0, 1, b"key", b"value", 1)?;
     fixture.persist()?;
-    let factory = Arc::new(NoRewriteFactory(crate::io::subdirectory(
+    let factory = Arc::new(NoRewriteFactory(cntryl_midge_core::io::subdirectory(
         Arc::clone(&fixture.event_loop.state.fs),
         "sst",
     )));
@@ -51,9 +51,9 @@ fn move_fixture() -> MidgeResult<(ConcurrentFixture, String)> {
 }
 
 fn range_tombstone_file(fixture: &mut ConcurrentFixture) -> MidgeResult<String> {
-    let name = crate::cloud_layout::file_name(0, 0, 1);
+    let name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
     let factory = FsSstFactoryIo::new(
-        crate::io::subdirectory(Arc::clone(&fixture.event_loop.state.fs), "sst"),
+        cntryl_midge_core::io::subdirectory(Arc::clone(&fixture.event_loop.state.fs), "sst"),
         64 * 1024,
     );
     let mut writer = factory.create()?;
@@ -69,7 +69,7 @@ fn range_tombstone_file(fixture: &mut ConcurrentFixture) -> MidgeResult<String> 
         .manifest
         .test_mut()
         .files
-        .push(crate::metadata::FileMeta {
+        .push(cntryl_midge_durability::metadata::FileMeta {
             name: name.clone(),
             level: 0,
             cf_id: 0,
@@ -122,7 +122,7 @@ impl Drop for HeldPublication {
 
 #[test]
 fn should_promote_existing_l0_identity_without_reading_or_writing_sst_bytes() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
     let (mut fixture, name) = move_fixture()?;
@@ -149,12 +149,12 @@ fn should_promote_existing_l0_identity_without_reading_or_writing_sst_bytes() ->
 
 #[test]
 fn should_preserve_range_tombstone_visibility_after_identity_move() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
     let mut fixture = ConcurrentFixture::new(16 * 1024 * 1024, false)?;
     let name = range_tombstone_file(&mut fixture)?;
-    let factory = Arc::new(NoRewriteFactory(crate::io::subdirectory(
+    let factory = Arc::new(NoRewriteFactory(cntryl_midge_core::io::subdirectory(
         Arc::clone(&fixture.event_loop.state.fs),
         "sst",
     )));
@@ -176,7 +176,7 @@ fn should_preserve_range_tombstone_visibility_after_identity_move() -> MidgeResu
         .find(|file| file.name == name)
         .unwrap()
         .clone();
-    assert!(!crate::metadata::manifest::validate_sst_move(
+    assert!(!cntryl_midge_durability::metadata::manifest::validate_sst_move(
         &fixture.event_loop.state.manifest.files,
         &[source],
         1,
@@ -202,7 +202,7 @@ fn should_preserve_range_tombstone_visibility_after_identity_move() -> MidgeResu
 #[test]
 fn should_retain_live_identity_when_logical_move_is_canceled_before_publication() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: the real move worker returns existing immutable names.
         let (mut fixture, name) = move_fixture()?;
         let original = std::fs::read(fixture.directory.path().join("sst").join(&name))?;
@@ -241,7 +241,7 @@ fn should_retain_live_identity_when_logical_move_is_canceled_before_publication(
 #[test]
 fn should_preserve_newest_l0_visibility_when_hot_sources_overlap_cold_predecessors(
 ) -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: the newest file is hot and the target is empty, but both
     // overlapping L0 sources must be selected and rewritten together.
@@ -293,7 +293,7 @@ fn should_preserve_newest_l0_visibility_when_hot_sources_overlap_cold_predecesso
 #[test]
 fn should_retain_live_objects_when_move_publication_acquires_conflicting_target_coverage(
 ) -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: hold the actual publication worker after its durable intent.
     let (mut fixture, source) = move_fixture()?;
@@ -342,7 +342,7 @@ fn should_retain_live_objects_when_move_publication_acquires_conflicting_target_
 #[test]
 fn should_recover_exact_original_identity_on_each_side_of_the_logical_move_edit() -> MidgeResult<()>
 {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     for (point, level) in [
         ("midge::manifest::inject_no_space_on_move_edit", 0),
@@ -361,9 +361,9 @@ fn should_recover_exact_original_identity_on_each_side_of_the_logical_move_edit(
         // or retired input. Startup replays the journal before the move intent.
         assert_eq!(current_level(&fixture, &name), level);
         assert!(fixture.event_loop.authority.compaction_fence.is_degraded());
-        let recovered = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+        let recovered = cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
             &fixture.event_loop.state.fs,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         )
         .map_err(MidgeError::Internal)?;
         assert_eq!(recovered.files.len(), 1);

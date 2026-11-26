@@ -15,9 +15,9 @@ impl ReadSnapshot {
             && !matches!(candidate, KeyState::Absent)
             && candidate_seq == existing_seq
         {
-            crate::types::resolve_same_sequence(
-                crate::types::VersionContent::from_state(existing).expect("present state"),
-                crate::types::VersionContent::from_state(candidate).expect("present state"),
+            cntryl_midge_core::types::resolve_same_sequence(
+                cntryl_midge_core::types::VersionContent::from_state(existing).expect("present state"),
+                cntryl_midge_core::types::VersionContent::from_state(candidate).expect("present state"),
             )
             .map_err(|()| {
                 MidgeError::Corruption(format!(

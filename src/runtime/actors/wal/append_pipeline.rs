@@ -4,12 +4,12 @@ use super::{
     PendingStrictAppend, PendingStrictSync, PreparedTransactionAppend, WalActor,
     WalTransitionOperation,
 };
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition::WalSyncTicket;
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
-use crate::wal::append_completion::{AppendResult, WalAppendPrefix};
-use crate::wal::sequenced::SequencedWalUnit;
+use cntryl_midge_durability::wal::append_completion::{AppendResult, WalAppendPrefix};
+use cntryl_midge_durability::wal::sequenced::SequencedWalUnit;
 use std::time::Instant;
 
 impl WalActor {
@@ -18,7 +18,7 @@ impl WalActor {
         state: &mut RuntimeState,
         prepared: &[PreparedTransactionAppend],
         ticket: &WalSyncTicket,
-        root: Option<crate::lease::WriterEffectGroup>,
+        root: Option<cntryl_midge_durability::lease::WriterEffectGroup>,
         authority_prevalidated: bool,
     ) -> MidgeResult<PendingStrictAppend> {
         #[cfg(feature = "failpoints")]
@@ -53,7 +53,7 @@ impl WalActor {
                 .commit_seq,
         };
         let admitted = self.admit_sequenced_wal(&units)?;
-        let previous_position = self.writer().map_or(0, crate::wal::WalWriter::current_pos);
+        let previous_position = self.writer().map_or(0, cntryl_midge_durability::wal::WalWriter::current_pos);
         let started = Instant::now();
         if let Err(error) = self
             .ensure_lease_validity()
@@ -73,7 +73,7 @@ impl WalActor {
                 )
             })
             .unwrap_or_else(|| {
-                Err(crate::wal::traits::WalAppendError::unchanged(
+                Err(cntryl_midge_durability::wal::traits::WalAppendError::unchanged(
                     MidgeError::Internal("WAL writer lost sequenced submission capability".into()),
                 ))
             });
@@ -158,7 +158,7 @@ impl WalActor {
         if receipt.prefix != pending.expected
             || receipt.prefix.barrier_id != ticket.generation()
             || receipt.start_offset != pending.previous_position
-            || receipt.end_offset != self.writer().map_or(0, crate::wal::WalWriter::current_pos)
+            || receipt.end_offset != self.writer().map_or(0, cntryl_midge_durability::wal::WalWriter::current_pos)
         {
             return Err(MidgeError::OutcomeUnknown(
                 "WAL append completion does not match its admitted group".into(),
@@ -172,7 +172,7 @@ impl WalActor {
         WalTransitionBoundary::AfterAppendBeforeAccounting
             .check()
             .map_err(Self::appended_unit_error)?;
-        crate::failpoints::fail_point!("midge::wal::after_append_batch_before_sync");
+        cntryl_midge_core::failpoints::fail_point!("midge::wal::after_append_batch_before_sync");
         state.wal.pending_writes = state
             .wal
             .pending_writes

@@ -3,7 +3,7 @@ use crate::runtime::event_loop::manifest::ManifestCoordinator;
 use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
 use crate::runtime::event_loop::wal::{ApplyTransactionRequest, WalCoordinator};
 use crate::runtime::{ConflictPolicy, RuntimeResponse, TransactionOp};
-use crate::storage::hybrid::policy::StorageBudgetPolicy;
+use cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -13,12 +13,12 @@ use std::time::{Duration, Instant};
 fn should_refuse_v10_maintenance_mirror_when_metadata_reload_is_required() -> MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(StorageBudgetPolicy::default())?;
-    let format_10 = crate::metadata::format::CURRENT_FORMAT_VERSION + 1;
+    let format_10 = cntryl_midge_durability::metadata::format::CURRENT_FORMAT_VERSION + 1;
     event_loop.state.manifest_store =
-        Arc::new(crate::metadata::store::ManifestStore::new_with_format(
+        Arc::new(cntryl_midge_durability::metadata::store::ManifestStore::new_with_format(
             Arc::clone(&event_loop.state.fs),
-            crate::metadata::accounting::Owner::new(),
-            crate::metadata::accounting::Medium::Persistent,
+            cntryl_midge_durability::metadata::accounting::Owner::new(),
+            cntryl_midge_durability::metadata::accounting::Medium::Persistent,
             format_10,
         ));
     event_loop.state.fence_metadata_until_reloaded();
@@ -28,7 +28,7 @@ fn should_refuse_v10_maintenance_mirror_when_metadata_reload_is_required() -> Mi
     let result = event_loop.start_metadata_mirror(MirrorContinuation::Retention, deadline);
 
     // Assert
-    assert!(matches!(result, Err(crate::common::MidgeError::Fenced(_))));
+    assert!(matches!(result, Err(cntryl_midge_core::common::MidgeError::Fenced(_))));
     assert!(!event_loop
         .actors
         .cloud_coordinator
@@ -71,15 +71,15 @@ impl Drop for HeldMirror {
 }
 
 struct HeldMetadataObjectStore {
-    inner: Arc<crate::storage::filesystem::FileSystem>,
+    inner: Arc<cntryl_midge_storage::filesystem::FileSystem>,
     entered: crossbeam::channel::Sender<()>,
     release: crossbeam::channel::Receiver<()>,
     armed: Arc<AtomicBool>,
     held: AtomicBool,
 }
 
-impl crate::storage::StorageBackend for HeldMetadataObjectStore {
-    crate::storage::forward_storage_backend!(inner;
+impl cntryl_midge_storage::StorageBackend for HeldMetadataObjectStore {
+    cntryl_midge_storage::forward_storage_backend!(inner;
         submit_range_read_request,
         submit_range_head_request,
         submit_metadata_read_request,
@@ -89,9 +89,9 @@ impl crate::storage::StorageBackend for HeldMetadataObjectStore {
 
     fn submit_write_request(
         &self,
-        request: crate::storage::StorageRequest,
+        request: cntryl_midge_storage::StorageRequest,
         data: Vec<u8>,
-        callback: crate::storage::StorageCallback,
+        callback: cntryl_midge_storage::StorageCallback,
     ) {
         if self.armed.load(Ordering::Acquire) && !self.held.swap(true, Ordering::AcqRel) {
             self.entered.send(()).expect("signal provider write");
@@ -103,40 +103,40 @@ impl crate::storage::StorageBackend for HeldMetadataObjectStore {
     }
 }
 
-impl crate::storage::inventory::ObjectInventory for HeldMetadataObjectStore {
+impl cntryl_midge_storage::inventory::ObjectInventory for HeldMetadataObjectStore {
     fn keys_page(
         &self,
         prefix: &str,
-        page: crate::storage::cloud::CloudListPageRequest,
-        scope: Option<&crate::common::DeadlineScope>,
-    ) -> MidgeResult<Option<crate::storage::cloud::CloudListPage>> {
-        crate::storage::inventory::ObjectInventory::keys_page(&*self.inner, prefix, page, scope)
+        page: cntryl_midge_storage::cloud::CloudListPageRequest,
+        scope: Option<&cntryl_midge_core::common::DeadlineScope>,
+    ) -> MidgeResult<Option<cntryl_midge_storage::cloud::CloudListPage>> {
+        cntryl_midge_storage::inventory::ObjectInventory::keys_page(&*self.inner, prefix, page, scope)
     }
 
     fn object_size(
         &self,
         key: &str,
-        scope: Option<&crate::common::DeadlineScope>,
+        scope: Option<&cntryl_midge_core::common::DeadlineScope>,
     ) -> MidgeResult<Option<u64>> {
-        crate::storage::inventory::ObjectInventory::object_size(&*self.inner, key, scope)
+        cntryl_midge_storage::inventory::ObjectInventory::object_size(&*self.inner, key, scope)
     }
 
     fn keys_under(
         &self,
         prefix: &str,
-        scope: Option<&crate::common::DeadlineScope>,
+        scope: Option<&cntryl_midge_core::common::DeadlineScope>,
     ) -> MidgeResult<Vec<String>> {
-        crate::storage::inventory::ObjectInventory::keys_under(&*self.inner, prefix, scope)
+        cntryl_midge_storage::inventory::ObjectInventory::keys_under(&*self.inner, prefix, scope)
     }
 }
 
 impl HeldMetadataObjectStore {
     fn wrap(
-        inner: Arc<crate::storage::filesystem::FileSystem>,
+        inner: Arc<cntryl_midge_storage::filesystem::FileSystem>,
         entered: crossbeam::channel::Sender<()>,
         release: crossbeam::channel::Receiver<()>,
         armed: Arc<AtomicBool>,
-    ) -> Arc<dyn crate::storage::inventory::ObjectStore> {
+    ) -> Arc<dyn cntryl_midge_storage::inventory::ObjectStore> {
         Arc::new(Self {
             inner,
             entered,
@@ -152,10 +152,10 @@ fn seed_compaction_name_source(event_loop: &mut EventLoop) -> MidgeResult<String
 }
 
 fn seed_manifest_sst(event_loop: &mut EventLoop, cf_id: u32, seq: u64) -> MidgeResult<String> {
-    use crate::sst::SstFactory as _;
-    let name = crate::cloud_layout::file_name(cf_id, 0, seq);
-    let factory = crate::sst::FsSstFactoryIo::new(
-        crate::io::subdirectory(Arc::clone(&event_loop.state.fs), "sst"),
+    use cntryl_midge_table::sst::SstFactory as _;
+    let name = cntryl_midge_core::cloud_layout::file_name(cf_id, 0, seq);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(
+        cntryl_midge_core::io::subdirectory(Arc::clone(&event_loop.state.fs), "sst"),
         4096,
     );
     let mut writer = factory.create()?;
@@ -163,7 +163,7 @@ fn seed_manifest_sst(event_loop: &mut EventLoop, cf_id: u32, seq: u64) -> MidgeR
         b"key",
         Some(b"value"),
         1,
-        crate::types::EntryType::Put,
+        cntryl_midge_core::types::EntryType::Put,
         None,
     )?;
     let finalized = writer
@@ -175,7 +175,7 @@ fn seed_manifest_sst(event_loop: &mut EventLoop, cf_id: u32, seq: u64) -> MidgeR
         .manifest
         .test_mut()
         .files
-        .push(crate::metadata::FileMeta {
+        .push(cntryl_midge_durability::metadata::FileMeta {
             name: name.clone(),
             cf_id,
             level: 0,
@@ -189,7 +189,7 @@ fn seed_manifest_sst(event_loop: &mut EventLoop, cf_id: u32, seq: u64) -> MidgeR
             key_bounds_complete: true,
             ..Default::default()
         });
-    crate::metadata::ManifestPersistence::save_with_fs(
+    cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(
         &event_loop.state.fs,
         &event_loop.state.manifest,
     )
@@ -200,12 +200,12 @@ fn seed_manifest_sst(event_loop: &mut EventLoop, cf_id: u32, seq: u64) -> MidgeR
 #[test]
 fn should_preserve_accepted_compaction_reservation_when_its_mirror_finishes_under_another_owner(
 ) -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: reserve a real source's output generation with a held mirror.
     let mut event_loop =
         crate::runtime::event_loop::tests::create_test_cloud_event_loop_with_reserved_names(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
             Some(100),
         )?;
     let source = seed_compaction_name_source(&mut event_loop)?;
@@ -287,7 +287,7 @@ fn should_keep_foreground_progress_available_while_metadata_provider_is_held() -
     let store_armed = Arc::clone(&armed);
     let mut event_loop =
         crate::runtime::event_loop::tests::create_test_cloud_event_loop_with_store_factory(
-            crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+            cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
             None,
             move |inner| HeldMetadataObjectStore::wrap(inner, entered, release_rx, store_armed),
         )?;
@@ -304,7 +304,7 @@ fn should_keep_foreground_progress_available_while_metadata_provider_is_held() -
     ManifestCoordinator::persist(
         &mut event_loop,
         90701,
-        crate::metadata::accounting::Origin::Administration,
+        cntryl_midge_durability::metadata::accounting::Origin::Administration,
     );
     entered_rx
         .recv_timeout(Duration::from_secs(2))
@@ -327,7 +327,7 @@ fn should_keep_foreground_progress_available_while_metadata_provider_is_held() -
                 insert_only: false,
             }],
             assertions: Vec::new(),
-            durability_policy: Some(crate::wal::DurabilityPolicy::BestEffort),
+            durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::BestEffort),
             start_sequence: None,
             conflict_policy: ConflictPolicy::LastWriteWins,
         },
@@ -371,11 +371,11 @@ fn should_keep_foreground_progress_available_while_metadata_provider_is_held() -
 #[test]
 fn should_retain_uncovered_names_when_a_completed_metadata_mirror_loses_authority(
 ) -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop.pipeline.inline_flush_worker = false;
     let healthy = Arc::new(AtomicBool::new(true));
@@ -389,7 +389,7 @@ fn should_retain_uncovered_names_when_a_completed_metadata_mirror_loses_authorit
         0,
         1,
         Some(&deadline),
-        crate::metadata::accounting::Origin::CloudFlush
+        cntryl_midge_durability::metadata::accounting::Origin::CloudFlush
     )?);
     held.await_entry();
     healthy.store(false, Ordering::Release);
@@ -407,11 +407,11 @@ fn should_retain_uncovered_names_when_a_completed_metadata_mirror_loses_authorit
 
 #[test]
 fn should_preserve_the_accepted_flush_while_name_reservation_is_pending() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop.pipeline.inline_flush_worker = false;
     event_loop.state.get_cf(0).unwrap().memtable.put_with_seq(
@@ -450,21 +450,21 @@ fn should_preserve_the_accepted_flush_while_name_reservation_is_pending() -> Mid
 #[test]
 fn should_reconcile_an_admitted_mirror_once_when_its_caller_abandons_the_result() -> MidgeResult<()>
 {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: a genuine journal edit makes this a new shared generation.
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop.pipeline.inline_flush_worker = false;
-    let edit = crate::metadata::ManifestEdit::BumpNextSstSeq {
+    let edit = cntryl_midge_durability::metadata::ManifestEdit::BumpNextSstSeq {
         cf_id: 0,
         next_seq: 64,
     };
     let edit_id = event_loop
         .state
         .manifest_store
-        .append_for(crate::metadata::accounting::Origin::Administration, &edit)?;
+        .append_for(cntryl_midge_durability::metadata::accounting::Origin::Administration, &edit)?;
     event_loop.state.manifest.set_next_sst_seq(0, 64);
     event_loop.state.manifest.note_applied_journal_edit(edit_id);
     let store = event_loop.authority.fencing.leader_store.clone().unwrap();
@@ -477,7 +477,7 @@ fn should_reconcile_an_admitted_mirror_once_when_its_caller_abandons_the_result(
     ManifestCoordinator::persist(
         &mut event_loop,
         90703,
-        crate::metadata::accounting::Origin::Administration,
+        cntryl_midge_durability::metadata::accounting::Origin::Administration,
     );
     held.await_entry();
 
@@ -516,11 +516,11 @@ fn should_reconcile_an_admitted_mirror_once_when_its_caller_abandons_the_result(
 #[test]
 fn should_fail_the_original_flush_attempt_when_name_publication_loses_authority() -> MidgeResult<()>
 {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop.pipeline.inline_flush_worker = false;
     let healthy = Arc::new(AtomicBool::new(true));
@@ -570,7 +570,7 @@ fn sst_is_resident(event_loop: &EventLoop, name: &str) -> bool {
     event_loop
         .state
         .fs
-        .metadata(&crate::sst::fs::sst_key(name))
+        .metadata(&cntryl_midge_table::sst::fs::sst_key(name))
         .is_ok()
 }
 
@@ -591,11 +591,11 @@ fn queued_reclamation(event_loop: &EventLoop) -> Vec<String> {
 /// Drops family A to start a held reclamation mirror, then drops `later`
 /// more families while it is held.
 fn assert_reclamation_mirror_releases_only_covered_names(later: usize) -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let (_sender, messages) = crossbeam::channel::unbounded();
     let mut families = Vec::new();
@@ -716,10 +716,10 @@ fn queue_reclamation_behind_held_mirror(
 #[test]
 fn should_defer_backup_capture_when_a_metadata_mirror_owns_publication() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let held = HeldMirror::new("midge::metadata_mirror::before_provider");
     queue_reclamation_behind_held_mirror(&mut event_loop, &held)?;
@@ -748,11 +748,11 @@ fn should_defer_backup_capture_when_a_metadata_mirror_owns_publication() -> Midg
 
 #[test]
 fn should_defer_reclamation_without_anomaly_when_retry_meets_a_running_mirror() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let held = HeldMirror::new("midge::metadata_mirror::before_provider");
     let sst = queue_reclamation_behind_held_mirror(&mut event_loop, &held)?;
@@ -780,7 +780,7 @@ fn should_defer_reclamation_without_anomaly_when_retry_meets_a_running_mirror() 
     assert!(!event_loop.state.persistence_anomaly_detected());
     assert_eq!(
         event_loop.state.health(),
-        crate::config::EngineHealth::Healthy
+        cntryl_midge_core::types::EngineHealth::Healthy
     );
     scenario.teardown();
     Ok(())
@@ -789,11 +789,11 @@ fn should_defer_reclamation_without_anomaly_when_retry_meets_a_running_mirror() 
 #[test]
 fn should_mark_persistence_anomaly_when_reclamation_mirror_start_fails_for_a_real_reason(
 ) -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: a queued name, no mirror running, and a failing local persist.
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let sst = seed_manifest_sst(&mut event_loop, 0, 8)?;
     event_loop.actors.gc_actor.queue_manifest_reclamation([sst]);
@@ -807,7 +807,7 @@ fn should_mark_persistence_anomaly_when_reclamation_mirror_start_fails_for_a_rea
     assert!(event_loop.state.persistence_anomaly_detected());
     assert_eq!(
         event_loop.state.health(),
-        crate::config::EngineHealth::Degraded
+        cntryl_midge_core::types::EngineHealth::Degraded
     );
     fail::remove("midge::manifest::persist");
     scenario.teardown();
@@ -817,12 +817,12 @@ fn should_mark_persistence_anomaly_when_reclamation_mirror_start_fails_for_a_rea
 #[test]
 fn should_defer_reclamation_without_anomaly_when_retry_meets_a_running_retention_mirror(
 ) -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     // Arrange: a queued reclamation name while a Retention mirror (not a
     // Reclamation one) is in flight.
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let sst = seed_manifest_sst(&mut event_loop, 0, 7)?;
     event_loop
@@ -863,7 +863,7 @@ fn should_mark_reclamation_anomaly_when_metadata_cut_admission_fails() -> MidgeR
     // Arrange: retain a captured flush intent and remove it without publishing
     // the terminal receipt. No event-loop mirror owns publication.
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let sst = seed_manifest_sst(&mut event_loop, 0, 8)?;
     event_loop
@@ -916,11 +916,11 @@ fn should_mark_reclamation_anomaly_when_metadata_cut_admission_fails() -> MidgeR
     Ok(())
 }
 
-fn read_selected_manifest(event_loop: &EventLoop) -> MidgeResult<crate::metadata::Manifest> {
+fn read_selected_manifest(event_loop: &EventLoop) -> MidgeResult<cntryl_midge_durability::metadata::Manifest> {
     let deadline = event_loop.event_loop_cloud_deadline();
     let store = event_loop.authority.fencing.leader_store.as_ref().unwrap();
     let head = store.read_committed_metadata(deadline.remaining())?;
-    let crate::lease::CloudMetadataHead::Committed(generation) = head else {
+    let cntryl_midge_durability::lease::CloudMetadataHead::Committed(generation) = head else {
         panic!("expected selected metadata generation, got {head:?}");
     };
     let cloud = event_loop
@@ -934,12 +934,12 @@ fn read_selected_manifest(event_loop: &EventLoop) -> MidgeResult<crate::metadata
         &generation,
         &deadline,
     )?;
-    crate::metadata::ManifestPersistence::decode_bodies(
-        &bodies[crate::metadata::files::MANIFEST_SNAPSHOT],
+    cntryl_midge_durability::metadata::ManifestPersistence::decode_bodies(
+        &bodies[cntryl_midge_durability::metadata::files::MANIFEST_SNAPSHOT],
         bodies
-            .get(crate::metadata::files::JOURNAL)
+            .get(cntryl_midge_durability::metadata::files::JOURNAL)
             .map(Vec::as_slice),
-        &crate::common::DeadlineScope::new(deadline),
+        &cntryl_midge_core::common::DeadlineScope::new(deadline),
     )
 }
 
@@ -955,7 +955,7 @@ fn progress_after_held_mirror(event_loop: &mut EventLoop, held: &HeldMirror) -> 
 
 #[test]
 fn should_publish_committed_create_when_retention_mirror_finishes() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let _scenario = fail::FailScenario::setup();
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(StorageBudgetPolicy::default())?;
@@ -988,14 +988,14 @@ fn should_publish_committed_create_when_retention_mirror_finishes() -> MidgeResu
         .is_some());
     assert_eq!(
         event_loop.state.health(),
-        crate::config::EngineHealth::Healthy
+        cntryl_midge_core::types::EngineHealth::Healthy
     );
     Ok(())
 }
 
 #[test]
 fn should_publish_committed_empty_drop_when_retention_mirror_finishes() -> MidgeResult<()> {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let _scenario = fail::FailScenario::setup();
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(StorageBudgetPolicy::default())?;
@@ -1032,7 +1032,7 @@ fn should_publish_committed_empty_drop_when_retention_mirror_finishes() -> Midge
         .is_none());
     assert_eq!(
         event_loop.state.health(),
-        crate::config::EngineHealth::Healthy
+        cntryl_midge_core::types::EngineHealth::Healthy
     );
     Ok(())
 }
@@ -1085,7 +1085,7 @@ fn should_publish_committed_create_when_shutdown_joins_publication_owner() -> Mi
 #[test]
 fn should_keep_healthy_when_compaction_deadline_expires_after_name_reservation() -> MidgeResult<()>
 {
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let _scenario = fail::FailScenario::setup();
     // Arrange: reserve a real output name. Another owner holds the gate
     // across mirror completion so the accepted plan cannot start compute.
@@ -1137,7 +1137,7 @@ fn should_keep_healthy_when_compaction_deadline_expires_after_name_reservation()
     assert_eq!(event_loop.actors.compaction_actor.active_count(), 0);
     assert_eq!(
         event_loop.state.health(),
-        crate::config::EngineHealth::Healthy
+        cntryl_midge_core::types::EngineHealth::Healthy
     );
     Ok(())
 }

@@ -3,7 +3,7 @@ use super::*;
 mod bounded_decode;
 
 fn root_at(directory: &std::path::Path) -> Arc<dyn Fs> {
-    crate::io::real::test_root(directory)
+    cntryl_midge_core::io::real::test_root(directory)
 }
 
 /// The host file behind a spill key in a host-backed test root.
@@ -19,7 +19,7 @@ fn should_reject_spill_before_creating_files_when_shared_disk_budget_is_exhauste
 ) -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let setup = crate::storage::simulated::host_simulated_cloud(dir.path(), Some(128))?;
+    let setup = cntryl_midge_storage::simulated::host_simulated_cloud(dir.path(), Some(128))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(128);
     let mut writes = TransactionWriteSet::new(
         Arc::new(TransactionMemoryPool::new(0)),
@@ -84,7 +84,7 @@ fn should_hold_spill_disk_charge_through_commit_source_until_files_are_removed()
 {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let setup = crate::storage::simulated::host_simulated_cloud(dir.path(), Some(4096))?;
+    let setup = cntryl_midge_storage::simulated::host_simulated_cloud(dir.path(), Some(4096))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(4096);
     let storage = &setup.hybrid_storage;
     let mut writes = TransactionWriteSet::new(
@@ -118,7 +118,7 @@ fn should_hold_spill_disk_charge_through_commit_source_until_files_are_removed()
 fn should_reject_oversized_range_before_staging_or_spilling() -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let limit = crate::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
+    let limit = cntryl_midge_core::codec::MAX_DECOMPRESSED_BLOCK_SIZE;
     for (start_len, end_len) in [(limit, 1), (1, limit), (limit / 2, limit / 2)] {
         let pool = Arc::new(TransactionMemoryPool::new(1024));
         let mut writes = TransactionWriteSet::new(pool.clone(), &root_at(dir.path()), false, 1);
@@ -149,7 +149,7 @@ fn should_reject_oversized_range_before_staging_or_spilling() -> MidgeResult<()>
 fn should_cover_range_tree_endpoint_duplication_with_spill_disk_reservation() -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let setup = crate::storage::simulated::host_simulated_cloud(dir.path(), Some(1024 * 1024))?;
+    let setup = cntryl_midge_storage::simulated::host_simulated_cloud(dir.path(), Some(1024 * 1024))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(1024 * 1024);
     let budget = SpillDiskBudget(Arc::clone(&setup.hybrid_storage));
     let mut ops = (0_u64..64)
@@ -189,7 +189,7 @@ fn should_cover_range_tree_endpoint_duplication_with_spill_disk_reservation() ->
 fn should_retain_spill_disk_charge_when_run_cleanup_fails() -> MidgeResult<()> {
     // Arrange
     let dir = tempfile::tempdir()?;
-    let setup = crate::storage::simulated::host_simulated_cloud(dir.path(), Some(4096))?;
+    let setup = cntryl_midge_storage::simulated::host_simulated_cloud(dir.path(), Some(4096))?;
     setup.hybrid_storage.enable_ephemeral_sst_cache(4096);
     let mut writes = TransactionWriteSet::new(
         Arc::new(TransactionMemoryPool::new(0)),

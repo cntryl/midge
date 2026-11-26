@@ -1,5 +1,5 @@
 use crate::compaction::{strategy::CompactionPurpose, CompactionPlan};
-use crate::metadata::FileMeta;
+use cntryl_midge_durability::metadata::FileMeta;
 
 pub(super) fn eligible(plan: &CompactionPlan, files: &[FileMeta]) -> bool {
     if !matches!(plan.purpose, CompactionPurpose::Merge)
@@ -35,7 +35,7 @@ pub(super) fn eligible(plan: &CompactionPlan, files: &[FileMeta]) -> bool {
         return false;
     }
     matches!(
-        crate::metadata::manifest::validate_sst_move(files, &captured, plan.target_level),
+        cntryl_midge_durability::metadata::manifest::validate_sst_move(files, &captured, plan.target_level),
         Ok(false)
     )
 }

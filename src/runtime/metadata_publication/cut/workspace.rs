@@ -1,9 +1,9 @@
 //! Admission of concrete typed metadata work before its allocating decode.
 
 use super::{MetadataPublicationLock, SelectedTerminalWitnesses};
-use crate::common::resource_budget::ResourceReservation;
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crate::metadata::files;
+use cntryl_midge_core::common::resource_budget::ResourceReservation;
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::metadata::files;
 use crate::runtime::IntentPersistence;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ impl MetadataPublicationLock {
             MidgeError::Corruption("selected metadata lacks manifest snapshot".into())
         })?;
         let journal = bodies.get(files::JOURNAL).map_or(&[][..], Vec::as_slice);
-        let manifest = crate::metadata::codec::manifest_workspace::decoded_workspace_bound(
+        let manifest = cntryl_midge_durability::metadata::codec::manifest_workspace::decoded_workspace_bound(
             snapshot, journal, deadline,
         )?;
         let required = encoded
@@ -115,7 +115,7 @@ impl MetadataPublicationLock {
             .ok_or_else(|| MidgeError::Corruption("metadata cut lacks manifest snapshot".into()))?;
         let journal = bodies.get(files::JOURNAL).map_or(&[][..], Vec::as_slice);
         let intents = bodies.get(files::INTENT_LOG).map_or(&[][..], Vec::as_slice);
-        let manifest = crate::metadata::codec::manifest_workspace::decoded_workspace_bound(
+        let manifest = cntryl_midge_durability::metadata::codec::manifest_workspace::decoded_workspace_bound(
             snapshot, journal, deadline,
         )?;
         let intents = IntentPersistence::decoded_workspace_bound(intents, deadline)?;
@@ -170,7 +170,7 @@ fn grow_reservation(
 
 fn required_private_workspace(
     encoded: usize,
-    manifest: &crate::metadata::codec::manifest_workspace::ManifestDecodeWorkspace,
+    manifest: &cntryl_midge_durability::metadata::codec::manifest_workspace::ManifestDecodeWorkspace,
     intents: &crate::runtime::intent_persistence::IntentDecodeWorkspace,
 ) -> MidgeResult<usize> {
     // Raw control copies and journal payload reads coexist with manifest

@@ -6,9 +6,9 @@ use super::{
     IntentLookup, OrdinalOp, TransactionOp, NO_RANGE_CHILD, RANGE_HEADER_LEN, RANGE_MAGIC,
     RANGE_TABLE_ENTRY_LEN, RANGE_VERSION,
 };
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::stream::FileWriter;
-use crate::io::{Fs, FsPath};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::stream::FileWriter;
+use cntryl_midge_core::io::{Fs, FsPath};
 use bytes::Bytes;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -494,7 +494,7 @@ pub(super) fn read_ordered_range(
 pub(super) fn validate_range_index_bounded(
     root: &dyn Fs,
     path: &FsPath,
-    budget: Option<&crate::common::resource_budget::ResourceBudget>,
+    budget: Option<&cntryl_midge_core::common::resource_budget::ResourceBudget>,
     frame_limit: usize,
 ) -> MidgeResult<()> {
     let mut file = RunFile::open_bounded(root, path, budget, frame_limit)?;

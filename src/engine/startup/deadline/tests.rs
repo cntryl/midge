@@ -9,7 +9,7 @@ use tracing_subscriber::Layer;
 #[test]
 fn should_inherit_caller_failpoint_scope_when_timed_open_starts_runtime() {
     // Arrange: a real timed open creates both startup and runtime threads.
-    let guard = crate::failpoints::test_failpoint_guard();
+    let guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let observed = Arc::new(AtomicUsize::new(0));
     let callback_observed = Arc::clone(&observed);
@@ -127,7 +127,7 @@ impl ReadyWorker {
         fixture
     }
 
-    fn lease(&self) -> Arc<dyn crate::lease::PrimaryLease> {
+    fn lease(&self) -> Arc<dyn cntryl_midge_durability::lease::PrimaryLease> {
         let slot = self.slot.lock().unwrap();
         match slot.as_ref() {
             Some(Ok(prepared)) => Arc::clone(prepared.engine.lease_state.lease.as_ref().unwrap()),
@@ -151,12 +151,12 @@ impl Drop for ReadyWorker {
 }
 
 fn assert_released_owner(
-    record: Option<&crate::lease::LeaderRecord>,
-    owner: &crate::lease::LeaderRecord,
+    record: Option<&cntryl_midge_durability::lease::LeaderRecord>,
+    owner: &cntryl_midge_durability::lease::LeaderRecord,
 ) {
     assert_eq!(
         record,
-        Some(&crate::lease::LeaderRecord {
+        Some(&cntryl_midge_durability::lease::LeaderRecord {
             acquired_at: "1970-01-01T00:00:00Z".into(),
             ..owner.clone()
         }),

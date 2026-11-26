@@ -1,14 +1,14 @@
 use super::*;
-use crate::common::{MidgeResult, OperationDeadline};
-use crate::lease::CloudMetadataHead;
+use cntryl_midge_core::common::{MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::CloudMetadataHead;
 use crate::runtime::event_loop::tests::create_test_cloud_event_loop;
-use crate::storage::cloud::BlockingCloud;
+use cntryl_midge_storage::cloud::BlockingCloud;
 
 #[test]
 fn should_reclaim_bounded_backlog_on_idle_turns_without_new_metadata_writes() -> MidgeResult<()> {
     // Arrange: twenty-five standalone snapshots exceed a single GC pass.
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     for sequence in 1..=25 {
         crate::runtime::IntentPersistence::save_with_fs(
@@ -18,7 +18,7 @@ fn should_reclaim_bounded_backlog_on_idle_turns_without_new_metadata_writes() ->
                 seqno: sequence,
             }],
         )
-        .map_err(crate::common::MidgeError::Internal)?;
+        .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
         event_loop.mirror_metadata_to_authoritative_cloud()?;
     }
     // Settle the independent first-use name prewarm before freezing the idle

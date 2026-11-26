@@ -31,7 +31,7 @@ impl EventLoop {
         let paths = [
             build.staging_path.clone(),
             std::path::PathBuf::from(temporary),
-            crate::sst::fs::sst_location(name),
+            cntryl_midge_table::sst::fs::sst_location(name),
         ];
         let primary_absent = paths.iter().all(|path| {
             self.runtime_fs_path(path)
@@ -60,8 +60,8 @@ impl EventLoop {
     pub(in crate::runtime::event_loop) fn fail_flush_pipeline(
         &mut self,
         flush_id: u64,
-        reservation: Option<crate::storage::hybrid::actor::StorageReservationToken>,
-        error: &crate::common::MidgeError,
+        reservation: Option<cntryl_midge_storage::hybrid::actor::StorageReservationToken>,
+        error: &cntryl_midge_core::common::MidgeError,
     ) {
         self.forget_flush_mirror_retry(flush_id);
         self.state.finish_flush_publication_attempt(flush_id, true);
@@ -100,7 +100,7 @@ impl EventLoop {
     pub(super) fn fail_deferred_column_family_drops(
         &mut self,
         cf_id: u32,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) {
         let mut retained = std::collections::VecDeque::new();
         for message in self.publication.publication_gate.take_deferred() {
@@ -139,10 +139,10 @@ impl EventLoop {
     /// intact, and `Aborted` is `Severity::Transient`, so the caller retries
     /// the safe drop.
     pub(super) fn deferred_drop_failure(
-        error: &crate::common::MidgeError,
-    ) -> crate::common::MidgeError {
+        error: &cntryl_midge_core::common::MidgeError,
+    ) -> cntryl_midge_core::common::MidgeError {
         match error {
-            crate::common::MidgeError::Busy(message) => crate::common::MidgeError::Aborted(
+            cntryl_midge_core::common::MidgeError::Busy(message) => cntryl_midge_core::common::MidgeError::Aborted(
                 format!("column family drop abandoned by a failed flush: {message}"),
             ),
             other => other.replay(),
@@ -189,7 +189,7 @@ impl EventLoop {
         &mut self,
         cf_id: u32,
         failed_sequence: u64,
-        error: &crate::common::MidgeError,
+        error: &cntryl_midge_core::common::MidgeError,
     ) {
         let Some(waiters) = self.publication.flush_barrier_waiters.remove(&cf_id) else {
             return;

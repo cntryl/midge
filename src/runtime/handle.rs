@@ -6,7 +6,7 @@ use super::{
     RuntimeLifecycleState, RuntimeMsg, RuntimeResponse, RuntimeTransactionGuard,
     SpilledTransactionSubmission, TransactionSubmission,
 };
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
 use crossbeam::channel::Sender;
 use std::sync::{atomic::Ordering, Arc};
 use std::time::Duration;
@@ -18,7 +18,7 @@ const WRITE_STALL_STATUS_TIMEOUT: Duration = Duration::from_millis(250);
 #[derive(Clone)]
 pub(super) struct CloudReadAuthority {
     healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
-    validity: Option<Arc<crate::lease::LeaseValidity>>,
+    validity: Option<Arc<cntryl_midge_durability::lease::LeaseValidity>>,
     epoch: u64,
 }
 
@@ -81,8 +81,8 @@ pub struct RuntimeHandle {
     /// Latest nonblocking pending-upload gauge published by the event loop.
     pub(crate) pending_cloud_uploads: Arc<crate::runtime::frontiers::ObservedPendingCloudUploads>,
     /// Shared local disk admission for transaction spill runs.
-    pub(crate) storage_budget: Option<Arc<crate::storage::HybridStorage>>,
-    pub(crate) sst_read_fs: Option<Arc<dyn crate::io::Fs>>,
+    pub(crate) storage_budget: Option<Arc<cntryl_midge_storage::HybridStorage>>,
+    pub(crate) sst_read_fs: Option<Arc<dyn cntryl_midge_core::io::Fs>>,
     pub(super) read_authority: Option<CloudReadAuthority>,
     pub(super) lifecycle: Arc<RuntimeLifecycle>,
     pub(super) runtime_response_timeout: Duration,
@@ -773,7 +773,7 @@ impl RuntimeHandle {
             Ok(response) => Ok(response),
             Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
                 if self.router.abandon(request_id, timeout) {
-                    Err(crate::common::error::classify_commit_error(
+                    Err(cntryl_midge_core::common::error::classify_commit_error(
                         Self::response_timeout_error(request_kind, request_id, timeout),
                         !has_writes,
                     ))
@@ -803,14 +803,14 @@ impl RuntimeHandle {
     /// Used by `Engine::commit()` to expose backpressure to clients before
     /// accepting new write transactions.
     #[cfg(test)]
-    pub fn check_write_stall(&self, cf_id: crate::types::ColumnFamilyId) -> MidgeResult<bool> {
+    pub fn check_write_stall(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> MidgeResult<bool> {
         self.check_write_stall_status(cf_id, false)
             .map(|(stalled, _)| stalled)
     }
 
     pub(crate) fn check_ingest_write_stall(
         &self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> MidgeResult<bool> {
         let (stalled, mask) = self.check_write_stall_status(cf_id, true)?;
         if stalled {
@@ -821,7 +821,7 @@ impl RuntimeHandle {
 
     fn check_write_stall_status(
         &self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         ingest_admission: bool,
     ) -> MidgeResult<(bool, u8)> {
         let response = self.send_and_wait_timeout(

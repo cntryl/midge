@@ -1,10 +1,10 @@
 // Responsibilities for this WAL actor slice stay within the actor namespace.
 use super::{FloorEdit, SyncCadence, WalActor, WalSyncReceipt, WalTransitionOperation};
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use crate::runtime::state::RuntimeState;
 use crate::runtime::wal_transition::{WalSealTicket, WalSyncTicket};
 use crate::runtime::wal_transition_boundary::WalTransitionBoundary;
-use crate::wal::DurabilityPolicy;
+use cntryl_midge_durability::wal::DurabilityPolicy;
 use std::time::{Duration, Instant};
 
 impl WalActor {
@@ -41,9 +41,9 @@ impl WalActor {
         &mut self,
         state: &mut RuntimeState,
         last_sequence: u64,
-        group: Option<&crate::lease::WriterEffectGroup>,
+        group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
     ) -> MidgeResult<()> {
-        crate::failpoints::fail_point!("midge::wal::txn_after_commit_append_before_sync");
+        cntryl_midge_core::failpoints::fail_point!("midge::wal::txn_after_commit_append_before_sync");
         if let Err(error) = self.sync_internal_with_group(state, group) {
             // The strict records are already on disk but not yet in memory.
             // Continuing as `Open` would let the runtime view and the recovery
@@ -57,7 +57,7 @@ impl WalActor {
             return Err(error);
         }
         state.wal.frontiers.advance_local_to(last_sequence);
-        crate::failpoints::fail_point!("midge::wal::txn_after_sync_before_ack");
+        cntryl_midge_core::failpoints::fail_point!("midge::wal::txn_after_sync_before_ack");
         Ok(())
     }
 
@@ -70,7 +70,7 @@ impl WalActor {
     fn sync_internal_with_group(
         &mut self,
         state: &mut RuntimeState,
-        group: Option<&crate::lease::WriterEffectGroup>,
+        group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
     ) -> MidgeResult<()> {
         let receipt = self.begin_sync_io(state, group, SyncCadence::Amortizable)?;
         self.commit_sync_io(state, receipt)
@@ -155,7 +155,7 @@ impl WalActor {
     fn begin_sync_io(
         &mut self,
         state: &mut RuntimeState,
-        group: Option<&crate::lease::WriterEffectGroup>,
+        group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
         cadence: SyncCadence,
     ) -> MidgeResult<WalSyncReceipt> {
         self.validate_sync_authority(state)?;
@@ -231,7 +231,7 @@ impl WalActor {
                         "WAL fsync panic; returning error to unblock event loop"
                     );
                     let error =
-                        crate::common::MidgeError::Internal("WAL fsync panicked".to_string());
+                        cntryl_midge_core::common::MidgeError::Internal("WAL fsync panicked".to_string());
                     self.fence_transition(state, error.to_string());
                     return Err(error);
                 }
@@ -285,7 +285,7 @@ impl WalActor {
             pending_writes: state.wal.pending_writes,
             pending_sync_count: self.pending_sync_count,
             bytes_since_sync: self.bytes_since_sync,
-            end_offset: self.writer().map(crate::wal::WalWriter::current_pos),
+            end_offset: self.writer().map(cntryl_midge_durability::wal::WalWriter::current_pos),
             writer_epoch: self.current_epoch,
             segment_id: state.wal.open_segment(),
             generation: None,
@@ -295,7 +295,7 @@ impl WalActor {
     pub(super) fn persist_sync_boundary(
         &mut self,
         state: &mut RuntimeState,
-        group: Option<&crate::lease::WriterEffectGroup>,
+        group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
         end_offset: Option<u64>,
         cadence: SyncCadence,
     ) -> MidgeResult<FloorEdit> {
@@ -312,7 +312,7 @@ impl WalActor {
     pub(super) fn record_exact_sync_boundary(
         &mut self,
         state: &mut RuntimeState,
-        group: Option<&crate::lease::WriterEffectGroup>,
+        group: Option<&cntryl_midge_durability::lease::WriterEffectGroup>,
         end_offset: Option<u64>,
     ) -> MidgeResult<()> {
         if let Some(bytes) = end_offset {
@@ -368,7 +368,7 @@ impl WalActor {
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
     pub(super) fn sync_failure_boundary() -> MidgeResult<()> {
-        crate::failpoints::fail_point!("midge::wal::inject_no_space_on_sync", |_| Err(
+        cntryl_midge_core::failpoints::fail_point!("midge::wal::inject_no_space_on_sync", |_| Err(
             MidgeError::NoSpace(
                 "wal writer fsync failed: failpoint: no space on WAL sync".to_string()
             )
@@ -380,7 +380,7 @@ impl WalActor {
     // feature; the Result is the production-shaped boundary contract.
     #[allow(clippy::unnecessary_wraps)]
     pub(super) fn after_fsync_boundary() -> MidgeResult<()> {
-        crate::failpoints::fail_point!("midge::wal::after_fsync_before_durable_frontier", |_| Err(
+        cntryl_midge_core::failpoints::fail_point!("midge::wal::after_fsync_before_durable_frontier", |_| Err(
             MidgeError::Internal(
                 "failpoint: WAL fsync completed before logical commit".to_string()
             )
@@ -401,7 +401,7 @@ impl WalActor {
     ) -> MidgeResult<u64> {
         self.flush_for_cloud_upload_within(
             state,
-            &crate::common::OperationDeadline::unbounded(),
+            &cntryl_midge_core::common::OperationDeadline::unbounded(),
             ticket,
         )
     }
@@ -418,7 +418,7 @@ impl WalActor {
     pub fn flush_for_cloud_upload_within(
         &mut self,
         state: &mut RuntimeState,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
         _ticket: &WalSealTicket,
     ) -> MidgeResult<u64> {
         self.ensure_filesystem_wal_available(state)?;
@@ -430,7 +430,7 @@ impl WalActor {
         if self.writer().is_some() {
             let Some(io_timeout) = deadline.clamp_nonzero(self.storage_io_timeout) else {
                 self.finish_io_transition()?;
-                return Err(crate::common::MidgeError::Timeout(format!(
+                return Err(cntryl_midge_core::common::MidgeError::Timeout(format!(
                     "operation deadline exhausted before WAL flush: remaining={:?}",
                     deadline.remaining()
                 )));
@@ -470,11 +470,11 @@ impl WalActor {
     pub(crate) fn submit_cloud_upload_flush(
         &mut self,
         state: &mut RuntimeState,
-        deadline: &crate::common::OperationDeadline,
+        deadline: &cntryl_midge_core::common::OperationDeadline,
         ticket: &WalSealTicket,
     ) -> MidgeResult<(
-        crate::wal::traits::WalPendingSync,
-        crate::wal::traits::WalSyncPrefix,
+        cntryl_midge_durability::wal::traits::WalPendingSync,
+        cntryl_midge_durability::wal::traits::WalSyncPrefix,
         u64,
     )> {
         self.ensure_filesystem_wal_available(state)?;
@@ -500,7 +500,7 @@ impl WalActor {
             ));
         }
         let tail = writer.tail();
-        let prefix = crate::wal::traits::WalSyncPrefix {
+        let prefix = cntryl_midge_durability::wal::traits::WalSyncPrefix {
             barrier_id: ticket.prefix_operation_id(),
             writer_epoch: self.current_epoch,
             segment_id: state.wal.open_segment(),
@@ -530,8 +530,8 @@ impl WalActor {
     pub(crate) fn finish_cloud_upload_flush(
         &mut self,
         state: &mut RuntimeState,
-        expected: crate::wal::traits::WalSyncPrefix,
-        completion: MidgeResult<crate::wal::traits::WalSyncCompletion>,
+        expected: cntryl_midge_durability::wal::traits::WalSyncPrefix,
+        completion: MidgeResult<cntryl_midge_durability::wal::traits::WalSyncCompletion>,
     ) -> MidgeResult<()> {
         let result = completion.and_then(|completion| {
             if completion.prefix != expected {

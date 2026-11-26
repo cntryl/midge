@@ -2,7 +2,7 @@ use super::*;
 use crate::runtime::hybrid_persistence::CloudPersistence;
 use crate::runtime::TestRuntimeMsg;
 use crate::runtime::{state::RuntimeState, ResponseRouter};
-use crate::types::EntryType;
+use cntryl_midge_core::types::EntryType;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -48,7 +48,7 @@ fn should_dispatch_compact_all_before_background_cloud_progress() {
 }
 
 #[test]
-fn should_preserve_fenced_kind_when_wal_sync_detects_stale_writer() -> crate::common::MidgeResult<()>
+fn should_preserve_fenced_kind_when_wal_sync_detects_stale_writer() -> cntryl_midge_core::common::MidgeResult<()>
 {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
@@ -68,7 +68,7 @@ fn should_preserve_fenced_kind_when_wal_sync_detects_stale_writer() -> crate::co
         matches!(
             &result,
             Ok(RuntimeResponse::Error {
-                error: crate::common::MidgeError::Fenced(_),
+                error: cntryl_midge_core::common::MidgeError::Fenced(_),
                 ..
             })
         ),
@@ -79,7 +79,7 @@ fn should_preserve_fenced_kind_when_wal_sync_detects_stale_writer() -> crate::co
 
 #[cfg(feature = "failpoints")]
 #[test]
-fn should_settle_parked_strict_group_before_shutdown_wal_barrier() -> crate::common::MidgeResult<()>
+fn should_settle_parked_strict_group_before_shutdown_wal_barrier() -> cntryl_midge_core::common::MidgeResult<()>
 {
     use crate::runtime::{ConflictPolicy, RuntimeResponse, TransactionOp};
     use bytes::Bytes;
@@ -87,7 +87,7 @@ fn should_settle_parked_strict_group_before_shutdown_wal_barrier() -> crate::com
     use std::sync::Arc;
 
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = create_test_local_event_loop()?;
     event_loop.pipeline.inline_flush_worker = false;
     let db_path = event_loop.state.db_path.clone();
@@ -118,7 +118,7 @@ fn should_settle_parked_strict_group_before_shutdown_wal_barrier() -> crate::com
                 insert_only: false,
             }],
             assertions: Vec::new(),
-            durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+            durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Strict),
             start_sequence: None,
             conflict_policy: ConflictPolicy::LastWriteWins,
             response_tx: None,
@@ -165,7 +165,7 @@ fn should_settle_parked_strict_group_before_shutdown_wal_barrier() -> crate::com
         Ok(RuntimeResponse::Ok { request_id: 94_051 })
     ));
     drop(event_loop);
-    let recovered = RuntimeState::try_new(db_path, false, crate::config::RecoveryPolicy::Strict)?;
+    let recovered = RuntimeState::try_new(db_path, false, cntryl_midge_durability::RecoveryPolicy::Strict)?;
     let family = recovered.get_cf(0).expect("recovered default family");
     assert_eq!(
         family.memtable.get(b"shutdown-prefix")?,
@@ -176,10 +176,10 @@ fn should_settle_parked_strict_group_before_shutdown_wal_barrier() -> crate::com
 
 #[test]
 fn should_preserve_resource_limit_when_compaction_launch_is_refused(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     event_loop
         .actors
@@ -194,14 +194,14 @@ fn should_preserve_resource_limit_when_compaction_launch_is_refused(
 
     // Assert
     assert!(
-        matches!(&result, Err(crate::common::MidgeError::ResourceLimit(_))),
+        matches!(&result, Err(cntryl_midge_core::common::MidgeError::ResourceLimit(_))),
         "unexpected compaction launch result: {result:?}"
     );
     Ok(())
 }
 
 #[test]
-fn should_wait_for_active_compaction_before_declaring_debt_clear() -> crate::common::MidgeResult<()>
+fn should_wait_for_active_compaction_before_declaring_debt_clear() -> cntryl_midge_core::common::MidgeResult<()>
 {
     // Arrange
     let mut event_loop = create_test_event_loop()?;
@@ -225,7 +225,7 @@ fn should_wait_for_active_compaction_before_declaring_debt_clear() -> crate::com
 }
 
 #[test]
-fn should_drain_flush_completion_after_non_mutating_request() -> crate::common::MidgeResult<()> {
+fn should_drain_flush_completion_after_non_mutating_request() -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
     event_loop.state.sequence = 1;
@@ -265,7 +265,7 @@ fn should_drain_flush_completion_after_non_mutating_request() -> crate::common::
 
 #[test]
 fn should_retry_transient_flush_failure_during_shutdown_checkpoint(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
     event_loop.state.sequence = 1;
@@ -282,7 +282,7 @@ fn should_retry_transient_flush_failure_during_shutdown_checkpoint(
         .state
         .mark_immutable_flush_failed(flush_id)
         .expect("retain failed immutable for retry");
-    let deadline = crate::common::OperationDeadline::from_budget(std::time::Duration::from_secs(2));
+    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(std::time::Duration::from_secs(2));
 
     // Act
     event_loop.drain_shutdown_flush_pipeline_within(&deadline)?;
@@ -321,8 +321,8 @@ pub(in crate::runtime::event_loop) fn record_wal_history(
 ) {
     // Release the ledger recovery opened before the fixture replaces it.
     state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
-    let wal: Arc<dyn crate::io::Fs> = Arc::new(
-        crate::io::RealFs::new(db_path.join(crate::wal::WAL_DIR)).expect("open the WAL directory"),
+    let wal: Arc<dyn cntryl_midge_core::io::Fs> = Arc::new(
+        cntryl_midge_core::io::RealFs::new(db_path.join(cntryl_midge_durability::wal::WAL_DIR)).expect("open the WAL directory"),
     );
     crate::runtime::wal_history::fixture::replace(&wal, sealed, open)
         .expect("record the WAL history");
@@ -337,7 +337,7 @@ pub(in crate::runtime::event_loop) fn create_test_state() -> RuntimeState {
 
 // Helper to create a new event loop
 pub(in crate::runtime::event_loop) fn create_test_event_loop(
-) -> crate::common::MidgeResult<EventLoop> {
+) -> cntryl_midge_core::common::MidgeResult<EventLoop> {
     let state = create_test_state();
     let router = Arc::new(ResponseRouter::new());
     EventLoop::new(
@@ -353,34 +353,34 @@ pub(in crate::runtime::event_loop) fn create_test_event_loop(
 }
 
 pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop(
-    storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
-) -> crate::common::MidgeResult<EventLoop> {
+    storage_policy: cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy,
+) -> cntryl_midge_core::common::MidgeResult<EventLoop> {
     create_test_cloud_event_loop_with_reserved_names(storage_policy, None)
 }
 
 pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_reserved_names(
-    storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
+    storage_policy: cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy,
     next_sst: Option<u64>,
-) -> crate::common::MidgeResult<EventLoop> {
+) -> cntryl_midge_core::common::MidgeResult<EventLoop> {
     create_test_cloud_event_loop_with_store_factory(storage_policy, next_sst, |cloud| cloud)
 }
 
 pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_store_factory(
-    storage_policy: crate::storage::hybrid::policy::StorageBudgetPolicy,
+    storage_policy: cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy,
     next_sst: Option<u64>,
     store_factory: impl FnOnce(
-        Arc<crate::storage::filesystem::FileSystem>,
-    ) -> Arc<dyn crate::storage::inventory::ObjectStore>,
-) -> crate::common::MidgeResult<EventLoop> {
+        Arc<cntryl_midge_storage::filesystem::FileSystem>,
+    ) -> Arc<dyn cntryl_midge_storage::inventory::ObjectStore>,
+) -> cntryl_midge_core::common::MidgeResult<EventLoop> {
     let db_path = unique_test_db_path("midge_event_loop_cloud");
     std::fs::create_dir_all(&db_path).expect("create temp cloud event loop dir");
     if let Some(next) = next_sst {
-        let fs = crate::io::real::test_root(&db_path);
-        crate::metadata::ensure_or_create_format_marker(&fs, &db_path)?;
-        let mut manifest = crate::metadata::Manifest::default();
+        let fs = cntryl_midge_core::io::real::test_root(&db_path);
+        cntryl_midge_durability::metadata::ensure_or_create_format_marker(&fs, &db_path)?;
+        let mut manifest = cntryl_midge_durability::metadata::Manifest::default();
         manifest.next_sst_seqs.insert(0, next);
-        crate::metadata::ManifestPersistence::save_with_fs(&fs, &manifest)
-            .map_err(crate::common::MidgeError::Internal)?;
+        cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&fs, &manifest)
+            .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
     }
 
     // The history starts under the event loop's lease, so its first segment
@@ -388,30 +388,30 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_store_fa
     let state = RuntimeState::new_in_epoch(&db_path, false, 1);
     let router = Arc::new(ResponseRouter::new());
     let cloud = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
+        cntryl_midge_storage::filesystem::FileSystem::new(db_path.join("cloud_store"))
             .expect("create cloud backend"),
     );
     let shared_metadata_store = store_factory(Arc::clone(&cloud));
-    let shared_metadata = Arc::new(crate::storage::cloud::CloudStorage::from_object_store(
+    let shared_metadata = Arc::new(cntryl_midge_storage::cloud::CloudStorage::from_object_store(
         shared_metadata_store,
         Duration::from_secs(5),
     ));
-    let inventory: Arc<dyn crate::storage::inventory::ObjectInventory> = cloud.clone();
-    let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+    let inventory: Arc<dyn cntryl_midge_storage::inventory::ObjectInventory> = cloud.clone();
+    let hybrid_storage = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
         cloud,
         storage_policy,
     ));
     hybrid_storage.configure_object_inventories(Arc::clone(&inventory), inventory)?;
-    let store: Arc<dyn crate::lease::LeaderStore> =
-        Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
-            crate::io::real::test_root(db_path.join("cloud_store")),
-            crate::lease::LeaseClock::default(),
+    let store: Arc<dyn cntryl_midge_durability::lease::LeaderStore> =
+        Arc::new(cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
+            cntryl_midge_core::io::real::test_root(db_path.join("cloud_store")),
+            cntryl_midge_durability::lease::LeaseClock::default(),
         ));
     store.acquire_leadership("test-writer")?;
-    crate::metadata::ensure_or_create_format_marker(&state.fs, &db_path)?;
-    crate::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
-        .map_err(crate::common::MidgeError::Internal)?;
-    let deadline = crate::common::OperationDeadline::from_budget(Duration::from_secs(5));
+    cntryl_midge_durability::metadata::ensure_or_create_format_marker(&state.fs, &db_path)?;
+    cntryl_midge_durability::metadata::ManifestPersistence::save_with_fs(&state.fs, &state.manifest)
+        .map_err(cntryl_midge_core::common::MidgeError::Internal)?;
+    let deadline = cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5));
     crate::runtime::ddl::fence_remote_registry_on_startup(
         &hybrid_storage,
         &crate::runtime::ddl::DdlLeaseAuthority {
@@ -438,7 +438,7 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_store_fa
     )?;
     CloudPersistence::new(Arc::clone(&hybrid_storage)).fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
-        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&hybrid_storage)),
         cloud_metadata_storage: Some(shared_metadata),
         provider_ddl_fencing: true,
@@ -458,7 +458,7 @@ pub(in crate::runtime::event_loop) fn create_test_cloud_event_loop_with_store_fa
 }
 
 pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
-) -> crate::common::MidgeResult<EventLoop> {
+) -> cntryl_midge_core::common::MidgeResult<EventLoop> {
     let db_path = unique_test_db_path("midge_event_loop_local");
     std::fs::create_dir_all(&db_path).expect("create temp local event loop dir");
 
@@ -477,7 +477,7 @@ pub(in crate::runtime::event_loop) fn create_test_local_event_loop(
 }
 
 #[test]
-fn should_use_injected_retry_policy_for_each_cloud_schedule() -> crate::common::MidgeResult<()> {
+fn should_use_injected_retry_policy_for_each_cloud_schedule() -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let policy = crate::runtime::RuntimeRetryPolicy {
         cloud_seal: Duration::from_millis(11),
@@ -521,22 +521,22 @@ fn should_use_injected_retry_policy_for_each_cloud_schedule() -> crate::common::
 
 #[test]
 fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
-) -> crate::common::MidgeResult<()> {
-    use crate::lease::PrimaryLease as _;
+) -> cntryl_midge_core::common::MidgeResult<()> {
+    use cntryl_midge_durability::lease::PrimaryLease as _;
 
     // Arrange
     let directory = tempfile::tempdir()?;
     let state = RuntimeState::try_new(
         directory.path(),
         false,
-        crate::config::RecoveryPolicy::Salvage,
+        cntryl_midge_durability::RecoveryPolicy::Salvage,
     )?;
-    let cloud = Arc::new(crate::storage::cloud::CloudStorage::new(
-        Arc::new(crate::storage::cloud::MockCloudBackend::new()),
+    let cloud = Arc::new(cntryl_midge_storage::cloud::CloudStorage::new(
+        Arc::new(cntryl_midge_storage::cloud::MockCloudBackend::new()),
         String::new(),
     ));
-    let lease = Arc::new(crate::lease::CloudStorageLease::new_provider_backed(
-        crate::lease::CloudLeaseConfig {
+    let lease = Arc::new(cntryl_midge_durability::lease::CloudStorageLease::new_provider_backed(
+        cntryl_midge_durability::lease::CloudLeaseConfig {
             bucket: "test".to_string(),
             prefix: String::new(),
         },
@@ -546,9 +546,9 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
     let _lease_guard = Arc::clone(&lease)
         .try_acquire()
         .expect("acquire cloud metadata lease");
-    let hybrid = Arc::new(crate::storage::HybridStorage::with_policy(
+    let hybrid = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
         cloud.clone(),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     let config = crate::runtime::RuntimeConfig {
         hybrid_storage: Some(hybrid),
@@ -578,7 +578,7 @@ fn should_require_cloud_filename_allocation_when_compacting_in_salvage_mode(
     // Assert
     assert!(matches!(
         result,
-        Err(crate::common::MidgeError::Busy(_) | crate::common::MidgeError::Timeout(_))
+        Err(cntryl_midge_core::common::MidgeError::Busy(_) | cntryl_midge_core::common::MidgeError::Timeout(_))
     ));
     assert!(event_loop.state.manifest.files.is_empty());
     Ok(())
@@ -620,7 +620,7 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
         .deferred_messages
         .push_back(RuntimeMsg::ManifestPersist {
             request_id: 8103,
-            origin: crate::metadata::accounting::Origin::Unclassified,
+            origin: cntryl_midge_durability::metadata::accounting::Origin::Unclassified,
         });
     event_loop.publication.flush_barrier_waiters.insert(
         0,
@@ -662,7 +662,7 @@ fn should_fail_every_held_request_when_shutdown_drain_restores_deferred_work() {
                 response,
                 RuntimeResponse::Error {
                     request_id: response_id,
-                    error: crate::common::MidgeError::Busy(_),
+                    error: cntryl_midge_core::common::MidgeError::Busy(_),
                 } if response_id == request_id
             ),
             "request {request_id} received the wrong shutdown response"
@@ -717,19 +717,19 @@ fn should_retain_writer_epochs_in_recovered_cloud_wal_runtime_config() {
 
 #[test]
 fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_acknowledged(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let db_path = unique_test_db_path("midge_recovered_cloud_wal_gap");
     let wal_dir = db_path.join("wal");
     let initialized = RuntimeState::new(db_path.clone(), false);
     drop(initialized);
     let (remote_bytes, remote_link, remote_entry) =
-        sealed_cloud_recovery_segment_for_test(1, 1, crate::wal::format::ChainLink::GENESIS, &[1]);
+        sealed_cloud_recovery_segment_for_test(1, 1, cntryl_midge_durability::wal::format::ChainLink::GENESIS, &[1]);
     let (local_bytes, _, _) = sealed_cloud_recovery_segment_for_test(2, 1, remote_link, &[2, 3]);
-    let local_segment = wal_dir.join(crate::wal::segment_file_name(2));
+    let local_segment = wal_dir.join(cntryl_midge_durability::wal::segment_file_name(2));
     std::fs::write(&local_segment, &local_bytes).expect("write recovered local WAL segment");
-    let wal: Arc<dyn crate::io::Fs> =
-        Arc::new(crate::io::RealFs::new(&wal_dir).expect("open the WAL directory"));
+    let wal: Arc<dyn cntryl_midge_core::io::Fs> =
+        Arc::new(cntryl_midge_core::io::RealFs::new(&wal_dir).expect("open the WAL directory"));
     crate::runtime::wal_history::fixture::replace(&wal, &[2], 3).expect("record the WAL history");
 
     let mut state = RuntimeState::new(db_path.clone(), false);
@@ -738,11 +738,11 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
     state.reset_cloud_durable_sequence_for_recovery(0);
     let cloud_root = db_path.join("cloud_store");
     let cloud = Arc::new(
-        crate::storage::filesystem::FileSystem::new(&cloud_root).expect("create cloud backend"),
+        cntryl_midge_storage::filesystem::FileSystem::new(&cloud_root).expect("create cloud backend"),
     );
-    let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+    let hybrid_storage = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
         cloud,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     let cloud_persistence = CloudPersistence::new(Arc::clone(&hybrid_storage));
     cloud_persistence.fence_cloud_wal_catalog(1)?;
@@ -751,11 +751,11 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
         .publish_wal_segments(
             std::slice::from_ref(&remote_entry),
             1,
-            &crate::common::OperationDeadline::unbounded(),
+            &cntryl_midge_core::common::OperationDeadline::unbounded(),
         )
-        .map_err(crate::common::MidgeError::from)?;
+        .map_err(cntryl_midge_core::common::MidgeError::from)?;
     let config = crate::runtime::RuntimeConfig {
-        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&hybrid_storage)),
         recovered_cloud_wal_entries: [(1, remote_entry)].into_iter().collect(),
         recovered_cloud_wal_segments: [(1, 1)].into_iter().collect(),
@@ -799,7 +799,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
 
     let remote_segment = db_path
         .join("cloud_store")
-        .join(crate::wal::segment_object_key(2, 1));
+        .join(cntryl_midge_durability::wal::segment_object_key(2, 1));
     std::fs::create_dir_all(remote_segment.parent().expect("remote WAL parent"))
         .expect("create remote WAL directory");
     // The upload publishes the sealed local segment's bytes.
@@ -808,7 +808,7 @@ fn should_hold_cloud_frontier_at_local_recovery_gap_until_resumed_upload_is_ackn
         std::fs::read(&local_segment).expect("read the sealed local segment"),
     )
     .expect("publish resumed WAL segment");
-    event_loop.handle_storage_event(crate::storage::StorageEvent::CloudAck {
+    event_loop.handle_storage_event(cntryl_midge_storage::StorageEvent::CloudAck {
         segment_id: 2,
         max_sequence: 3,
     });
@@ -847,7 +847,7 @@ fn should_leave_later_write_queued_when_destructively_dropping_column_family() {
                 insert_only: false,
             }],
             assertions: Vec::new(),
-            durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+            durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Batched),
             start_sequence: None,
             conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             response_tx: None,
@@ -880,7 +880,7 @@ fn should_leave_later_write_queued_when_destructively_dropping_column_family() {
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("later write response"),
         RuntimeResponse::Error {
-            error: crate::common::MidgeError::InvalidArgument(message),
+            error: cntryl_midge_core::common::MidgeError::InvalidArgument(message),
             ..
         } if message.contains("does not exist")
     ));
@@ -945,7 +945,7 @@ fn should_cancel_column_family_waiters_after_drop_commits() {
                 .recv_timeout(std::time::Duration::from_secs(1))
                 .expect("canceled waiter response"),
             RuntimeResponse::Error {
-                error: crate::common::MidgeError::InvalidArgument(message),
+                error: cntryl_midge_core::common::MidgeError::InvalidArgument(message),
                 ..
             } if message.contains("was dropped")
         ));
@@ -967,14 +967,14 @@ fn should_cancel_column_family_waiters_after_drop_commits() {
 
 #[test]
 fn should_apply_runtime_config_block_cache_policy_to_read_resources_when_initializing_event_loop(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let db_path = unique_test_db_path("midge_event_loop_config");
     std::fs::create_dir_all(&db_path).expect("create temp runtime config dir");
     let state = RuntimeState::new(db_path, false);
     let router = Arc::new(ResponseRouter::new());
     let config = crate::runtime::RuntimeConfig {
-        block_cache_policy: crate::sst::cache::CachePolicyType::ClockPro,
+        block_cache_policy: cntryl_midge_table::sst::cache::CachePolicyType::ClockPro,
         block_cache_size: 512 * 1024,
         l0_compaction_trigger: 7,
         ..crate::runtime::RuntimeConfig::default()
@@ -1001,15 +1001,15 @@ fn should_apply_runtime_config_block_cache_policy_to_read_resources_when_initial
         .expect("local runtime should construct read resources");
     assert_eq!(
         read_resources.block_cache().policy_type(),
-        crate::sst::cache::CachePolicyType::ClockPro
+        cntryl_midge_table::sst::cache::CachePolicyType::ClockPro
     );
     Ok(())
 }
 
 fn valid_sst_bytes_for_event_loop_test(key: &[u8], value: &[u8], seq: u64) -> Vec<u8> {
-    use crate::sst::SstFactory;
+    use cntryl_midge_table::sst::SstFactory;
 
-    let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+    let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::new(cntryl_midge_core::io::MockFs::new()), 4096);
     let mut writer = factory.create().expect("create test SST writer");
     writer
         .add_with_meta(key, Some(value), seq, EntryType::Put, None)
@@ -1017,8 +1017,8 @@ fn valid_sst_bytes_for_event_loop_test(key: &[u8], value: &[u8], seq: u64) -> Ve
     writer.finish_bytes().expect("finish test SST bytes")
 }
 
-fn test_manifest_l0_file_meta(name: &str, largest_seq: u64) -> crate::metadata::FileMeta {
-    crate::metadata::FileMeta {
+fn test_manifest_l0_file_meta(name: &str, largest_seq: u64) -> cntryl_midge_durability::metadata::FileMeta {
+    cntryl_midge_durability::metadata::FileMeta {
         name: name.to_string(),
         level: 0,
         size_bytes: 128,
@@ -1091,7 +1091,7 @@ fn should_create_event_loop_given_supported_storage_modes() {
 fn should_not_treat_blocked_auto_flush_candidate_as_standalone_actionable_work() {
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::new(1_000_000),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::new(1_000_000),
     )
     .expect("create cloud event loop");
     let hybrid = event_loop
@@ -1143,7 +1143,7 @@ fn should_not_treat_blocked_auto_flush_candidate_as_standalone_actionable_work()
 
 #[test]
 fn should_schedule_compaction_after_l0_flush_when_threshold_reached(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let (worker_tx, _worker_rx) = crossbeam::channel::unbounded();
@@ -1262,7 +1262,7 @@ fn should_schedule_recovery_compaction_above_hard_l0_ceiling_when_background_dis
 
 #[test]
 fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
@@ -1338,7 +1338,7 @@ fn should_schedule_live_compaction_at_hard_l0_ceiling_when_background_disabled()
 
 #[test]
 fn should_continue_pressure_compaction_when_one_publication_leaves_l0_at_hard_ceiling() {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange
         let mut event_loop = create_test_local_event_loop().expect("create local event loop");
         let (worker_tx, worker_rx) = crossbeam::channel::unbounded();
@@ -1423,11 +1423,11 @@ fn persist_pressure_input_layout(event_loop: &EventLoop) {
         .state
         .manifest_store
         .save_snapshot_for(
-            crate::metadata::accounting::Origin::Unclassified,
+            cntryl_midge_durability::metadata::accounting::Origin::Unclassified,
             &event_loop.state.manifest,
         )
         .expect("persist the recovered pressure input layout");
-    let persisted = crate::metadata::ManifestPersistence::load_with_fs_and_policy(
+    let persisted = cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy(
         &event_loop.state.fs,
         crate::RecoveryPolicy::Strict,
     )
@@ -1438,7 +1438,7 @@ fn persist_pressure_input_layout(event_loop: &EventLoop) {
         assert!(event_loop
             .state
             .fs
-            .exists(&crate::sst::fs::sst_key(&file.name))
+            .exists(&cntryl_midge_table::sst::fs::sst_key(&file.name))
             .expect("check the persisted pressure input"));
     }
 }
@@ -1524,7 +1524,7 @@ fn should_preserve_compaction_gates_when_recovering_live_l0_pressure() {
 }
 
 #[test]
-fn should_not_schedule_auto_compaction_when_compaction_disabled() -> crate::common::MidgeResult<()>
+fn should_not_schedule_auto_compaction_when_compaction_disabled() -> cntryl_midge_core::common::MidgeResult<()>
 {
     // Arrange
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
@@ -1627,8 +1627,8 @@ fn should_reject_runtime_config_atomically_given_invalid_memtable_candidate() {
             memtable_flush_threshold: Some(0),
             enable_compaction: Some(!original_compaction),
             l0_compaction_trigger: Some(original_trigger.saturating_add(1)),
-            wal_durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
-            wal_batch_config: Some(crate::wal::policy::BatchConfig {
+            wal_durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Strict),
+            wal_batch_config: Some(cntryl_midge_durability::wal::policy::BatchConfig {
                 max_delay_ms: 1,
                 max_bytes: 1,
             }),
@@ -1642,7 +1642,7 @@ fn should_reject_runtime_config_atomically_given_invalid_memtable_candidate() {
             .recv_timeout(Duration::from_secs(1))
             .expect("runtime config response"),
         RuntimeResponse::Error {
-            error: crate::common::MidgeError::InvalidArgument(_),
+            error: cntryl_midge_core::common::MidgeError::InvalidArgument(_),
             ..
         }
     ));
@@ -1698,8 +1698,8 @@ fn should_reject_runtime_config_atomically_given_cross_mode_wal_policy() {
             memtable_flush_threshold: Some(candidate_threshold),
             enable_compaction: Some(!original_compaction),
             l0_compaction_trigger: Some(original_actor_trigger.saturating_add(1)),
-            wal_durability_policy: Some(crate::wal::DurabilityPolicy::CloudAsync),
-            wal_batch_config: Some(crate::wal::policy::BatchConfig {
+            wal_durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync),
+            wal_batch_config: Some(cntryl_midge_durability::wal::policy::BatchConfig {
                 max_delay_ms: original_batch_config.max_delay_ms.saturating_add(1),
                 max_bytes: original_batch_config.max_bytes.saturating_add(1),
             }),
@@ -1713,7 +1713,7 @@ fn should_reject_runtime_config_atomically_given_cross_mode_wal_policy() {
             .recv_timeout(Duration::from_secs(1))
             .expect("runtime config response"),
         RuntimeResponse::Error {
-            error: crate::common::MidgeError::InvalidArgument(_),
+            error: cntryl_midge_core::common::MidgeError::InvalidArgument(_),
             ..
         }
     ));
@@ -1755,8 +1755,8 @@ fn should_mark_persistence_anomaly_when_compaction_metadata_range_is_missing() {
         .manifest
         .test_mut()
         .files
-        .push(crate::metadata::FileMeta {
-            name: crate::cloud_layout::file_name(0, 0, 1),
+        .push(cntryl_midge_durability::metadata::FileMeta {
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, 1),
             level: 0,
             cf_id: 0,
             smallest_key: None,
@@ -1770,7 +1770,7 @@ fn should_mark_persistence_anomaly_when_compaction_metadata_range_is_missing() {
         .expect_err("unknown overlap range must stop compaction planning");
 
     // Assert
-    assert!(matches!(error, crate::common::MidgeError::Corruption(_)));
+    assert!(matches!(error, cntryl_midge_core::common::MidgeError::Corruption(_)));
     assert!(event_loop.state.persistence_anomaly_detected());
 }
 
@@ -1809,7 +1809,7 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
     let blocked_mutation =
         event_loop.gate_message_for_storage_verification(RuntimeMsg::ManifestPersist {
             request_id: mutation_request_id,
-            origin: crate::metadata::accounting::Origin::Unclassified,
+            origin: cntryl_midge_durability::metadata::accounting::Origin::Unclassified,
         });
     let deferred_completion = event_loop.gate_message_for_storage_verification(completion);
     let deferred_gc = event_loop.gate_message_for_storage_verification(RuntimeMsg::RetryGc);
@@ -1829,7 +1829,7 @@ fn should_defer_layout_completion_until_verification_barrier_releases() {
             .recv_timeout(Duration::from_secs(1))
             .expect("blocked mutation response"),
         RuntimeResponse::Error {
-            error: crate::common::MidgeError::Busy(_),
+            error: cntryl_midge_core::common::MidgeError::Busy(_),
             ..
         }
     ));
@@ -1886,7 +1886,7 @@ fn should_capture_runtime_health_at_verification_barrier_acquisition() {
     assert!(matches!(
         response.recv_timeout(Duration::from_secs(1)),
         Ok(RuntimeResponse::StorageVerificationBarrier {
-            health: crate::config::EngineHealth::Degraded,
+            health: cntryl_midge_core::types::EngineHealth::Degraded,
             ..
         })
     ));
@@ -1919,7 +1919,7 @@ fn should_reject_storage_verification_while_flush_publication_is_active() {
             .recv_timeout(Duration::from_secs(1))
             .expect("verification response"),
         RuntimeResponse::Error {
-            error: crate::common::MidgeError::Busy(_),
+            error: cntryl_midge_core::common::MidgeError::Busy(_),
             ..
         }
     ));
@@ -2073,7 +2073,7 @@ fn should_publish_all_flushable_cfs_given_local_write_burst_without_further_writ
             insert_only: false,
         }],
         assertions: Vec::new(),
-        durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+        durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Batched),
         start_sequence: None,
         conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
         response_tx: None,
@@ -2166,8 +2166,8 @@ fn should_advance_compaction_output_sequence_past_recovered_manifest_name() {
         .manifest
         .test_mut()
         .files
-        .push(crate::metadata::FileMeta {
-            name: crate::cloud_layout::compaction_file_name(0, 1, 409, 0),
+        .push(cntryl_midge_durability::metadata::FileMeta {
+            name: cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 409, 0),
             level: 1,
             cf_id: 0,
             ..Default::default()
@@ -2175,7 +2175,7 @@ fn should_advance_compaction_output_sequence_past_recovered_manifest_name() {
     event_loop.state.restore_sequence_floor_from_manifest();
     assert_eq!(
         event_loop.state.manifest.flush_frontiers().get(0).unwrap(),
-        crate::metadata::FamilyFrontier::Live {
+        cntryl_midge_durability::metadata::FamilyFrontier::Live {
             through_sequence: 0
         },
     );
@@ -2194,8 +2194,8 @@ fn should_advance_compaction_output_sequence_past_recovered_manifest_name() {
 mod compaction_scheduling {
     use super::*;
 
-    fn manifest_file_from_runtime(file: crate::runtime::FileMeta) -> crate::metadata::FileMeta {
-        crate::metadata::FileMeta {
+    fn manifest_file_from_runtime(file: crate::runtime::FileMeta) -> cntryl_midge_durability::metadata::FileMeta {
+        cntryl_midge_durability::metadata::FileMeta {
             name: file.name,
             level: file.level,
             size_bytes: file.size_bytes,
@@ -2260,7 +2260,7 @@ mod compaction_scheduling {
         event_loop.state.set_compaction_enabled(true);
         event_loop.state.sequence = 100;
         for seq in 1..=4 {
-            let name = crate::cloud_layout::file_name(0, 0, seq);
+            let name = cntryl_midge_core::cloud_layout::file_name(0, 0, seq);
             let file = write_runtime_l0_sst_for_test(&event_loop, &name, seq);
             event_loop
                 .state
@@ -2394,14 +2394,14 @@ fn should_maintain_router_reference() {
 
 #[test]
 fn should_sleep_until_cloud_seal_deadline_without_spinning_given_subthreshold_wal(
-) -> crate::common::MidgeResult<()> {
-    crate::failpoints::with_read_gate(verify_subthreshold_cloud_seal_wait)
+) -> cntryl_midge_core::common::MidgeResult<()> {
+    cntryl_midge_core::failpoints::with_read_gate(verify_subthreshold_cloud_seal_wait)
 }
 
-fn verify_subthreshold_cloud_seal_wait() -> crate::common::MidgeResult<()> {
+fn verify_subthreshold_cloud_seal_wait() -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_cloud_event_loop(
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     )?;
     let max_flush_delay = Duration::from_millis(250);
     let policy = crate::runtime::CloudRuntimePolicy {
@@ -2441,47 +2441,47 @@ fn verify_subthreshold_cloud_seal_wait() -> crate::common::MidgeResult<()> {
 }
 
 fn cloud_recovery_wal_bytes(sequence: u64) -> Vec<u8> {
-    let record = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
+    let record = cntryl_midge_durability::wal::WalRecord::new(
+        cntryl_midge_durability::wal::WalOpKind::Put,
         bytes::Bytes::from(format!("key-{sequence}")),
         Some(bytes::Bytes::from_static(b"value")),
         sequence,
     );
-    let payload = crate::wal::encoding::encode(&record).expect("encode recovery WAL record");
+    let payload = cntryl_midge_durability::wal::encoding::encode(&record).expect("encode recovery WAL record");
     let mut framed = Vec::new();
-    crate::wal::frame::append_frame(&mut framed, &payload).expect("frame recovery WAL record");
+    cntryl_midge_durability::wal::frame::append_frame(&mut framed, &payload).expect("frame recovery WAL record");
     framed
 }
 
 fn sealed_cloud_recovery_segment_for_test(
     segment_id: u64,
     writer_epoch: u64,
-    prev: crate::wal::format::ChainLink,
+    prev: cntryl_midge_durability::wal::format::ChainLink,
     sequences: &[u64],
 ) -> (
     Vec<u8>,
-    crate::wal::format::ChainLink,
-    crate::wal::cloud_catalog::CatalogEntry,
+    cntryl_midge_durability::wal::format::ChainLink,
+    cntryl_midge_durability::wal::cloud_catalog::CatalogEntry,
 ) {
     let mut builder =
-        crate::wal::format::segment::SegmentBuilder::new(segment_id, writer_epoch, prev);
+        cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(segment_id, writer_epoch, prev);
     for sequence in sequences {
-        builder = builder.record(&crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
+        builder = builder.record(&cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::WalOpKind::Put,
             bytes::Bytes::from(format!("key-{sequence}")),
             Some(bytes::Bytes::from_static(b"value")),
             *sequence,
         ));
     }
     let (bytes, link) = builder.seal();
-    let entry = crate::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
+    let entry = cntryl_midge_durability::wal::cloud_catalog::CatalogEntry::from_sealed_bytes(&bytes)
         .expect("test WAL segment is sealed and catalogable");
     (bytes, link, entry)
 }
 
 fn write_recovered_cloud_segment_for_test(
     cloud_root: &std::path::Path,
-    entry: &crate::wal::cloud_catalog::CatalogEntry,
+    entry: &cntryl_midge_durability::wal::cloud_catalog::CatalogEntry,
     bytes: &[u8],
 ) {
     let object = cloud_root.join(entry.object_key());
@@ -2492,14 +2492,14 @@ fn write_recovered_cloud_segment_for_test(
 
 #[test]
 fn should_incrementally_drain_recovered_wal_given_bounded_upload_queue_at_open(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: this fixture has no intentional global failpoint configuration.
     // Act: retain its fault-free read scope through setup, deadline and cleanup.
     // Assert: the helper keeps the exact queue/backlog/durable-frontier checks.
-    crate::failpoints::with_read_gate(verify_bounded_recovered_wal_upload_queue)
+    cntryl_midge_core::failpoints::with_read_gate(verify_bounded_recovered_wal_upload_queue)
 }
 
-fn verify_bounded_recovered_wal_upload_queue() -> crate::common::MidgeResult<()> {
+fn verify_bounded_recovered_wal_upload_queue() -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let db_path = unique_test_db_path("midge_recovered_wal_backlog");
     let mut state = RuntimeState::new(db_path.clone(), false);
@@ -2508,15 +2508,15 @@ fn verify_bounded_recovered_wal_upload_queue() -> crate::common::MidgeResult<()>
     let first_bytes = cloud_recovery_wal_bytes(1);
     let second_bytes = cloud_recovery_wal_bytes(2);
     let active_bytes = cloud_recovery_wal_bytes(3);
-    std::fs::write(wal_dir.join(crate::wal::segment_file_name(1)), &first_bytes)
+    std::fs::write(wal_dir.join(cntryl_midge_durability::wal::segment_file_name(1)), &first_bytes)
         .expect("write first recovered WAL");
     std::fs::write(
-        wal_dir.join(crate::wal::segment_file_name(2)),
+        wal_dir.join(cntryl_midge_durability::wal::segment_file_name(2)),
         &second_bytes,
     )
     .expect("write second recovered WAL");
     std::fs::write(
-        wal_dir.join(crate::wal::segment_file_name(3)),
+        wal_dir.join(cntryl_midge_durability::wal::segment_file_name(3)),
         &active_bytes,
     )
     .expect("write recovered active WAL");
@@ -2524,7 +2524,7 @@ fn verify_bounded_recovered_wal_upload_queue() -> crate::common::MidgeResult<()>
 
     state.sequence = 3;
     let cloud = Arc::new(
-        crate::storage::filesystem::FileSystem::new(db_path.join("cloud-store"))
+        cntryl_midge_storage::filesystem::FileSystem::new(db_path.join("cloud-store"))
             .expect("create cloud storage"),
     );
     // Each sealed segment adds its header and footer to the record.
@@ -2533,15 +2533,15 @@ fn verify_bounded_recovered_wal_upload_queue() -> crate::common::MidgeResult<()>
         .max(second_bytes.len())
         .max(active_bytes.len()) as u64
         + 256;
-    let storage = Arc::new(crate::storage::HybridStorage::with_test_upload_limits(
+    let storage = Arc::new(cntryl_midge_storage::HybridStorage::with_test_upload_limits(
         cloud,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
         1,
         max_segment_bytes,
     ));
     CloudPersistence::new(Arc::clone(&storage)).fence_cloud_wal_catalog(1)?;
     let config = crate::runtime::RuntimeConfig {
-        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(Arc::clone(&storage)),
         // The recovered open segment 3 is sealed when the event loop opens
         // and owed to the cloud with segments 1 and 2.
@@ -2603,25 +2603,25 @@ fn verify_bounded_recovered_wal_upload_queue() -> crate::common::MidgeResult<()>
 
 #[test]
 fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_durable(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let db_path = unique_test_db_path("midge_remote_wal_local_cleanup");
     let mut state = RuntimeState::new(db_path.clone(), false);
     let (remote_bytes, _, remote_entry) =
-        sealed_cloud_recovery_segment_for_test(1, 1, crate::wal::format::ChainLink::GENESIS, &[1]);
+        sealed_cloud_recovery_segment_for_test(1, 1, cntryl_midge_durability::wal::format::ChainLink::GENESIS, &[1]);
     let wal_dir = db_path.join("wal");
     std::fs::create_dir_all(&wal_dir).expect("create WAL directory");
-    let local_path = wal_dir.join(crate::wal::segment_file_name(1));
+    let local_path = wal_dir.join(cntryl_midge_durability::wal::segment_file_name(1));
     std::fs::write(&local_path, &remote_bytes).expect("write validated local copy");
     record_wal_history(&mut state, &db_path, &[1], 2);
     state.sequence = 1;
     let cloud_root = db_path.join("cloud-store");
     let cloud = Arc::new(
-        crate::storage::filesystem::FileSystem::new(&cloud_root).expect("create cloud storage"),
+        cntryl_midge_storage::filesystem::FileSystem::new(&cloud_root).expect("create cloud storage"),
     );
-    let hybrid_storage = Arc::new(crate::storage::HybridStorage::with_policy(
+    let hybrid_storage = Arc::new(cntryl_midge_storage::HybridStorage::with_policy(
         cloud,
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     ));
     let cloud_persistence = CloudPersistence::new(Arc::clone(&hybrid_storage));
     cloud_persistence.fence_cloud_wal_catalog(1)?;
@@ -2630,11 +2630,11 @@ fn should_remove_validated_local_copy_when_remote_recovery_segment_is_initially_
         .publish_wal_segments(
             std::slice::from_ref(&remote_entry),
             1,
-            &crate::common::OperationDeadline::unbounded(),
+            &cntryl_midge_core::common::OperationDeadline::unbounded(),
         )
-        .map_err(crate::common::MidgeError::from)?;
+        .map_err(cntryl_midge_core::common::MidgeError::from)?;
     let config = crate::runtime::RuntimeConfig {
-        wal_durability_policy: crate::wal::DurabilityPolicy::CloudAsync,
+        wal_durability_policy: cntryl_midge_durability::wal::DurabilityPolicy::CloudAsync,
         hybrid_storage: Some(hybrid_storage),
         recovered_cloud_wal_entries: [(1, remote_entry)].into_iter().collect(),
         recovered_cloud_wal_segments: std::collections::BTreeMap::from([(1, 1)]),
@@ -2680,7 +2680,7 @@ fn add_event_loop_test_sst_metadata(
         .manifest
         .test_mut()
         .files
-        .push(crate::metadata::FileMeta {
+        .push(cntryl_midge_durability::metadata::FileMeta {
             name,
             level,
             size_bytes: u64::try_from(bytes.len()).expect("test SST length"),
@@ -2697,7 +2697,7 @@ fn add_event_loop_test_sst_metadata(
 fn prepare_event_loop_test_compaction(
     event_loop: &mut EventLoop,
     input_ssts: &[String],
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     event_loop
         .actors
         .compaction_actor
@@ -2745,8 +2745,8 @@ fn should_defer_column_family_drop_until_compaction_publication_finishes() {
     let mut event_loop = create_test_local_event_loop().expect("create local event loop");
     let sst_dir = event_loop.state.host_sst_dir();
     let cf_id = create_event_loop_test_column_family(&mut event_loop, "compacting");
-    let input_name = crate::cloud_layout::file_name(cf_id, 0, 1);
-    let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
+    let input_name = cntryl_midge_core::cloud_layout::file_name(cf_id, 0, 1);
+    let output_name = cntryl_midge_core::cloud_layout::file_name(cf_id, 1, 2);
     let input_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"old", 1);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"new", 2);
     std::fs::write(sst_dir.join(&input_name), &input_bytes).expect("write compaction input");
@@ -2843,11 +2843,11 @@ fn should_restore_deferred_column_family_drop_before_emergent_compaction_followu
         .compaction_actor
         .set_l0_file_count_threshold(2);
     let cf_id = create_event_loop_test_column_family(&mut event_loop, "drop-before-followup");
-    let current_input = crate::cloud_layout::file_name(cf_id, 0, 1);
+    let current_input = cntryl_midge_core::cloud_layout::file_name(cf_id, 0, 1);
     for (name, key, sequence) in
         std::iter::once((current_input.clone(), b'a', 1_u64)).chain((2_u8..=5).map(|index| {
             (
-                crate::cloud_layout::file_name(cf_id, 0, u64::from(index)),
+                cntryl_midge_core::cloud_layout::file_name(cf_id, 0, u64::from(index)),
                 b'a'.saturating_add(index),
                 u64::from(index),
             )
@@ -2955,8 +2955,8 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
         .drop_column_family(&mut event_loop.state, cf_id)
         .expect("drop column family");
 
-    let input_name = crate::cloud_layout::file_name(cf_id, 0, 1);
-    let output_name = crate::cloud_layout::file_name(cf_id, 1, 2);
+    let input_name = cntryl_midge_core::cloud_layout::file_name(cf_id, 0, 1);
+    let output_name = cntryl_midge_core::cloud_layout::file_name(cf_id, 1, 2);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"key", b"value", 2);
     std::fs::write(
         event_loop.state.host_sst_dir().join(&output_name),
@@ -3018,10 +3018,10 @@ fn should_reject_late_compaction_output_after_column_family_is_dropped() {
 
 #[test]
 fn should_reject_out_of_order_compaction_output_set_before_publication(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
-    let input_name = crate::cloud_layout::file_name(0, 0, 1);
+    let input_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
     let input_bytes = valid_sst_bytes_for_event_loop_test(b"input", b"value", 1);
     std::fs::write(
         event_loop.state.host_sst_dir().join(&input_name),
@@ -3032,7 +3032,7 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
         .manifest
         .test_mut()
         .files
-        .push(crate::metadata::FileMeta {
+        .push(cntryl_midge_durability::metadata::FileMeta {
             name: input_name.clone(),
             level: 0,
             size_bytes: u64::try_from(input_bytes.len()).expect("input length fits u64"),
@@ -3044,8 +3044,8 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
             largest_seq: Some(1),
             ..Default::default()
         });
-    let first_name = crate::cloud_layout::compaction_file_name(0, 1, 2, 0);
-    let second_name = crate::cloud_layout::compaction_file_name(0, 1, 2, 1);
+    let first_name = cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 2, 0);
+    let second_name = cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 2, 1);
     let first_bytes = valid_sst_bytes_for_event_loop_test(b"a", b"first", 2);
     let second_bytes = valid_sst_bytes_for_event_loop_test(b"z", b"second", 2);
     std::fs::write(
@@ -3122,13 +3122,13 @@ fn should_reject_out_of_order_compaction_output_set_before_publication(
 
 #[test]
 fn should_reject_compaction_when_target_span_changes_before_publication(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
     let sst_dir = event_loop.state.host_sst_dir();
-    let source_name = crate::cloud_layout::file_name(0, 0, 1);
-    let selected_target = crate::cloud_layout::file_name(0, 1, 2);
-    let concurrent_target = crate::cloud_layout::file_name(0, 1, 3);
+    let source_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
+    let selected_target = cntryl_midge_core::cloud_layout::file_name(0, 1, 2);
+    let concurrent_target = cntryl_midge_core::cloud_layout::file_name(0, 1, 3);
     for (name, level, key, smallest, largest, sequence) in [
         (&source_name, 0, b'm', b'a', b'z', 1_u64),
         (&selected_target, 1, b'b', b'a', b'm', 2_u64),
@@ -3146,7 +3146,7 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
             sequence,
         );
     }
-    let output_name = crate::cloud_layout::compaction_file_name(0, 1, 4, 0);
+    let output_name = cntryl_midge_core::cloud_layout::compaction_file_name(0, 1, 4, 0);
     let output_bytes = valid_sst_bytes_for_event_loop_test(b"m", b"replacement", 4);
     std::fs::write(sst_dir.join(&output_name), output_bytes)?;
     let captured_inputs = vec![source_name.clone(), selected_target.clone()];
@@ -3189,7 +3189,7 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("compact_all publication failure response"),
         RuntimeResponse::Error {
-            error: crate::common::MidgeError::Fenced(message),
+            error: cntryl_midge_core::common::MidgeError::Fenced(message),
             ..
         } if message.contains("target-level span changed")
     ));
@@ -3202,17 +3202,17 @@ fn should_reject_compaction_when_target_span_changes_before_publication(
 }
 
 #[test]
-fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::common::MidgeResult<()>
+fn should_return_exact_compaction_failure_to_compact_all_waiter() -> cntryl_midge_core::common::MidgeResult<()>
 {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
-    let input_name = crate::cloud_layout::file_name(0, 0, 1);
+    let input_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
     event_loop
         .state
         .manifest
         .test_mut()
         .files
-        .push(crate::metadata::FileMeta {
+        .push(cntryl_midge_durability::metadata::FileMeta {
             name: input_name.clone(),
             level: 0,
             cf_id: 0,
@@ -3243,7 +3243,7 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
     event_loop
         .actors
         .compaction_actor
-        .set_worker_error_for_test(crate::common::MidgeError::ResourceLimit(
+        .set_worker_error_for_test(cntryl_midge_core::common::MidgeError::ResourceLimit(
             "compaction pool exhausted".to_string(),
         ));
     let (_msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -3267,7 +3267,7 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
             .recv_timeout(Duration::from_secs(1))
             .expect("compact_all failure response"),
         RuntimeResponse::Error {
-            error: crate::common::MidgeError::ResourceLimit(message),
+            error: cntryl_midge_core::common::MidgeError::ResourceLimit(message),
             ..
         } if message == "compaction pool exhausted"
     ));
@@ -3284,28 +3284,28 @@ fn should_return_exact_compaction_failure_to_compact_all_waiter() -> crate::comm
 
 #[test]
 fn should_reject_cloud_partition_read_before_exceeding_compaction_pool(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
     let path = temp_dir.path().join("oversized-partition.sst");
     std::fs::write(&path, vec![0u8; 128])?;
-    let budget = crate::common::resource_budget::ResourceBudget::new(64);
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(64);
 
-    let hybrid = crate::storage::HybridStorage::with_policy(
-        Arc::new(crate::storage::filesystem::FileSystem::new(
+    let hybrid = cntryl_midge_storage::HybridStorage::with_policy(
+        Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(
             temp_dir.path().join("cloud"),
         )?),
-        crate::storage::hybrid::policy::StorageBudgetPolicy::default(),
+        cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
     );
 
-    let source = crate::io::RealFs::new(temp_dir.path()).map_err(crate::io::FsError::into_midge)?;
+    let source = cntryl_midge_core::io::RealFs::new(temp_dir.path()).map_err(cntryl_midge_core::io::FsError::into_midge)?;
 
     // Act
     let result = hybrid.publish_immutable_file(
-        crate::storage::hybrid::backend::ImmutableFileSource {
+        cntryl_midge_storage::hybrid::backend::ImmutableFileSource {
             key: "sst/oversized-partition.sst",
             fs: &source,
-            path: &crate::io::FsPath::new("oversized-partition.sst"),
+            path: &cntryl_midge_core::io::FsPath::new("oversized-partition.sst"),
             size: 128,
             checksum: 0,
         },
@@ -3315,7 +3315,7 @@ fn should_reject_cloud_partition_read_before_exceeding_compaction_pool(
     // Assert
     assert!(matches!(
         result,
-        Err(crate::common::MidgeError::ResourceLimit(_))
+        Err(cntryl_midge_core::common::MidgeError::ResourceLimit(_))
     ));
     assert!(path.is_file());
     Ok(())
@@ -3323,13 +3323,13 @@ fn should_reject_cloud_partition_read_before_exceeding_compaction_pool(
 
 #[test]
 fn should_reject_sst_checksum_buffer_before_exceeding_compaction_pool(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
     let temp_dir = tempfile::tempdir()?;
     let path = temp_dir.path().join("checksum-input.sst");
     std::fs::write(&path, [1u8; 128])?;
-    let fs = crate::io::real::test_root(temp_dir.path());
-    let budget = crate::common::resource_budget::ResourceBudget::new(64);
+    let fs = cntryl_midge_core::io::real::test_root(temp_dir.path());
+    let budget = cntryl_midge_core::common::resource_budget::ResourceBudget::new(64);
 
     // Act
     let result =
@@ -3342,7 +3342,7 @@ fn should_reject_sst_checksum_buffer_before_exceeding_compaction_pool(
     // Assert
     assert!(matches!(
         result,
-        Err(crate::common::MidgeError::ResourceLimit(_))
+        Err(cntryl_midge_core::common::MidgeError::ResourceLimit(_))
     ));
     assert!(path.is_file());
     Ok(())
@@ -3449,7 +3449,7 @@ fn should_restore_compaction_completion_deferred_behind_waiting_cf_drop() {
 }
 
 #[test]
-fn should_wait_in_select_when_queued_flush_cannot_start() -> crate::common::MidgeResult<()> {
+fn should_wait_in_select_when_queued_flush_cannot_start() -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: a queued immutable whose flush cannot start while the
     // publication gate is held. Treating it as actionable made the run loop
     // spin through progress passes every 50 µs instead of blocking.
@@ -3482,7 +3482,7 @@ fn should_wait_in_select_when_queued_flush_cannot_start() -> crate::common::Midg
 }
 
 #[test]
-fn should_fsync_batched_wal_while_verification_barrier_is_held() -> crate::common::MidgeResult<()> {
+fn should_fsync_batched_wal_while_verification_barrier_is_held() -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange: a buffered write is acknowledged, then verification freezes
     // layout maintenance. Group-commit fsync is not layout maintenance; it must
     // still run once the batch window elapses, or a crash during a long
@@ -3553,7 +3553,7 @@ fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
                 insert_only: false,
             }],
             assertions: Vec::new(),
-            durability_policy: Some(crate::wal::DurabilityPolicy::Batched),
+            durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Batched),
             start_sequence: None,
             conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             response_tx: None,
@@ -3564,9 +3564,9 @@ fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
     event_loop
         .state
         .manifest
-        .add_file(crate::metadata::FileMeta {
+        .add_file(cntryl_midge_durability::metadata::FileMeta {
             name: "cache-invalidation.sst".to_owned(),
-            ..crate::metadata::FileMeta::default()
+            ..cntryl_midge_durability::metadata::FileMeta::default()
         });
     event_loop.publish_snapshot();
     let after_manifest_change = read_resources.prune_call_count();
@@ -3578,7 +3578,7 @@ fn should_not_prune_reader_cache_when_publishing_after_plain_write() {
 }
 
 #[test]
-fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::common::MidgeResult<()>
+fn should_retain_untouched_family_sources_when_one_family_commits() -> cntryl_midge_core::common::MidgeResult<()>
 {
     // Arrange
     let mut event_loop = create_test_local_event_loop()?;
@@ -3608,7 +3608,7 @@ fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::co
                 insert_only: false,
             }],
             assertions: Vec::new(),
-            durability_policy: Some(crate::wal::DurabilityPolicy::BestEffort),
+            durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::BestEffort),
             start_sequence: None,
             conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
             response_tx: None,
@@ -3638,9 +3638,9 @@ fn should_retain_untouched_family_sources_when_one_family_commits() -> crate::co
 #[cfg(feature = "failpoints")]
 #[test]
 fn should_publish_applied_sequence_given_failed_group_when_snapshot_published(
-) -> crate::common::MidgeResult<()> {
+) -> cntryl_midge_core::common::MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = create_test_local_event_loop()?;
     let cache = Arc::new(crate::runtime::snapshot_cache::SnapshotCache::new());
     event_loop.set_snapshot_cache(Arc::clone(&cache));
@@ -3654,7 +3654,7 @@ fn should_publish_applied_sequence_given_failed_group_when_snapshot_published(
             insert_only: false,
         }],
         assertions: Vec::new(),
-        durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+        durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Strict),
         start_sequence: None,
         conflict_policy: crate::runtime::ConflictPolicy::LastWriteWins,
     };
@@ -3675,7 +3675,7 @@ fn should_publish_applied_sequence_given_failed_group_when_snapshot_published(
     // Assert
     assert!(matches!(
         result,
-        Err(crate::common::MidgeError::OutcomeUnknown(_))
+        Err(cntryl_midge_core::common::MidgeError::OutcomeUnknown(_))
     ));
     assert!(event_loop.state.sequence > applied);
     let (visible, snapshot) = cache.load_family(0).expect("published family");
@@ -3689,8 +3689,8 @@ fn should_publish_applied_sequence_given_failed_group_when_snapshot_published(
 fn should_pass_configured_grandparent_overlap_to_compaction_actor_when_creating_it() {
     for configured in [0_u64, 12_345] {
         // Arrange
-        let factory: Arc<dyn crate::sst::SstFactory> = Arc::new(crate::sst::FsSstFactoryIo::new(
-            Arc::new(crate::io::MockFs::new()),
+        let factory: Arc<dyn cntryl_midge_table::sst::SstFactory> = Arc::new(cntryl_midge_table::sst::FsSstFactoryIo::new(
+            Arc::new(cntryl_midge_core::io::MockFs::new()),
             4096,
         ));
         let config = crate::runtime::RuntimeConfig {

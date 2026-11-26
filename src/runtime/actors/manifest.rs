@@ -8,10 +8,10 @@
 
 use super::super::state::RuntimeState;
 use super::super::FileMeta;
-use crate::common::MidgeResult;
-use crate::metadata::accounting::Origin;
+use cntryl_midge_core::common::MidgeResult;
+use cntryl_midge_durability::metadata::accounting::Origin;
 #[cfg(test)]
-use crate::types::EntryType;
+use cntryl_midge_core::types::EntryType;
 
 /// Actor handling manifest operations
 pub struct ManifestActor {
@@ -29,13 +29,13 @@ impl ManifestActor {
     pub fn add_sst(&mut self, state: &mut RuntimeState, file_meta: &FileMeta) -> MidgeResult<()> {
         // Validate SST file exists and is readable (defensive: avoid manifest pointing at corrupt file)
         if !state.is_memory_mode() {
-            let sst_path = crate::sst::fs::sst_key(&file_meta.name);
+            let sst_path = cntryl_midge_table::sst::fs::sst_key(&file_meta.name);
             if !state
                 .fs
                 .exists(&sst_path)
-                .map_err(crate::io::FsError::into_midge)?
+                .map_err(cntryl_midge_core::io::FsError::into_midge)?
             {
-                return Err(crate::common::MidgeError::Internal(format!(
+                return Err(cntryl_midge_core::common::MidgeError::Internal(format!(
                     "SST file '{}' not found in sst dir",
                     file_meta.name
                 )));
@@ -43,9 +43,9 @@ impl ManifestActor {
 
             // Try opening the SST to validate footer/format correctness
             if let Err(e) =
-                crate::sst::fs::SstFileIo::open(&sst_path.0, std::sync::Arc::clone(&state.fs))
+                cntryl_midge_table::sst::fs::SstFileIo::open(&sst_path.0, std::sync::Arc::clone(&state.fs))
             {
-                return Err(crate::common::MidgeError::Corruption(format!(
+                return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
                     "SST file '{}' failed validation: {}",
                     file_meta.name, e
                 )));
@@ -53,14 +53,14 @@ impl ManifestActor {
         }
 
         let memory_mode = state.is_memory_mode();
-        let edit = crate::metadata::ManifestEdit::AddSst(file_meta.into());
+        let edit = cntryl_midge_durability::metadata::ManifestEdit::AddSst(file_meta.into());
         let prepared = state.manifest.prepare_edit(&edit)?;
         let journaled_id = if memory_mode {
             None
         } else {
-            crate::failpoints::fail_point!(
+            cntryl_midge_core::failpoints::fail_point!(
                 "midge::manifest::inject_no_space_on_add_sst_edit",
-                |_| Err(crate::common::MidgeError::NoSpace(
+                |_| Err(cntryl_midge_core::common::MidgeError::NoSpace(
                     "failpoint: no space on manifest add_sst append".to_string()
                 ))
             );
@@ -96,18 +96,18 @@ impl ManifestActor {
         // Append compaction edits to manifest journal as a single batch (reduces fixed overhead)
         let mut edits = Vec::with_capacity(removed.len() + added.len());
         for n in removed {
-            edits.push(crate::metadata::ManifestEdit::RemoveSst { name: n.clone() });
+            edits.push(cntryl_midge_durability::metadata::ManifestEdit::RemoveSst { name: n.clone() });
         }
         for f in added {
-            edits.push(crate::metadata::ManifestEdit::AddSst(f.into()));
+            edits.push(cntryl_midge_durability::metadata::ManifestEdit::AddSst(f.into()));
         }
         let memory_mode = state.is_memory_mode();
-        let batch = crate::metadata::ManifestEdit::Batch(edits);
+        let batch = cntryl_midge_durability::metadata::ManifestEdit::Batch(edits);
         let prepared = state.manifest.prepare_edit(&batch)?;
         let journaled_id = if !memory_mode && (!removed.is_empty() || !added.is_empty()) {
-            crate::failpoints::fail_point!(
+            cntryl_midge_core::failpoints::fail_point!(
                 "midge::manifest::inject_no_space_on_compaction_batch_edit",
-                |_| Err(crate::common::MidgeError::NoSpace(
+                |_| Err(cntryl_midge_core::common::MidgeError::NoSpace(
                     "failpoint: no space on manifest compaction batch append".to_string()
                 ))
             );
@@ -139,10 +139,10 @@ impl ManifestActor {
     pub(crate) fn move_ssts(
         &mut self,
         state: &mut RuntimeState,
-        captured: &[crate::metadata::FileMeta],
+        captured: &[cntryl_midge_durability::metadata::FileMeta],
         target_level: u32,
     ) -> MidgeResult<()> {
-        let edit = crate::metadata::ManifestEdit::MoveSsts {
+        let edit = cntryl_midge_durability::metadata::ManifestEdit::MoveSsts {
             captured: captured.to_vec(),
             target_level,
         };
@@ -151,8 +151,8 @@ impl ManifestActor {
         let journaled = if memory {
             None
         } else {
-            crate::failpoints::fail_point!("midge::manifest::inject_no_space_on_move_edit", |_| {
-                Err(crate::common::MidgeError::NoSpace(
+            cntryl_midge_core::failpoints::fail_point!("midge::manifest::inject_no_space_on_move_edit", |_| {
+                Err(cntryl_midge_core::common::MidgeError::NoSpace(
                     "injected logical move append failure".into(),
                 ))
             });
@@ -182,8 +182,8 @@ impl ManifestActor {
             tracing::debug!("Manifest: skipping persistence in memory mode");
             return Ok(());
         }
-        crate::failpoints::fail_point!("midge::manifest::persist", |_| Err(
-            crate::common::MidgeError::Internal("injected manifest persist failure".into())
+        cntryl_midge_core::failpoints::fail_point!("midge::manifest::persist", |_| Err(
+            cntryl_midge_core::common::MidgeError::Internal("injected manifest persist failure".into())
         ));
         // A persist is itself a chance to lift a failed-reload fence (#500).
         state.retry_metadata_reload()?;
@@ -220,7 +220,7 @@ impl ManifestActor {
             return Ok(existing.id);
         }
         let edit = crate::runtime::ddl::create_edit(state, name)?;
-        let crate::metadata::ManifestEdit::CreateColumnFamily { id, .. } = &edit else {
+        let cntryl_midge_durability::metadata::ManifestEdit::CreateColumnFamily { id, .. } = &edit else {
             unreachable!("create_edit returned a non-create edit");
         };
         let cf_id = *id;
@@ -235,7 +235,7 @@ impl ManifestActor {
     pub fn drop_column_family(
         &mut self,
         state: &mut RuntimeState,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> MidgeResult<()> {
         let edit = crate::runtime::ddl::drop_edit(state, cf_id, false)?;
         crate::runtime::ddl::apply_local_edit(state, &edit)?;
@@ -253,7 +253,7 @@ impl Default for ManifestActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sst::traits::SstFactory;
+    use cntryl_midge_table::sst::traits::SstFactory;
 
     #[test]
     fn should_initialize_manifest_actor_with_zero_pending_edits() {
@@ -325,15 +325,15 @@ mod tests {
 
     fn sst_meta(sequence: u64) -> crate::runtime::FileMeta {
         crate::runtime::FileMeta {
-            name: crate::cloud_layout::file_name(0, 0, sequence),
+            name: cntryl_midge_core::cloud_layout::file_name(0, 0, sequence),
             ..memory_file_meta("")
         }
     }
 
-    fn read_snapshot(state: &crate::runtime::state::RuntimeState) -> crate::metadata::Manifest {
+    fn read_snapshot(state: &crate::runtime::state::RuntimeState) -> cntryl_midge_durability::metadata::Manifest {
         let bytes = std::fs::read(state.db_path.join("manifest.snapshot.json"))
             .expect("snapshot should exist after persist");
-        crate::metadata::codec::decode(crate::metadata::codec::MANIFEST, &bytes)
+        cntryl_midge_durability::metadata::codec::decode(cntryl_midge_durability::metadata::codec::MANIFEST, &bytes)
             .expect("snapshot should parse")
     }
 
@@ -421,9 +421,9 @@ mod tests {
             .compaction_complete(&mut state, &[], &[sst_meta(1)])
             .expect("first local edit");
         let flushed = sst_meta(2);
-        crate::metadata::append_edit(
+        cntryl_midge_durability::metadata::append_edit(
             &state.db_path,
-            &crate::metadata::ManifestEdit::AddSst(crate::metadata::FileMeta {
+            &cntryl_midge_durability::metadata::ManifestEdit::AddSst(cntryl_midge_durability::metadata::FileMeta {
                 name: flushed.name.clone(),
                 ..Default::default()
             }),
@@ -444,7 +444,7 @@ mod tests {
             "racing flush edit was lost by the snapshot: {names:?}"
         );
         assert_eq!(names.len(), 3, "unexpected snapshot files: {names:?}");
-        let reloaded = crate::metadata::ManifestPersistence::load(&state.db_path).expect("reload");
+        let reloaded = cntryl_midge_durability::metadata::ManifestPersistence::load(&state.db_path).expect("reload");
         assert_eq!(reloaded.files.len(), 3);
     }
 
@@ -452,7 +452,7 @@ mod tests {
     fn should_fail_to_add_sst_given_corrupted_file_when_validating() {
         // Arrange: create a temp dir and a corrupt SST file (partial content)
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = crate::cloud_layout::file_name(0, 0, 1);
+        let sst_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 1);
         let sst_path = tmp.path().join(&sst_name);
 
         // Write corrupted content (not a valid SST)
@@ -491,7 +491,7 @@ mod tests {
     fn should_fail_to_add_sst_given_missing_final_file_when_only_tmp_exists() {
         // Arrange: create a temp dir and a leftover .tmp file (simulate crash before rename)
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = crate::cloud_layout::file_name(0, 0, 2);
+        let sst_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 2);
         let tmp_name = format!("{sst_name}.tmp");
         let tmp_path = tmp.path().join(&tmp_name);
 
@@ -529,15 +529,15 @@ mod tests {
     fn should_add_sst_successfully_given_valid_file_when_manifest_updated() -> MidgeResult<()> {
         // Arrange: create a valid on-disk SST via the Fs SstFactory
         let tmp = tempfile::tempdir().expect("create tmpdir");
-        let sst_name = crate::cloud_layout::file_name(0, 0, 3);
+        let sst_name = cntryl_midge_core::cloud_layout::file_name(0, 0, 3);
         let mut state = crate::runtime::state::RuntimeState::new(tmp.path().to_path_buf(), false);
         assert!(state.host_sst_dir().exists(), "sst dir must exist");
         let sst_path = state.host_sst_dir().join(&sst_name);
 
-        let factory = crate::sst::FsSstFactoryIo::new(std::sync::Arc::clone(&state.fs), 4096);
+        let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(std::sync::Arc::clone(&state.fs), 4096);
         let mut writer = factory.create()?;
         writer.add_with_meta(b"a", Some(b"value"), 10, EntryType::Put, None)?;
-        crate::sst::fs::finish_writer_to_path(writer, &sst_path)?;
+        cntryl_midge_table::sst::fs::finish_writer_to_path(writer, &sst_path)?;
         assert!(
             sst_path.exists(),
             "sst path must exist after creating footer"
@@ -583,7 +583,7 @@ mod tests {
         let mut actor = ManifestActor::new();
         crate::runtime::ddl::apply_local_edit(
             &mut state,
-            &crate::metadata::ManifestEdit::CreateColumnFamily {
+            &cntryl_midge_durability::metadata::ManifestEdit::CreateColumnFamily {
                 id: 1,
                 name: "other".to_string(),
                 created_at: 1,
@@ -637,7 +637,7 @@ mod tests {
         ManifestActor::persist(&mut state).expect("persist");
         state
             .manifest_store
-            .append(&crate::metadata::ManifestEdit::CreateColumnFamily {
+            .append(&cntryl_midge_durability::metadata::ManifestEdit::CreateColumnFamily {
                 id: 7,
                 name: "orphan".to_string(),
                 created_at: 1,
@@ -659,7 +659,7 @@ mod tests {
         ManifestActor::persist(&mut state).expect("persist after flush install");
 
         // Assert
-        let reloaded = crate::metadata::ManifestPersistence::load(&state.db_path).expect("reload");
+        let reloaded = cntryl_midge_durability::metadata::ManifestPersistence::load(&state.db_path).expect("reload");
         assert!(
             reloaded.column_families.iter().any(|cf| cf.id == 7),
             "orphan journal edit was truncated away"
@@ -667,13 +667,13 @@ mod tests {
         assert!(reloaded.files.iter().any(|file| file.name == flushed.name));
         assert_eq!(
             reloaded.flush_frontiers().get(0).expect("default frontier"),
-            crate::metadata::frontiers::FamilyFrontier::Live {
+            cntryl_midge_durability::metadata::frontiers::FamilyFrontier::Live {
                 through_sequence: 2,
             }
         );
         assert_eq!(
             reloaded.flush_frontiers().get(7).expect("orphan frontier"),
-            crate::metadata::frontiers::FamilyFrontier::Live {
+            cntryl_midge_durability::metadata::frontiers::FamilyFrontier::Live {
                 through_sequence: 0,
             }
         );

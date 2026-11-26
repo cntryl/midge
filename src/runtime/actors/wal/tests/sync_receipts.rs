@@ -7,19 +7,19 @@ struct AppendAfterSyncWriter {
 }
 
 impl WalWriter for AppendAfterSyncWriter {
-    fn set_write_authority(&self, authority: Option<crate::wal::traits::WriteAuthority>) {
+    fn set_write_authority(&self, authority: Option<cntryl_midge_durability::wal::traits::WriteAuthority>) {
         self.inner.set_write_authority(authority);
     }
     fn append_record_accounted(
         &self,
         record: &WalRecord,
-    ) -> Result<u64, crate::wal::traits::WalAppendError> {
+    ) -> Result<u64, cntryl_midge_durability::wal::traits::WalAppendError> {
         self.inner.append_record_accounted(record)
     }
     fn append_batch_accounted(
         &self,
         records: &[WalRecord],
-    ) -> Result<u64, crate::wal::traits::WalAppendError> {
+    ) -> Result<u64, cntryl_midge_durability::wal::traits::WalAppendError> {
         self.inner.append_batch_accounted(records)
     }
     fn sync_with_timeout(&self, timeout: Duration) -> MidgeResult<()> {
@@ -37,15 +37,15 @@ impl WalWriter for AppendAfterSyncWriter {
     fn current_pos(&self) -> u64 {
         self.inner.current_pos()
     }
-    fn tail(&self) -> crate::wal::format::SegmentTail {
+    fn tail(&self) -> cntryl_midge_durability::wal::format::SegmentTail {
         self.inner.tail()
     }
-    fn seal_facts(&self, timeout: Duration) -> MidgeResult<crate::wal::format::SealedFacts> {
+    fn seal_facts(&self, timeout: Duration) -> MidgeResult<cntryl_midge_durability::wal::format::SealedFacts> {
         self.inner.seal_facts(timeout)
     }
     fn write_footer(
         &self,
-        facts: &crate::wal::format::SealedFacts,
+        facts: &cntryl_midge_durability::wal::format::SealedFacts,
         timeout: Duration,
     ) -> MidgeResult<()> {
         self.inner.write_footer(facts, timeout)
@@ -63,7 +63,7 @@ fn should_record_only_captured_sync_prefix_when_later_frame_arrives_before_recei
         DurabilityPolicy::Batched,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let first = prepare_put_transaction(
         &mut actor,
@@ -126,13 +126,13 @@ fn should_record_only_captured_sync_prefix_when_later_frame_arrives_before_recei
             directory
                 .path()
                 .join("wal")
-                .join(crate::wal::segment_file_name(segment)),
+                .join(cntryl_midge_durability::wal::segment_file_name(segment)),
         )?
         .set_len(expected_floor)?;
     let recovered = RuntimeState::try_new(
         directory.path(),
         false,
-        crate::config::RecoveryPolicy::Strict,
+        cntryl_midge_durability::RecoveryPolicy::Strict,
     )?;
     let table = &recovered.get_cf(0).expect("default family").memtable;
     assert_eq!(table.get(b"synced")?, Some(b"first".to_vec()));
@@ -152,7 +152,7 @@ fn should_fence_receipt_commit_when_barrier_generation_or_writer_identity_mismat
             DurabilityPolicy::Batched,
             BatchConfig::default(),
             1,
-            crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+            cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
         )?;
         let unit = prepare_put_transaction(
             &mut actor,
@@ -192,7 +192,7 @@ fn should_fence_duplicate_valid_sync_receipt_without_advancing_frontier_twice() 
         DurabilityPolicy::Strict,
         BatchConfig::default(),
         1,
-        crate::config::DEFAULT_STORAGE_IO_TIMEOUT,
+        cntryl_midge_core::common::DEFAULT_STORAGE_IO_TIMEOUT,
     )?;
     let unit = prepare_put_transaction(
         &mut actor,

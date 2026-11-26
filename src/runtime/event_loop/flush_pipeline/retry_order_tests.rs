@@ -1,8 +1,8 @@
 //! Retained-generation ordering through real flush workers and publication.
 
 use super::*;
-use crate::common::{MidgeResult, OperationDeadline};
-use crate::metadata::frontiers::FamilyFrontier;
+use cntryl_midge_core::common::{MidgeResult, OperationDeadline};
+use cntryl_midge_durability::metadata::frontiers::FamilyFrontier;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -124,7 +124,7 @@ impl Fixture {
 fn should_keep_younger_family_flush_behind_retained_retry_while_other_family_publishes(
 ) -> MidgeResult<()> {
     // Arrange: the real AddSst failure retains the original completed output.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let mut fixture = Fixture::new()?;
     let clock = Arc::new(HeldRetryClock(Mutex::new(Instant::now())));
@@ -218,7 +218,7 @@ fn should_keep_younger_family_flush_behind_retained_retry_while_other_family_pub
     names.sort();
     assert_eq!(
         names,
-        [original_name, crate::cloud_layout::file_name(0, 0, 2)]
+        [original_name, cntryl_midge_core::cloud_layout::file_name(0, 0, 2)]
     );
     scenario.teardown();
     fixture.verify_recovery()

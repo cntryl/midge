@@ -19,8 +19,8 @@ struct RetainedEvidence {
 struct RecoveryInputs {
     db_path: PathBuf,
     cloud: Arc<CloudStorage>,
-    authority: Arc<dyn crate::lease::LeaderStore>,
-    remote: Arc<dyn crate::storage::StorageBackend>,
+    authority: Arc<dyn cntryl_midge_durability::lease::LeaderStore>,
+    remote: Arc<dyn cntryl_midge_storage::StorageBackend>,
     inputs: Vec<(String, Vec<u8>)>,
     outputs: Vec<String>,
 }
@@ -48,13 +48,13 @@ impl RecoveryInputs {
         crate::runtime::cloud_startup::CloudStartupRecovery::hydrate_cloud_metadata(
             &self.cloud,
             self.authority.as_ref(),
-            &crate::io::real::test_root(&self.db_path),
+            &cntryl_midge_core::io::real::test_root(&self.db_path),
             &self.db_path,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         )?;
-        let root = crate::io::real::test_root(&self.db_path);
+        let root = cntryl_midge_core::io::real::test_root(&self.db_path);
         let history = crate::runtime::wal_history::WalHistory::open(
-            crate::io::subdirectory(Arc::clone(&root), crate::wal::WAL_DIR),
+            cntryl_midge_core::io::subdirectory(Arc::clone(&root), cntryl_midge_durability::wal::WAL_DIR),
             1,
             0,
         )?;
@@ -62,22 +62,22 @@ impl RecoveryInputs {
             &self.db_path,
             false,
             root,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
             crate::runtime::state::RecoveryWal::Deferred(history),
             None,
             None,
         )?;
         let recovered_names = manifest_names(&recovered.manifest);
         let before_replay = recovered.intent_log.clone();
-        let remote_fs: Arc<dyn crate::io::Fs> =
-            Arc::new(crate::storage::remote_sst::RemoteSstFs::new(
-                Arc::new(crate::io::RealFs::new(&self.db_path).map_err(FsError::into_midge)?),
+        let remote_fs: Arc<dyn cntryl_midge_core::io::Fs> =
+            Arc::new(cntryl_midge_storage::remote_sst::RemoteSstFs::new(
+                Arc::new(cntryl_midge_core::io::RealFs::new(&self.db_path).map_err(FsError::into_midge)?),
                 Arc::clone(&self.remote),
                 PROVIDER_CAP,
             ));
         recovered.recovery_sst_fs = Some(Arc::clone(&remote_fs));
         recovered.replay_intent_log()?;
-        let factory = crate::sst::FsSstFactoryIo::new(remote_fs, 4096);
+        let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(remote_fs, 4096);
         let mut rows = Vec::new();
         for name in &self.outputs {
             rows.extend(
@@ -93,7 +93,7 @@ impl RecoveryInputs {
         assert!(
             crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
                 &recovered.fs,
-                crate::config::RecoveryPolicy::Strict,
+                cntryl_midge_durability::RecoveryPolicy::Strict,
             )?
             .is_empty()
         );
@@ -109,7 +109,7 @@ impl RecoveryInputs {
     }
 }
 
-fn manifest_names(manifest: &crate::metadata::Manifest) -> BTreeSet<String> {
+fn manifest_names(manifest: &cntryl_midge_durability::metadata::Manifest) -> BTreeSet<String> {
     manifest
         .files
         .iter()
@@ -169,7 +169,7 @@ fn capture_retained_evidence(fixture: &BudgetFixture) -> RetainedEvidence {
             .has_compaction_publication_intent(&names, &fixture.outputs),
         durable_intents: crate::runtime::IntentPersistence::load_with_fs_and_policy_typed(
             &fixture.el.state.fs,
-            crate::config::RecoveryPolicy::Strict,
+            cntryl_midge_durability::RecoveryPolicy::Strict,
         ),
         no_final_phase: !fixture.el.actors.compaction_publish_actor.is_inflight()
             && fixture
@@ -224,10 +224,10 @@ fn assert_matching_intent(
     )));
 }
 
-fn descriptor_generation(bytes: &[u8]) -> crate::lease::CloudMetadataGeneration {
+fn descriptor_generation(bytes: &[u8]) -> cntryl_midge_durability::lease::CloudMetadataGeneration {
     let pointer: serde_json::Value =
-        crate::metadata::codec::decode(4, bytes).expect("actual bounded binary metadata pointer");
-    serde_json::from_value::<Option<crate::lease::CloudMetadataGeneration>>(
+        cntryl_midge_durability::metadata::codec::decode(4, bytes).expect("actual bounded binary metadata pointer");
+    serde_json::from_value::<Option<cntryl_midge_durability::lease::CloudMetadataGeneration>>(
         pointer["committed"].clone(),
     )
     .expect("actual committed generation")
@@ -256,8 +256,8 @@ fn assert_committed_cas(
         write.lease_before, write.lease_after,
         "metadata publication leaves every exact lease byte unchanged"
     );
-    let before: serde_json::Value = crate::metadata::codec::decode(4, &write.before)?;
-    let after: serde_json::Value = crate::metadata::codec::decode(4, &write.after)?;
+    let before: serde_json::Value = cntryl_midge_durability::metadata::codec::decode(4, &write.before)?;
+    let after: serde_json::Value = cntryl_midge_durability::metadata::codec::decode(4, &write.after)?;
     for field in ["writer_epoch", "holder_id", "owner_token"] {
         assert_eq!(before[field], after[field]);
     }
@@ -270,9 +270,9 @@ fn assert_committed_cas(
         .map_err(|error| error.into_validation_error("late CAS readback"))?;
     assert_eq!(
         actual,
-        crate::lease::CloudMetadataHead::Committed(after.clone())
+        cntryl_midge_durability::lease::CloudMetadataHead::Committed(after.clone())
     );
-    let scope = crate::common::DeadlineScope::new(OperationDeadline::from_budget(FIXTURE_WAIT));
+    let scope = cntryl_midge_core::common::DeadlineScope::new(OperationDeadline::from_budget(FIXTURE_WAIT));
     for generation in [&before, &after] {
         crate::runtime::cloud_startup::CloudStartupRecovery::read_committed_cloud_metadata_within(
             &recovery.cloud,
@@ -286,7 +286,7 @@ fn assert_committed_cas(
 #[test]
 fn should_retain_both_generations_when_committed_metadata_cas_response_exceeds_manual_deadline(
 ) -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: all setup precedes the immutable actual manual-caller origin.
         let mut fixture = BudgetFixture::new()?;
         let (started, response) = fixture.start_manual();

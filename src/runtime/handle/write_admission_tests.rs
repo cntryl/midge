@@ -26,7 +26,7 @@ fn should_never_submit_after_deadline_expires_during_caller_slowdown() {
         assertions: vec![],
         durability_policy: None,
         start_sequence: None,
-        conflict_policy: crate::types::ConflictPolicy::LastWriteWins,
+        conflict_policy: cntryl_midge_core::types::ConflictPolicy::LastWriteWins,
     };
 
     // Act

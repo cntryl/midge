@@ -141,7 +141,7 @@ impl StagedWriteOverlay {
                     expiration,
                     ..
                 } if *family == cf_id && written.as_ref() == key => Some(
-                    *exists && !crate::common::time::is_expired_at(*expiration, read_time_millis),
+                    *exists && !cntryl_midge_core::common::time::is_expired_at(*expiration, read_time_millis),
                 ),
                 StagedMutation::Range {
                     cf_id: family,
@@ -157,7 +157,7 @@ impl StagedWriteOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::MidgeResult;
+    use cntryl_midge_core::common::MidgeResult;
     use bytes::Bytes;
     use proptest::prelude::*;
 
@@ -170,7 +170,7 @@ mod tests {
                 let key = Bytes::copy_from_slice(&[*first]);
                 match kind {
                     0 => TransactionApplyOp::Put {
-                        op: crate::wal::WalOpKind::Put,
+                        op: cntryl_midge_durability::wal::WalOpKind::Put,
                         cf_id: *cf_id,
                         key,
                         value: Bytes::copy_from_slice(&[u8::try_from(index).unwrap_or(u8::MAX)]),
@@ -203,7 +203,7 @@ mod tests {
     }
 
     fn apply_to_memtables(
-        memtables: &[crate::memtable::SkipListMemtable; 2],
+        memtables: &[cntryl_midge_table::memtable::SkipListMemtable; 2],
         ops: &[TransactionApplyOp],
     ) -> MidgeResult<()> {
         for op in ops {
@@ -238,17 +238,17 @@ mod tests {
         Ok(())
     }
 
-    fn state_sequence(state: &crate::types::KeyState) -> Option<u64> {
+    fn state_sequence(state: &cntryl_midge_core::types::KeyState) -> Option<u64> {
         match state {
-            crate::types::KeyState::Absent => None,
-            crate::types::KeyState::Tombstone(sequence)
-            | crate::types::KeyState::Value(_, sequence, _, _) => Some(*sequence),
+            cntryl_midge_core::types::KeyState::Absent => None,
+            cntryl_midge_core::types::KeyState::Tombstone(sequence)
+            | cntryl_midge_core::types::KeyState::Value(_, sequence, _, _) => Some(*sequence),
         }
     }
 
     fn assert_overlay_matches_memtables(
         overlay: &StagedWriteOverlay,
-        memtables: &[crate::memtable::SkipListMemtable; 2],
+        memtables: &[cntryl_midge_table::memtable::SkipListMemtable; 2],
     ) -> MidgeResult<()> {
         for (cf_id, memtable) in (0u32..).zip(memtables.iter()) {
             let ranges = memtable.range_tombstones_at(u64::MAX);
@@ -273,10 +273,10 @@ mod tests {
                         .map(|range| range.seq)
                         .max();
                     let exists = match (point, covered) {
-                        (crate::types::KeyState::Value(_, sequence, _, _), Some(range_seq)) => {
+                        (cntryl_midge_core::types::KeyState::Value(_, sequence, _, _), Some(range_seq)) => {
                             sequence > range_seq
                         }
-                        (crate::types::KeyState::Value(_, _, _, _), None) => true,
+                        (cntryl_midge_core::types::KeyState::Value(_, _, _, _), None) => true,
                         _ => false,
                     };
                     assert_eq!(
@@ -322,8 +322,8 @@ mod tests {
             let mut overlay = StagedWriteOverlay::default();
             overlay.record_ops(&ops);
             let memtables = [
-                crate::memtable::SkipListMemtable::new(),
-                crate::memtable::SkipListMemtable::new(),
+                cntryl_midge_table::memtable::SkipListMemtable::new(),
+                cntryl_midge_table::memtable::SkipListMemtable::new(),
             ];
 
             // Act

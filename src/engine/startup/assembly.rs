@@ -4,7 +4,7 @@ use super::{
     RuntimeRecoveryMaterialization, RuntimeStorageMaterialization, StartedRuntime, StartupLease,
     StartupStoragePath,
 };
-use crate::common::{DeadlineScope, MidgeError, MidgeResult};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult};
 use crate::config::Storage;
 use crate::engine::ingest;
 use crate::runtime::Runtime;

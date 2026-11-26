@@ -10,7 +10,7 @@ impl RuntimeState {
     #[cfg(test)]
     pub(crate) fn track_new_immutable_flush(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         memtable: Arc<SkipListMemtable>,
         sequence: u64,
     ) -> Option<ImmutableFlush> {
@@ -18,16 +18,16 @@ impl RuntimeState {
             cf_id,
             memtable,
             sequence,
-            crate::metadata::accounting::Origin::Unclassified,
+            cntryl_midge_durability::metadata::accounting::Origin::Unclassified,
         )
     }
 
     pub(crate) fn track_new_immutable_flush_for(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         memtable: Arc<SkipListMemtable>,
         sequence: u64,
-        origin: crate::metadata::accounting::Origin,
+        origin: cntryl_midge_durability::metadata::accounting::Origin,
     ) -> Option<ImmutableFlush> {
         let flush_id = self.next_flush_id;
         self.next_flush_id = self.next_flush_id.checked_add(1)?;
@@ -143,7 +143,7 @@ impl RuntimeState {
 
     pub(crate) fn complete_immutable_flush(
         &mut self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         memtable: &Arc<SkipListMemtable>,
     ) -> Option<usize> {
         let cf_state = self.column_families.get_mut(&cf_id)?;
@@ -187,7 +187,7 @@ impl RuntimeState {
     }
 
     #[cfg(test)]
-    pub(crate) fn make_immutable_flush_retry_due(&mut self, cf_id: crate::types::ColumnFamilyId) {
+    pub(crate) fn make_immutable_flush_retry_due(&mut self, cf_id: cntryl_midge_core::types::ColumnFamilyId) {
         if let Some(cf_state) = self.column_families.get_mut(&cf_id) {
             for flush in &mut cf_state.immutable_flushes {
                 if flush.phase == ImmutableFlushPhase::RetryPending {
@@ -204,7 +204,7 @@ impl RuntimeState {
             .max(1)
     }
 
-    pub fn is_immutable_memtable_queue_full(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+    pub fn is_immutable_memtable_queue_full(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> bool {
         self.column_families.get(&cf_id).is_some_and(|cf_state| {
             cf_state.immutable_memtables.len() >= self.limits.max_immutable_memtables
         })
@@ -238,7 +238,7 @@ impl RuntimeState {
     /// Published L0 files plus every in-memory generation that can still
     /// publish one L0 file. `max` is conservative if test or recovery state is
     /// temporarily between the paired immutable indexes.
-    pub(crate) fn l0_slot_usage(&self, cf_id: crate::types::ColumnFamilyId) -> usize {
+    pub(crate) fn l0_slot_usage(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> usize {
         let published = self
             .manifest
             .files
@@ -254,7 +254,7 @@ impl RuntimeState {
             .saturating_add(usize::from(cf.memtable.size_bytes() > 0))
     }
 
-    pub(crate) fn has_critical_l0_debt(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+    pub(crate) fn has_critical_l0_debt(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> bool {
         self.l0_slot_usage(cf_id) >= self.l0_hard_ceiling()
     }
 
@@ -268,7 +268,7 @@ impl RuntimeState {
     /// that does not exist. A below-threshold active memtable may continue to
     /// consume its already-reserved slot; the transaction that crosses the
     /// flush threshold is accepted, then the next transaction stalls.
-    pub(crate) fn l0_write_slot_unavailable(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+    pub(crate) fn l0_write_slot_unavailable(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> bool {
         let usage = self.l0_slot_usage(cf_id);
         let ceiling = self.l0_hard_ceiling();
         if usage < ceiling {
@@ -303,7 +303,7 @@ impl RuntimeState {
     ///
     /// This intentionally excludes active memtable size: active memtable pressure
     /// should trigger flush, not block the flush that would relieve it.
-    pub fn should_hard_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+    pub fn should_hard_stall_writes(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> bool {
         if self.write_pressure.admission.hard_pending_limit() {
             return true;
         }
@@ -332,7 +332,7 @@ impl RuntimeState {
     }
 
     /// Compatibility wrapper for write-admission callsites.
-    pub fn should_stall_writes(&self, cf_id: crate::types::ColumnFamilyId) -> bool {
+    pub fn should_stall_writes(&self, cf_id: cntryl_midge_core::types::ColumnFamilyId) -> bool {
         self.should_hard_stall_writes(cf_id)
     }
 
@@ -350,14 +350,14 @@ impl RuntimeState {
         self.mode.persistence.is_memory()
     }
 
-    pub fn recovery_policy(&self) -> crate::config::RecoveryPolicy {
+    pub fn recovery_policy(&self) -> cntryl_midge_durability::RecoveryPolicy {
         self.recovery.policy
     }
 
     #[cfg(test)]
     pub(crate) fn set_recovery_policy_for_test(
         &mut self,
-        recovery_policy: crate::config::RecoveryPolicy,
+        recovery_policy: cntryl_midge_durability::RecoveryPolicy,
     ) {
         self.recovery.policy = recovery_policy;
     }
@@ -406,7 +406,7 @@ impl RuntimeState {
 
     pub(crate) fn active_memtable_wal_segment_gap(
         &self,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> u64 {
         self.column_families.get(&cf_id).map_or(0, |cf_state| {
             if cf_state.memtable.size_bytes() == 0 {
@@ -435,8 +435,8 @@ impl RuntimeState {
     pub(crate) fn next_flush_candidate_skipping(
         &self,
         rule: EventualFlush,
-        attempted_cfs: &HashSet<crate::types::ColumnFamilyId>,
-        oldest_shared: Option<&crate::wal::format::SealedFacts>,
+        attempted_cfs: &HashSet<cntryl_midge_core::types::ColumnFamilyId>,
+        oldest_shared: Option<&cntryl_midge_durability::wal::format::SealedFacts>,
     ) -> Option<FlushCandidate> {
         let retry_candidate = self
             .column_families
@@ -539,8 +539,8 @@ impl RuntimeState {
     /// local member.
     pub(crate) fn oldest_wal_blocking_family(
         &self,
-        oldest_shared: Option<&crate::wal::format::SealedFacts>,
-    ) -> Option<crate::types::ColumnFamilyId> {
+        oldest_shared: Option<&cntryl_midge_durability::wal::format::SealedFacts>,
+    ) -> Option<cntryl_midge_core::types::ColumnFamilyId> {
         let facts = oldest_shared.or_else(|| {
             self.wal
                 .history
@@ -551,10 +551,10 @@ impl RuntimeState {
         })?;
         facts.max_seq_per_cf.iter().find_map(|&(cf, sequence)| {
             let needs_flush = match self.manifest.flush_frontiers().get(cf) {
-                Ok(crate::metadata::FamilyFrontier::Live { through_sequence }) => {
+                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Live { through_sequence }) => {
                     sequence > through_sequence
                 }
-                Ok(crate::metadata::FamilyFrontier::Dropped) => false,
+                Ok(cntryl_midge_durability::metadata::FamilyFrontier::Dropped) => false,
                 Err(_) => true,
             };
             needs_flush.then_some(cf)
@@ -638,8 +638,8 @@ mod retention_tests {
         state.limits.eventual_flush_segment_gap = 1;
         let blocker = state.create_cf("blocker".into()).unwrap();
         state.wal.history = crate::runtime::wal_history::WalHistory::in_memory(0);
-        let facts = crate::wal::format::SealedFacts {
-            link: crate::wal::format::ChainLink {
+        let facts = cntryl_midge_durability::wal::format::SealedFacts {
+            link: cntryl_midge_durability::wal::format::ChainLink {
                 id: 1,
                 last_seq: 3,
                 digest: [1; 16],

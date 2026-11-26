@@ -1,7 +1,7 @@
 //! Per-request response routing.
 
 use super::RuntimeResponse;
-use crate::common::{MidgeError, OperationDeadline};
+use cntryl_midge_core::common::{MidgeError, OperationDeadline};
 use crossbeam::channel::{self, Receiver, Sender};
 use dashmap::DashMap;
 use std::collections::{HashMap, VecDeque};
@@ -310,7 +310,7 @@ impl ResponseRouter {
                         // already appended or synced, so a lost commit is
                         // never reported as a definite failure.
                         "ApplyTransaction" | "ApplySpilledTransaction" => {
-                            crate::common::error::classify_commit_error(
+                            cntryl_midge_core::common::error::classify_commit_error(
                                 MidgeError::Internal(message.to_string()),
                                 false,
                             )

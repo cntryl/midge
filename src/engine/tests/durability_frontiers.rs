@@ -7,7 +7,7 @@ use crossbeam::channel;
 #[test]
 fn should_read_durability_frontiers_while_full_metrics_response_is_held() -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let directory = tempfile::tempdir()?;
     let options = OpenOptions::cloud_simulated(directory.path(), "frontier-snapshot", "db")

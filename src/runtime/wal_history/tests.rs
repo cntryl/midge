@@ -6,12 +6,12 @@
 //! bytes it held when it became history.
 
 use super::{SalvageCut, SetAside, WalHistory, WalHistoryFence};
-use crate::common::MidgeError;
-use crate::io::{Durability, Fs, FsPath, OpenMode, OpenOptions, ReadFs};
-use crate::lease::LeaderStore;
-use crate::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
-use crate::wal::format::{ChainLink, SegmentHeader, HEADER_LEN};
-use crate::wal::ledger::SegmentId;
+use cntryl_midge_core::common::MidgeError;
+use cntryl_midge_core::io::{Durability, Fs, FsPath, OpenMode, OpenOptions, ReadFs};
+use cntryl_midge_durability::lease::LeaderStore;
+use cntryl_midge_core::simulation::crash_fs::{CrashDevice, Fault, FaultEffect, FaultError, FaultOp};
+use cntryl_midge_durability::wal::format::{ChainLink, SegmentHeader, HEADER_LEN};
+use cntryl_midge_durability::wal::ledger::SegmentId;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ mod fenced_ledger;
 const POWER_LOSS_SEEDS: u64 = 64;
 
 fn wal(device: &CrashDevice) -> Arc<dyn Fs> {
-    crate::io::subdirectory(Arc::new(device.fs()), crate::wal::WAL_DIR)
+    cntryl_midge_core::io::subdirectory(Arc::new(device.fs()), cntryl_midge_durability::wal::WAL_DIR)
 }
 
 /// [`wal`] as the read-only view [`WalHistory::read`] takes.
@@ -29,11 +29,11 @@ fn wal_view(device: &CrashDevice) -> Arc<dyn ReadFs> {
 }
 
 fn name(id: SegmentId) -> String {
-    crate::wal::segment_file_name(id)
+    cntryl_midge_durability::wal::segment_file_name(id)
 }
 
 fn key(id: SegmentId) -> String {
-    format!("{}/{}", crate::wal::WAL_DIR, name(id))
+    format!("{}/{}", cntryl_midge_durability::wal::WAL_DIR, name(id))
 }
 
 /// Open the WAL at segment 1 under epoch 0, starting it if needed.
@@ -44,10 +44,10 @@ fn open(device: &CrashDevice) -> WalHistory {
 #[test]
 fn should_fence_stale_history_before_successor_wal_effects() {
     // Arrange
-    let wal: Arc<dyn Fs> = Arc::new(crate::io::MockFs::new());
-    let leader = Arc::new(crate::lease::fs_leader_store::FsLeaderStore::new(
+    let wal: Arc<dyn Fs> = Arc::new(cntryl_midge_core::io::MockFs::new());
+    let leader = Arc::new(cntryl_midge_durability::lease::fs_leader_store::FsLeaderStore::new(
         Arc::clone(&wal),
-        crate::lease::LeaseClock::default(),
+        cntryl_midge_durability::lease::LeaseClock::default(),
     ));
     let predecessor = leader.acquire_leadership("predecessor").unwrap();
     let fence = WalHistoryFence::new(
@@ -58,8 +58,8 @@ fn should_fence_stale_history_before_successor_wal_effects() {
     );
     let mut history =
         WalHistory::open_with_fence(Arc::clone(&wal), 1, predecessor.epoch, &fence).unwrap();
-    let ledger_path = FsPath::new(crate::wal::ledger_store::LEDGER_FILE);
-    let before = crate::io::read_all(wal.as_ref(), &ledger_path).unwrap();
+    let ledger_path = FsPath::new(cntryl_midge_durability::wal::ledger_store::LEDGER_FILE);
+    let before = cntryl_midge_core::io::read_all(wal.as_ref(), &ledger_path).unwrap();
     leader.acquire_leadership("successor").unwrap();
 
     // Act
@@ -68,7 +68,7 @@ fn should_fence_stale_history_before_successor_wal_effects() {
     // Assert: neither the ledger nor the segment directory is touched.
     assert!(matches!(result, Err(MidgeError::Fenced(_))), "{result:?}");
     assert_eq!(
-        crate::io::read_all(wal.as_ref(), &ledger_path).unwrap(),
+        cntryl_midge_core::io::read_all(wal.as_ref(), &ledger_path).unwrap(),
         before
     );
     assert_eq!(history.ledger().members().collect::<Vec<_>>(), vec![1]);
@@ -76,15 +76,15 @@ fn should_fence_stale_history_before_successor_wal_effects() {
 
 /// The frame of a put at `seq`, the sequence segment `id` uses.
 fn put_frame(id: SegmentId, seq: u64) -> Vec<u8> {
-    let record = crate::wal::WalRecord::new(
-        crate::wal::WalOpKind::Put,
+    let record = cntryl_midge_durability::wal::WalRecord::new(
+        cntryl_midge_durability::wal::WalOpKind::Put,
         bytes::Bytes::from(format!("segment-{id}")),
         Some(bytes::Bytes::from_static(b"value")),
         seq,
     );
-    let payload = crate::wal::encoding::encode(&record).expect("encode record");
+    let payload = cntryl_midge_durability::wal::encoding::encode(&record).expect("encode record");
     let mut frame = Vec::new();
-    crate::wal::frame::append_frame(&mut frame, &payload).expect("frame record");
+    cntryl_midge_durability::wal::frame::append_frame(&mut frame, &payload).expect("frame record");
     frame
 }
 
@@ -174,18 +174,18 @@ fn header_of(device: &CrashDevice, id: SegmentId) -> SegmentHeader {
 /// Replay every member strictly and return the sequences applied.
 fn replayed_sequences(device: &CrashDevice, history: &WalHistory) -> Vec<u64> {
     let storage = wal(device);
-    let segments = crate::wal::recovery::ReplaySegments::from_ledger(history.ledger(), |id| {
-        FsPath::new(crate::wal::segment_file_name(id))
+    let segments = cntryl_midge_durability::wal::recovery::ReplaySegments::from_ledger(history.ledger(), |id| {
+        FsPath::new(cntryl_midge_durability::wal::segment_file_name(id))
     });
     let mut memtables = std::collections::HashMap::new();
-    crate::wal::recovery::streaming::replay_wal_with_options(
+    cntryl_midge_durability::wal::recovery::streaming::replay_wal_with_options(
         storage.as_ref(),
         &segments,
         &mut memtables,
-        crate::wal::recovery::ReplayPolicy::Strict,
-        crate::wal::recovery::streaming::StreamingReplayLimits::local(),
-        crate::wal::recovery::streaming::ReplayOptions::new(
-            crate::wal::replay::ReplaySelection::All,
+        cntryl_midge_durability::wal::recovery::ReplayPolicy::Strict,
+        cntryl_midge_durability::wal::recovery::streaming::StreamingReplayLimits::local(),
+        cntryl_midge_durability::wal::recovery::streaming::ReplayOptions::new(
+            cntryl_midge_durability::wal::replay::ReplaySelection::All,
         ),
         &mut |_, _| Ok(()),
     )
@@ -222,7 +222,7 @@ fn should_refuse_genesis_when_segment_files_exist_without_ledger() {
     let device = CrashDevice::new();
     let stray = wal(&device);
     stray.create_dir_all(&FsPath::new("")).expect("WAL dir");
-    let (bytes, _) = crate::wal::format::segment::SegmentBuilder::new(3, 0, ChainLink::GENESIS)
+    let (bytes, _) = cntryl_midge_durability::wal::format::segment::SegmentBuilder::new(3, 0, ChainLink::GENESIS)
         .bytes(&put_frame(3, 1))
         .seal();
     stray
@@ -347,7 +347,7 @@ fn should_link_each_segment_to_the_footer_before_it_when_rotating() {
         assert_eq!(header.prev, sealed.link, "segment {id}");
         assert_eq!(header.first_seq, sealed.link.last_seq + 1, "segment {id}");
         assert_eq!(
-            crate::wal::format::segment::footer_link(&device.files()[&key(id - 1)])
+            cntryl_midge_durability::wal::format::segment::footer_link(&device.files()[&key(id - 1)])
                 .expect("footer"),
             Some(sealed.link)
         );
@@ -538,15 +538,15 @@ fn should_keep_recovered_tail_when_power_is_lost_after_its_footer_append() {
         let device = CrashDevice::new();
         let mut history = four_segments(&device);
         let wal = wal(&device);
-        let record = crate::wal::WalRecord::new(
-            crate::wal::WalOpKind::Put,
+        let record = cntryl_midge_durability::wal::WalRecord::new(
+            cntryl_midge_durability::wal::WalOpKind::Put,
             bytes::Bytes::from_static(b"segment-4-large"),
             Some(bytes::Bytes::from(incompressible(3 * 4096))),
             43,
         );
-        let payload = crate::wal::encoding::encode(&record).expect("encode record");
+        let payload = cntryl_midge_durability::wal::encoding::encode(&record).expect("encode record");
         let mut frame = Vec::new();
-        crate::wal::frame::append_frame(&mut frame, &payload).expect("frame record");
+        cntryl_midge_durability::wal::frame::append_frame(&mut frame, &payload).expect("frame record");
         let mut file = wal
             .open(
                 &FsPath::new(name(4)),
@@ -731,8 +731,8 @@ fn should_set_aside_again_when_power_was_lost_after_members_moved() {
         op: FaultOp::Write,
         path: format!(
             "{}/{}",
-            crate::wal::WAL_DIR,
-            crate::wal::ledger_store::LEDGER_FILE
+            cntryl_midge_durability::wal::WAL_DIR,
+            cntryl_midge_durability::wal::ledger_store::LEDGER_FILE
         ),
         nth: 1,
         effect: FaultEffect::Before,
@@ -768,8 +768,8 @@ fn should_retire_after_healing_when_an_earlier_ledger_write_failed() {
         op: FaultOp::Write,
         path: format!(
             "{}/{}",
-            crate::wal::WAL_DIR,
-            crate::wal::ledger_store::LEDGER_FILE
+            cntryl_midge_durability::wal::WAL_DIR,
+            cntryl_midge_durability::wal::ledger_store::LEDGER_FILE
         ),
         nth: 1,
         effect: FaultEffect::Before,

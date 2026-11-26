@@ -1,6 +1,6 @@
 use super::*;
 use crate::runtime::event_loop::flush::FlushCoordinator;
-use crate::sst::read_path_metrics::SstReadObserver as _;
+use cntryl_midge_table::sst::read_path_metrics::SstReadObserver as _;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -70,7 +70,7 @@ fn request(request_id: u64, key: &'static [u8], checked: bool) -> ApplyTransacti
             insert_only: false,
         }],
         assertions: Vec::new(),
-        durability_policy: Some(crate::wal::DurabilityPolicy::Strict),
+        durability_policy: Some(cntryl_midge_durability::wal::DurabilityPolicy::Strict),
         start_sequence: checked.then_some(0),
         conflict_policy: if checked {
             ConflictPolicy::AbortOnWriteConflict
@@ -114,7 +114,7 @@ fn apply_and_flush_family(
 }
 
 struct SstReadOpenCounter {
-    inner: crate::io::RealFs,
+    inner: cntryl_midge_core::io::RealFs,
     event_loop_thread: std::thread::ThreadId,
     validation_worker_thread: std::sync::Mutex<Option<std::thread::ThreadId>>,
     event_loop_opens: AtomicUsize,
@@ -122,37 +122,37 @@ struct SstReadOpenCounter {
     unrelated_opens: AtomicUsize,
 }
 
-impl crate::io::ReadFs for SstReadOpenCounter {
+impl cntryl_midge_core::io::ReadFs for SstReadOpenCounter {
     fn open_read(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::ReadFile + '_>> {
-        crate::io::Fs::open(self, path, crate::io::OpenOptions::READ_ONLY)
-            .map(|file| file as Box<dyn crate::io::ReadFile>)
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::ReadFile + '_>> {
+        cntryl_midge_core::io::Fs::open(self, path, cntryl_midge_core::io::OpenOptions::READ_ONLY)
+            .map(|file| file as Box<dyn cntryl_midge_core::io::ReadFile>)
     }
 
-    fn exists(&self, path: &crate::io::FsPath) -> crate::io::FsResult<bool> {
+    fn exists(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<bool> {
         self.inner.exists(path)
     }
 
     fn metadata(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<crate::io::traits::Metadata> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<cntryl_midge_core::io::traits::Metadata> {
         self.inner.metadata(path)
     }
 
     fn list_dir(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Vec<crate::io::traits::DirEntry>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Vec<cntryl_midge_core::io::traits::DirEntry>> {
         self.inner.list_dir(path)
     }
 }
 
 impl SstReadOpenCounter {
-    fn record_read_open(&self, path: &crate::io::FsPath, options: crate::io::OpenOptions) {
-        if options.mode == crate::io::OpenMode::ReadOnly
+    fn record_read_open(&self, path: &cntryl_midge_core::io::FsPath, options: cntryl_midge_core::io::OpenOptions) {
+        if options.mode == cntryl_midge_core::io::OpenMode::ReadOnly
             && std::path::Path::new(&path.0)
                 .extension()
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("sst"))
@@ -175,72 +175,72 @@ impl SstReadOpenCounter {
     }
 }
 
-impl crate::io::Fs for SstReadOpenCounter {
-    fn persistent_handle_capability(&self) -> Option<&dyn crate::io::PersistentHandleFs> {
+impl cntryl_midge_core::io::Fs for SstReadOpenCounter {
+    fn persistent_handle_capability(&self) -> Option<&dyn cntryl_midge_core::io::PersistentHandleFs> {
         Some(self)
     }
 
     fn try_lock_exclusive(
         &self,
-        path: &crate::io::FsPath,
-    ) -> crate::io::FsResult<Box<dyn crate::io::FsLock>> {
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::FsLock>> {
         self.inner.try_lock_exclusive(path)
     }
 
     fn open(
         &self,
-        path: &crate::io::FsPath,
-        options: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File + '_>> {
+        path: &cntryl_midge_core::io::FsPath,
+        options: cntryl_midge_core::io::OpenOptions,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File + '_>> {
         self.record_read_open(path, options);
         self.inner.open(path, options)
     }
 
-    fn remove_file(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_file(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_file(path)
     }
 
-    fn create_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn create_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.create_dir_all(path)
     }
 
-    fn remove_dir_all(&self, path: &crate::io::FsPath) -> crate::io::FsResult<()> {
+    fn remove_dir_all(&self, path: &cntryl_midge_core::io::FsPath) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.remove_dir_all(path)
     }
 
     fn sync_dir(
         &self,
-        path: &crate::io::FsPath,
-        durability: crate::io::Durability,
-    ) -> crate::io::FsResult<()> {
+        path: &cntryl_midge_core::io::FsPath,
+        durability: cntryl_midge_core::io::Durability,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.sync_dir(path, durability)
     }
 
     fn rename_atomic(
         &self,
-        from: &crate::io::FsPath,
-        to: &crate::io::FsPath,
-    ) -> crate::io::FsResult<()> {
+        from: &cntryl_midge_core::io::FsPath,
+        to: &cntryl_midge_core::io::FsPath,
+    ) -> cntryl_midge_core::io::FsResult<()> {
         self.inner.rename_atomic(from, to)
     }
 }
 
-impl crate::io::PersistentHandleFs for SstReadOpenCounter {
+impl cntryl_midge_core::io::PersistentHandleFs for SstReadOpenCounter {
     fn open_persistent(
         &self,
-        path: &crate::io::FsPath,
-        options: crate::io::OpenOptions,
-    ) -> crate::io::FsResult<Box<dyn crate::io::File>> {
+        path: &cntryl_midge_core::io::FsPath,
+        options: cntryl_midge_core::io::OpenOptions,
+    ) -> cntryl_midge_core::io::FsResult<Box<dyn cntryl_midge_core::io::File>> {
         self.record_read_open(path, options);
-        crate::io::PersistentHandleFs::open_persistent(&self.inner, path, options)
+        cntryl_midge_core::io::PersistentHandleFs::open_persistent(&self.inner, path, options)
     }
 }
 
 fn create_counted_event_loop(
-) -> crate::common::MidgeResult<(tempfile::TempDir, EventLoop, Arc<SstReadOpenCounter>)> {
+) -> cntryl_midge_core::common::MidgeResult<(tempfile::TempDir, EventLoop, Arc<SstReadOpenCounter>)> {
     let directory = tempfile::tempdir()?;
     let fs = Arc::new(SstReadOpenCounter {
-        inner: crate::io::RealFs::new(directory.path()).map_err(crate::io::FsError::into_midge)?,
+        inner: cntryl_midge_core::io::RealFs::new(directory.path()).map_err(cntryl_midge_core::io::FsError::into_midge)?,
         event_loop_thread: std::thread::current().id(),
         validation_worker_thread: std::sync::Mutex::new(None),
         event_loop_opens: AtomicUsize::new(0),
@@ -280,7 +280,7 @@ fn should_respond_to_stale_validation_when_compaction_empties_the_dropped_family
 {
     use crate::runtime::event_loop::manifest::ManifestCoordinator;
 
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let _scenario = fail::FailScenario::setup();
     // Arrange: a checked transaction pins two SSTs containing only obsolete
     // tombstones. An unrelated write will invalidate its read cut.
@@ -404,7 +404,7 @@ fn should_select_detached_validation_completion_without_event_loop_sst_reads() -
     sst_opens.event_loop_opens.store(0, Ordering::SeqCst);
     let mut checked = request(94_601, b"new-key", true);
     checked.start_sequence = Some(event_loop.state.applied_sequence);
-    checked.durability_policy = Some(crate::wal::DurabilityPolicy::BestEffort);
+    checked.durability_policy = Some(cntryl_midge_durability::wal::DurabilityPolicy::BestEffort);
     let router = Arc::clone(&event_loop.routing.router);
     let client_router = Arc::clone(&router);
     let (msg_tx, msg_rx) = crossbeam::channel::unbounded();
@@ -546,7 +546,7 @@ fn assert_intervening_flushed_write_is_seen(
     expected_error: fn(&MidgeError) -> bool,
 ) -> MidgeResult<()> {
     // Arrange
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let (_directory, mut event_loop, sst_opens) = create_counted_event_loop()?;
     apply_and_flush(&mut event_loop, request(94_600, b"seed", false));
     checked.start_sequence = Some(event_loop.state.applied_sequence);
@@ -669,7 +669,7 @@ fn assert_pending_group_validation_rejects(
     expected_error: fn(&MidgeError) -> bool,
 ) -> MidgeResult<()> {
     // Arrange: a caller's detached read starts at the fully applied seed cut.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     let checked_id = checked.request_id;
     apply_and_flush(&mut event_loop, request(checked_id - 1, b"seed", false));
@@ -741,7 +741,7 @@ fn assert_pending_group_validation_rejects(
 fn should_retry_detached_range_validation_after_earlier_pending_group_becomes_visible(
 ) -> MidgeResult<()> {
     // Arrange: the range proof starts at the applied seed cut and sees no later key.
-    let _guard = crate::failpoints::test_failpoint_guard();
+    let _guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let mut event_loop = super::super::tests::create_test_local_event_loop()?;
     apply_and_flush(&mut event_loop, request(94_610, b"seed", false));
     event_loop.pipeline.inline_flush_worker = false;

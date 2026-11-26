@@ -1,12 +1,12 @@
 //! Versioned cloud metadata snapshots and bounded suffix-edit chains.
 
 use super::metadata_snapshot::CloudMetadataMirrorContext;
-use crate::common::{MidgeError, MidgeResult, OperationDeadline};
-use crate::lease::{CloudMetadataGeneration, CloudMetadataObject, SharedGenerationId};
-use crate::metadata::cloud_manifest::{CHAIN_FILE_NAME, MAX_CHAIN_BYTES, MAX_CHAIN_OBJECTS};
-use crate::metadata::{codec, files};
-use crate::storage::cloud::{BlockingCloud, CloudStorage};
-use crate::storage::{StorageBackend, StoragePrecondition, StorageRequest};
+use cntryl_midge_core::common::{MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::{CloudMetadataGeneration, CloudMetadataObject, SharedGenerationId};
+use cntryl_midge_durability::metadata::cloud_manifest::{CHAIN_FILE_NAME, MAX_CHAIN_BYTES, MAX_CHAIN_OBJECTS};
+use cntryl_midge_durability::metadata::{codec, files};
+use cntryl_midge_storage::cloud::{BlockingCloud, CloudStorage};
+use cntryl_midge_storage::{StorageBackend, StoragePrecondition, StorageRequest};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -83,7 +83,7 @@ pub(super) fn reclaimable_version(
     ordinal: u64,
     writer_epoch: u64,
 ) -> MidgeResult<bool> {
-    crate::metadata::cloud_manifest::validate_key(key, ordinal)?;
+    cntryl_midge_durability::metadata::cloud_manifest::validate_key(key, ordinal)?;
     let version: ManifestVersion = codec::decode(CHAIN_KIND, encoded)?;
     Ok(version.id.get() == ordinal
         && version.writer_epoch != 0
@@ -99,7 +99,7 @@ pub(crate) fn is_chain(generation: &CloudMetadataGeneration) -> bool {
 }
 
 pub(crate) fn validate_reference(object: &CloudMetadataObject, ordinal: u64) -> MidgeResult<()> {
-    crate::metadata::cloud_manifest::validate_key(&object.object_key, ordinal)?;
+    cntryl_midge_durability::metadata::cloud_manifest::validate_key(&object.object_key, ordinal)?;
     if object.file_name != CHAIN_FILE_NAME || object.len == 0 {
         return Err(MidgeError::Corruption(
             "invalid cloud manifest object reference".into(),
@@ -128,7 +128,7 @@ pub(super) fn read_with_cut_reserved(
     cloud: &CloudStorage,
     generation: &CloudMetadataGeneration,
     deadline: &OperationDeadline,
-    reservation: Option<std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
+    reservation: Option<std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
 ) -> MidgeResult<DecodedChain> {
     if generation.objects.is_empty() || generation.objects.len() > MAX_CHAIN_OBJECTS {
         return Err(MidgeError::Corruption(
@@ -389,7 +389,7 @@ fn publish_bytes(
     key: &str,
     bytes: &[u8],
     deadline: &OperationDeadline,
-    reservation: Option<&std::sync::Arc<crate::common::resource_budget::ResourceReservation>>,
+    reservation: Option<&std::sync::Arc<cntryl_midge_core::common::resource_budget::ResourceReservation>>,
 ) -> MidgeResult<()> {
     let mut io = BlockingCloud::new(cloud, deadline);
     if let Some(reservation) = reservation {
@@ -489,7 +489,7 @@ mod decoder_tests {
 #[cfg(test)]
 mod publish_tests {
     use super::*;
-    use crate::storage::cloud::{
+    use cntryl_midge_storage::cloud::{
         CloudBackend, CloudCallback, CloudEvent, CloudHeadCapability, CloudListCapability,
         CloudReadCapability, CloudWriteCapability, MockCloudBackend,
     };
@@ -507,7 +507,7 @@ mod publish_tests {
             self.inner.submit_get(key, callback);
         }
 
-        crate::storage::cloud::forward_cloud_backend!(inner;
+        cntryl_midge_storage::cloud::forward_cloud_backend!(inner;
             submit_get_with_metadata,
             submit_get_range,
             submit_get_range_with_identity,
@@ -532,7 +532,7 @@ mod publish_tests {
             callback
                 .send(CloudEvent::Put {
                     key: key.into(),
-                    result: Err(crate::storage::cloud::CloudError::Transport(
+                    result: Err(cntryl_midge_storage::cloud::CloudError::Transport(
                         "injected lost conditional catalog PUT response".into(),
                     )),
                 })
@@ -540,16 +540,16 @@ mod publish_tests {
         }
     }
 
-    impl crate::storage::cloud::CloudDeleteCapability for LostConditionalPut {
-        crate::storage::cloud::forward_cloud_backend!(inner; submit_delete);
+    impl cntryl_midge_storage::cloud::CloudDeleteCapability for LostConditionalPut {
+        cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_delete);
     }
 
     impl CloudListCapability for LostConditionalPut {
-        crate::storage::cloud::forward_cloud_backend!(inner; submit_list);
+        cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_list);
     }
 
     impl CloudHeadCapability for LostConditionalPut {
-        crate::storage::cloud::forward_cloud_backend!(inner; submit_head);
+        cntryl_midge_storage::cloud::forward_cloud_backend!(inner; submit_head);
     }
 
     impl CloudBackend for LostConditionalPut {}

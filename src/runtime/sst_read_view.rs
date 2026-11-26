@@ -1,6 +1,6 @@
 //! Immutable SST candidate index shared by read snapshots.
 
-use crate::metadata::{FileMeta, Manifest};
+use cntryl_midge_durability::metadata::{FileMeta, Manifest};
 use std::collections::{BTreeMap, HashMap, HashSet};
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -67,7 +67,7 @@ pub(crate) struct SstReadView {
 
 impl SstReadView {
     pub(crate) fn new(
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
         files: impl IntoIterator<Item = FileMeta>,
     ) -> Self {
         Self::from_shared(
@@ -367,8 +367,8 @@ impl SstReadView {
 /// later snapshot publications clone only one `Arc` per column family.
 pub(crate) struct SstReadViewCache {
     dirty: bool,
-    views: HashMap<crate::types::ColumnFamilyId, Arc<SstReadView>>,
-    files: HashMap<crate::types::ColumnFamilyId, Vec<Arc<FileMeta>>>,
+    views: HashMap<cntryl_midge_core::types::ColumnFamilyId, Arc<SstReadView>>,
+    files: HashMap<cntryl_midge_core::types::ColumnFamilyId, Vec<Arc<FileMeta>>>,
     live_names: Arc<HashSet<String>>,
     /// Set by every rebuild and cleared when the caller takes the new live
     /// names, so pruning of dead readers happens only after a manifest change.
@@ -446,7 +446,7 @@ impl SstReadViewCache {
     pub(crate) fn view_for(
         &mut self,
         manifest: &Manifest,
-        cf_id: crate::types::ColumnFamilyId,
+        cf_id: cntryl_midge_core::types::ColumnFamilyId,
     ) -> Arc<SstReadView> {
         self.refresh_if_dirty(manifest);
 

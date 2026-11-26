@@ -1,6 +1,6 @@
 //! Iterator API - lazy, fallible range scans.
 
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 use bytes::Bytes;
 
 /// Iteration direction.
@@ -151,7 +151,7 @@ impl std::iter::Iterator for Iterator<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::MidgeError;
+    use cntryl_midge_core::common::MidgeError;
 
     #[test]
     fn should_surface_late_error_when_collecting_lazy_scan() {

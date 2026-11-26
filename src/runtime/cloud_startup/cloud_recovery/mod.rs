@@ -1,8 +1,8 @@
 use super::cloud_io::BlockingCloudIo;
 use super::{CloudSstRecoveryProof, CloudStartupRecovery};
-use crate::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
-use crate::config::RecoveryPolicy;
-use crate::io::FsError;
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::RecoveryPolicy;
+use cntryl_midge_core::io::FsError;
 use crate::runtime::RuntimeState;
 use std::path::Path;
 use std::sync::Arc;
@@ -43,13 +43,13 @@ enum SstDisposition {
 impl CloudStartupRecovery {
     pub(crate) fn cleanup_non_authoritative_compaction_outputs(
         state: &mut RuntimeState,
-        storage: &crate::storage::HybridStorage,
+        storage: &cntryl_midge_storage::HybridStorage,
         candidates: &[crate::runtime::FileMeta],
     ) -> MidgeResult<std::collections::BTreeSet<String>> {
         let mut cleaned = std::collections::BTreeSet::new();
         for file_meta in candidates {
             state.check_startup_scope("remote compaction cleanup")?;
-            let key = crate::cloud_layout::object_key(&file_meta.name);
+            let key = cntryl_midge_core::cloud_layout::object_key(&file_meta.name);
             let deadline = state.startup_scope.as_ref().map_or_else(
                 || OperationDeadline::from_budget(storage.storage_io_timeout()),
                 DeadlineScope::deadline,
@@ -61,7 +61,7 @@ impl CloudStartupRecovery {
                 })?;
             if let Some(metadata) = metadata {
                 let pinned = Arc::new(
-                    crate::storage::remote_sst::RemoteSstFs::for_object(
+                    cntryl_midge_storage::remote_sst::RemoteSstFs::for_object(
                         Arc::clone(&state.fs),
                         storage.remote_sst_backend(),
                         key.clone(),
@@ -70,28 +70,28 @@ impl CloudStartupRecovery {
                     )
                     .with_deadline(deadline),
                 );
-                let pinned: Arc<dyn crate::io::Fs> = pinned;
+                let pinned: Arc<dyn cntryl_midge_core::io::Fs> = pinned;
                 let pinned = state.startup_scope.as_ref().map_or_else(
                     || Arc::clone(&pinned),
-                    |scope| crate::io::scope_fs(Arc::clone(&pinned), scope.clone()),
+                    |scope| cntryl_midge_core::io::scope_fs(Arc::clone(&pinned), scope.clone()),
                 );
-                let pinned = crate::telemetry::recovery_progress::observe_reads(pinned);
+                let pinned = cntryl_midge_core::telemetry::recovery_progress::observe_reads(pinned);
                 RuntimeState::validate_sst_fs_proof(pinned, file_meta)?;
                 // The intent proves this name is non-authoritative and the
                 // remote checksum proves its publication. Discard its local
                 // cache before deleting that remote proof, even if the cache
                 // is corrupt. A durable directory barrier prevents a crash
                 // from resurrecting corrupt local bytes after remote cleanup.
-                let local_path = crate::io::FsPath::new(key.clone());
+                let local_path = cntryl_midge_core::io::FsPath::new(key.clone());
                 match state.fs.remove_file(&local_path) {
                     Ok(()) => state
                         .fs
                         .sync_dir(
-                            &crate::io::FsPath::new(crate::sst::fs::SST_DIR),
-                            crate::io::Durability::Durable,
+                            &cntryl_midge_core::io::FsPath::new(cntryl_midge_table::sst::fs::SST_DIR),
+                            cntryl_midge_core::io::Durability::Durable,
                         )
                         .map_err(FsError::into_midge)?,
-                    Err(crate::io::FsError::NotFound(_)) => {}
+                    Err(cntryl_midge_core::io::FsError::NotFound(_)) => {}
                     Err(error @ FsError::Timeout(_)) => return Err(error.into_midge()),
                     Err(error) => {
                         return Err(MidgeError::RecoveryFailed(format!(
@@ -117,9 +117,9 @@ impl CloudStartupRecovery {
 
     #[cfg(test)]
     pub(crate) fn hydrate_cloud_metadata(
-        cloud: &crate::storage::cloud::CloudStorage,
-        leader_store: &dyn crate::lease::LeaderStore,
-        root: &Arc<dyn crate::io::Fs>,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
+        leader_store: &dyn cntryl_midge_durability::lease::LeaderStore,
+        root: &Arc<dyn cntryl_midge_core::io::Fs>,
         db_path: &Path,
         recovery_policy: RecoveryPolicy,
     ) -> MidgeResult<()> {
@@ -129,26 +129,26 @@ impl CloudStartupRecovery {
             root,
             db_path,
             recovery_policy,
-            crate::lease::SharedGenerationId::NONE,
+            cntryl_midge_durability::lease::SharedGenerationId::NONE,
             &DeadlineScope::new(OperationDeadline::unbounded()),
         )
         .map(|_| ())
     }
 
     fn validate_uncommitted_cloud_metadata(
-        cloud: &crate::storage::cloud::CloudStorage,
-        staging_fs: &dyn crate::io::Fs,
-        retired_by: crate::lease::SharedGenerationId,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
+        staging_fs: &dyn cntryl_midge_core::io::Fs,
+        retired_by: cntryl_midge_durability::lease::SharedGenerationId,
         scope: &DeadlineScope,
     ) -> MidgeResult<()> {
         Self::reject_legacy_cloud_metadata_without_generation_within(cloud, scope)?;
-        for file_name in crate::metadata::files::CLOUD_MIRRORED
+        for file_name in cntryl_midge_durability::metadata::files::CLOUD_MIRRORED
             .iter()
             .copied()
-            .chain(std::iter::once(crate::metadata::files::MANIFEST))
+            .chain(std::iter::once(cntryl_midge_durability::metadata::files::MANIFEST))
         {
             if staging_fs
-                .exists(&crate::io::traits::FsPath::new(file_name))
+                .exists(&cntryl_midge_core::io::traits::FsPath::new(file_name))
                 .map_err(FsError::into_midge)?
             {
                 return Err(MidgeError::RecoveryFailed(format!(
@@ -156,7 +156,7 @@ impl CloudStartupRecovery {
                 )));
             }
         }
-        if retired_by != crate::lease::SharedGenerationId::NONE {
+        if retired_by != cntryl_midge_durability::lease::SharedGenerationId::NONE {
             return Err(MidgeError::RecoveryFailed(
                 "retired cloud WAL has no committed shared metadata generation".into(),
             ));
@@ -167,16 +167,16 @@ impl CloudStartupRecovery {
     /// Stage the committed cloud metadata generation into `root`. `db_path`
     /// only names the database in errors.
     pub(crate) fn hydrate_cloud_metadata_within(
-        cloud: &crate::storage::cloud::CloudStorage,
-        leader_store: &dyn crate::lease::LeaderStore,
-        root: &Arc<dyn crate::io::Fs>,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
+        leader_store: &dyn cntryl_midge_durability::lease::LeaderStore,
+        root: &Arc<dyn cntryl_midge_core::io::Fs>,
         db_path: &Path,
         _recovery_policy: RecoveryPolicy,
-        retired_by: crate::lease::SharedGenerationId,
+        retired_by: cntryl_midge_durability::lease::SharedGenerationId,
         scope: &DeadlineScope,
-    ) -> MidgeResult<Option<crate::lease::SharedGenerationId>> {
+    ) -> MidgeResult<Option<cntryl_midge_durability::lease::SharedGenerationId>> {
         scope.check("cloud metadata hydration")?;
-        let staging_fs = crate::io::scope_fs(Arc::clone(root), scope.clone());
+        let staging_fs = cntryl_midge_core::io::scope_fs(Arc::clone(root), scope.clone());
         let head = leader_store
             .read_committed_metadata(scope.clamp(cloud.callback_timeout()))
             .map_err(|error| {
@@ -186,12 +186,12 @@ impl CloudStartupRecovery {
                 )
             })?;
         let generation = match head {
-            crate::lease::CloudMetadataHead::MissingLease => {
+            cntryl_midge_durability::lease::CloudMetadataHead::MissingLease => {
                 return Err(MidgeError::RecoveryFailed(
                     "cloud metadata lease disappeared after acquisition".into(),
                 ));
             }
-            crate::lease::CloudMetadataHead::Uncommitted => {
+            cntryl_midge_durability::lease::CloudMetadataHead::Uncommitted => {
                 Self::validate_uncommitted_cloud_metadata(
                     cloud,
                     staging_fs.as_ref(),
@@ -200,7 +200,7 @@ impl CloudStartupRecovery {
                 )?;
                 return Ok(None);
             }
-            crate::lease::CloudMetadataHead::Committed(generation) => generation,
+            cntryl_midge_durability::lease::CloudMetadataHead::Committed(generation) => generation,
         };
         if generation.id < retired_by {
             return Err(MidgeError::RecoveryFailed(format!(
@@ -219,9 +219,9 @@ impl CloudStartupRecovery {
             stage_legacy_metadata_cache(&staging_fs, &metadata_objects, scope)?;
         }
 
-        crate::metadata::validate_format_marker(staging_fs.as_ref(), db_path)
+        cntryl_midge_durability::metadata::validate_format_marker(staging_fs.as_ref(), db_path)
             .map_err(|error| preserve_timeout(error, "committed cloud FORMAT is invalid"))?;
-        crate::metadata::ManifestPersistence::load_with_fs_and_policy_within(
+        cntryl_midge_durability::metadata::ManifestPersistence::load_with_fs_and_policy_within(
             &staging_fs,
             RecoveryPolicy::Strict,
             scope,
@@ -241,7 +241,7 @@ impl CloudStartupRecovery {
                     "failed to recheck cloud metadata authority after hydration",
                 )
             })?;
-        if current != crate::lease::CloudMetadataHead::Committed(generation) {
+        if current != cntryl_midge_durability::lease::CloudMetadataHead::Committed(generation) {
             return Err(MidgeError::RecoveryFailed(
                 "cloud metadata authority changed during hydration".into(),
             ));
@@ -253,12 +253,12 @@ impl CloudStartupRecovery {
 
     #[cfg(test)]
     pub(crate) fn mirror_cloud_metadata(
-        cloud: &crate::storage::cloud::CloudStorage,
-        root: &Arc<dyn crate::io::Fs>,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
+        root: &Arc<dyn cntryl_midge_core::io::Fs>,
         recovery_policy: RecoveryPolicy,
         authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>,
         publication_lock: &crate::runtime::MetadataPublicationLock,
-        validate_lease: impl FnMut(&crate::common::OperationDeadline) -> MidgeResult<()>,
+        validate_lease: impl FnMut(&cntryl_midge_core::common::OperationDeadline) -> MidgeResult<()>,
     ) -> MidgeResult<()> {
         let scope = DeadlineScope::new(OperationDeadline::from_budget(
             cloud.callback_timeout().saturating_mul(16),
@@ -276,8 +276,8 @@ impl CloudStartupRecovery {
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn mirror_cloud_metadata_within(
-        cloud: &crate::storage::cloud::CloudStorage,
-        root: &Arc<dyn crate::io::Fs>,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
+        root: &Arc<dyn cntryl_midge_core::io::Fs>,
         recovery_policy: RecoveryPolicy,
         authority: crate::runtime::hybrid_persistence::CloudMetadataMirrorAuthority<'_>,
         publication_lock: &crate::runtime::MetadataPublicationLock,
@@ -297,7 +297,7 @@ impl CloudStartupRecovery {
             Err(error) => return Err(error),
         };
         local_manifest.validate_persisted()?;
-        let fs: Arc<dyn crate::io::Fs> = crate::io::scope_fs(Arc::clone(root), scope.clone());
+        let fs: Arc<dyn cntryl_midge_core::io::Fs> = cntryl_midge_core::io::scope_fs(Arc::clone(root), scope.clone());
         let deadline = scope.deadline();
         // Untimed startup retains the ordinary finite mirror attempt budget.
         let deadline = if deadline.is_bounded() {
@@ -322,24 +322,24 @@ impl CloudStartupRecovery {
     /// Refuse a cloud whose WAL objects have no publication catalog: object
     /// presence is not authority.
     pub(crate) fn reject_cloud_wal_without_catalog(
-        store: &dyn crate::storage::inventory::ObjectInventory,
+        store: &dyn cntryl_midge_storage::inventory::ObjectInventory,
         scope: Option<&DeadlineScope>,
     ) -> MidgeResult<()> {
         if let Some(scope) = scope {
             scope.check("cloud WAL authority inventory")?;
         }
         for key in [
-            crate::wal::cloud_catalog::OBJECT_KEY,
-            crate::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
+            cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
         ] {
             if store.object_size(key, scope)?.is_some() {
                 return Ok(());
             }
         }
         let untracked = store
-            .keys_under(crate::cloud_layout::CloudObjectLayout::WAL_PREFIX, scope)?
+            .keys_under(cntryl_midge_core::cloud_layout::CloudObjectLayout::WAL_PREFIX, scope)?
             .into_iter()
-            .find(|key| crate::wal::parse_segment_object_key(key).is_some());
+            .find(|key| cntryl_midge_durability::wal::parse_segment_object_key(key).is_some());
         if let Some(key) = untracked {
             return Err(Self::cloud_wal_without_catalog_error(&key));
         }
@@ -356,11 +356,11 @@ impl CloudStartupRecovery {
     /// it, so the discarded bytes stay available for inspection. The caller
     /// syncs the WAL directory before cutting the original.
     pub(crate) fn retain_local_wal_copy(
-        fs: &dyn crate::io::Fs,
-        path: &crate::io::FsPath,
+        fs: &dyn cntryl_midge_core::io::Fs,
+        path: &cntryl_midge_core::io::FsPath,
     ) -> MidgeResult<()> {
         let retained_path = Self::unused_retained_path(fs, path)?;
-        crate::io::copy_durably(fs, path, &retained_path)
+        cntryl_midge_core::io::copy_durably(fs, path, &retained_path)
             .map(|_| ())
             .map_err(|error| {
                 if let FsError::Timeout(message) = error {
@@ -374,14 +374,14 @@ impl CloudStartupRecovery {
     }
 
     fn unused_retained_path(
-        fs: &dyn crate::io::Fs,
-        path: &crate::io::FsPath,
-    ) -> MidgeResult<crate::io::FsPath> {
+        fs: &dyn cntryl_midge_core::io::Fs,
+        path: &cntryl_midge_core::io::FsPath,
+    ) -> MidgeResult<cntryl_midge_core::io::FsPath> {
         for suffix in 0_u32..=u32::MAX {
             let retained_path = if suffix == 0 {
-                crate::io::FsPath::new(format!("{}.salvage-retained", path.0))
+                cntryl_midge_core::io::FsPath::new(format!("{}.salvage-retained", path.0))
             } else {
-                crate::io::FsPath::new(format!("{}.salvage-retained.{suffix}", path.0))
+                cntryl_midge_core::io::FsPath::new(format!("{}.salvage-retained.{suffix}", path.0))
             };
             if !fs.exists(&retained_path).map_err(FsError::into_midge)? {
                 return Ok(retained_path);
@@ -398,7 +398,7 @@ impl CloudStartupRecovery {
     /// ordinary startup must not scan or copy the object-store dataset.
     pub(crate) fn validate_manifest_ssts_in_store(
         state: &mut RuntimeState,
-        store: &dyn crate::storage::inventory::ObjectInventory,
+        store: &dyn cntryl_midge_storage::inventory::ObjectInventory,
     ) -> MidgeResult<()> {
         const INVENTORY_CONCURRENCY: usize = 32;
         let files = state.manifest.files.clone();
@@ -416,7 +416,7 @@ impl CloudStartupRecovery {
                     let Some(file) = files.get(index) else {
                         break;
                     };
-                    let key = crate::cloud_layout::object_key(&file.name);
+                    let key = cntryl_midge_core::cloud_layout::object_key(&file.name);
                     let result = store
                         .object_size(&key, scope)
                         .map_err(SstLoss::Indeterminate)
@@ -448,7 +448,7 @@ impl CloudStartupRecovery {
     /// one place that decides which manifest SSTs survive startup.
     fn reconcile_manifest_ssts(
         state: &mut RuntimeState,
-        results: impl Iterator<Item = (crate::metadata::FileMeta, Result<u64, SstLoss>)>,
+        results: impl Iterator<Item = (cntryl_midge_durability::metadata::FileMeta, Result<u64, SstLoss>)>,
     ) -> MidgeResult<()> {
         let mut retained_files = Vec::with_capacity(state.manifest.files.len());
         let original_order = state
@@ -460,7 +460,7 @@ impl CloudStartupRecovery {
             .collect::<std::collections::HashMap<_, _>>();
         let mut manifest_changed = false;
         let mut definitively_lost: Vec<String> = Vec::new();
-        let mut progress = crate::telemetry::recovery_progress::WorkProgress::new("sst_inventory");
+        let mut progress = cntryl_midge_core::telemetry::recovery_progress::WorkProgress::new("sst_inventory");
 
         let expected_files = state.manifest.files.len();
         let mut completed_files = 0;
@@ -505,7 +505,7 @@ impl CloudStartupRecovery {
     }
 
     fn validate_manifest_sst_size(
-        file: &crate::metadata::FileMeta,
+        file: &cntryl_midge_durability::metadata::FileMeta,
         actual_size: u64,
     ) -> MidgeResult<()> {
         if actual_size != file.size_bytes {
@@ -526,25 +526,25 @@ impl CloudStartupRecovery {
     /// possibly live remote SST.
     fn commit_manifest_removals(
         state: &mut RuntimeState,
-        retained_files: Vec<crate::metadata::FileMeta>,
+        retained_files: Vec<cntryl_midge_durability::metadata::FileMeta>,
         definitively_lost: &[String],
     ) -> MidgeResult<()> {
         state.check_startup_scope("manifest salvage removals")?;
         if definitively_lost.is_empty() {
             state.manifest.replace_files(retained_files);
             state.manifest_store.save_snapshot_for(
-                crate::metadata::accounting::Origin::Recovery,
+                cntryl_midge_durability::metadata::accounting::Origin::Recovery,
                 &state.manifest,
             )?;
             return Ok(());
         }
-        let edits: Vec<crate::metadata::ManifestEdit> = definitively_lost
+        let edits: Vec<cntryl_midge_durability::metadata::ManifestEdit> = definitively_lost
             .iter()
-            .map(|name| crate::metadata::ManifestEdit::RemoveSst { name: name.clone() })
+            .map(|name| cntryl_midge_durability::metadata::ManifestEdit::RemoveSst { name: name.clone() })
             .collect();
         let edit_id = state
             .manifest_store
-            .append_batch_for(crate::metadata::accounting::Origin::Recovery, &edits)?;
+            .append_batch_for(cntryl_midge_durability::metadata::accounting::Origin::Recovery, &edits)?;
         let mut durable = state.manifest.clone();
         durable
             .files
@@ -552,7 +552,7 @@ impl CloudStartupRecovery {
         durable.note_applied_journal_edit(edit_id);
         state
             .manifest_store
-            .save_snapshot_for(crate::metadata::accounting::Origin::Recovery, &durable)?;
+            .save_snapshot_for(cntryl_midge_durability::metadata::accounting::Origin::Recovery, &durable)?;
         state.manifest.replace_files(retained_files);
         state.manifest.note_applied_journal_edit(edit_id);
         Ok(())
@@ -560,7 +560,7 @@ impl CloudStartupRecovery {
 
     fn retain_manifest_sst_after_metadata_validation(
         state: &mut RuntimeState,
-        file: &crate::metadata::FileMeta,
+        file: &cntryl_midge_durability::metadata::FileMeta,
         validation: Result<(), SstLoss>,
     ) -> MidgeResult<SstDisposition> {
         let Err(loss) = validation else {
@@ -607,12 +607,12 @@ impl CloudStartupRecovery {
 
     pub(crate) fn retain_verified_local_sst(
         state: &RuntimeState,
-        file: &crate::metadata::FileMeta,
+        file: &cntryl_midge_durability::metadata::FileMeta,
     ) -> MidgeResult<bool> {
         state.check_startup_scope("local salvage SST proof")?;
         let retained = Self::local_sst_file_matches_manifest_within(
             &state.fs,
-            &crate::sst::fs::sst_key(&file.name),
+            &cntryl_midge_table::sst::fs::sst_key(&file.name),
             file,
             state.startup_scope.as_ref(),
         )?;
@@ -622,7 +622,7 @@ impl CloudStartupRecovery {
 
     pub(crate) fn ensure_named_sst_cache_from_cloud_storage(
         state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
         sst_proofs: impl IntoIterator<Item = CloudSstRecoveryProof>,
     ) -> MidgeResult<()> {
         if state.recovery_sst_fs.is_some() {
@@ -643,15 +643,15 @@ impl CloudStartupRecovery {
 
     fn recover_named_sst_from_cloud(
         state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
-        staging_fs: &Arc<dyn crate::io::traits::Fs>,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
+        staging_fs: &Arc<dyn cntryl_midge_core::io::traits::Fs>,
         proof: &CloudSstRecoveryProof,
     ) -> MidgeResult<()> {
         let sst_name = proof.name.clone();
-        let cloud_key = crate::cloud_layout::object_key(&sst_name);
+        let cloud_key = cntryl_midge_core::cloud_layout::object_key(&sst_name);
         if Self::local_sst_file_matches_proof_within(
             &state.fs,
-            &crate::sst::fs::sst_key(&sst_name),
+            &cntryl_midge_table::sst::fs::sst_key(&sst_name),
             &sst_name,
             proof.expected_size_bytes,
             proof.expected_crc32c,
@@ -666,7 +666,7 @@ impl CloudStartupRecovery {
 
     fn validate_named_sst_against_cloud(
         state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
         cloud_key: &str,
         sst_name: &str,
         proof: &CloudSstRecoveryProof,
@@ -710,8 +710,8 @@ impl CloudStartupRecovery {
 
     fn restore_named_sst_from_cloud(
         state: &mut RuntimeState,
-        cloud: &crate::storage::cloud::CloudStorage,
-        staging_fs: &Arc<dyn crate::io::traits::Fs>,
+        cloud: &cntryl_midge_storage::cloud::CloudStorage,
+        staging_fs: &Arc<dyn cntryl_midge_core::io::traits::Fs>,
         cloud_key: &str,
         sst_name: &str,
         proof: &CloudSstRecoveryProof,
@@ -755,8 +755,8 @@ impl CloudStartupRecovery {
 
         state.check_startup_scope("cloud intent SST staging")?;
         Self::stage_sst_bytes(staging_fs, sst_name, &cloud_proof.bytes)?;
-        let staged_path = crate::io::FsPath::new(crate::cloud_layout::object_key(sst_name));
-        if let Err(error) = crate::sst::fs::SstFileIo::open(&staged_path.0, Arc::clone(staging_fs))
+        let staged_path = cntryl_midge_core::io::FsPath::new(cntryl_midge_core::cloud_layout::object_key(sst_name));
+        if let Err(error) = cntryl_midge_table::sst::fs::SstFileIo::open(&staged_path.0, Arc::clone(staging_fs))
         {
             if matches!(error, MidgeError::Timeout(_)) {
                 return Err(error);
@@ -803,14 +803,14 @@ impl CloudStartupRecovery {
     }
 
     fn stage_sst_bytes(
-        staging_fs: &Arc<dyn crate::io::traits::Fs>,
+        staging_fs: &Arc<dyn cntryl_midge_core::io::traits::Fs>,
         sst_name: &str,
         data: &[u8],
     ) -> MidgeResult<()> {
         let temp_path =
-            crate::io::traits::FsPath::new(crate::cloud_layout::temp_object_key(sst_name));
-        let target_path = crate::io::traits::FsPath::new(crate::cloud_layout::object_key(sst_name));
-        crate::io::staging::stage_bytes_typed(staging_fs, &temp_path, &target_path, data, || Ok(()))
+            cntryl_midge_core::io::traits::FsPath::new(cntryl_midge_core::cloud_layout::temp_object_key(sst_name));
+        let target_path = cntryl_midge_core::io::traits::FsPath::new(cntryl_midge_core::cloud_layout::object_key(sst_name));
+        cntryl_midge_core::io::staging::stage_bytes_typed(staging_fs, &temp_path, &target_path, data, || Ok(()))
     }
 
     pub(crate) fn cloud_recovery_sst_proofs_for_intent_replay(
@@ -857,17 +857,17 @@ impl CloudStartupRecovery {
 }
 
 fn stage_legacy_metadata_cache(
-    fs: &Arc<dyn crate::io::Fs>,
+    fs: &Arc<dyn cntryl_midge_core::io::Fs>,
     objects: &std::collections::BTreeMap<String, Vec<u8>>,
     scope: &DeadlineScope,
 ) -> MidgeResult<()> {
     let mut removed = false;
-    for path in crate::metadata::files::CLOUD_MIRRORED {
+    for path in cntryl_midge_durability::metadata::files::CLOUD_MIRRORED {
         scope.check("cloud metadata staging")?;
         if let Some(bytes) = objects.get(*path) {
             stage_cache_file(fs, path, bytes, scope)?;
         } else {
-            match fs.remove_file(&crate::io::FsPath::new(*path)) {
+            match fs.remove_file(&cntryl_midge_core::io::FsPath::new(*path)) {
                 Ok(()) => removed = true,
                 Err(FsError::NotFound(_)) => {}
                 Err(error) => return Err(error.into_midge()),
@@ -875,19 +875,19 @@ fn stage_legacy_metadata_cache(
         }
     }
     if removed {
-        fs.sync_dir(&crate::io::FsPath::new(""), crate::io::Durability::Durable)
+        fs.sync_dir(&cntryl_midge_core::io::FsPath::new(""), cntryl_midge_core::io::Durability::Durable)
             .map_err(FsError::into_midge)?;
     }
     Ok(())
 }
 
 fn stage_format_10_cache(
-    fs: &Arc<dyn crate::io::Fs>,
+    fs: &Arc<dyn cntryl_midge_core::io::Fs>,
     objects: &std::collections::BTreeMap<String, Vec<u8>>,
     scope: &DeadlineScope,
 ) -> MidgeResult<()> {
-    use crate::metadata::files::FORMAT;
-    use crate::metadata::local_authority::{sync_directory_chain, HEAD_PATH};
+    use cntryl_midge_durability::metadata::files::FORMAT;
+    use cntryl_midge_durability::metadata::local_authority::{sync_directory_chain, HEAD_PATH};
     for (path, bytes) in objects {
         if path == FORMAT || path == HEAD_PATH {
             continue;
@@ -896,7 +896,7 @@ fn stage_format_10_cache(
         let (directory, _) = path.rsplit_once('/').ok_or_else(|| {
             MidgeError::Corruption("cloud FORMAT 10 body has no parent directory".into())
         })?;
-        fs.create_dir_all(&crate::io::FsPath::new(directory))
+        fs.create_dir_all(&cntryl_midge_core::io::FsPath::new(directory))
             .map_err(FsError::into_midge)?;
         sync_directory_chain(fs.as_ref(), directory)?;
         stage_cache_file(fs, path, bytes, scope)?;
@@ -914,15 +914,15 @@ fn stage_format_10_cache(
 }
 
 fn stage_cache_file(
-    fs: &Arc<dyn crate::io::Fs>,
+    fs: &Arc<dyn cntryl_midge_core::io::Fs>,
     path: &str,
     bytes: &[u8],
     scope: &DeadlineScope,
 ) -> MidgeResult<()> {
-    crate::io::staging::stage_bytes_typed(
+    cntryl_midge_core::io::staging::stage_bytes_typed(
         fs,
-        &crate::io::FsPath::new(format!("{path}.tmp")),
-        &crate::io::FsPath::new(path),
+        &cntryl_midge_core::io::FsPath::new(format!("{path}.tmp")),
+        &cntryl_midge_core::io::FsPath::new(path),
         bytes,
         || scope.check("cloud metadata staged rename"),
     )

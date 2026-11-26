@@ -1,5 +1,5 @@
 use super::*;
-use crate::common::resource_budget::ResourceBudget;
+use cntryl_midge_core::common::resource_budget::ResourceBudget;
 
 fn capture_fixture() -> MidgeResult<(ConcurrentFixture, ResourceBudget, String)> {
     let mut fixture = ConcurrentFixture::new(16 * 1024 * 1024, false)?;
@@ -9,7 +9,7 @@ fn capture_fixture() -> MidgeResult<(ConcurrentFixture, ResourceBudget, String)>
         .event_loop
         .actors
         .cloud_coordinator
-        .cloud_metadata_storage = Some(Arc::new(crate::storage::cloud::CloudStorage::with_mock()));
+        .cloud_metadata_storage = Some(Arc::new(cntryl_midge_storage::cloud::CloudStorage::with_mock()));
     let memory = ResourceBudget::new(1024 * 1024);
     fixture
         .event_loop
@@ -34,7 +34,7 @@ fn wait_for_capture_retry(fixture: &mut ConcurrentFixture) {
 #[test]
 fn should_preserve_accepted_compaction_when_capture_memory_is_temporarily_owned() -> MidgeResult<()>
 {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: compute may finish, but another owner occupies the capture pool.
         let (mut fixture, memory, input) = capture_fixture()?;
         let held = memory.reserve(memory.limit(), "held metadata workspace")?;
@@ -87,7 +87,7 @@ fn should_preserve_accepted_compaction_when_capture_memory_is_temporarily_owned(
 
 #[test]
 fn should_fail_expired_capture_admission_without_deleting_accepted_input() -> MidgeResult<()> {
-    crate::failpoints::with_read_gate(|| {
+    cntryl_midge_core::failpoints::with_read_gate(|| {
         // Arrange: the original short allowance is consumed by actual contention.
         let (mut fixture, memory, input) = capture_fixture()?;
         let held = memory.reserve(memory.limit(), "held metadata workspace")?;
@@ -146,7 +146,7 @@ fn should_fail_expired_capture_admission_without_deleting_accepted_input() -> Mi
 #[test]
 fn should_retain_sibling_compute_owner_when_another_capture_retry_expires() -> MidgeResult<()> {
     // Arrange: A waits for capture memory; B owns a disjoint native worker.
-    let guard = crate::failpoints::test_failpoint_guard();
+    let guard = cntryl_midge_core::failpoints::test_failpoint_guard();
     let scenario = fail::FailScenario::setup();
     let (mut fixture, memory, first) = capture_fixture()?;
     let second = fixture.file(3, 2, b"z", b"sibling", 2)?;

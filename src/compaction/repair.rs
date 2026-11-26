@@ -1,8 +1,8 @@
 //! Bounded, non-authoritative raw runs for large same-level repair components.
 
-use crate::common::{MidgeError, MidgeResult};
-use crate::io::{Fs, FsError};
-use crate::sst::traits::SstFactory;
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::{Fs, FsError};
+use cntryl_midge_table::sst::traits::SstFactory;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -60,8 +60,8 @@ impl RepairScratch {
             ));
         }
         let fs = factory.output_fs();
-        let directory = output_dir.join(crate::sst::fs::REPAIR_DIR_NAME);
-        let key = crate::sst::fs::fs_relative_sst_path(&fs, &directory)?;
+        let directory = output_dir.join(cntryl_midge_table::sst::fs::REPAIR_DIR_NAME);
+        let key = cntryl_midge_table::sst::fs::fs_relative_sst_path(&fs, &directory)?;
         if fs.exists(&key).map_err(FsError::into_midge)?
             && !fs.list_dir(&key).map_err(FsError::into_midge)?.is_empty()
         {
@@ -84,7 +84,7 @@ impl RepairScratch {
         factory: &dyn SstFactory,
         originals: &[String],
         fan_in: usize,
-        budget: &crate::common::resource_budget::ResourceBudget,
+        budget: &cntryl_midge_core::common::resource_budget::ResourceBudget,
         abort_check: Option<&dyn Fn() -> bool>,
     ) -> MidgeResult<Vec<String>> {
         if fan_in < 2 {
@@ -104,7 +104,7 @@ impl RepairScratch {
                 let path = self
                     .directory
                     .join(format!("repair-{}.sst", uuid::Uuid::new_v4().simple()));
-                let key = crate::sst::fs::fs_relative_sst_path(&self.fs, &path)?;
+                let key = cntryl_midge_table::sst::fs::fs_relative_sst_path(&self.fs, &path)?;
                 // Record before writing so a failed finalization cannot leave
                 // a newly created run outside the owned cleanup set.
                 self.paths.insert(key.0.clone(), 0);
@@ -144,7 +144,7 @@ impl RepairScratch {
                 continue;
             };
             self.fs
-                .remove_file(&crate::io::FsPath::new(key))
+                .remove_file(&cntryl_midge_core::io::FsPath::new(key))
                 .map_err(FsError::into_midge)?;
             self.used_bytes = self.used_bytes.saturating_sub(*size);
             self.paths.remove(key);
@@ -157,7 +157,7 @@ impl RepairScratch {
         self.paths.retain(|key, _| {
             let result = self
                 .fs
-                .remove_file(&crate::io::FsPath::new(key))
+                .remove_file(&cntryl_midge_core::io::FsPath::new(key))
                 .map_err(FsError::into_midge);
             match result {
                 Ok(()) | Err(MidgeError::NotFound) => false,
@@ -236,8 +236,8 @@ mod tests {
         // Arrange: real bytes and independently observed canonical native mounts.
         let directory = tempfile::tempdir()?;
         let fs: Arc<dyn Fs> =
-            Arc::new(crate::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
-        let factory = crate::sst::FsSstFactoryIo::new(fs.clone(), 4096);
+            Arc::new(cntryl_midge_core::io::RealFs::new(directory.path()).map_err(FsError::into_midge)?);
+        let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(fs.clone(), 4096);
         let root = fs.host_addressing().expect("real host identity").root;
         let retained = directory.path().join("retained");
         std::fs::write(&retained, b"actual retained filesystem bytes")?;
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn should_refuse_capacity_when_filesystem_has_no_host_identity() {
         // Arrange: this filesystem deliberately exposes no host path capability.
-        let factory = crate::sst::FsSstFactoryIo::new(Arc::new(crate::io::MockFs::new()), 4096);
+        let factory = cntryl_midge_table::sst::FsSstFactoryIo::new(Arc::new(cntryl_midge_core::io::MockFs::new()), 4096);
 
         // Act: native disk enumeration cannot establish this backend's identity.
         let result = RepairScratch::local_capacity(&factory);

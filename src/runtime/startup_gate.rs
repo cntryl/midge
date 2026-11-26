@@ -1,7 +1,7 @@
 //! Dormant runtime acceptance under the caller's original startup budget.
 
 use super::{RuntimeConfig, RuntimeLifecycle, StartupEvent, StartupObserver};
-use crate::common::{DeadlineScope, MidgeError, MidgeResult};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult};
 use std::sync::{atomic::Ordering, Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ struct Inner {
     changed: Condvar,
     lifecycle: Arc<RuntimeLifecycle>,
     lease_healthy: Option<Arc<std::sync::atomic::AtomicBool>>,
-    lease_validity: Option<Arc<crate::lease::LeaseValidity>>,
+    lease_validity: Option<Arc<cntryl_midge_durability::lease::LeaseValidity>>,
     writer_epoch: u64,
     observer: Option<Arc<dyn StartupObserver>>,
 }

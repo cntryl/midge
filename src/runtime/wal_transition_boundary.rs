@@ -1,6 +1,6 @@
 //! Stable failure boundaries for the WAL durability commit protocol.
 
-use crate::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::common::{MidgeError, MidgeResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WalTransitionBoundary {
@@ -120,7 +120,7 @@ impl WalTransitionBoundary {
     }
 
     pub(crate) fn check(self) -> MidgeResult<()> {
-        if crate::failpoints::is_active(self.failpoint_name()) {
+        if cntryl_midge_core::failpoints::is_active(self.failpoint_name()) {
             return Err(MidgeError::Internal(format!(
                 "failpoint: WAL transition stopped at {self:?}"
             )));

@@ -1,7 +1,7 @@
 use super::*;
-use crate::common::OperationDeadline;
-use crate::lease::CloudMetadataObject;
-use crate::storage::cloud::CloudStorage;
+use cntryl_midge_core::common::OperationDeadline;
+use cntryl_midge_durability::lease::CloudMetadataObject;
+use cntryl_midge_storage::cloud::CloudStorage;
 use std::time::Duration;
 
 fn deadline() -> OperationDeadline {
@@ -111,7 +111,7 @@ fn should_enforce_migration_admission_budget_when_cut_proof_is_absent() {
         .iter_mut()
         .find(|object| object.file_name.ends_with("manifest/base"))
         .unwrap()
-        .len = crate::metadata::local_authority::MAX_CLOSURE_BYTES;
+        .len = cntryl_midge_durability::metadata::local_authority::MAX_CLOSURE_BYTES;
     let oversized_result = canonical_plan(publication_id, &oversized);
     let mut noncanonical = objects.clone();
     noncanonical[0].object_key.push_str("/unexpected");
