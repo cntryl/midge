@@ -23,10 +23,40 @@ license = "Apache-2.0"
 repository = "https://github.com/cntryl/midge"
 
 [workspace.dependencies]
+# Keep version requirements for these path dependencies aligned with workspace.package.version.
 cntryl-midge-core = { version = "=0.6.0", path = "crates/core" }
-cntryl-midge-table = { version = "=0.6.0", path = "crates/table" }
-cntryl-midge-storage = { version = "=0.6.0", path = "crates/storage", default-features = false }
 cntryl-midge-durability = { version = "=0.6.0", path = "crates/durability", default-features = false }
+cntryl-midge-storage = { version = "=0.6.0", path = "crates/storage", default-features = false }
+cntryl-midge-table = { version = "=0.6.0", path = "crates/table" }
+
+arc-swap = "1.9"
+base64 = "0.23"
+bytes = { version = "1.12", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+cntryl-stress = "0.5.1"
+crc32c = "0.6"
+crossbeam = "0.8"
+dashmap = "6.2"
+fail = { version = "0.5", features = ["failpoints"] }
+hex = "0.4"
+hmac = "0.13"
+libc = "0.2"
+md5 = { package = "md-5", version = "0.11" }
+parking_lot = "0.13"
+proptest = "1.12"
+rand = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"] }
+rmp-serde = "1.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha1 = "0.11"
+sha2 = "0.11"
+tempfile = "3.27"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.29", features = ["v4"] }
+winapi = { version = "0.3", features = ["fileapi", "winbase"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [lib]
 bench = false
@@ -50,66 +80,50 @@ inherits = "release"
 
 [dependencies]
 cntryl-midge-core.workspace = true
-cntryl-midge-table.workspace = true
-cntryl-midge-storage.workspace = true
 cntryl-midge-durability.workspace = true
+cntryl-midge-storage.workspace = true
+cntryl-midge-table.workspace = true
 
-# Concurrency & Synchronization
-arc-swap = "1.9"
-crossbeam = "0.8"
-dashmap = "6.2"
-fail = { version = "0.5", features = ["failpoints"], optional = true }
-parking_lot = "0.13"
-
-# Randomness for workloads and qualification tests
-rand = "0.10"
-
+arc-swap.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+crc32c.workspace = true
+crossbeam.workspace = true
+dashmap.workspace = true
+fail = { workspace = true, optional = true }
+hex.workspace = true
 # Optional global allocator; see `docs/operations/performance-tuning.md`
 mimalloc = { version = "0.1", optional = true }
-
-# Data Types & Serialization
-bytes = { version = "1.12", features = ["serde"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-uuid = { version = "1.29", features = ["v4"] }
-
-# Hashing
-crc32c = "0.6"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
-
-# Logging & Tracing
-chrono = { version = "0.4", features = ["serde"] }
-tracing = "0.1"
-
-# System Utilities
-hex = "0.4"
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 sysinfo = "0.40"
-tempfile = "3.27"
-
-# Cloud workload setup (optional)
-base64 = { version = "0.23", optional = true }
-hmac = { version = "0.13", optional = true }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "blocking"], optional = true }
-sha2 = "0.11"
-sha1 = { version = "0.11", optional = true }
-rmp-serde = "1.3"
-
-# Platform-Specific Dependencies
+tempfile.workspace = true
+tracing.workspace = true
+uuid.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["fileapi", "winbase"] }
+winapi.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+cntryl-stress.workspace = true
 crc32fast = "1.5"
-md5 = { package = "md-5", version = "0.11" }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-num_cpus = "1.17"
-proptest = "1.12"
-cntryl-stress = "0.5.1"
 hdrhistogram = "7.6"
+hmac.workspace = true
+md5.workspace = true
+num_cpus = "1.17"
+proptest.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+rmp-serde.workspace = true
+sha1.workspace = true
+tracing-subscriber.workspace = true
+xxhash-rust.workspace = true
 # Self dev-dependency: turns on `internal-testing` for tests/ and benches/ so
 # they can reach implementation internals through `cntryl_midge::__internal`
 # without those modules being public API for downstream consumers.
@@ -138,12 +152,12 @@ telemetry = [
 telemetry-otlp = ["telemetry", "cntryl-midge-core/telemetry-otlp"]
 
 # Cloud storage backends, enabled by default for current deployment profiles.
-cloud-common = ["cntryl-midge-storage/cloud-common", "cntryl-midge-durability/cloud-common", "dep:reqwest"]
+cloud-common = ["cntryl-midge-storage/cloud-common", "cntryl-midge-durability/cloud-common"]
 # Request signing shared by every provider. Not a backend by itself.
-cloud-signing = ["cloud-common", "cntryl-midge-storage/cloud-signing", "dep:base64", "dep:hmac"]
+cloud-signing = ["cloud-common", "cntryl-midge-storage/cloud-signing"]
 cloud-aws = ["cloud-signing", "cntryl-midge-storage/cloud-aws"]
 cloud-azure = ["cloud-signing", "cntryl-midge-storage/cloud-azure"]
-cloud-gcp = ["cloud-signing", "cntryl-midge-storage/cloud-gcp", "dep:sha1"]
+cloud-gcp = ["cloud-signing", "cntryl-midge-storage/cloud-gcp"]
 cloud-oci = ["cloud-signing", "cntryl-midge-storage/cloud-oci"]
 cloud-all = ["cloud-aws", "cloud-azure", "cloud-gcp", "cloud-oci", "cntryl-midge-durability/cloud-all"]
 

@@ -2,15 +2,23 @@
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
+#[doc(hidden)]
 pub mod cloud_layout;
+#[doc(hidden)]
 pub mod codec;
+#[doc(hidden)]
 pub mod common;
+#[doc(hidden)]
 pub mod failpoints;
+#[doc(hidden)]
 pub mod io;
+#[doc(hidden)]
 pub mod telemetry;
+#[doc(hidden)]
 pub mod types;
 
 #[cfg(any(test, feature = "internal-testing"))]
+#[doc(hidden)]
 pub mod simulation;
 
 pub use cloud_layout::CloudObjectLayout;

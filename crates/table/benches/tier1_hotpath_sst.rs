@@ -10,8 +10,8 @@
 
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
+use cntryl_midge_core::types::EntryType;
 use cntryl_midge_table::sst::encoding::{decode, encode};
-use cntryl_midge_table::types::EntryType;
 
 const ENCODE_BATCH_SIZE: usize = 2048;
 const DECODE_BATCH_SIZE: usize = 65_536;

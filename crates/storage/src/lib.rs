@@ -67,28 +67,40 @@
 //! 3. **WAL ordering**: Local write → memtable visibility → cloud upload → `CloudAck`
 //! 4. **Deterministic testing**: `MockCloudBackend` for synchronous test execution
 
+#[doc(hidden)]
 pub mod cloud;
+#[doc(hidden)]
 pub mod config;
+#[doc(hidden)]
 pub mod filesystem;
+#[doc(hidden)]
 pub mod hybrid;
 pub use hybrid::HybridStorage;
+#[doc(hidden)]
 pub mod inventory;
+#[doc(hidden)]
 pub mod providers;
+#[doc(hidden)]
 pub mod remote_block_cache;
 #[doc(hidden)]
 pub mod remote_sst;
+#[doc(hidden)]
 pub mod simulated;
 mod write_receipt;
 pub use write_receipt::FILE_UPLOAD_PART_BYTES;
 pub use write_receipt::{StorageFileUpload, StorageWriteReceipt, WriteReceiptCallback};
-#[cfg(feature = "internal-testing")]
+#[cfg(any(test, feature = "internal-testing"))]
+#[doc(hidden)]
 pub mod object_store;
+#[doc(hidden)]
 pub mod retained_callback;
 #[cfg(feature = "internal-testing")]
+#[doc(hidden)]
 pub mod simulation {
     pub use crate::object_store::*;
 }
 #[cfg(any(test, feature = "internal-testing", feature = "sqrzl-tests"))]
+#[doc(hidden)]
 pub mod test_support;
 
 #[cfg(test)]
