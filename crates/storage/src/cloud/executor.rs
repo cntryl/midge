@@ -31,6 +31,7 @@ pub struct CloudRequest {
 }
 
 impl CloudRequest {
+    #[must_use]
     pub fn new(method: Method, url: String) -> Self {
         Self {
             method,
@@ -46,11 +47,13 @@ impl CloudRequest {
         }
     }
 
+    #[must_use]
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
     }
 
+    #[must_use]
     pub fn with_body(mut self, body: Vec<u8>) -> Self {
         self.body = Some(bytes::Bytes::from(body));
         self
@@ -76,6 +79,7 @@ impl CloudRequest {
         self
     }
 
+    #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
@@ -96,6 +100,7 @@ impl CloudRequest {
     /// Permit bounded retries for provider-specific conditional-conflict
     /// responses. AWS S3 uses 409 `ConditionalRequestConflict` for a retryable
     /// conditional PUT race; other providers do not share that contract.
+    #[must_use]
     pub fn with_conditional_conflict_retries(mut self) -> Self {
         self.retry_conditional_conflicts = true;
         self

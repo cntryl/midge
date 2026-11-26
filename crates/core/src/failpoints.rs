@@ -29,6 +29,7 @@ pub use fail;
 
 /// Return whether a boolean failpoint is active.
 #[inline]
+#[must_use]
 pub fn is_active(name: &str) -> bool {
     #[cfg(feature = "failpoints")]
     {
@@ -123,6 +124,7 @@ fn gate() -> &'static RecursiveRwLock<()> {
 /// fault-injection scenario is running. The owner thread skips the read lock
 /// because it already holds the write side.
 #[cfg(feature = "failpoints")]
+#[must_use]
 pub fn read_gate() -> Option<RecursiveRwLockReadGuard<'static, ()>> {
     if skips_gate() {
         None

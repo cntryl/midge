@@ -21,6 +21,7 @@ thread_local! {
 
 /// Take the directories this thread has fsynced since the last call.
 #[cfg(any(test, feature = "internal-testing"))]
+#[must_use]
 pub fn take_synced_dirs() -> Vec<PathBuf> {
     SYNCED_DIRS.with(|synced| std::mem::take(&mut *synced.borrow_mut()))
 }
@@ -292,7 +293,7 @@ mod tests {
         // Arrange
         let temp = tempfile::tempdir().expect("temp dir");
         let root = std::fs::canonicalize(temp.path()).expect("canonical root");
-        take_synced_dirs();
+        drop(take_synced_dirs());
 
         // Act
         create_dir_all_durably(&root, &root.join("a/b/c")).expect("create durably");
@@ -312,7 +313,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = std::fs::canonicalize(temp.path()).expect("canonical root");
         std::fs::create_dir(root.join("sst")).expect("plain mkdir");
-        take_synced_dirs();
+        drop(take_synced_dirs());
 
         // Act
         create_dir_all_durably(&root, &root.join("sst")).expect("create durably");
@@ -327,7 +328,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let root = std::fs::canonicalize(temp.path()).expect("canonical root");
         create_dir_all_durably(&root, &root.join("wal")).expect("first create");
-        take_synced_dirs();
+        drop(take_synced_dirs());
 
         // Act
         create_dir_all_durably(&root, &root.join("wal")).expect("second create");
@@ -343,12 +344,12 @@ mod tests {
         let root = std::fs::canonicalize(temp.path()).expect("canonical root");
         let directory = root.join("db/wal");
         create_dir_all_durably(&root, &directory).expect("initial durable create");
-        take_synced_dirs();
+        drop(take_synced_dirs());
 
         // Act: a database directory can be removed and recreated at the same
         // path while this process remains alive.
         let fs = crate::io::real::RealFs::new(&root).expect("real filesystem");
-        take_synced_dirs();
+        drop(take_synced_dirs());
         crate::io::Fs::remove_dir_all(&fs, &crate::io::FsPath::new("db"))
             .expect("remove database directory");
         create_dir_all_durably(&root, &directory).expect("recreate durable directory");

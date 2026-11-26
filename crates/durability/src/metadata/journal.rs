@@ -156,6 +156,7 @@ impl ManifestEdit {
         self.validate_persisted_sst_names()
     }
 
+    #[must_use]
     pub fn record_type(&self) -> u8 {
         match self {
             ManifestEdit::AddSst(_) => 1,

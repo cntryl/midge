@@ -247,6 +247,7 @@ impl FileMeta {
     }
 
     /// Borrow this entry's recorded proofs for the SST identity checker.
+    #[must_use]
     pub fn expected_sst(&self) -> cntryl_midge_core::types::ExpectedSst<'_> {
         cntryl_midge_core::types::ExpectedSst {
             name: &self.name,
@@ -267,6 +268,7 @@ impl FileMeta {
     }
 
     /// Get current read count
+    #[must_use]
     pub fn get_read_count(&self) -> u64 {
         self.read_count.load(Ordering::Relaxed)
     }
@@ -275,6 +277,7 @@ impl FileMeta {
 impl Manifest {
     /// Get all files at a specific level
     #[cfg(test)]
+    #[must_use]
     pub fn files_at_level(&self, level: u32) -> Vec<&FileMeta> {
         self.files.iter().filter(|f| f.level == level).collect()
     }
@@ -341,6 +344,7 @@ impl Manifest {
     }
 
     /// Get an active column family by name
+    #[must_use]
     pub fn get_column_family_by_name(&self, name: &str) -> Option<&ColumnFamilyMeta> {
         self.column_families
             .iter()
@@ -349,6 +353,7 @@ impl Manifest {
 
     /// Get an active column family by ID
     #[cfg(test)]
+    #[must_use]
     pub fn get_column_family_by_id(&self, id: u32) -> Option<&ColumnFamilyMeta> {
         self.column_families
             .iter()
@@ -357,6 +362,7 @@ impl Manifest {
 
     /// Get all active column families
     #[cfg(test)]
+    #[must_use]
     pub fn active_column_families(&self) -> Vec<&ColumnFamilyMeta> {
         self.column_families
             .iter()
@@ -388,6 +394,7 @@ impl Manifest {
     }
 
     /// Return dropped families whose snapshot frontier is no longer pinned.
+    #[must_use]
     pub fn reclaimable_column_family_files(
         &self,
         oldest_snapshot_sequence: Option<u64>,

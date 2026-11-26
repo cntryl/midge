@@ -60,6 +60,7 @@ impl FsSstFactoryIo {
         }
     }
 
+    #[must_use]
     pub fn with_write_limiter(
         mut self,
         limiter: Option<Arc<cntryl_midge_core::common::write_rate::BackgroundWriteLimiter>>,
@@ -69,6 +70,7 @@ impl FsSstFactoryIo {
     }
 
     /// Keep build scratch in `directory`, a location in the output filesystem.
+    #[must_use]
     pub fn with_compaction_scratch_directory(mut self, directory: std::path::PathBuf) -> Self {
         self.compaction_scratch_directory = Some(directory);
         self

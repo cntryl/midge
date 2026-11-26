@@ -455,7 +455,7 @@ mod operation_tests {
         let fs = FileSystem::new(temp_dir.path()).unwrap();
         let root = std::fs::canonicalize(temp_dir.path()).unwrap();
         std::fs::create_dir(root.join("sst")).unwrap();
-        cntryl_midge_core::io::durable_dir::take_synced_dirs();
+        drop(cntryl_midge_core::io::durable_dir::take_synced_dirs());
         let (tx, rx) = mpsc::channel();
 
         // Act

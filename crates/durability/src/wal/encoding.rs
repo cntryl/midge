@@ -745,6 +745,7 @@ pub fn decode_txn_batch_payload(
 
 /// Allocation replay charges for decoding a transaction batch payload. The
 /// writer uses the same bound so it never accepts a batch replay rejects.
+#[must_use]
 pub fn txn_batch_decoded_bound(payload_len: usize, op_count: usize) -> usize {
     let slots =
         size_of::<TxnBatchRecord>().saturating_add(size_of::<WalRecord>().saturating_mul(2));

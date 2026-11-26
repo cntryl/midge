@@ -298,6 +298,7 @@ impl Footer {
         }
     }
 
+    #[must_use]
     pub fn sealed_facts(&self) -> SealedFacts {
         SealedFacts {
             link: ChainLink {
@@ -455,15 +456,18 @@ impl SegmentScan {
         })
     }
 
+    #[must_use]
     pub fn header(&self) -> &SegmentHeader {
         &self.header
     }
 
+    #[must_use]
     pub fn tail(&self) -> &SegmentTail {
         &self.tail
     }
 
     /// The footer, once the scan reached it.
+    #[must_use]
     pub fn footer(&self) -> Option<&Footer> {
         self.footer.as_ref().map(|(footer, _)| footer)
     }
@@ -555,6 +559,7 @@ impl SegmentScan {
     }
 
     /// The footer sealing what the scan has read so far.
+    #[must_use]
     pub fn sealing(&self) -> Footer {
         Footer::sealing(&self.header, &self.tail, &self.digest)
     }

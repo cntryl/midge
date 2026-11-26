@@ -23,6 +23,7 @@ pub struct RemoteCasFailure {
 
 impl RemoteCasFailure {
     /// The provider never admitted the mutation.
+    #[must_use]
     pub fn not_committed(error: cntryl_midge_core::MidgeError) -> Self {
         Self {
             may_have_committed: false,
@@ -32,6 +33,7 @@ impl RemoteCasFailure {
 
     /// The mutation may still be applied, so the caller must resolve it
     /// against durable state.
+    #[must_use]
     pub fn may_have_committed(error: cntryl_midge_core::MidgeError) -> Self {
         Self {
             may_have_committed: true,

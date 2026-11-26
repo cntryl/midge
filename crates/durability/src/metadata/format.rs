@@ -20,6 +20,7 @@ const FORMAT_FILE: &str = "FORMAT";
 const FORMAT_FILE_TEMP: &str = "FORMAT.tmp";
 const FORMAT_PREFIX: &str = "midge-format-version=";
 
+#[must_use]
 pub fn current_format_marker_bytes() -> Vec<u8> {
     format!("{FORMAT_PREFIX}{CURRENT_FORMAT_VERSION}\n").into_bytes()
 }

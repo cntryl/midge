@@ -777,6 +777,7 @@ impl fmt::Debug for CloudProviderConfig {
 
 impl CloudProviderConfig {
     /// Return the explicitly configured service endpoint, when present.
+    #[must_use]
     pub fn endpoint(&self) -> Option<&str> {
         match self {
             Self::AwsS3(_) => None,

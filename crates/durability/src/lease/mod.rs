@@ -167,6 +167,7 @@ impl LeaseError {
     /// loss of ownership fences. A store that did not answer leaves authority
     /// unknown, which callers retry, and the lease's own validity still
     /// fences the writer if that lasts until it expires.
+    #[must_use]
     pub fn into_validation_error(self, context: &str) -> cntryl_midge_core::common::MidgeError {
         match self {
             LeaseError::IoError(_) | LeaseError::Indeterminate(_) => {
@@ -185,6 +186,7 @@ impl LeaseError {
     /// authority check failed. Preserve unknown authority as a lease failure
     /// so commit handling reports an unknown outcome instead of retryable
     /// local I/O poisoning.
+    #[must_use]
     pub fn into_writer_effect_error(self, context: &str) -> cntryl_midge_core::common::MidgeError {
         match self {
             LeaseError::IoError(_) | LeaseError::Timeout(_) => {

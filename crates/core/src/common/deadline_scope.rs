@@ -30,6 +30,7 @@ pub struct DeadlineScope {
 }
 
 impl DeadlineScope {
+    #[must_use]
     pub fn new(deadline: OperationDeadline) -> Self {
         Self {
             deadline,
@@ -44,6 +45,7 @@ impl DeadlineScope {
 
     /// Narrow an operation budget while retaining the same cancellation and
     /// mutation-admission state as its owner.
+    #[must_use]
     pub fn with_deadline(&self, deadline: OperationDeadline) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -64,6 +66,7 @@ impl DeadlineScope {
         }
     }
 
+    #[must_use]
     pub fn clamp(&self, per_operation_timeout: Duration) -> Duration {
         self.deadline().clamp(per_operation_timeout)
     }

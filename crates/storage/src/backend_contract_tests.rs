@@ -385,7 +385,7 @@ fn backends(root: &std::path::Path) -> Vec<(&'static str, Box<dyn StorageBackend
         (
             "cloud-simulated",
             Box::new(CloudStorage::new(
-                std::sync::Arc::new(crate::simulation::SimulatedObjectStore::eager()),
+                std::sync::Arc::new(crate::object_store::SimulatedObjectStore::eager()),
                 "midge".to_string(),
             )),
         ),

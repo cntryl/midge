@@ -88,6 +88,7 @@ pub enum FamilyLifecycleEdit<'a> {
 
 impl<'a> FamilyLifecycleEdit<'a> {
     /// The lifecycle decision `edit` records, if it records one.
+    #[must_use]
     pub fn of(edit: &'a ManifestEdit) -> Option<Self> {
         match edit {
             ManifestEdit::CreateColumnFamily {
@@ -122,6 +123,7 @@ impl<'a> FamilyLifecycleEdit<'a> {
     /// family live under this identity, or dropped at this sequence. The exact
     /// original create also counts once a later drop left its tombstone, so
     /// replaying it cannot revive a dropped family.
+    #[must_use]
     pub fn is_reflected_in(self, manifest: &Manifest) -> bool {
         let frontier = manifest.flushed_through.get(self.id());
         manifest.column_families.iter().any(|cf| {

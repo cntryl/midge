@@ -9,6 +9,7 @@ use super::{
 };
 use cntryl_midge_core::common::DeadlineScope;
 use cntryl_midge_core::io::FsError;
+use cntryl_midge_durability::metadata::store::ManifestStore;
 
 fn check_scope(scope: Option<&DeadlineScope>, context: &str) -> MidgeResult<()> {
     scope.map_or(Ok(()), |scope| scope.check(context))
@@ -256,14 +257,12 @@ impl RuntimeState {
             manifest: super::ManifestRuntimeState::new(manifest),
             fs: fs.clone(),
             startup_scope: scope.cloned(),
-            manifest_store: Arc::new(
-                cntryl_midge_durability::metadata::store::ManifestStore::new_with_format(
-                    fs,
-                    accounting,
-                    accounting_medium,
-                    format_version,
-                ),
-            ),
+            manifest_store: Arc::new(ManifestStore::new_with_format(
+                fs,
+                accounting,
+                accounting_medium,
+                format_version,
+            )),
             sst_names,
             recovery_sst_fs: None,
             salvaged_local_ssts: std::collections::HashSet::new(),

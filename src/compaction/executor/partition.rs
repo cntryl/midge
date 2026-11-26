@@ -577,7 +577,7 @@ fn select_newest_version<'a>(
                 expiration: older.expiration,
             },
         )
-        .map_err(|()| {
+        .map_err(|_| {
             cntryl_midge_core::common::MidgeError::Corruption(format!(
                 "conflicting compaction versions for key {:?} at sequence {}",
                 String::from_utf8_lossy(&older.key),

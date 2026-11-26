@@ -52,6 +52,7 @@ use std::sync::Arc;
 ///
 /// Spelled out rather than reusing the encoded byte, so the two numbering
 /// schemes are never conflated.
+#[must_use]
 pub fn entry_type_of(op: OpType) -> EntryType {
     match op {
         OpType::Put => EntryType::Put,

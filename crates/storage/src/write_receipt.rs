@@ -13,6 +13,7 @@ pub struct StorageWriteReceipt {
 }
 
 impl StorageWriteReceipt {
+    #[must_use]
     pub fn matches(&self, bytes: &[u8]) -> bool {
         self.matches_identity(bytes.len() as u64, crc32c::crc32c(bytes))
     }

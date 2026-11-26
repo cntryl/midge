@@ -724,7 +724,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp dir");
         let fs = RealFs::new(temp.path()).expect("real fs");
         let root = std::fs::canonicalize(temp.path()).expect("canonical root");
-        crate::io::durable_dir::take_synced_dirs();
+        drop(crate::io::durable_dir::take_synced_dirs());
 
         // Act
         crate::io::Fs::create_dir_all(&fs, &FsPath::new("wal/epochs/3")).expect("create");
@@ -848,7 +848,7 @@ mod tests {
         let temp = TempDir::new().expect("temp dir");
         let root = std::fs::canonicalize(temp.path()).expect("canonical temp dir");
         let database = root.join("nested/database");
-        crate::io::durable_dir::take_synced_dirs();
+        drop(crate::io::durable_dir::take_synced_dirs());
 
         // Act
         let _fs = RealFs::new(&database).expect("create filesystem root");
@@ -868,7 +868,7 @@ mod tests {
         let root = std::fs::canonicalize(temp.path()).expect("canonical temp dir");
         let database = root.join("database");
         std::fs::create_dir(&database).expect("create database root");
-        crate::io::durable_dir::take_synced_dirs();
+        drop(crate::io::durable_dir::take_synced_dirs());
 
         // Act
         let _fs = RealFs::new(&database).expect("open filesystem root");
@@ -890,7 +890,7 @@ mod tests {
         std::fs::create_dir(&target).expect("database target");
         let configured_root = link_parent.join("database");
         symlink(&target, &configured_root).expect("database root symlink");
-        crate::io::durable_dir::take_synced_dirs();
+        drop(crate::io::durable_dir::take_synced_dirs());
 
         // Act
         let _fs = RealFs::new(&configured_root).expect("open symlinked root");

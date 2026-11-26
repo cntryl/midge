@@ -20,10 +20,12 @@ pub struct RemoteObjectProof {
 }
 
 impl RemoteObjectProof {
+    #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
+    #[must_use]
     pub fn metadata(&self) -> &StorageObjectMetadata {
         &self.metadata
     }

@@ -522,14 +522,11 @@ impl CloudPersistence {
                 results.push((id, Ok(())));
                 continue;
             }
-            match identity {
-                Some(_) => {}
-                None => {
-                    self.queue_cloud_wal_prune_complete(
-                        id,
-                        cntryl_midge_storage::StorageOutcome::Ok(()),
-                    );
-                }
+            if identity.is_none() {
+                self.queue_cloud_wal_prune_complete(
+                    id,
+                    cntryl_midge_storage::StorageOutcome::Ok(()),
+                );
             }
         }
         cleanup.schedule();

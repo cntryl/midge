@@ -51,6 +51,7 @@ pub enum Lineage {
 }
 
 /// Place `ledger`, the cache's, if it has one, against `catalog`.
+#[must_use]
 pub fn lineage(catalog: &WalPublicationCatalog, ledger: Option<&WalLedger>) -> Lineage {
     let Some(ledger) = ledger else {
         return Lineage::Fresh;
@@ -251,22 +252,27 @@ pub struct RecoveryPlan {
 impl RecoveryPlan {
     /// Whether the catalog must change before the ledger does: salvage sets
     /// cataloged segments aside, or the floor rises.
+    #[must_use]
     pub fn changes_catalog(&self, catalog: &WalPublicationCatalog) -> bool {
         self.retire_catalog_from.is_some() || self.catalog_floor > catalog.seq_floor()
     }
 
+    #[must_use]
     pub fn remote_max_sequences(&self) -> BTreeMap<u64, u64> {
         facts(&self.remote_segments, |facts| facts.max_sequence)
     }
 
+    #[must_use]
     pub fn remote_writer_epochs(&self) -> BTreeMap<u64, u64> {
         facts(&self.remote_segments, |facts| facts.writer_epoch)
     }
 
+    #[must_use]
     pub fn local_max_sequences(&self) -> BTreeMap<u64, u64> {
         facts(&self.local_segments, |facts| facts.max_sequence)
     }
 
+    #[must_use]
     pub fn local_writer_epochs(&self) -> BTreeMap<u64, u64> {
         facts(&self.local_segments, |facts| facts.writer_epoch)
     }

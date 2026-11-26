@@ -390,7 +390,7 @@ fn verify_storage_root(
                 |ledger| {
                     cntryl_midge_durability::wal::recovery::ReplaySegments::from_ledger(
                         &ledger,
-                        |id| cntryl_midge_durability::wal::segment_key(id),
+                        cntryl_midge_durability::wal::segment_key,
                     )
                 },
             );

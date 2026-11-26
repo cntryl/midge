@@ -54,6 +54,7 @@ impl CatalogEntry {
     }
 
     /// The entry for `bytes`, a segment that says it is `identity`.
+    #[must_use]
     pub fn describing(
         validation: &crate::wal::cloud_segment::SegmentValidation,
         bytes: &[u8],

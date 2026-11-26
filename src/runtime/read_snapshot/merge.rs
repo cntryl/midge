@@ -21,7 +21,7 @@ impl ReadSnapshot {
                 cntryl_midge_core::types::VersionContent::from_state(candidate)
                     .expect("present state"),
             )
-            .map_err(|()| {
+            .map_err(|_| {
                 MidgeError::Corruption(format!(
                     "conflicting read versions at sequence {candidate_seq}"
                 ))

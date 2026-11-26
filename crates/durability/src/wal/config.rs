@@ -6,6 +6,7 @@ pub struct WalBatchingConfig {
 }
 
 impl WalBatchingConfig {
+    #[must_use]
     pub fn new(buffer_size: usize, batch: Option<super::policy::BatchConfig>) -> Self {
         Self { buffer_size, batch }
     }

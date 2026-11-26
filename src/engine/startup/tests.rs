@@ -9,7 +9,7 @@ fn should_make_new_database_root_chain_durable_before_startup_writes() -> MidgeR
     let parent = std::fs::canonicalize(temp.path())?;
     let db_path = parent.join("nested/database");
     let opts = OpenOptions::local(&db_path).build()?;
-    cntryl_midge_core::io::durable_dir::take_synced_dirs();
+    drop(cntryl_midge_core::io::durable_dir::take_synced_dirs());
 
     // Act
     StartupStoragePath::resolve(&opts)?;

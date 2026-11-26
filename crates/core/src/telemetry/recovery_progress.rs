@@ -17,6 +17,7 @@ pub struct WorkProgress {
 }
 
 impl WorkProgress {
+    #[must_use]
     pub fn new(stage: &'static str) -> Self {
         Self {
             stage,

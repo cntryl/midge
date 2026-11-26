@@ -34,17 +34,20 @@ pub const REPAIR_DIR_NAME: &str = ".compaction-repair";
 pub const REPAIR_SCRATCH_DIR: &str = "sst/.compaction-repair";
 
 /// Root-relative location of the SST named `name`.
+#[must_use]
 pub fn sst_location(name: &str) -> std::path::PathBuf {
     Path::new(SST_DIR).join(name)
 }
 
 /// Root filesystem key of the SST named `name`.
+#[must_use]
 pub fn sst_key(name: &str) -> FsPath {
     FsPath::new(format!("{SST_DIR}/{name}"))
 }
 
 /// Classify a failure to reach an SST the engine itself wrote. A missing
 /// file is an engine fault, never a caller asking for something absent.
+#[must_use]
 pub fn engine_sst_error(error: FsError) -> MidgeError {
     error.into_midge_for_existing_file("engine SST")
 }

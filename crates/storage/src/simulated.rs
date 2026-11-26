@@ -32,6 +32,7 @@ pub enum SimulatedCloud {
 
 impl SimulatedCloud {
     /// The host object store is durable shared state, outside the local cache.
+    #[must_use]
     pub fn cache_root_exclusion(&self) -> Option<&'static str> {
         match self {
             Self::Host(_) => Some(SIMULATED_CLOUD_DIR),
@@ -136,6 +137,7 @@ pub fn build_simulated_cloud_stores(
 
 /// Root of the host directory that simulates cloud storage under `db_path`.
 #[cfg(any(test, feature = "internal-testing"))]
+#[must_use]
 pub fn simulated_cloud_root(db_path: &std::path::Path) -> PathBuf {
     db_path.join(SIMULATED_CLOUD_DIR)
 }

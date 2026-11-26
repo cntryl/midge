@@ -182,15 +182,19 @@ impl<'a> VersionContent<'a> {
     }
 }
 
+/// Conflicting contents for the same sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SequenceConflict;
+
 /// Identical copies are valid; differing content at one sequence is corrupt.
 pub fn resolve_same_sequence(
     existing: VersionContent<'_>,
     candidate: VersionContent<'_>,
-) -> Result<(), ()> {
+) -> Result<(), SequenceConflict> {
     if existing == candidate {
         Ok(())
     } else {
-        Err(())
+        Err(SequenceConflict)
     }
 }
 

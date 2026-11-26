@@ -30,8 +30,15 @@ use std::fmt;
 #[serde(into = "String", try_from = "String")]
 pub struct HolderId(uuid::Uuid);
 
+impl Default for HolderId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HolderId {
     /// A new, random identity.
+    #[must_use]
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4())
     }
@@ -39,12 +46,14 @@ impl HolderId {
     /// The identity segment headers store as `bytes`; `None` for the nil
     /// identity.
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn from_bytes(bytes: [u8; 16]) -> Option<Self> {
         let uuid = uuid::Uuid::from_bytes(bytes);
         (!uuid.is_nil()).then_some(Self(uuid))
     }
 
     /// The identity as segment headers store it.
+    #[must_use]
     pub fn bytes(self) -> [u8; 16] {
         *self.0.as_bytes()
     }
@@ -82,6 +91,7 @@ pub struct Member {
 }
 
 impl Member {
+    #[must_use]
     pub fn id(&self) -> SegmentId {
         self.open.id
     }
@@ -492,16 +502,19 @@ impl WalLedger {
     }
 
     /// The holder identity genesis recorded.
+    #[must_use]
     pub fn holder(&self) -> HolderId {
         self.holder
     }
 
     /// The link the first member names.
+    #[must_use]
     pub fn anchor(&self) -> ChainLink {
         self.anchor
     }
 
     /// The open member, the newest.
+    #[must_use]
     pub fn open_member(&self) -> &Member {
         self.members
             .back()
@@ -509,11 +522,13 @@ impl WalLedger {
     }
 
     /// The open segment, the newest member.
+    #[must_use]
     pub fn open_segment(&self) -> SegmentId {
         self.open_member().id()
     }
 
     /// The id the next rotation opens.
+    #[must_use]
     pub fn next_segment_id(&self) -> SegmentId {
         self.next_segment_id
     }
@@ -572,12 +587,14 @@ impl WalLedger {
     }
 
     /// Whether segment `id` is history recovery replays.
+    #[must_use]
     pub fn is_member(&self, id: SegmentId) -> bool {
         self.expected(id).is_some()
     }
 
     /// The newest writer epoch that wrote this history: the open member's,
     /// since epochs never fall along the chain.
+    #[must_use]
     pub fn newest_epoch(&self) -> u64 {
         self.members
             .iter()
@@ -587,6 +604,7 @@ impl WalLedger {
     }
 
     /// Every sequence handed out is at or below this.
+    #[must_use]
     pub fn seq_reserved_through(&self) -> u64 {
         self.seq_reserved_through
     }

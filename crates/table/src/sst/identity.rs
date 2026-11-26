@@ -69,6 +69,7 @@ const READ_CHUNK_BYTES: usize = 1024 * 1024;
 
 impl SstIdentity {
     /// Identity of an in-memory object body.
+    #[must_use]
     pub fn of_bytes(data: &[u8]) -> Self {
         Self {
             size_bytes: data.len() as u64,

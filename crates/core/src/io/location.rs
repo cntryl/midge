@@ -18,6 +18,7 @@ impl FsLocation {
 
     /// The host file at `path`, through a root at its parent directory.
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn host_file(path: &std::path::Path) -> Self {
         let parent = path.parent().expect("host file has a parent directory");
         let name = path.file_name().expect("host file has a name");
@@ -49,6 +50,10 @@ impl FsLocation {
 
     pub fn len(&self) -> FsResult<u64> {
         self.fs.metadata(&self.path).map(|metadata| metadata.len)
+    }
+
+    pub fn is_empty(&self) -> FsResult<bool> {
+        self.len().map(|len| len == 0)
     }
 }
 

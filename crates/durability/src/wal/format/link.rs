@@ -49,6 +49,7 @@ pub struct OpenFacts {
 
 impl OpenFacts {
     /// The header of a segment with these facts, written for `holder`.
+    #[must_use]
     pub fn header(self, holder: [u8; 16]) -> SegmentHeader {
         SegmentHeader {
             id: self.id,

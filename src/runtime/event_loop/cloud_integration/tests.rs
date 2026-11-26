@@ -15,6 +15,7 @@ use crate::runtime::{
     state::RuntimeState, ConflictPolicy, KeyAssertion, ResponseRouter, RuntimeMsg, RuntimeResponse,
 };
 use bytes::Bytes;
+use cntryl_midge_core::common::MidgeResult;
 use cntryl_midge_core::types::EntryType;
 use cntryl_midge_durability::wal::DurabilityPolicy;
 use std::path::{Path, PathBuf};
@@ -9055,7 +9056,7 @@ impl cntryl_midge_storage::StorageBackend for CountingSstHeadBackend {
 
 #[test]
 fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outputs(
-) -> cntryl_midge_core::common::MidgeResult<()> {
+) -> MidgeResult<()> {
     // Arrange
     let mut el = create_test_cloud_event_loop(
         cntryl_midge_storage::hybrid::policy::StorageBudgetPolicy::default(),
@@ -9087,35 +9088,14 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
         .state
         .db_path
         .join("counted_store")
-        .join(cntryl_midge_core::cloud_layout::object_key(&output_sst));
+        .join(&counting.sst_key);
     std::fs::create_dir_all(staged_path.parent().expect("staged object parent"))
         .expect("staged object directory");
     write_test_file(staged_path, &output_bytes);
     // Read the staged object's real identity through the inner store, so the
     // proof matches and the turn publishes. Going through `inner` keeps this
     // setup HEAD out of the count.
-    let (metadata_tx, metadata_rx) = std::sync::mpsc::channel();
-    cntryl_midge_storage::StorageBackend::submit_range_head_request(
-        counting.inner.as_ref(),
-        cntryl_midge_storage::StorageRequest::new(
-            cntryl_midge_core::cloud_layout::object_key(&output_sst),
-            cntryl_midge_core::common::OperationDeadline::from_budget(Duration::from_secs(5)),
-            Duration::from_secs(5),
-        ),
-        metadata_tx,
-    );
-    let metadata = match metadata_rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(cntryl_midge_storage::StorageEvent::HeadComplete {
-            result: cntryl_midge_storage::StorageOutcome::Ok(metadata),
-            ..
-        }) => metadata,
-        other => panic!("staged object identity unavailable: {other:?}"),
-    };
-    let proof = cntryl_midge_storage::hybrid::backend::GuardedObjectProof::range_identity(
-        Arc::clone(&counting) as Arc<dyn cntryl_midge_storage::StorageBackend>,
-        cntryl_midge_core::cloud_layout::object_key(&output_sst),
-        metadata,
-    );
+    let proof = staged_object_proof(&counting);
     el.actors
         .compaction_actor
         .prepare_for_completion_test(&mut el.state, &[input_sst.to_string()])?;
@@ -9176,6 +9156,37 @@ fn should_head_each_compaction_output_once_when_publishing_prepared_remote_outpu
          not once per code path that happens to hold the proof"
     );
     Ok(())
+}
+
+fn staged_object_proof(
+    counting: &Arc<CountingSstHeadBackend>,
+) -> cntryl_midge_storage::hybrid::backend::GuardedObjectProof {
+    use cntryl_midge_core::common::OperationDeadline;
+    use cntryl_midge_storage::hybrid::backend::GuardedObjectProof;
+    use cntryl_midge_storage::{StorageBackend, StorageEvent, StorageOutcome, StorageRequest};
+
+    let (metadata_tx, metadata_rx) = std::sync::mpsc::channel();
+    let timeout = Duration::from_secs(5);
+    counting.inner.submit_range_head_request(
+        StorageRequest::new(
+            counting.sst_key.clone(),
+            OperationDeadline::from_budget(timeout),
+            timeout,
+        ),
+        metadata_tx,
+    );
+    let metadata = match metadata_rx.recv_timeout(timeout) {
+        Ok(StorageEvent::HeadComplete {
+            result: StorageOutcome::Ok(metadata),
+            ..
+        }) => metadata,
+        other => panic!("staged object identity unavailable: {other:?}"),
+    };
+    GuardedObjectProof::range_identity(
+        Arc::clone(counting) as Arc<dyn StorageBackend>,
+        counting.sst_key.clone(),
+        metadata,
+    )
 }
 
 #[test]

@@ -52,6 +52,7 @@ impl MockCloudBackend {
     }
 
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn get_request_timeouts(&self) -> Vec<std::time::Duration> {
         self.get_timeouts.lock().clone()
     }

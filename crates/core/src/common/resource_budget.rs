@@ -104,6 +104,7 @@ impl ResourceBudget {
 
     /// Preserve the cause of admission failure for an internal retrying caller.
     /// Ordinary consumers retain the public `ResourceLimit` error contract.
+    #[must_use]
     pub fn with_contention_errors(mut self) -> Self {
         self.report_contention = true;
         self
@@ -205,11 +206,13 @@ impl ResourceBudget {
         self.inner.limit
     }
 
+    #[must_use]
     pub fn used(&self) -> usize {
         self.inner.current.load(Ordering::Acquire)
     }
 
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn peak(&self) -> usize {
         self.inner.peak.load(Ordering::Acquire)
     }
@@ -228,6 +231,7 @@ pub struct ResourceContention {
 impl ResourceContention {
     /// Match this failed attempt's originating pool even if the owner that
     /// caused contention has already released its charge.
+    #[must_use]
     pub fn is_for_pool(&self, budget: &ResourceBudget) -> bool {
         budget.is_within_pool(self.pool_id)
     }
@@ -235,6 +239,7 @@ impl ResourceContention {
     /// contention-reporting budget. Pure: nothing is consumed, so the same
     /// error can be inspected any number of times and no other attempt can
     /// affect the answer.
+    #[must_use]
     pub fn from_error(error: &MidgeError) -> Option<Self> {
         let MidgeError::ResourceLimit(message) = error else {
             return None;
@@ -250,6 +255,7 @@ impl ResourceContention {
         })
     }
 
+    #[must_use]
     pub fn is_blocked_by(&self, budget: &ResourceBudget) -> bool {
         // Temporary allocations have unwound before the caller decides to retry.
         // The remaining reservations must cover the shortfall; otherwise the
@@ -263,6 +269,7 @@ impl ResourceContention {
     }
 
     #[cfg(test)]
+    #[must_use]
     pub fn with_context(mut self, context: &str) -> Self {
         self.message = format!("{context}: {}", self.message);
         self

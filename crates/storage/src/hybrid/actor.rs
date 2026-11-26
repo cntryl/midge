@@ -72,6 +72,7 @@ enum WatermarkState {
 }
 
 impl StorageBudgetActor {
+    #[must_use]
     pub fn new(policy: StorageBudgetPolicy) -> Self {
         Self {
             policy,
@@ -518,10 +519,12 @@ impl StorageBudgetActor {
     }
 
     /// Get current disk state (snapshot)
+    #[must_use]
     pub fn disk_state(&self) -> DiskState {
         self.disk_state.clone()
     }
 
+    #[must_use]
     pub fn max_local_bytes(&self) -> u64 {
         self.policy.max_local_bytes
     }
@@ -532,6 +535,7 @@ impl StorageBudgetActor {
 
     /// Get pending eviction queue
     #[cfg(test)]
+    #[must_use]
     pub fn pending_evictions(&self) -> Vec<(u64, u64)> {
         self.pending_evictions.iter().copied().collect()
     }

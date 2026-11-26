@@ -33,6 +33,7 @@ pub struct CachePolicyConfig {
 }
 
 impl CachePolicyConfig {
+    #[must_use]
     pub fn new(block_size: usize, capacity_bytes: usize, policy: BlockCachePolicy) -> Self {
         Self {
             block_size,

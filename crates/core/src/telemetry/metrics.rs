@@ -1051,6 +1051,7 @@ pub struct MetricsSnapshot {
 impl MetricsSnapshot {
     /// Calculate cache hit ratio (0.0..=1.0)
     #[cfg(test)]
+    #[must_use]
     pub fn cache_hit_ratio(&self) -> f64 {
         let total = self.cache_hits + self.cache_misses;
         if total == 0 {
@@ -1062,12 +1063,14 @@ impl MetricsSnapshot {
 
     /// Total write operations
     #[cfg(test)]
+    #[must_use]
     pub fn total_writes(&self) -> u64 {
         self.puts + self.deletes + self.merges
     }
 
     /// Total cloud bytes transferred
     #[cfg(test)]
+    #[must_use]
     pub fn total_cloud_bytes(&self) -> u64 {
         self.cloud_bytes_uploaded + self.cloud_bytes_downloaded
     }

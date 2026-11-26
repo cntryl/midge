@@ -169,7 +169,7 @@ impl SstFileIo {
                 cntryl_midge_core::types::VersionContent::from_state(&candidate)
                     .expect("present state"),
             )
-            .map_err(|()| {
+            .map_err(|_| {
                 cntryl_midge_core::common::MidgeError::Corruption(format!(
                     "conflicting SST versions at sequence {candidate_sequence}"
                 ))

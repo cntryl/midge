@@ -32,11 +32,13 @@ impl Response {
         }
     }
 
+    #[must_use]
     pub fn with_etag(mut self, version: usize) -> Self {
         self.headers.push(("ETag".into(), format!("\"{version}\"")));
         self
     }
 
+    #[must_use]
     pub fn with_delivery_receipt(mut self, delivery: std::sync::mpsc::Sender<bool>) -> Self {
         self.delivery = Some(delivery);
         self

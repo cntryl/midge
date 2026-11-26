@@ -1004,8 +1004,10 @@ impl CloudStorageLease {
     /// Exercise the production lease protocol over a filesystem object store.
     #[cfg(any(test, feature = "internal-testing"))]
     pub fn new(config: CloudLeaseConfig, shared_path: impl AsRef<std::path::Path>) -> Self {
-        let store =
-            Arc::new(cntryl_midge_storage::filesystem::FileSystem::new(shared_path).unwrap());
+        let store = Arc::new(
+            cntryl_midge_storage::filesystem::FileSystem::new(shared_path)
+                .expect("create the filesystem object store for the lease fixture"),
+        );
         let cloud = Arc::new(CloudStorage::from_object_store(
             store,
             Duration::from_secs(5),
@@ -1031,6 +1033,7 @@ impl CloudStorageLease {
         Ok(self)
     }
 
+    #[must_use]
     pub fn new_provider_backed(
         config: CloudLeaseConfig,
         _local_cache_path: std::path::PathBuf,
@@ -1084,6 +1087,7 @@ impl CloudStorageLease {
     }
 
     /// A provider lease whose document lives in `cloud`, timed by `clock`.
+    #[must_use]
     pub fn new_provider_backed_with_clock_skew_tolerance_and_ttl(
         config: CloudLeaseConfig,
         cloud: Arc<CloudStorage>,

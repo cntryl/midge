@@ -210,6 +210,7 @@ impl BlockCache {
     }
 
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn policy_type(&self) -> CachePolicyType {
         self.policy_type
     }

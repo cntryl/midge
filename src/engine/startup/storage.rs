@@ -6,7 +6,8 @@ use super::{
 use crate::config::Storage;
 use crate::runtime::ddl::DdlLeaseAuthority;
 use crate::runtime::hybrid_persistence::{CloudMetadataMirrorAuthority, CloudPersistence};
-use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult};
+use cntryl_midge_core::common::{DeadlineScope, MidgeError, MidgeResult, OperationDeadline};
+use cntryl_midge_durability::lease::LeaseError;
 use cntryl_midge_durability::RecoveryPolicy;
 use std::sync::Arc;
 
@@ -815,22 +816,12 @@ impl RuntimeStorageMaterialization {
         let head = leader_store
             .read_committed_metadata(scope.map_or(timeout, |scope| scope.clamp(timeout)))
             .map_err(|error| {
-                if scope.is_some()
-                    && matches!(
-                        error,
-                        cntryl_midge_durability::lease::LeaseError::Timeout(_)
-                    )
-                {
+                if scope.is_some() && matches!(error, LeaseError::Timeout(_)) {
                     return MidgeError::Timeout(format!(
                         "cloud metadata authority bootstrap: {error}"
                     ));
                 }
-                if scope.is_some()
-                    && matches!(
-                        error,
-                        cntryl_midge_durability::lease::LeaseError::Indeterminate(_)
-                    )
-                {
+                if scope.is_some() && matches!(error, LeaseError::Indeterminate(_)) {
                     return MidgeError::LeaseIndeterminate(format!(
                         "cloud metadata authority bootstrap: {error}"
                     ));
@@ -878,11 +869,7 @@ impl RuntimeStorageMaterialization {
             ));
         }
         let deadline = scope.map_or_else(
-            || {
-                cntryl_midge_core::common::OperationDeadline::from_budget(
-                    timeout.saturating_mul(16),
-                )
-            },
+            || OperationDeadline::from_budget(timeout.saturating_mul(16)),
             DeadlineScope::deadline,
         );
         crate::runtime::ddl::require_empty_registry_for_metadata_bootstrap(

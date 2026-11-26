@@ -51,15 +51,18 @@ impl CloudStorage {
     }
 
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn with_mock() -> Self {
         let backend = Arc::new(super::MockCloudBackend::new());
         Self::new(backend, "midge".to_string())
     }
 
+    #[must_use]
     pub fn callback_timeout(&self) -> std::time::Duration {
         self.scoped_timeout(self.callback_timeout)
     }
 
+    #[must_use]
     pub fn with_startup_scope(&self, scope: cntryl_midge_core::DeadlineScope) -> Self {
         Self {
             reads: Arc::clone(&self.reads),
@@ -132,6 +135,7 @@ impl CloudStorage {
         }
     }
 
+    #[must_use]
     pub fn strip_namespace<'a>(&self, key: &'a str) -> &'a str {
         let namespace = self.namespace.trim_matches('/');
         if namespace.is_empty() {

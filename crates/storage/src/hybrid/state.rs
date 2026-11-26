@@ -27,6 +27,7 @@ pub struct DiskState {
 }
 
 impl DiskState {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             wal_bytes: 0,
@@ -40,6 +41,7 @@ impl DiskState {
     }
 
     /// Total reserved + used space
+    #[must_use]
     pub fn total_committed(&self) -> u64 {
         self.wal_bytes
             .saturating_add(self.sst_bytes)
@@ -51,11 +53,13 @@ impl DiskState {
     }
 
     /// Available free space given a disk limit
+    #[must_use]
     pub fn free_bytes(&self, limit: u64) -> u64 {
         limit.saturating_sub(self.total_committed())
     }
 
     /// Percentage of disk used
+    #[must_use]
     pub fn usage_percent(&self, limit: u64) -> u32 {
         usage_percent(self.total_committed(), limit)
     }
@@ -74,12 +78,14 @@ pub struct AtomicDiskState {
 }
 #[cfg(test)]
 impl AtomicDiskState {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             total_committed: AtomicU64::new(0),
         }
     }
 
+    #[must_use]
     pub fn from_disk_state(state: &DiskState) -> Self {
         Self {
             total_committed: AtomicU64::new(state.total_committed()),

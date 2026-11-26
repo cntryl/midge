@@ -37,6 +37,7 @@ pub struct LeaseValidity {
 }
 
 impl LeaseValidity {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             state: Mutex::new(LeaseValidityState::Inactive),
@@ -265,6 +266,12 @@ impl LeaseValidity {
     }
 }
 
+impl Default for LeaseValidity {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Error type for lease operations.
 ///
 /// This taxonomy exists so `LeaseHeld` means one thing and one thing only:
@@ -437,6 +444,7 @@ impl LeaseGuard {
     /// Useful for lease implementations that manage release separately (for example,
     /// release is tied to the engine lifetime). The token still conveys "lease held"
     /// to callers but dropping it is a no-op.
+    #[must_use]
     pub fn token() -> Self {
         Self {
             release_fn: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -725,6 +733,7 @@ impl CloudFormatMigrationPending {
 }
 
 impl CloudMetadataGeneration {
+    #[must_use]
     pub fn uses_format_10(&self) -> bool {
         self.objects
             .iter()

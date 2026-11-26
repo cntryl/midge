@@ -119,6 +119,7 @@ impl CloudProviderConfig {
     }
 }
 
+#[must_use]
 pub fn validate_location(
     location: &CloudStorageLocation,
     roles: &[CloudStorageRole],
@@ -147,6 +148,7 @@ pub fn validate_location(
     report_from_findings(findings)
 }
 
+#[must_use]
 pub fn validate_topology(topology: &CloudStorageTopology) -> CloudValidationReport {
     let mut findings = Vec::new();
     for (location, roles) in unique_locations(topology) {

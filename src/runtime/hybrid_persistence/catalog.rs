@@ -5,7 +5,9 @@ use super::{
     WalPublicationCatalog,
 };
 use cntryl_midge_core::common::resource_budget::{ResourceBudget, ResourceReservation};
-use cntryl_midge_durability::wal::cloud_catalog::{CatalogDecodeError, CatalogRefusal};
+use cntryl_midge_durability::wal::cloud_catalog::{
+    CatalogDecodeError, CatalogRefusal, MIRROR_OBJECT_KEY, OBJECT_KEY,
+};
 use cntryl_midge_storage::StorageObjectMetadata;
 
 /// The expected rows kept through retirement CAS, including their cloned
@@ -252,11 +254,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
     validate()?;
     let budget = catalog_budget(storage);
     let primary = storage
-        .read_control_object(
-            cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
-            &budget,
-            deadline,
-        )
+        .read_control_object(OBJECT_KEY, &budget, deadline)
         .map_err(|error| {
             contextualize_cloud_error(error, "cloud WAL publication catalog unavailable")
         })?;
@@ -267,7 +265,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
             Ok(catalog) => {
                 sync_catalog_copy_with_authority(
                     storage,
-                    cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
+                    MIRROR_OBJECT_KEY,
                     primary.bytes(),
                     deadline,
                     validate,
@@ -277,11 +275,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
             Err(error) if unrepairable(&error) => return Err(error),
             Err(primary_error) => {
                 let mirror = storage
-                    .read_control_object(
-                        cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
-                        &budget,
-                        deadline,
-                    )
+                    .read_control_object(MIRROR_OBJECT_KEY, &budget, deadline)
                     .map_err(|error| {
                         contextualize_cloud_error(
                             error,
@@ -306,7 +300,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
                 );
                 let repaired = sync_catalog_copy_with_authority(
                     storage,
-                    cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
+                    OBJECT_KEY,
                     mirror.bytes(),
                     deadline,
                     validate,
@@ -320,11 +314,7 @@ pub(super) fn load_and_repair_catalog_with_authority(
     }
 
     let mirror = storage
-        .read_control_object(
-            cntryl_midge_durability::wal::cloud_catalog::MIRROR_OBJECT_KEY,
-            &budget,
-            deadline,
-        )
+        .read_control_object(MIRROR_OBJECT_KEY, &budget, deadline)
         .map_err(|error| {
             contextualize_cloud_error(error, "cloud WAL publication catalog mirror unavailable")
         })?;
@@ -341,13 +331,8 @@ pub(super) fn load_and_repair_catalog_with_authority(
         ))
     })?;
     tracing::warn!("restoring missing cloud WAL publication catalog from validated mirror");
-    let repaired = sync_catalog_copy_with_authority(
-        storage,
-        cntryl_midge_durability::wal::cloud_catalog::OBJECT_KEY,
-        mirror.bytes(),
-        deadline,
-        validate,
-    )?;
+    let repaired =
+        sync_catalog_copy_with_authority(storage, OBJECT_KEY, mirror.bytes(), deadline, validate)?;
     Ok(Some(CatalogAuthority {
         primary: repaired,
         catalog,

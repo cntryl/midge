@@ -35,6 +35,7 @@ pub struct FileMeta {
 
 impl FileMeta {
     /// Borrow this entry's recorded proofs for the SST identity checker.
+    #[must_use]
     pub fn expected_sst(&self) -> cntryl_midge_core::types::ExpectedSst<'_> {
         cntryl_midge_core::types::ExpectedSst {
             name: &self.name,

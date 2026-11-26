@@ -24,6 +24,7 @@ pub struct RealS3Settings {
     pub path_style: bool,
 }
 
+#[must_use]
 pub fn configured_real_s3_settings() -> Option<RealS3Settings> {
     Some(RealS3Settings {
         bucket: std::env::var(REAL_S3_BUCKET_ENV).ok()?,
@@ -46,6 +47,7 @@ pub fn require_sqrzl(label: &str) {
     );
 }
 
+#[must_use]
 pub fn sqrzl_is_available() -> bool {
     let Ok(addr) = SQRZL_SOCKET.parse::<SocketAddr>() else {
         return false;
@@ -71,6 +73,7 @@ pub fn ensure_sqrzl_s3_bucket_at(bucket: &str, endpoint: &str) -> Result<(), Str
     }
 }
 
+#[must_use]
 pub fn hmac_sha256(key: &[u8], data: &str) -> Vec<u8> {
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
@@ -267,11 +270,13 @@ pub fn ensure_sqrzl_azure_container(container: &str) -> Result<(), String> {
     }
 }
 
+#[must_use]
 pub fn setup_error_has_conflict_status(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
     lower.contains("status 409") || lower.contains("status 500")
 }
 
+#[must_use]
 pub fn azure_header_value(headers: &[(String, String)], name: &str) -> String {
     headers
         .iter()
@@ -280,6 +285,7 @@ pub fn azure_header_value(headers: &[(String, String)], name: &str) -> String {
         .unwrap_or_default()
 }
 
+#[must_use]
 pub fn azure_canonical_headers(headers: &[(String, String)]) -> String {
     let mut x_ms = headers
         .iter()
@@ -299,6 +305,7 @@ pub fn azure_canonical_headers(headers: &[(String, String)]) -> String {
         })
 }
 
+#[must_use]
 pub fn azure_canonical_resource(path: &str, query: &str) -> String {
     let mut canonical_resource = format!("/{SQRZL_ACCESS_KEY}{path}");
     if !query.is_empty() {
@@ -318,6 +325,7 @@ pub fn azure_canonical_resource(path: &str, query: &str) -> String {
     canonical_resource
 }
 
+#[must_use]
 pub fn azure_string_to_sign(
     method: &str,
     headers: &[(String, String)],

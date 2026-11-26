@@ -605,6 +605,7 @@ impl AzureProvider {
     }
 
     /// Get the underlying cloud backend for use with `CloudStorage`.
+    #[must_use]
     pub fn backend(&self) -> Arc<dyn CloudBackend> {
         Arc::clone(&self.backend)
     }
@@ -735,6 +736,7 @@ struct AzureBackend {
 /// A path-style backend against a test HTTP endpoint, for the provider
 /// contract table.
 #[cfg(any(test, feature = "internal-testing"))]
+#[must_use]
 pub fn contract_test_backend(endpoint: String) -> std::sync::Arc<dyn crate::cloud::CloudBackend> {
     std::sync::Arc::new(AzureBackend::new(
         "account".into(),

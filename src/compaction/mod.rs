@@ -18,8 +18,10 @@ pub use executor::GrandparentOverlap;
 pub use strategy::{CompactionPlan, Compactor, LeveledCompactionConfig};
 
 use cntryl_midge_core::common::{MidgeError, MidgeResult};
+use cntryl_midge_core::io::FsError;
 #[cfg(test)]
 use cntryl_midge_core::types::EntryType;
+use cntryl_midge_table::sst::fs::fs_relative_sst_path;
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
@@ -223,11 +225,8 @@ pub(crate) fn execute_compaction_at_target(
             let fs = sst_factory.output_fs();
             for name in &outputs {
                 let path = output_dir.join(name);
-                if let Err(cleanup_error) =
-                    cntryl_midge_table::sst::fs::fs_relative_sst_path(&fs, &path).and_then(|key| {
-                        fs.remove_file(&key)
-                            .map_err(cntryl_midge_core::io::FsError::into_midge)
-                    })
+                if let Err(cleanup_error) = fs_relative_sst_path(&fs, &path)
+                    .and_then(|key| fs.remove_file(&key).map_err(FsError::into_midge))
                 {
                     tracing::warn!(file = %path.display(), %cleanup_error, "retaining unpublished repair output after scratch cleanup failure");
                 }

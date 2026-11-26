@@ -121,6 +121,7 @@ impl RemoteSstFs {
     }
 
     /// Serve fetched ranges from, and record them into, a local disk cache.
+    #[must_use]
     pub fn with_block_cache(mut self, cache: Arc<RemoteBlockCache>) -> Self {
         if let Some(file) = &mut self.pinned {
             Arc::get_mut(file)
@@ -131,6 +132,7 @@ impl RemoteSstFs {
         self
     }
 
+    #[must_use]
     pub fn with_deadline(mut self, deadline: cntryl_midge_core::common::OperationDeadline) -> Self {
         self.deadline = Some(deadline);
         if let Some(file) = &mut self.pinned {
@@ -141,6 +143,7 @@ impl RemoteSstFs {
         self
     }
 
+    #[must_use]
     pub fn with_verified_local_overrides(
         mut self,
         names: std::collections::HashSet<String>,

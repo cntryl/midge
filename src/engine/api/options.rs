@@ -1040,14 +1040,7 @@ impl OpenOptionsBuilder {
             ));
         }
         self.validate_open_timeout()?;
-        let runtime_response_timeout = self.io_timeouts.runtime_response.unwrap_or_else(|| {
-            crate::config::default_runtime_response_timeout(self.io_timeouts.storage)
-        });
-        if runtime_response_timeout <= self.io_timeouts.storage {
-            return Err(MidgeError::InvalidArgument(
-                "runtime response timeout must be greater than storage I/O timeout".to_string(),
-            ));
-        }
+        let runtime_response_timeout = self.resolve_runtime_response_timeout()?;
         if self.cloud.shutdown_drain_timeout.is_zero() {
             return Err(MidgeError::InvalidArgument(
                 "cloud shutdown drain timeout must be greater than zero".to_string(),
@@ -1137,6 +1130,18 @@ impl OpenOptionsBuilder {
             ttl_clock: self.ttl_clock,
             drop_transaction_wait_timeout: self.drop_transaction_wait_timeout,
         })
+    }
+
+    fn resolve_runtime_response_timeout(&self) -> MidgeResult<Duration> {
+        let timeout = self.io_timeouts.runtime_response.unwrap_or_else(|| {
+            crate::config::default_runtime_response_timeout(self.io_timeouts.storage)
+        });
+        if timeout <= self.io_timeouts.storage {
+            return Err(MidgeError::InvalidArgument(
+                "runtime response timeout must be greater than storage I/O timeout".to_string(),
+            ));
+        }
+        Ok(timeout)
     }
 
     fn resolve_total_memory(&self) -> MidgeResult<usize> {

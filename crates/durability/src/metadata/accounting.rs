@@ -403,6 +403,7 @@ impl Owner {
     }
 
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn handle(&self) -> MetricsHandle {
         self.0.clone()
     }
@@ -487,6 +488,12 @@ impl Owner {
                 ..Counters::default()
             })
         });
+    }
+}
+
+impl Default for Owner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

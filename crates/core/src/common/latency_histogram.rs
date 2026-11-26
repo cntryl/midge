@@ -17,6 +17,7 @@ pub(crate) const LINEAR_BUCKETS: usize = 64;
 pub(crate) const STEP_NS: u64 = 250_000;
 
 /// Inclusive upper bound in nanoseconds of bin `index`.
+#[must_use]
 pub fn upper_bound(index: usize) -> u64 {
     if index < LINEAR_BUCKETS {
         u64::try_from(index + 1).expect("fixed histogram index") * STEP_NS - 1

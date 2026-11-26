@@ -60,6 +60,7 @@ impl Default for TelemetryConfig {
 impl TelemetryConfig {
     /// Create a new configuration (disabled by default)
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             enabled: false,
@@ -68,6 +69,7 @@ impl TelemetryConfig {
     }
 
     /// Enable/disable telemetry
+    #[must_use]
     pub fn with_enabled(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
@@ -75,6 +77,7 @@ impl TelemetryConfig {
 
     /// Set service name
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn with_service_name(mut self, name: String) -> Self {
         self.service_name = name;
         self
@@ -86,6 +89,7 @@ impl TelemetryConfig {
     /// deserialized and directly-constructed configurations follow the same
     /// fail-closed path as builder-created configurations.
     #[cfg(test)]
+    #[must_use]
     pub fn with_sample_rate(mut self, rate: f64) -> Self {
         self.trace_sample_rate = rate;
         self
@@ -107,6 +111,7 @@ impl TelemetryConfig {
 
     /// Set OTLP exporter configuration
     #[cfg(test)]
+    #[must_use]
     pub fn with_otlp(mut self, endpoint: String) -> Self {
         self.otlp_config = Some(OtlpConfig { endpoint });
         self
@@ -114,6 +119,7 @@ impl TelemetryConfig {
 
     /// Enable/disable logging
     #[cfg(test)]
+    #[must_use]
     pub fn with_logging(mut self, enabled: bool) -> Self {
         self.features.enable_logging = enabled;
         self
@@ -121,6 +127,7 @@ impl TelemetryConfig {
 
     /// Enable/disable tracing
     #[cfg(test)]
+    #[must_use]
     pub fn with_tracing(mut self, enabled: bool) -> Self {
         self.features.enable_tracing = enabled;
         self
@@ -128,6 +135,7 @@ impl TelemetryConfig {
 
     /// Enable/disable metrics
     #[cfg(test)]
+    #[must_use]
     pub fn with_metrics(mut self, enabled: bool) -> Self {
         self.features.enable_metrics = enabled;
         self

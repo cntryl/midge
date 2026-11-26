@@ -815,11 +815,13 @@ impl LocalMetadataAuthority {
         }
     }
 
+    #[must_use]
     pub fn head_digest(&self) -> [u8; 32] {
         self.head_digest
     }
 
     /// Names of the immutable objects selected by HEAD, plus HEAD itself.
+    #[must_use]
     pub fn selected_relative_paths(&self) -> Vec<String> {
         relative_paths(&self.head)
     }

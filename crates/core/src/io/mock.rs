@@ -68,6 +68,7 @@ impl MockFs {
     }
 
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn sync_dir_calls(&self) -> Vec<(FsPath, Durability)> {
         self.sync_dir_calls.lock().clone()
     }

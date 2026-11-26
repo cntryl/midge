@@ -240,6 +240,7 @@ pub struct AwsCredentials {
 
 impl AwsCredentials {
     #[cfg(test)]
+    #[must_use]
     pub fn new(access_key: String, secret_key: String, region: String) -> Self {
         Self {
             access_key,
@@ -851,6 +852,7 @@ pub struct S3Config {
 
 impl S3Config {
     /// Create config for AWS S3 (default endpoint)
+    #[must_use]
     pub fn aws(bucket: String, region: String) -> Self {
         Self {
             bucket,
@@ -862,6 +864,7 @@ impl S3Config {
     }
 
     /// Create config for custom S3-compatible endpoint
+    #[must_use]
     pub fn custom(bucket: String, region: String, endpoint: String, path_style: bool) -> Self {
         Self {
             bucket,
@@ -943,6 +946,7 @@ impl S3Provider {
         Self::aws(bucket, region, creds)
     }
 
+    #[must_use]
     pub fn backend(&self) -> Arc<dyn CloudBackend> {
         Arc::clone(&self.backend)
     }
@@ -962,6 +966,7 @@ struct S3Backend {
 /// A path-style backend against a test HTTP endpoint, for the provider
 /// contract table.
 #[cfg(any(test, feature = "internal-testing"))]
+#[must_use]
 pub fn contract_test_backend(endpoint: String) -> std::sync::Arc<dyn crate::cloud::CloudBackend> {
     std::sync::Arc::new(S3Backend::new(
         S3Config::custom("bucket".into(), "us-east-1".into(), endpoint, true),

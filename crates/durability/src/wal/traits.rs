@@ -19,6 +19,7 @@ pub struct WalAppendError {
 }
 
 impl WalAppendError {
+    #[must_use]
     pub fn unknown(error: MidgeError) -> Self {
         Self {
             error,
@@ -26,6 +27,7 @@ impl WalAppendError {
         }
     }
 
+    #[must_use]
     pub fn unchanged(error: MidgeError) -> Self {
         Self {
             error,
@@ -280,6 +282,7 @@ pub mod unsealable {
     use crate::wal::format::{SealedFacts, SegmentTail};
     use cntryl_midge_core::common::{MidgeError, MidgeResult};
 
+    #[must_use]
     pub fn tail() -> SegmentTail {
         SegmentTail::default()
     }

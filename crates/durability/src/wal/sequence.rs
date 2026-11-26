@@ -26,6 +26,7 @@ pub enum Allocation {
 /// reservation `reserved_through`. `None` when the sequence space is
 /// exhausted. `u64::MAX` is the persisted dropped-family sentinel, so
 /// `u64::MAX - 1` is the last sequence a live family may use.
+#[must_use]
 pub fn allocate(last: u64, reserved_through: u64, count: u64) -> Option<Allocation> {
     let first = last.checked_add(1)?;
     let end = last.checked_add(count.max(1))?;
@@ -43,6 +44,7 @@ pub fn allocate(last: u64, reserved_through: u64, count: u64) -> Option<Allocati
 /// `last`, if one is due: when less than half a block would remain past the
 /// allocation, reserve a whole block past it. A large allocation reserves
 /// once, for itself and a block beyond.
+#[must_use]
 pub fn refill_due(last: u64, reserved_through: u64, count: u64) -> Option<u64> {
     let end = last.saturating_add(count.max(1));
     let remaining = reserved_through.checked_sub(end);
@@ -54,6 +56,7 @@ pub fn refill_due(last: u64, reserved_through: u64, count: u64) -> Option<u64> {
 /// The last sequence that may be considered handed out when a process
 /// opens: everything recovery saw, every compaction generation, and every
 /// sequence an earlier process reserved, which it may have handed out.
+#[must_use]
 pub fn opening_last(state_sequence: u64, compaction_generation: u64, reserved: u64) -> u64 {
     state_sequence.max(compaction_generation).max(reserved)
 }

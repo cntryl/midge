@@ -64,10 +64,12 @@ impl PersistedSstName {
         Ok(Self(name.to_owned()))
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    #[must_use]
     pub fn join_under(&self, root: &Path) -> PathBuf {
         root.join(self.as_str())
     }
@@ -86,6 +88,7 @@ pub fn file_name(cf_id: u32, level: u32, sequence: u64) -> String {
 }
 
 /// Parse only a canonical, complete flush object identity.
+#[must_use]
 pub fn parse_file_name(name: &str) -> Option<(u32, u32, u64)> {
     let mut parts = name.strip_suffix(".sst")?.split('_');
     let parsed = (
@@ -107,6 +110,7 @@ pub fn compaction_file_name(cf_id: u32, level: u32, generation: u64, partition: 
 ///
 /// This remains internal because partition identity is an implementation detail,
 /// not part of the stable SST naming API.
+#[must_use]
 pub fn parse_compaction_file_name(name: &str) -> Option<(u32, u32, u64, u32)> {
     let stem = name.strip_suffix(".sst")?;
     let mut parts = stem.split('_');

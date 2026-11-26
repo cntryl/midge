@@ -48,6 +48,7 @@ pub struct AckSet {
 impl AckSet {
     /// The segments recovery found published, each with the last sequence
     /// it holds.
+    #[must_use]
     pub fn recovered(published: BTreeMap<SegmentId, CatalogEntry>) -> Self {
         Self {
             acks: published
@@ -124,6 +125,7 @@ impl AckSet {
     }
 
     /// The verified summary of the oldest still-authoritative remote segment.
+    #[must_use]
     pub fn oldest_published_facts(&self) -> Option<&crate::wal::format::SealedFacts> {
         self.acks.values().find_map(|ack| match ack {
             Ack::Published(entry) => Some(entry.facts()),
@@ -133,6 +135,7 @@ impl AckSet {
 
     /// What publishing `run` adds: its verified uploads, oldest first.
     /// Segments the catalog already publishes add nothing.
+    #[must_use]
     pub fn unpublished(&self, run: &[OwedSegment]) -> Vec<CatalogEntry> {
         run.iter()
             .filter_map(|segment| match self.acks.get(&segment.segment_id) {
@@ -144,6 +147,7 @@ impl AckSet {
 
     /// How many verified uploads wait to be published, and their total
     /// size in bytes.
+    #[must_use]
     pub fn held(&self) -> (usize, u64) {
         self.acks
             .values()
@@ -158,6 +162,7 @@ impl AckSet {
 
     /// Whether `segment_id` is acknowledged, uploaded or published.
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn contains(&self, segment_id: SegmentId) -> bool {
         self.acks.contains_key(&segment_id)
     }
@@ -168,8 +173,14 @@ impl AckSet {
     }
 
     /// How many segments are acknowledged.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.acks.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.acks.is_empty()
     }
 }
 
@@ -206,6 +217,7 @@ pub enum Refusal {
 
 impl Refusal {
     /// The segment the refusal is about, if it is about one.
+    #[must_use]
     pub fn segment_id(&self) -> Option<u64> {
         match self {
             Self::Unordered { next, .. } => Some(*next),

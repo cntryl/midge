@@ -348,16 +348,19 @@ impl LeaseHeartbeat {
     ///
     /// Returns `false` if renewal has failed, indicating the instance
     /// should stop accepting writes.
+    #[must_use]
     pub fn is_healthy(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
     }
 
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn validity_for_test(&self) -> Option<Arc<super::traits::LeaseValidity>> {
         self.validity.clone()
     }
 
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn healthy_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.healthy)
     }

@@ -171,6 +171,11 @@ pub enum StoragePrecondition {
 }
 
 impl StoragePrecondition {
+    /// Build the conditional headers for the mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a precondition error if an `IfMatch` condition lacks a usable object identity.
     pub fn headers(&self) -> Result<Vec<(String, String)>, StorageError> {
         match self {
             Self::None => Ok(Vec::new()),
@@ -312,6 +317,7 @@ pub(crate) fn conditional_object_identity<'a>(
 }
 
 impl StorageObjectMetadata {
+    #[must_use]
     pub fn same_version(&self, other: &Self) -> bool {
         let identity = conditional_object_identity(&self.etag, self.generation.as_deref());
         self.size == other.size
@@ -319,6 +325,7 @@ impl StorageObjectMetadata {
             && identity == conditional_object_identity(&other.etag, other.generation.as_deref())
     }
 
+    #[must_use]
     pub fn content_crc(size: u64, data: &[u8]) -> Self {
         Self {
             size,

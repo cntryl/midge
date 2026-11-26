@@ -51,6 +51,11 @@ where
     pub fn len(&self) -> u64 {
         self.len
     }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 impl<F, T> Read for FileReader<F>
@@ -110,6 +115,7 @@ pub struct FileWriter {
 }
 
 impl FileWriter {
+    #[must_use]
     pub fn new(file: Box<dyn File>) -> Self {
         Self {
             file,

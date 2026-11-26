@@ -88,6 +88,7 @@ impl StreamingReplayLimits {
     /// Local recovery: no frame bound beyond the WAL record limit (which the
     /// frame header already enforces) and no memory checkpoints. Split-marker
     /// transactions spill to disk instead (`ReplayOptions::spill_pending_txns`).
+    #[must_use]
     pub fn local() -> Self {
         Self {
             max_frame_bytes: crate::wal::frame::WAL_MAX_RECORD_LEN,
@@ -99,6 +100,7 @@ impl StreamingReplayLimits {
 
     /// Largest transaction WAL footprint these limits can replay, whether it
     /// is one batch frame or a split-marker transaction buffered until commit.
+    #[must_use]
     pub fn max_replayable_txn_bytes(self) -> usize {
         self.max_frame_bytes.min(self.max_pending_txn_bytes)
     }
@@ -141,6 +143,7 @@ pub struct ReplayOptions<'a> {
 impl<'a> ReplayOptions<'a> {
     /// Admit units by `selection`, with no deadline and neither salvage nor
     /// spill behaviour.
+    #[must_use]
     pub const fn new(selection: crate::wal::replay::ReplaySelection<'a>) -> Self {
         Self {
             deadline: None,
@@ -170,7 +173,7 @@ pub struct ReplayCheckpoint {
     pub through_sequence: u64,
 }
 
-type Memtables = HashMap<u32, Arc<SkipListMemtable>>;
+pub(super) type Memtables = HashMap<u32, Arc<SkipListMemtable>>;
 type Checkpoint<'a> = dyn FnMut(&mut Memtables, ReplayCheckpoint) -> MidgeResult<()> + 'a;
 
 struct PendingTxn {
@@ -1246,6 +1249,7 @@ fn record_bytes(record: &WalRecord) -> usize {
 
 /// Replay buffer charge for one record of a split-marker transaction. The
 /// writer uses the same accounting to reject transactions replay cannot hold.
+#[must_use]
 pub fn pending_record_bytes(key_len: usize, value_len: usize, range_end_len: usize) -> usize {
     size_of::<WalRecord>()
         .saturating_mul(2)
@@ -1255,6 +1259,7 @@ pub fn pending_record_bytes(key_len: usize, value_len: usize, range_end_len: usi
 }
 
 /// Replay buffer charge for opening one split-marker transaction.
+#[must_use]
 pub fn pending_txn_overhead_bytes() -> usize {
     size_of::<PendingTxn>()
         .saturating_add(size_of::<(u64, u64)>())

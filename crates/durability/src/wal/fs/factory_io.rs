@@ -39,6 +39,7 @@ impl FsWalFactoryIo {
         self
     }
 
+    #[must_use]
     pub fn with_write_authority(
         mut self,
         authority: Option<crate::wal::traits::WriteAuthority>,

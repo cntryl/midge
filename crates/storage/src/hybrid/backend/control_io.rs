@@ -20,9 +20,11 @@ pub struct ControlObject {
 }
 
 impl ControlObject {
+    #[must_use]
     pub fn into_metadata(self) -> StorageObjectMetadata {
         self.metadata
     }
+    #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -32,6 +34,7 @@ impl ControlObject {
         &self.metadata
     }
 
+    #[must_use]
     pub fn has_write_receipt(&self) -> bool {
         self.confirmed_write
     }
@@ -45,6 +48,7 @@ pub enum ControlWriteFailure {
 }
 
 impl ControlWriteFailure {
+    #[must_use]
     pub fn into_error(self) -> MidgeError {
         match self {
             Self::Authority(error) | Self::Operation(error) => error,

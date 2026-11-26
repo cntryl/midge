@@ -2595,7 +2595,7 @@ fn should_sync_database_root_when_creating_wal_and_sst_directories() {
     // not only because some later step happens to sync the root (#519).
     let temp = tempfile::tempdir().expect("temp dir");
     let db_path = std::fs::canonicalize(temp.path()).expect("canonical db path");
-    cntryl_midge_core::io::durable_dir::take_synced_dirs();
+    drop(cntryl_midge_core::io::durable_dir::take_synced_dirs());
 
     // Act
     let _state = RuntimeState::new(db_path.clone(), false);

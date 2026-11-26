@@ -430,6 +430,7 @@ pub trait Fs: ReadFs {
 
 impl FsError {
     /// Classify a missing file the engine already owns as an internal failure.
+    #[must_use]
     pub fn into_midge_for_existing_file(self, description: &str) -> crate::common::MidgeError {
         match self {
             Self::NotFound(path) => {
@@ -442,6 +443,7 @@ impl FsError {
     /// Carry a filesystem error through a `std::io` interface. The error rides
     /// along as the payload, so converting back to [`crate::common::MidgeError`]
     /// classifies it exactly as [`Self::into_midge`] does.
+    #[must_use]
     pub fn into_io(self) -> std::io::Error {
         let kind = match &self {
             FsError::NotFound(_) => std::io::ErrorKind::NotFound,
@@ -456,6 +458,7 @@ impl FsError {
     }
 
     /// Map a filesystem error onto the public error type.
+    #[must_use]
     pub fn into_midge(self) -> crate::common::MidgeError {
         match self {
             FsError::NotFound(_msg) => crate::common::MidgeError::NotFound,

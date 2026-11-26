@@ -450,6 +450,7 @@ pub fn compress_wal_value(value: &[u8]) -> (Bytes, Option<u8>) {
 
 /// Borrow a passthrough value so the WAL frame can copy it directly into its
 /// final buffer. A compressed result retains the compressor's owned buffer.
+#[must_use]
 pub fn compress_wal_value_borrowed(value: &[u8]) -> (std::borrow::Cow<'_, [u8]>, Option<u8>) {
     if value.len() < MIN_COMPRESSION_INPUT_BYTES {
         return (std::borrow::Cow::Borrowed(value), None);

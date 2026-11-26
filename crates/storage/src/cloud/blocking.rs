@@ -21,6 +21,7 @@ pub struct BlockingCloud<'a> {
 }
 
 impl<'a> BlockingCloud<'a> {
+    #[must_use]
     pub fn new(cloud: &'a CloudStorage, deadline: &'a OperationDeadline) -> Self {
         Self {
             cloud,
@@ -29,6 +30,7 @@ impl<'a> BlockingCloud<'a> {
         }
     }
 
+    #[must_use]
     pub fn with_reservation(
         mut self,
         reservation: std::sync::Arc<

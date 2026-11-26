@@ -16,6 +16,7 @@ pub struct StorageBudgetPolicy {
 }
 
 impl StorageBudgetPolicy {
+    #[must_use]
     pub fn new(max_local_bytes: u64) -> Self {
         Self {
             max_local_bytes,
@@ -26,16 +27,19 @@ impl StorageBudgetPolicy {
     }
 
     /// Check if we're in high watermark territory
+    #[must_use]
     pub fn is_high_watermark(&self, usage_percent: u32) -> bool {
         usage_percent >= self.high_watermark_percent
     }
 
     /// Check if we're in critical watermark territory
+    #[must_use]
     pub fn is_critical_watermark(&self, usage_percent: u32) -> bool {
         usage_percent >= self.critical_watermark_percent
     }
 
     /// Check if we're in emergency watermark territory
+    #[must_use]
     pub fn is_emergency_watermark(&self, usage_percent: u32) -> bool {
         usage_percent >= self.emergency_watermark_percent
     }

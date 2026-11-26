@@ -228,6 +228,7 @@ impl MidgeError {
 impl MidgeError {
     /// Reconstruct this error for terminal-state replay without erasing its
     /// public variant or message.
+    #[must_use]
     pub fn replay(&self) -> Self {
         match self {
             Self::Io(error) => Self::Io(error.raw_os_error().map_or_else(
@@ -266,6 +267,7 @@ impl MidgeError {
 
 /// Preserve a definite rejection only with proof that this transaction left
 /// no effects. All other commit failures may still become visible on replay.
+#[must_use]
 pub fn classify_commit_error(error: MidgeError, unchanged: bool) -> MidgeError {
     if unchanged || matches!(error, MidgeError::OutcomeUnknown(_)) {
         error
@@ -280,6 +282,7 @@ pub fn classify_commit_error(error: MidgeError, unchanged: bool) -> MidgeError {
 /// Whether an OS error means the device or quota is full. std maps ENOSPC,
 /// EDQUOT and the Windows disk-full codes to these kinds, so no raw code (whose
 /// meaning differs by platform) or message text is needed.
+#[must_use]
 pub fn is_no_space(kind: io::ErrorKind) -> bool {
     matches!(
         kind,

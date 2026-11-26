@@ -149,6 +149,7 @@ impl WalPublicationCatalog {
 
     /// What the decoded catalog holds: its row and family-frontier
     /// capacities, plus fixed slack for its scalars.
+    #[must_use]
     pub fn retained_allocation_bytes(&self) -> usize {
         self.segments.iter().fold(
             self.segments
@@ -161,6 +162,7 @@ impl WalPublicationCatalog {
         )
     }
 
+    #[must_use]
     pub fn prefix_copy_allocation_bytes(&self, count: usize) -> usize {
         self.segments[..count].iter().fold(
             count.saturating_mul(std::mem::size_of::<CatalogEntry>()),
@@ -171,6 +173,7 @@ impl WalPublicationCatalog {
     /// What [`Self::extend_validated`] adds to the retained charge while it
     /// appends `added`: the new rows and their cloned frontiers, and the old
     /// rows while a reallocation copies them.
+    #[must_use]
     pub fn append_growth_bytes(&self, added: &[CatalogEntry]) -> usize {
         let capacity = self.segments.capacity();
         let required = self.segments.len().saturating_add(added.len());

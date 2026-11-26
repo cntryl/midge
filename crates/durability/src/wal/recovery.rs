@@ -137,6 +137,7 @@ impl ReplaySegments {
 
     /// The open segment the replay reads last, if any.
     #[cfg(any(test, feature = "internal-testing"))]
+    #[must_use]
     pub fn open_segment(&self) -> Option<crate::wal::ledger::SegmentId> {
         self.files
             .last()
@@ -221,6 +222,7 @@ impl VerifiedWalPrefix {
     }
 
     /// The greatest sequence the verified records hold, or zero.
+    #[must_use]
     pub fn max_sequence(&self) -> u64 {
         self.scan
             .as_ref()
@@ -229,6 +231,7 @@ impl VerifiedWalPrefix {
     }
 
     /// The records verified so far.
+    #[must_use]
     pub fn record_count(&self) -> u64 {
         self.scan
             .as_ref()
@@ -243,6 +246,7 @@ impl VerifiedWalPrefix {
     }
 
     /// What the segment says it is, once its footer sealed it.
+    #[must_use]
     pub fn identity(&self) -> Option<crate::wal::format::SegmentIdentity> {
         let scan = self.scan.as_ref()?;
         let footer = scan.footer()?;
@@ -261,14 +265,17 @@ pub struct WalPrefixInspectionFailure {
 }
 
 impl WalPrefixInspectionFailure {
+    #[must_use]
     pub fn verified_prefix(&self) -> VerifiedWalPrefix {
         self.verified_prefix.clone()
     }
 
+    #[must_use]
     pub fn is_incomplete_tail(&self) -> bool {
         self.failure.is_incomplete_tail()
     }
 
+    #[must_use]
     pub fn error(&self) -> &MidgeError {
         self.failure.error()
     }
@@ -313,6 +320,7 @@ fn replay_error_action(
 /// Classify open-segment damage against independent persisted sync evidence.
 /// Both local replay and cloud planning use this rule. Damage below a floor
 /// can only be salvaged; only a verified unsynced tail may be tolerated.
+#[must_use]
 pub fn open_tail_action(
     durable_bytes: Option<u64>,
     valid_bytes: u64,
@@ -496,7 +504,7 @@ pub fn validate_wal_with_policy(
 pub fn replay_wal_with_frontiers_within(
     storage: &dyn ReadFs,
     segments: &ReplaySegments,
-    memtables: &mut HashMap<ColumnFamilyId, Arc<SkipListMemtable>>,
+    memtables: &mut streaming::Memtables,
     replay_policy: ReplayPolicy,
     frontiers: &crate::metadata::frontiers::FlushFrontiers,
     scope: Option<&cntryl_midge_core::common::DeadlineScope>,
