@@ -6,6 +6,7 @@ rust-version.workspace = true
 description = "WAL, writer leases, and persisted metadata for Midge"
 license.workspace = true
 repository.workspace = true
+autobenches = false
 
 [lib]
 bench = false

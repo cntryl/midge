@@ -364,7 +364,7 @@ impl ResourceReservation {
     /// Hold `bytes` of independent charge. Growth is admitted like a new
     /// reservation and a refusal leaves the charge unchanged; a smaller total
     /// releases the rest. Any borrowed credit remains separately owned.
-    pub(crate) fn resize(&mut self, bytes: usize, resource: &'static str) -> MidgeResult<()> {
+    pub fn resize(&mut self, bytes: usize, resource: &'static str) -> MidgeResult<()> {
         if self.credit_claimed.load(Ordering::Acquire) {
             return Err(MidgeError::ResourceLimit(
                 "resource reservation cannot resize its lent charge".into(),

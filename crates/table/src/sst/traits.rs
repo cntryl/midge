@@ -1,0 +1,984 @@
+//! SST traits for readers and writers
+
+#[cfg(test)]
+use bytes::Bytes;
+use std::path::Path;
+
+use cntryl_midge_core::common::MidgeResult;
+#[cfg(test)]
+use cntryl_midge_core::types::KeyState;
+use cntryl_midge_core::types::{EntryType, RangeTombstone};
+
+/// One owned logical version yielded by an SST's raw compaction cursor.
+///
+/// This is an internal/diagnostic SST contract rather than part of Midge's
+/// stable engine API. Values retain their persisted TTL metadata verbatim.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RawSstVersion {
+    pub key: Vec<u8>,
+    pub seq: u64,
+    pub is_tombstone: bool,
+    pub value: Option<Vec<u8>>,
+    pub expiration: Option<u64>,
+}
+
+/// Owned, fallible stream of raw SST versions in key-ascending,
+/// sequence-descending order.
+pub type RawSstVersionCursor =
+    Box<dyn Iterator<Item = MidgeResult<RawSstVersion>> + Send + 'static>;
+
+#[cfg(test)]
+struct MaterializedRawVersionCursor {
+    versions: std::vec::IntoIter<RawSstVersion>,
+    _reservation: Option<cntryl_midge_core::common::resource_budget::ResourceReservation>,
+}
+
+#[cfg(test)]
+impl Iterator for MaterializedRawVersionCursor {
+    type Item = MidgeResult<RawSstVersion>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.versions.next().map(Ok)
+    }
+}
+
+/// Stateful reader contract exposing tombstones and metadata
+pub trait SstStateReader: Send + Sync {
+    /// Get presence state (value/tombstone/absent) for a specific key
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be read or decoded.
+    ///
+    /// Applies wall-clock TTL expiry. Production reads pass their own clock
+    /// through test-only `get_state_at_with_time`.
+    #[cfg(test)]
+    fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState>;
+
+    /// Scan a key range returning presence state for each key
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be scanned or decoded.
+    #[cfg(test)]
+    fn scan_range_state(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> MidgeResult<Vec<(Bytes, KeyState)>>;
+
+    /// Snapshot-aware range lookup with a caller-owned TTL clock.
+    #[cfg(test)]
+    fn scan_range_state_with_time(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+        now_millis: u64,
+    ) -> MidgeResult<Vec<(Bytes, KeyState)>>;
+
+    /// Scan persisted state without interpreting TTL expiration. Recovery and
+    /// compaction use this to preserve raw value-plus-expiration metadata.
+    #[cfg(test)]
+    fn scan_range_raw_state(
+        &self,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
+    ) -> MidgeResult<Vec<(Bytes, KeyState)>>;
+
+    /// Consume this reader and stream persisted logical versions without
+    /// interpreting TTL expiration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested range cannot be read or decoded.
+    #[cfg(test)]
+    fn raw_version_cursor(
+        self: Box<Self>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+    ) -> MidgeResult<RawSstVersionCursor> {
+        self.raw_version_cursor_with_budget(start, end, None)
+    }
+
+    /// Budgeted form of [`SstStateReader::raw_version_cursor`] used by
+    /// compaction. Implementations must reserve retained cursor buffers before
+    /// growing them whenever a budget is supplied.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::ResourceLimit` before retaining data that cannot fit.
+    fn raw_version_cursor_with_budget(
+        self: Box<Self>,
+        start: Option<Vec<u8>>,
+        end: Option<Vec<u8>>,
+        budget: Option<cntryl_midge_core::common::resource_budget::ResourceBudget>,
+    ) -> MidgeResult<RawSstVersionCursor>;
+
+    /// Snapshot-aware point lookup (entries with seq > `snapshot_seq` are ignored)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be read or decoded.
+    #[cfg(test)]
+    fn get_state_at(&self, key: &[u8], snapshot_seq: u64) -> MidgeResult<KeyState>;
+
+    /// Snapshot-aware lookup with a caller-owned TTL clock.
+    #[cfg(test)]
+    fn get_state_at_with_time(
+        &self,
+        key: &[u8],
+        snapshot_seq: u64,
+        now_millis: u64,
+    ) -> MidgeResult<KeyState>;
+
+    /// Return all range tombstones stored in this SST.
+    fn range_tombstones(&self) -> Vec<RangeTombstone>;
+
+    /// The highest sequence of a range tombstone in this SST, visible at
+    /// `snapshot_seq`, that covers `key`. Readers that hold their tombstones
+    /// override this to avoid the copy.
+    fn max_covering_tombstone_seq(&self, key: &[u8], snapshot_seq: u64) -> Option<u64> {
+        crate::memtable::max_covering_seq(&self.range_tombstones(), key, snapshot_seq)
+    }
+
+    /// Retained bytes required to clone this SST's range tombstones.
+    fn range_tombstone_memory_usage(&self) -> usize;
+}
+
+/// Materializing cursor for explicit test doubles. Production readers must
+/// implement bounded streaming in their own reader implementation.
+#[cfg(test)]
+pub(crate) fn materialized_raw_cursor_for_test<R: SstStateReader + ?Sized>(
+    reader: &R,
+    start: Option<&[u8]>,
+    end: Option<&[u8]>,
+    budget: Option<cntryl_midge_core::common::resource_budget::ResourceBudget>,
+) -> MidgeResult<RawSstVersionCursor> {
+    let states = reader.scan_range_raw_state(start, end)?;
+    let versions = states
+        .into_iter()
+        .filter_map(|(key, state)| match state {
+            KeyState::Absent => None,
+            KeyState::Tombstone(seq) => Some(RawSstVersion {
+                key: key.to_vec(),
+                seq,
+                is_tombstone: true,
+                value: None,
+                expiration: None,
+            }),
+            KeyState::Value(value, seq, expiration, _op_type) => Some(RawSstVersion {
+                key: key.to_vec(),
+                seq,
+                is_tombstone: false,
+                value: Some(value.to_vec()),
+                expiration,
+            }),
+        })
+        .collect::<Vec<_>>();
+    let retained_bytes = versions.iter().fold(0usize, |total, version| {
+        total
+            .saturating_add(version.key.capacity())
+            .saturating_add(version.value.as_ref().map_or(0, Vec::capacity))
+            .saturating_add(std::mem::size_of::<RawSstVersion>())
+    });
+    let reservation = budget
+        .map(|budget| budget.reserve(retained_bytes, "compatibility raw-version cursor"))
+        .transpose()?;
+    Ok(Box::new(MaterializedRawVersionCursor {
+        versions: versions.into_iter(),
+        _reservation: reservation,
+    }))
+}
+
+#[cfg(test)]
+macro_rules! test_reader_required_methods {
+    () => {
+        fn scan_range_state_with_time(
+            &self,
+            start: Option<&[u8]>,
+            end: Option<&[u8]>,
+            now_millis: u64,
+        ) -> cntryl_midge_core::common::MidgeResult<
+            Vec<(bytes::Bytes, cntryl_midge_core::types::KeyState)>,
+        > {
+            self.scan_range_state(start, end).map(|states| {
+                states
+                    .into_iter()
+                    .map(|(key, state)| {
+                        (
+                            key,
+                            crate::sst::traits::test_state_at_time(state, now_millis),
+                        )
+                    })
+                    .collect()
+            })
+        }
+
+        fn raw_version_cursor_with_budget(
+            self: Box<Self>,
+            start: Option<Vec<u8>>,
+            end: Option<Vec<u8>>,
+            budget: Option<cntryl_midge_core::common::resource_budget::ResourceBudget>,
+        ) -> cntryl_midge_core::common::MidgeResult<crate::sst::traits::RawSstVersionCursor> {
+            crate::sst::traits::materialized_raw_cursor_for_test(
+                self.as_ref(),
+                start.as_deref(),
+                end.as_deref(),
+                budget,
+            )
+        }
+
+        fn get_state_at(
+            &self,
+            key: &[u8],
+            snapshot_seq: u64,
+        ) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_core::types::KeyState> {
+            self.get_state_at_with_time(
+                key,
+                snapshot_seq,
+                cntryl_midge_core::common::time::unix_time_millis(),
+            )
+        }
+
+        fn get_state_at_with_time(
+            &self,
+            key: &[u8],
+            snapshot_seq: u64,
+            now_millis: u64,
+        ) -> cntryl_midge_core::common::MidgeResult<cntryl_midge_core::types::KeyState> {
+            self.get_state(key).map(|state| {
+                let sequence = match &state {
+                    cntryl_midge_core::types::KeyState::Value(_, seq, _, _)
+                    | cntryl_midge_core::types::KeyState::Tombstone(seq) => *seq,
+                    cntryl_midge_core::types::KeyState::Absent => {
+                        return cntryl_midge_core::types::KeyState::Absent
+                    }
+                };
+                if sequence > snapshot_seq {
+                    cntryl_midge_core::types::KeyState::Absent
+                } else {
+                    crate::sst::traits::test_state_at_time(state, now_millis)
+                }
+            })
+        }
+    };
+}
+
+#[cfg(test)]
+pub(crate) use test_reader_required_methods;
+
+#[cfg(test)]
+pub(crate) fn test_state_at_time(state: KeyState, now_millis: u64) -> KeyState {
+    match state {
+        KeyState::Value(_, sequence, expiration, _)
+            if cntryl_midge_core::common::time::is_expired_at(expiration, now_millis) =>
+        {
+            KeyState::Tombstone(sequence)
+        }
+        other => other,
+    }
+}
+
+/// Combined reader contract used by the SST factory.
+pub trait SstReaderExt: SstStateReader {}
+
+impl<T> SstReaderExt for T where T: SstStateReader {}
+
+/// Object-safe SST writer for polymorphic use
+pub trait DynSstWriter: Send {
+    /// Retained/encoded size used for soft compaction rollover.
+    fn estimated_size_bytes(&self) -> usize;
+
+    /// Conservative final file size, including all data, indexes, filters,
+    /// tombstones and framing, or `None` when the writer cannot establish one.
+    /// Bounded local staging rejects a `None` before finalization. Required, so
+    /// a writer must say so explicitly rather than inherit an unbounded answer.
+    fn encoded_size_upper_bound(&self) -> Option<usize>;
+
+    /// Bound after appending one sorted entry, without mutating the writer.
+    /// This must bound the subsequent `encoded_size_upper_bound`, allowing
+    /// callers to roll a partition before an otherwise splittable overflow.
+    fn encoded_size_upper_bound_after_sorted_entry(
+        &self,
+        key: &[u8],
+        value: Option<&[u8]>,
+    ) -> Option<usize>;
+
+    /// Incremental bound for a range tombstone held outside this writer.
+    /// Includes possible growth of the file's key-bound metadata.
+    fn additional_range_tombstone_size_upper_bound(
+        &self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Option<usize>;
+
+    /// Add an entry with metadata
+    /// `op_type`: 0=Put, 1=Insert, 2=Delete
+    ///
+    /// Required: a writer that cannot store the sequence, operation kind,
+    /// expiration and point tombstones supplied here must not implement this
+    /// trait, because a default would silently discard persisted deletes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry cannot be appended to the SST.
+    #[cfg(test)]
+    fn add_with_meta(
+        &mut self,
+        key: &[u8],
+        value: Option<&[u8]>,
+        seq: u64,
+        op_type: EntryType,
+        expiration: Option<u64>,
+    ) -> MidgeResult<()>;
+
+    /// Add an entry that is already sorted by key ascending and sequence
+    /// descending for equal keys.
+    ///
+    /// Filesystem writers use this signal to encode and spill complete data
+    /// blocks incrementally during compaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry cannot be appended to the SST.
+    fn add_sorted_with_meta(
+        &mut self,
+        key: &[u8],
+        value: Option<&[u8]>,
+        seq: u64,
+        op_type: EntryType,
+        expiration: Option<u64>,
+    ) -> MidgeResult<()>;
+
+    /// Add a range tombstone
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the range tombstone cannot be appended to the SST.
+    fn add_range_tombstone(&mut self, start: &[u8], end: &[u8], seq: u64) -> MidgeResult<()>;
+
+    /// Finalize and atomically persist this SST directly to `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when finalization or atomic persistence fails.
+    fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()>;
+
+    /// Finalize and return the exact encoded identity without reopening the
+    /// output. Writers without this capability return `None`; their callers
+    /// must verify the completed file before publishing metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when finalization or persistence fails.
+    fn finish_to_path_with_summary(
+        self: Box<Self>,
+        path: &Path,
+    ) -> MidgeResult<Option<FinalizedSst>> {
+        self.finish_to_path(path)?;
+        Ok(None)
+    }
+
+    /// Finalize and get SST bytes
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be finalized.
+    fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>>;
+}
+
+/// Identity and logical bounds of a successfully finalized encoded SST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizedSst {
+    /// Empty SSTs have no logical key or sequence bounds.
+    pub summary: Option<crate::sst::fs::SstFileSummary>,
+    pub size_bytes: u64,
+    pub content_crc32c: u32,
+    pub point_count: u64,
+    pub range_count: u64,
+}
+
+/// Factory trait for creating SST writers and readers
+pub trait SstFactory: Send + Sync {
+    /// Independent scratch ownership for one background worker, retaining the
+    /// same filesystem, compression and shared I/O admission configuration.
+    fn fork_for_worker(&self) -> Option<std::sync::Arc<dyn SstFactory>> {
+        None
+    }
+    /// Filesystem that owns SST outputs and their metadata, identity and cleanup.
+    fn output_fs(&self) -> std::sync::Arc<dyn cntryl_midge_core::io::Fs>;
+
+    /// Whether every temporary file created by compaction writers has been
+    /// explicitly removed. Unknown cleanup retains ephemeral disk admission.
+    fn compaction_scratch_cleanup_verified(&self) -> bool;
+
+    /// Create a new dynamic SST writer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the writer cannot be created.
+    #[cfg(test)]
+    fn create(&self) -> MidgeResult<Box<dyn DynSstWriter>>;
+
+    /// Create a writer for a budgeted compaction operation.
+    ///
+    /// Filesystem writers preserve readable legacy raw entries that exceed the
+    /// admission limit for new writes. Such blocks remain uncompressed; entry
+    /// buffers and compression workspaces still require budget reservations.
+    ///
+    fn create_for_compaction(
+        &self,
+        budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn DynSstWriter>>;
+
+    /// Open a reader whose retained metadata is charged to compaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be opened within the supplied budget.
+    fn open_for_compaction(
+        &self,
+        path: &Path,
+        budget: cntryl_midge_core::common::resource_budget::ResourceBudget,
+    ) -> MidgeResult<Box<dyn SstReaderExt>>;
+
+    /// Open an existing SST file for reading
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the SST cannot be opened or decoded.
+    #[cfg(test)]
+    fn open(&self, path: &Path) -> MidgeResult<Box<dyn SstReaderExt>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // =========== Mock Implementations for Testing ===========
+
+    #[derive(Debug)]
+    struct MockSstReader {
+        data: std::collections::BTreeMap<Vec<u8>, Vec<u8>>,
+    }
+
+    impl MockSstReader {
+        fn new() -> Self {
+            Self {
+                data: std::collections::BTreeMap::new(),
+            }
+        }
+
+        fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) {
+            self.data.insert(key, value);
+        }
+    }
+
+    impl MockSstReader {
+        fn get(&self, key: &[u8]) -> Option<Bytes> {
+            self.data.get(key).map(|v| Bytes::copy_from_slice(v))
+        }
+
+        fn scan_range(&self, start: Option<&[u8]>, end: Option<&[u8]>) -> Vec<(Bytes, Bytes)> {
+            let mut results = Vec::new();
+
+            for (k, v) in &self.data {
+                let k_bytes = k.as_slice();
+
+                // Check start bound
+                if let Some(start_key) = start {
+                    if k_bytes < start_key {
+                        continue;
+                    }
+                }
+
+                // Check end bound
+                if let Some(end_key) = end {
+                    if k_bytes >= end_key {
+                        continue;
+                    }
+                }
+
+                results.push((Bytes::copy_from_slice(k), Bytes::copy_from_slice(v)));
+            }
+
+            results
+        }
+    }
+
+    impl SstStateReader for MockSstReader {
+        test_reader_required_methods!();
+
+        fn range_tombstones(&self) -> Vec<RangeTombstone> {
+            Vec::new()
+        }
+
+        fn range_tombstone_memory_usage(&self) -> usize {
+            0
+        }
+
+        fn get_state(&self, key: &[u8]) -> MidgeResult<KeyState> {
+            Ok(match self.data.get(key) {
+                Some(value) => {
+                    KeyState::Value(Bytes::copy_from_slice(value), 0, None, EntryType::Put)
+                }
+                None => KeyState::Absent,
+            })
+        }
+
+        #[cfg(test)]
+        fn scan_range_state(
+            &self,
+            start: Option<&[u8]>,
+            end: Option<&[u8]>,
+        ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
+            Ok(self
+                .scan_range(start, end)
+                .into_iter()
+                .map(|(key, value)| (key, KeyState::Value(value, 0, None, EntryType::Put)))
+                .collect())
+        }
+
+        #[cfg(test)]
+        fn scan_range_raw_state(
+            &self,
+            start: Option<&[u8]>,
+            end: Option<&[u8]>,
+        ) -> MidgeResult<Vec<(Bytes, KeyState)>> {
+            self.scan_range_state(start, end)
+        }
+    }
+
+    #[derive(Debug)]
+    struct MockSstWriter {
+        data: Vec<(Vec<u8>, Vec<u8>)>,
+    }
+
+    impl MockSstWriter {
+        fn new() -> Self {
+            Self { data: Vec::new() }
+        }
+
+        fn add(&mut self, key: &[u8], value: &[u8]) {
+            self.data.push((key.to_vec(), value.to_vec()));
+        }
+    }
+
+    impl DynSstWriter for MockSstWriter {
+        fn estimated_size_bytes(&self) -> usize {
+            self.data
+                .iter()
+                .map(|(key, value)| key.len() + value.len() + 2)
+                .sum()
+        }
+
+        fn finish_to_path(self: Box<Self>, path: &Path) -> MidgeResult<()> {
+            std::fs::write(path, self.finish_bytes()?)?;
+            Ok(())
+        }
+
+        fn encoded_size_upper_bound(&self) -> Option<usize> {
+            None
+        }
+
+        fn encoded_size_upper_bound_after_sorted_entry(
+            &self,
+            _key: &[u8],
+            _value: Option<&[u8]>,
+        ) -> Option<usize> {
+            None
+        }
+
+        fn additional_range_tombstone_size_upper_bound(
+            &self,
+            _start: &[u8],
+            _end: &[u8],
+        ) -> Option<usize> {
+            None
+        }
+
+        #[cfg(test)]
+        fn add_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            _seq: u64,
+            _op_type: EntryType,
+            _expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.add(key, value.unwrap_or_default());
+            Ok(())
+        }
+
+        fn add_sorted_with_meta(
+            &mut self,
+            key: &[u8],
+            value: Option<&[u8]>,
+            seq: u64,
+            op_type: EntryType,
+            expiration: Option<u64>,
+        ) -> MidgeResult<()> {
+            self.add_with_meta(key, value, seq, op_type, expiration)
+        }
+
+        fn add_range_tombstone(
+            &mut self,
+            _start: &[u8],
+            _end: &[u8],
+            _seq: u64,
+        ) -> MidgeResult<()> {
+            Err(cntryl_midge_core::common::MidgeError::NotSupported(
+                "this SST writer does not support range tombstones".to_string(),
+            ))
+        }
+
+        fn finish_bytes(self: Box<Self>) -> MidgeResult<Vec<u8>> {
+            // Mock serialization: just concatenate all data
+            let mut result = Vec::new();
+            for (k, v) in self.data {
+                result.extend_from_slice(&[u8::try_from(k.len()).unwrap_or(u8::MAX)]);
+                result.extend_from_slice(&k);
+                result.extend_from_slice(&[u8::try_from(v.len()).unwrap_or(u8::MAX)]);
+                result.extend_from_slice(&v);
+            }
+            Ok(result)
+        }
+    }
+
+    #[test]
+    fn should_carry_a_typed_operation_through_add_with_meta() {
+        // Arrange
+        let mut writer = MockSstWriter::new();
+
+        // Act
+        let result = writer.add_with_meta(b"k", Some(b"v"), 1, EntryType::Insert, None);
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    // =========== Trait Object Safety Tests ===========
+
+    #[test]
+    fn should_use_reader_as_trait_object() {
+        // Arrange
+        let reader = MockSstReader::new();
+        let reader_ref: &dyn SstReaderExt = &reader;
+
+        // Act
+        let result = reader_ref.get_state(b"any_key");
+
+        // Assert
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), KeyState::Absent));
+    }
+
+    #[test]
+    fn should_downcast_reader_through_trait_object() {
+        // Arrange
+        let mut reader = MockSstReader::new();
+        reader.insert(b"key1".to_vec(), b"value1".to_vec());
+        let reader_ref: &dyn SstReaderExt = &reader;
+
+        // Act
+        let result = reader_ref.get_state(b"key1");
+
+        // Assert
+        assert!(result.is_ok());
+        assert!(
+            matches!(result.expect("get failed"), KeyState::Value(value, _, _, _) if value == "value1")
+        );
+    }
+
+    // =========== Mock reader behavior tests ===========
+
+    #[test]
+    fn should_get_return_present_key() {
+        // Arrange
+        let mut reader = MockSstReader::new();
+        reader.insert(b"key1".to_vec(), b"value1".to_vec());
+
+        // Act
+        let result = reader.get(b"key1");
+
+        // Assert
+        assert_eq!(result, Some(Bytes::from("value1")));
+    }
+
+    #[test]
+    fn should_get_return_none_for_absent_key() {
+        // Arrange
+        let reader = MockSstReader::new();
+
+        // Act
+        let result = reader.get(b"nonexistent");
+
+        // Assert
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn should_apply_bounded_range_given_mock_reader() {
+        // Arrange
+        let mut reader = MockSstReader::new();
+        reader.insert(b"a".to_vec(), b"val_a".to_vec());
+        reader.insert(b"b".to_vec(), b"val_b".to_vec());
+        reader.insert(b"c".to_vec(), b"val_c".to_vec());
+        reader.insert(b"d".to_vec(), b"val_d".to_vec());
+
+        // Act - [b, d) should return b and c (inclusive start, exclusive end)
+        let result = reader.scan_range(Some(b"b"), Some(b"d"));
+
+        // Assert
+        let pairs = result;
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].0, Bytes::from("b"));
+        assert_eq!(pairs[1].0, Bytes::from("c"));
+    }
+
+    #[test]
+    fn should_return_suffix_given_inclusive_start_bound_when_using_mock_reader() {
+        // Arrange
+        let mut reader = MockSstReader::new();
+        reader.insert(b"apple".to_vec(), b"v1".to_vec());
+        reader.insert(b"banana".to_vec(), b"v2".to_vec());
+        reader.insert(b"cherry".to_vec(), b"v3".to_vec());
+
+        // Act - Start boundary is inclusive
+        let result = reader.scan_range(Some(b"banana"), None);
+
+        // Assert
+        let pairs = result;
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].0, Bytes::from("banana"));
+    }
+
+    #[test]
+    fn should_return_prefix_given_exclusive_end_bound_when_using_mock_reader() {
+        // Arrange
+        let mut reader = MockSstReader::new();
+        reader.insert(b"apple".to_vec(), b"v1".to_vec());
+        reader.insert(b"banana".to_vec(), b"v2".to_vec());
+        reader.insert(b"cherry".to_vec(), b"v3".to_vec());
+
+        // Act - End boundary is exclusive
+        let result = reader.scan_range(None, Some(b"cherry"));
+
+        // Assert
+        let pairs = result;
+        assert_eq!(pairs.len(), 2);
+        assert!(pairs.iter().all(|(k, _)| k.as_ref() < b"cherry".as_ref()));
+    }
+
+    #[test]
+    fn should_scan_range_with_no_bounds_returns_all() {
+        // Arrange
+        let mut reader = MockSstReader::new();
+        reader.insert(b"a".to_vec(), b"val_a".to_vec());
+        reader.insert(b"b".to_vec(), b"val_b".to_vec());
+        reader.insert(b"c".to_vec(), b"val_c".to_vec());
+
+        // Act
+        let result = reader.scan_range(None, None);
+
+        // Assert
+        let pairs = result;
+        assert_eq!(pairs.len(), 3);
+    }
+
+    #[test]
+    fn should_scan_empty_range() {
+        // Arrange
+        let reader = MockSstReader::new();
+
+        // Act
+        let result = reader.scan_range(Some(b"a"), Some(b"z"));
+
+        // Assert
+        let pairs = result;
+        assert_eq!(pairs.len(), 0);
+    }
+
+    #[test]
+    fn should_scan_range_returns_results_in_order() {
+        // Arrange
+        let mut reader = MockSstReader::new();
+        reader.insert(b"key3".to_vec(), b"v3".to_vec());
+        reader.insert(b"key1".to_vec(), b"v1".to_vec());
+        reader.insert(b"key2".to_vec(), b"v2".to_vec());
+
+        // Act
+        let result = reader.scan_range(None, None);
+
+        // Assert - BTreeMap maintains sorted order
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].0, Bytes::from("key1"));
+        assert_eq!(result[1].0, Bytes::from("key2"));
+        assert_eq!(result[2].0, Bytes::from("key3"));
+    }
+
+    #[test]
+    fn should_get_handle_binary_keys() {
+        // Arrange
+        let binary_key = vec![0u8, 1u8, 255u8, 254u8];
+        let binary_value = vec![100u8, 200u8];
+        let mut reader = MockSstReader::new();
+        reader.insert(binary_key.clone(), binary_value.clone());
+
+        // Act
+        let result = reader.get(&binary_key).unwrap();
+
+        // Assert
+        assert_eq!(result.to_vec(), binary_value);
+    }
+
+    #[test]
+    fn should_get_handle_large_values() {
+        // Arrange
+        let large_value = vec![42u8; 100_000];
+        let mut reader = MockSstReader::new();
+        reader.insert(b"key".to_vec(), large_value.clone());
+
+        // Act
+        let result = reader.get(b"key");
+
+        // Assert
+        assert_eq!(result.unwrap().to_vec(), large_value);
+    }
+
+    // =========== DynSstWriter Trait Behavior Tests ===========
+
+    #[test]
+    fn should_add_with_meta_default_impl_calls_add_for_some() {
+        // Arrange
+        let mut writer = MockSstWriter::new();
+
+        // Act - Default impl should call add() for Some(value)
+        let result = writer.add_with_meta(b"key", Some(b"value"), 100, EntryType::Put, None);
+
+        // Assert
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn should_reject_range_tombstone_when_writer_does_not_support_it() {
+        // Arrange
+        let mut writer = MockSstWriter::new();
+
+        // Act - unsupported range tombstones must fail closed.
+        let result = writer.add_range_tombstone(b"start", b"end", 100);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(cntryl_midge_core::common::MidgeError::NotSupported(_))
+        ));
+    }
+
+    #[test]
+    fn should_finish_writer_to_path_helper_writes_file() {
+        // Arrange
+        let writer = MockSstWriter::new();
+        let boxed: Box<dyn DynSstWriter> = Box::new(writer);
+        let temp_path = PathBuf::from("/tmp/test_sst_finish.bin");
+
+        // Act
+        let result = crate::sst::fs::finish_writer_to_path(boxed, &temp_path);
+
+        // Assert
+        assert!(result.is_ok());
+        if temp_path.exists() {
+            std::fs::remove_file(&temp_path).ok();
+        }
+    }
+
+    #[test]
+    fn should_finish_bytes_produces_non_empty_output_when_has_data() {
+        // Arrange
+        let mut writer = MockSstWriter::new();
+        writer.add(b"test", b"data");
+        let boxed = Box::new(writer);
+
+        // Act
+        let result = boxed.finish_bytes();
+
+        // Assert
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert_ne!(bytes.len(), 0);
+    }
+
+    #[test]
+    fn should_finish_bytes_produces_output_for_empty_writer() {
+        // Arrange
+        let writer = MockSstWriter::new();
+        let boxed = Box::new(writer);
+
+        // Act
+        let result = boxed.finish_bytes();
+
+        // Assert - the mock encodes each entry as length-prefixed bytes, so
+        // finishing with zero entries deterministically produces zero bytes.
+        assert_eq!(result.unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn should_multiple_add_calls_accumulate() {
+        // Arrange
+        let mut writer = MockSstWriter::new();
+
+        // Act
+        writer.add(b"k1", b"v1");
+        writer.add(b"k2", b"v2");
+        writer.add(b"k3", b"v3");
+        let boxed = Box::new(writer);
+        let result = boxed.finish_bytes().unwrap();
+
+        // Assert - Should have accumulated data
+        assert_ne!(result.len(), 0);
+    }
+
+    // =========== Trait Polymorphism Edge Cases ===========
+
+    #[test]
+    fn should_scan_with_start_end_as_same_value_returns_empty() {
+        // Arrange
+        let mut reader = MockSstReader::new();
+        reader.insert(b"key1".to_vec(), b"v".to_vec());
+
+        // Act - [key1, key1) should be empty
+        let result = reader.scan_range(Some(b"key1"), Some(b"key1"));
+
+        // Assert
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn should_scan_with_start_greater_than_end_returns_empty() {
+        // Arrange
+        let mut reader = MockSstReader::new();
+        reader.insert(b"a".to_vec(), b"v".to_vec());
+        reader.insert(b"z".to_vec(), b"v".to_vec());
+
+        // Act - [z, a) is invalid range
+        let result = reader.scan_range(Some(b"z"), Some(b"a"));
+
+        // Assert
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn should_preserve_value_integrity_through_bytes() {
+        // Arrange
+        let original_value = vec![0u8, 1u8, 2u8, 255u8, 254u8];
+        let mut reader = MockSstReader::new();
+        reader.insert(b"key".to_vec(), original_value.clone());
+
+        // Act
+        let result = reader.get(b"key").expect("key not found");
+
+        // Assert
+        assert_eq!(result.to_vec(), original_value);
+    }
+}

@@ -8,7 +8,7 @@ const PARTIAL_REPORT_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Batch fast cached work; a slow successful completion can report a partial
 /// batch. This has no timer, destructor callback, or shared mutable state.
-pub(crate) struct WorkProgress {
+pub struct WorkProgress {
     stage: &'static str,
     completed_bytes: u64,
     completed_frames: u64,
@@ -17,7 +17,7 @@ pub(crate) struct WorkProgress {
 }
 
 impl WorkProgress {
-    pub(crate) fn new(stage: &'static str) -> Self {
+    pub fn new(stage: &'static str) -> Self {
         Self {
             stage,
             completed_bytes: 0,
@@ -27,11 +27,11 @@ impl WorkProgress {
         }
     }
 
-    pub(crate) fn completed(&mut self, bytes: u64, frames: u64) {
+    pub fn completed(&mut self, bytes: u64, frames: u64) {
         self.record(bytes, frames, 0);
     }
 
-    pub(crate) fn completed_operation(&mut self) {
+    pub fn completed_operation(&mut self) {
         self.record(0, 0, 1);
     }
 
@@ -55,7 +55,7 @@ impl WorkProgress {
     }
 
     /// Call only after a successful bounded walk, never during error cleanup.
-    pub(crate) fn finish(&mut self) {
+    pub fn finish(&mut self) {
         if self.completed_bytes > 0 || self.completed_frames > 0 || self.completed_operations > 0 {
             emit(
                 self.stage,

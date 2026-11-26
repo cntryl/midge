@@ -158,14 +158,14 @@ pub enum KeyState {
 /// Persisted content at one sequence, independent of its source. Put and
 /// Insert have the same logical value identity; TTL metadata is part of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct VersionContent<'a> {
-    pub(crate) is_tombstone: bool,
-    pub(crate) value: Option<&'a [u8]>,
-    pub(crate) expiration: Option<u64>,
+pub struct VersionContent<'a> {
+    pub is_tombstone: bool,
+    pub value: Option<&'a [u8]>,
+    pub expiration: Option<u64>,
 }
 
 impl<'a> VersionContent<'a> {
-    pub(crate) fn from_state(state: &'a KeyState) -> Option<Self> {
+    pub fn from_state(state: &'a KeyState) -> Option<Self> {
         match state {
             KeyState::Absent => None,
             KeyState::Tombstone(_) => Some(Self {
@@ -183,7 +183,7 @@ impl<'a> VersionContent<'a> {
 }
 
 /// Identical copies are valid; differing content at one sequence is corrupt.
-pub(crate) fn resolve_same_sequence(
+pub fn resolve_same_sequence(
     existing: VersionContent<'_>,
     candidate: VersionContent<'_>,
 ) -> Result<(), ()> {
@@ -211,14 +211,14 @@ impl fmt::Display for KeyState {
 /// Metadata and runtime messages both construct this view while the SST
 /// identity checker consumes it, so it belongs below either owner.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ExpectedSst<'a> {
-    pub(crate) name: &'a str,
-    pub(crate) size_bytes: u64,
-    pub(crate) content_crc32c: Option<u32>,
-    pub(crate) smallest_key: Option<&'a [u8]>,
-    pub(crate) largest_key: Option<&'a [u8]>,
-    pub(crate) smallest_seq: Option<u64>,
-    pub(crate) largest_seq: Option<u64>,
+pub struct ExpectedSst<'a> {
+    pub name: &'a str,
+    pub size_bytes: u64,
+    pub content_crc32c: Option<u32>,
+    pub smallest_key: Option<&'a [u8]>,
+    pub largest_key: Option<&'a [u8]>,
+    pub smallest_seq: Option<u64>,
+    pub largest_seq: Option<u64>,
 }
 
 /// Conflict handling policy for read-write transaction commits.

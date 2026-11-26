@@ -57,7 +57,7 @@ where
 /// The stream is copied into a temporary file in bounded chunks, followed by
 /// the same file-sync, atomic-rename, and parent-directory-sync sequence used
 /// by [`stage_bytes`].
-pub(crate) fn stage_stream<E, M>(
+pub fn stage_stream<E, M>(
     fs: &Arc<dyn Fs>,
     temp_path: &FsPath,
     target_path: &FsPath,

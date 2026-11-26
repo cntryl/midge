@@ -10,19 +10,22 @@ macro_rules! fail_point {
         #[cfg(feature = "failpoints")]
         {
             let _midge_failpoint_read_guard = $crate::failpoints::read_gate();
-            fail::fail_point!($name);
+            $crate::failpoints::fail::fail_point!($name);
         }
     }};
     ($name:expr, $($rest:tt)*) => {{
         #[cfg(feature = "failpoints")]
         {
             let _midge_failpoint_read_guard = $crate::failpoints::read_gate();
-            fail::fail_point!($name, $($rest)*);
+            $crate::failpoints::fail::fail_point!($name, $($rest)*);
         }
     }};
 }
 
 pub use crate::fail_point;
+
+#[cfg(feature = "failpoints")]
+pub use fail;
 
 /// Return whether a boolean failpoint is active.
 #[inline]
@@ -120,7 +123,7 @@ fn gate() -> &'static RecursiveRwLock<()> {
 /// fault-injection scenario is running. The owner thread skips the read lock
 /// because it already holds the write side.
 #[cfg(feature = "failpoints")]
-pub(crate) fn read_gate() -> Option<RecursiveRwLockReadGuard<'static, ()>> {
+pub fn read_gate() -> Option<RecursiveRwLockReadGuard<'static, ()>> {
     if skips_gate() {
         None
     } else {

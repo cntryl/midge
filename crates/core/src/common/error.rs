@@ -228,7 +228,7 @@ impl MidgeError {
 impl MidgeError {
     /// Reconstruct this error for terminal-state replay without erasing its
     /// public variant or message.
-    pub(crate) fn replay(&self) -> Self {
+    pub fn replay(&self) -> Self {
         match self {
             Self::Io(error) => Self::Io(error.raw_os_error().map_or_else(
                 || io::Error::new(error.kind(), error.to_string()),

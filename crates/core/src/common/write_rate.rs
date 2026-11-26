@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 mod tests;
 
-pub(crate) struct BackgroundWriteLimiter {
+pub struct BackgroundWriteLimiter {
     bytes_per_second: u64,
     next: Mutex<Instant>,
     urgent: Arc<AtomicBool>,
@@ -15,7 +15,7 @@ pub(crate) struct BackgroundWriteLimiter {
 }
 
 impl BackgroundWriteLimiter {
-    pub(crate) fn new(
+    pub fn new(
         bytes_per_second: u64,
         urgent: Arc<AtomicBool>,
         admitted_bytes: Arc<AtomicU64>,
@@ -28,7 +28,7 @@ impl BackgroundWriteLimiter {
         }
     }
 
-    pub(crate) fn acquire(&self, bytes: usize) -> MidgeResult<()> {
+    pub fn acquire(&self, bytes: usize) -> MidgeResult<()> {
         if bytes == 0 || self.urgent.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -74,7 +74,7 @@ impl BackgroundWriteLimiter {
     }
 }
 
-pub(crate) struct RateLimitedReader<R> {
+pub struct RateLimitedReader<R> {
     pub(crate) inner: R,
     pub(crate) limiter: Option<Arc<BackgroundWriteLimiter>>,
 }

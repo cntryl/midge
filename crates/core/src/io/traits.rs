@@ -446,7 +446,7 @@ impl FsError {
     }
 
     /// Map a filesystem error onto the public error type.
-    pub(crate) fn into_midge(self) -> crate::common::MidgeError {
+    pub fn into_midge(self) -> crate::common::MidgeError {
         match self {
             FsError::NotFound(_msg) => crate::common::MidgeError::NotFound,
             FsError::AlreadyExists(msg) => crate::common::MidgeError::InvalidArgument(msg),

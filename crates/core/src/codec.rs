@@ -382,7 +382,7 @@ pub fn decompress_block_with_trailer(block: &[u8]) -> MidgeResult<Bytes> {
 /// Return the maximum decoded allocation required by a checksummed block.
 /// Compaction uses this before decompression so its output buffer is reserved
 /// against the internal memory pool first.
-pub(crate) fn decompressed_size_with_trailer(block: &[u8]) -> MidgeResult<usize> {
+pub fn decompressed_size_with_trailer(block: &[u8]) -> MidgeResult<usize> {
     if block.len() < BLOCK_TRAILER_SIZE {
         return Err(crate::common::MidgeError::Corruption(
             "block too small for trailer".into(),

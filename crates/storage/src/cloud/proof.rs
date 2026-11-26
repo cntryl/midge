@@ -1,0 +1,118 @@
+//! Verified object reads: bytes plus the identity they were read under.
+
+#[allow(clippy::wildcard_imports)]
+use super::*;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CloudObjectProof {
+    pub bytes: Vec<u8>,
+    pub metadata: StorageObjectMetadata,
+}
+
+/// Validate observations from one metadata-bearing read. Never pair a body
+/// with identity from a separate HEAD, even when both lengths agree.
+pub(crate) fn validate_object_proof(
+    key: &str,
+    bytes: &[u8],
+    metadata: &StorageObjectMetadata,
+) -> cntryl_midge_core::MidgeResult<()> {
+    if metadata.size != u64::try_from(bytes.len()).unwrap_or(u64::MAX) {
+        return Err(cntryl_midge_core::MidgeError::Internal(format!(
+            "cloud object '{key}' length mismatch: read={}, metadata={}",
+            bytes.len(),
+            metadata.size
+        )));
+    }
+    if crate::conditional_object_identity(&metadata.etag, metadata.generation.as_deref()).is_none()
+    {
+        return Err(cntryl_midge_core::MidgeError::Internal(format!(
+            "cloud object '{key}' is missing an identity token"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn blocking_cloud_object_proof(
+    cloud: &CloudStorage,
+    key: &str,
+) -> Result<Option<CloudObjectProof>, String> {
+    blocking_cloud_object_proof_within(
+        cloud,
+        key,
+        &cntryl_midge_core::OperationDeadline::unbounded(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn blocking_cloud_object_proof_within(
+    cloud: &CloudStorage,
+    key: &str,
+    deadline: &cntryl_midge_core::OperationDeadline,
+) -> cntryl_midge_core::MidgeResult<Option<CloudObjectProof>> {
+    cloud.check_startup_scope("cloud object proof submission")?;
+    let get_timeout = deadline
+        .clamp_nonzero(cloud.callback_timeout())
+        .ok_or_else(|| {
+            cntryl_midge_core::MidgeError::Timeout(format!(
+                "operation deadline exhausted before cloud object GET for '{key}'"
+            ))
+        })?;
+    let (get_tx, get_rx) = std::sync::mpsc::channel();
+    let get_deadline = cntryl_midge_core::OperationDeadline::from_budget(get_timeout);
+    cloud.submit_get_with_metadata_within(key, get_timeout, get_tx);
+    let wait_timeout = get_deadline
+        .clamp_nonzero(deadline.remaining())
+        .ok_or_else(|| {
+            cntryl_midge_core::MidgeError::Timeout(format!(
+                "operation deadline exhausted during cloud object GET submission for '{key}'"
+            ))
+        })?;
+    let event = get_rx.recv_timeout(wait_timeout);
+    cloud.check_startup_scope("cloud object proof completion")?;
+    if get_deadline.is_expired() || deadline.is_expired() {
+        return Err(cntryl_midge_core::MidgeError::Timeout(format!(
+            "cloud object proof deadline exhausted for '{key}'"
+        )));
+    }
+    let (bytes, metadata) = match event {
+        Ok(CloudEvent::GetWithMetadata {
+            result: CloudOutcome::Ok((bytes, metadata)),
+            ..
+        }) => (bytes, metadata),
+        Ok(CloudEvent::GetWithMetadata {
+            result: CloudOutcome::Err(error),
+            ..
+        }) if is_not_found_error(&error) => return Ok(None),
+        Ok(CloudEvent::GetWithMetadata {
+            result: CloudOutcome::Err(error),
+            ..
+        }) => {
+            return Err(contextualize_operation_error(
+                &error,
+                format_args!("cloud object '{key}' is unreadable"),
+                deadline,
+            ))
+        }
+        Ok(other) => {
+            return Err(cntryl_midge_core::MidgeError::Internal(format!(
+                "unexpected cloud object GET response for '{key}': {other:?}"
+            )))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            return Err(cntryl_midge_core::MidgeError::Timeout(format!(
+                "cloud object GET exceeded the operation deadline for '{key}'"
+            )))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            return Err(cntryl_midge_core::MidgeError::Internal(format!(
+                "cloud object GET callback closed for '{key}'"
+            )))
+        }
+    };
+
+    validate_object_proof(key, &bytes, &metadata)?;
+    cloud.check_startup_scope("cloud object proof acceptance")?;
+
+    Ok(Some(CloudObjectProof { bytes, metadata }))
+}

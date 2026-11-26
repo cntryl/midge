@@ -1,0 +1,1181 @@
+//! SST core types and structures
+
+#[cfg(test)]
+use cntryl_midge_core::types::KeyState;
+use cntryl_midge_core::types::RangeTombstone;
+
+use crate::sst::index::tuner::IndexKind;
+
+/// Handle to a block in SST file (offset + size)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockHandle {
+    pub offset: u64,
+    pub size: u64,
+}
+
+impl BlockHandle {
+    #[must_use]
+    pub fn new(offset: u64, size: u64) -> Self {
+        Self { offset, size }
+    }
+}
+
+/// RocksDB-compatible magic number for SST footer validation
+pub const SST_FOOTER_MAGIC: u64 = 0xdb47_7524_8b80_fb57;
+
+/// Current checksummed SST format with restart points and compact entry headers.
+pub const SST_FORMAT_V5: u32 = 5;
+
+/// Exact encoded size of the self-identifying V5 footer.
+pub const SST_FOOTER_SIZE: usize = 84;
+const SST_FOOTER_CHECKSUM_OFFSET: usize = 80;
+const SST_FOOTER_MAGIC_OFFSET: usize = 72;
+
+/// Footer stored at end of SST file
+#[derive(Debug, Clone)]
+pub struct Footer {
+    pub meta_index_handle: BlockHandle,
+    pub index_handle: BlockHandle,
+    pub trie_handle: Option<BlockHandle>,
+    pub block_bloom_handle: Option<BlockHandle>,
+}
+
+impl Footer {
+    #[must_use]
+    pub fn new(meta_index_handle: BlockHandle, index_handle: BlockHandle) -> Self {
+        Self {
+            meta_index_handle,
+            index_handle,
+            trie_handle: None,
+            block_bloom_handle: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_trie(mut self, trie_handle: BlockHandle) -> Self {
+        self.trie_handle = Some(trie_handle);
+        self
+    }
+
+    #[must_use]
+    pub fn with_block_bloom(mut self, block_bloom_handle: BlockHandle) -> Self {
+        self.block_bloom_handle = Some(block_bloom_handle);
+        self
+    }
+
+    /// Encode the self-identifying V5 footer to exactly 84 bytes.
+    /// Layout:
+    ///   [`meta_index_handle`: 16 bytes]
+    ///   [`index_handle`: 16 bytes]
+    ///   [`trie_handle`: 16 bytes (optional, 0 if None)]
+    ///   [`block_bloom_handle`: 16 bytes (optional, 0 if None)]
+    ///   [`format_version`: 4 bytes]
+    ///   [`footer_size`: 4 bytes]
+    ///   [magic: 8 bytes]
+    ///   [crc32c: 4 bytes, covering every preceding footer byte]
+    /// Total: 84 bytes.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = vec![0u8; SST_FOOTER_SIZE];
+        // Store handles as fixed 16 bytes each
+        // meta_index: offset (8) + size (8)
+        buf[0..8].copy_from_slice(&self.meta_index_handle.offset.to_le_bytes());
+        buf[8..16].copy_from_slice(&self.meta_index_handle.size.to_le_bytes());
+        // index: offset (8) + size (8)
+        buf[16..24].copy_from_slice(&self.index_handle.offset.to_le_bytes());
+        buf[24..32].copy_from_slice(&self.index_handle.size.to_le_bytes());
+        // trie: offset (8) + size (8) - zero if None
+        if let Some(trie) = self.trie_handle {
+            buf[32..40].copy_from_slice(&trie.offset.to_le_bytes());
+            buf[40..48].copy_from_slice(&trie.size.to_le_bytes());
+        }
+        // block_bloom: offset (8) + size (8) - zero if None
+        if let Some(block_bloom) = self.block_bloom_handle {
+            buf[48..56].copy_from_slice(&block_bloom.offset.to_le_bytes());
+            buf[56..64].copy_from_slice(&block_bloom.size.to_le_bytes());
+        }
+        buf[64..68].copy_from_slice(&SST_FORMAT_V5.to_le_bytes());
+        buf[68..72].copy_from_slice(
+            &u32::try_from(SST_FOOTER_SIZE)
+                .expect("V5 footer size fits in u32")
+                .to_le_bytes(),
+        );
+        buf[SST_FOOTER_MAGIC_OFFSET..SST_FOOTER_CHECKSUM_OFFSET]
+            .copy_from_slice(&SST_FOOTER_MAGIC.to_le_bytes());
+        let checksum = crc32c::crc32c(&buf[..SST_FOOTER_CHECKSUM_OFFSET]);
+        buf[SST_FOOTER_CHECKSUM_OFFSET..SST_FOOTER_SIZE].copy_from_slice(&checksum.to_le_bytes());
+        buf
+    }
+
+    /// Decode one exact V5 footer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::Corruption` when the footer is malformed or its
+    /// checksum is invalid, and `MidgeError::CompatibilityError` for a
+    /// well-formed unsupported version. V1-V4 footers are intentionally not
+    /// decoded by this build.
+    pub fn decode(data: &[u8]) -> cntryl_midge_core::common::MidgeResult<Self> {
+        if data.len() != SST_FOOTER_SIZE {
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
+                "SST V5 footer must be exactly {SST_FOOTER_SIZE} bytes, got {}",
+                data.len()
+            )));
+        }
+
+        let magic = u64::from_le_bytes([
+            data[72], data[73], data[74], data[75], data[76], data[77], data[78], data[79],
+        ]);
+        if magic != SST_FOOTER_MAGIC {
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
+                "Invalid footer magic: expected 0x{SST_FOOTER_MAGIC:016x}, got 0x{magic:016x}"
+            )));
+        }
+
+        let stored_checksum = u32::from_le_bytes([data[80], data[81], data[82], data[83]]);
+        let actual_checksum = crc32c::crc32c(&data[..SST_FOOTER_CHECKSUM_OFFSET]);
+        if stored_checksum != actual_checksum {
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
+                "SST footer CRC32C mismatch: expected {stored_checksum:#010x}, computed {actual_checksum:#010x}"
+            )));
+        }
+
+        let format_version = u32::from_le_bytes([data[64], data[65], data[66], data[67]]);
+        if format_version != SST_FORMAT_V5 {
+            return Err(cntryl_midge_core::common::MidgeError::CompatibilityError(format!(
+                "unsupported SST format version {format_version}; this build requires V{SST_FORMAT_V5}"
+            )));
+        }
+        let encoded_size = u32::from_le_bytes([data[68], data[69], data[70], data[71]]);
+        if usize::try_from(encoded_size).ok() != Some(SST_FOOTER_SIZE) {
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
+                "SST footer declares size {encoded_size}, expected {SST_FOOTER_SIZE}"
+            )));
+        }
+
+        let meta_offset = u64::from_le_bytes([
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+        ]);
+        let meta_size = u64::from_le_bytes([
+            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
+        ]);
+        let idx_offset = u64::from_le_bytes([
+            data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
+        ]);
+        let idx_size = u64::from_le_bytes([
+            data[24], data[25], data[26], data[27], data[28], data[29], data[30], data[31],
+        ]);
+
+        let trie_offset = u64::from_le_bytes([
+            data[32], data[33], data[34], data[35], data[36], data[37], data[38], data[39],
+        ]);
+        let trie_size = u64::from_le_bytes([
+            data[40], data[41], data[42], data[43], data[44], data[45], data[46], data[47],
+        ]);
+        let trie_handle = decode_optional_footer_handle(trie_offset, trie_size, "trie")?;
+
+        let bloom_offset = u64::from_le_bytes([
+            data[48], data[49], data[50], data[51], data[52], data[53], data[54], data[55],
+        ]);
+        let bloom_size = u64::from_le_bytes([
+            data[56], data[57], data[58], data[59], data[60], data[61], data[62], data[63],
+        ]);
+        let block_bloom_handle =
+            decode_optional_footer_handle(bloom_offset, bloom_size, "block bloom")?;
+
+        Ok(Footer {
+            meta_index_handle: BlockHandle::new(meta_offset, meta_size),
+            index_handle: BlockHandle::new(idx_offset, idx_size),
+            trie_handle,
+            block_bloom_handle,
+        })
+    }
+}
+
+fn decode_optional_footer_handle(
+    offset: u64,
+    size: u64,
+    kind: &str,
+) -> cntryl_midge_core::common::MidgeResult<Option<BlockHandle>> {
+    if offset == 0 && size == 0 {
+        return Ok(None);
+    }
+    if size == 0 {
+        return Err(cntryl_midge_core::common::MidgeError::Corruption(format!(
+            "SST footer {kind} handle must be fully absent or fully present"
+        )));
+    }
+    Ok(Some(BlockHandle::new(offset, size)))
+}
+
+/// SST-level metadata persisted in the meta block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SstMetadata {
+    pub format_version: u32,
+    pub index_kind: IndexKind,
+    pub range_tombstone_handle: Option<BlockHandle>,
+    pub key_range: Option<KeyRangeMetadata>,
+}
+
+/// Persisted key-range metadata for an SST.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRangeMetadata {
+    pub smallest_key: Vec<u8>,
+    pub largest_key: Vec<u8>,
+}
+
+impl Default for SstMetadata {
+    fn default() -> Self {
+        Self {
+            format_version: SST_FORMAT_V5,
+            index_kind: IndexKind::Sparse,
+            range_tombstone_handle: None,
+            key_range: None,
+        }
+    }
+}
+
+impl SstMetadata {
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let key_range_len = self.key_range.as_ref().map_or(0, |range| {
+            4 + range.smallest_key.len() + 4 + range.largest_key.len()
+        });
+        let mut buf = Vec::with_capacity(24 + key_range_len);
+        buf.extend_from_slice(&self.format_version.to_le_bytes());
+        buf.push(self.index_kind.to_u8());
+        buf.push(u8::from(self.key_range.is_some()));
+        buf.extend_from_slice(&[0u8; 2]);
+        if let Some(handle) = self.range_tombstone_handle {
+            buf.extend_from_slice(&handle.offset.to_le_bytes());
+            buf.extend_from_slice(&handle.size.to_le_bytes());
+        } else {
+            buf.extend_from_slice(&0u64.to_le_bytes());
+            buf.extend_from_slice(&0u64.to_le_bytes());
+        }
+        if let Some(range) = &self.key_range {
+            buf.extend_from_slice(
+                &u32::try_from(range.smallest_key.len())
+                    .unwrap_or(u32::MAX)
+                    .to_le_bytes(),
+            );
+            buf.extend_from_slice(&range.smallest_key);
+            buf.extend_from_slice(
+                &u32::try_from(range.largest_key.len())
+                    .unwrap_or(u32::MAX)
+                    .to_le_bytes(),
+            );
+            buf.extend_from_slice(&range.largest_key);
+        }
+        buf
+    }
+
+    /// Decode SST metadata from the meta block payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MidgeError::Corruption` when the metadata block is truncated.
+    pub fn decode(data: &[u8]) -> cntryl_midge_core::common::MidgeResult<Self> {
+        if data.len() < 20 {
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(
+                "SST metadata block too short".into(),
+            ));
+        }
+
+        let format_version = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        if format_version != SST_FORMAT_V5 {
+            return Err(cntryl_midge_core::common::MidgeError::CompatibilityError(format!(
+                "unsupported SST metadata format version {format_version}; this build requires V{SST_FORMAT_V5}"
+            )));
+        }
+        if data.len() == 20 {
+            return Err(cntryl_midge_core::common::MidgeError::CompatibilityError(
+                "legacy SST metadata layout is unsupported; V5 metadata is required".into(),
+            ));
+        }
+
+        if data.len() < 24 {
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(
+                "SST metadata block truncated".into(),
+            ));
+        }
+
+        let index_kind = IndexKind::from_u8(data[4]).ok_or_else(|| {
+            cntryl_midge_core::common::MidgeError::Corruption("Unknown SST index kind".into())
+        })?;
+        let flags = data[5];
+        if flags & !0x01 != 0 || data[6] != 0 || data[7] != 0 {
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(
+                "SST metadata contains unknown flags or nonzero reserved bytes".into(),
+            ));
+        }
+        let offset = u64::from_le_bytes([
+            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
+        ]);
+        let size = u64::from_le_bytes([
+            data[16], data[17], data[18], data[19], data[20], data[21], data[22], data[23],
+        ]);
+
+        let mut cursor = 24usize;
+        let key_range = if flags & 0x01 == 0 {
+            if data.len() != cursor {
+                return Err(cntryl_midge_core::common::MidgeError::Corruption(
+                    "SST metadata has trailing bytes without key-range flag".into(),
+                ));
+            }
+            None
+        } else {
+            let smallest_len = decode_metadata_u32(data, &mut cursor, "smallest key length")?;
+            let smallest_key =
+                decode_metadata_bytes(data, &mut cursor, smallest_len, "smallest key")?;
+            let largest_len = decode_metadata_u32(data, &mut cursor, "largest key length")?;
+            let largest_key = decode_metadata_bytes(data, &mut cursor, largest_len, "largest key")?;
+            if cursor != data.len() {
+                return Err(cntryl_midge_core::common::MidgeError::Corruption(
+                    "SST metadata key range has trailing bytes".into(),
+                ));
+            }
+            if smallest_key > largest_key {
+                return Err(cntryl_midge_core::common::MidgeError::Corruption(
+                    "SST metadata key range is inverted".into(),
+                ));
+            }
+            Some(KeyRangeMetadata {
+                smallest_key,
+                largest_key,
+            })
+        };
+
+        if size == 0 && offset != 0 {
+            return Err(cntryl_midge_core::common::MidgeError::Corruption(
+                "SST range-tombstone handle must be fully absent or fully present".into(),
+            ));
+        }
+
+        Ok(Self {
+            format_version,
+            index_kind,
+            range_tombstone_handle: if offset == 0 && size == 0 {
+                None
+            } else {
+                Some(BlockHandle::new(offset, size))
+            },
+            key_range,
+        })
+    }
+}
+
+fn decode_metadata_u32(
+    data: &[u8],
+    cursor: &mut usize,
+    field: &str,
+) -> cntryl_midge_core::common::MidgeResult<usize> {
+    let end = cursor.checked_add(4).ok_or_else(|| {
+        cntryl_midge_core::common::MidgeError::Corruption(format!(
+            "{field} overflow in SST metadata"
+        ))
+    })?;
+    let bytes = data.get(*cursor..end).ok_or_else(|| {
+        cntryl_midge_core::common::MidgeError::Corruption(format!(
+            "{field} truncated in SST metadata"
+        ))
+    })?;
+    *cursor = end;
+    Ok(
+        usize::try_from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .unwrap_or(usize::MAX),
+    )
+}
+
+fn decode_metadata_bytes(
+    data: &[u8],
+    cursor: &mut usize,
+    len: usize,
+    field: &str,
+) -> cntryl_midge_core::common::MidgeResult<Vec<u8>> {
+    let end = cursor.checked_add(len).ok_or_else(|| {
+        cntryl_midge_core::common::MidgeError::Corruption(format!(
+            "{field} overflow in SST metadata"
+        ))
+    })?;
+    let bytes = data.get(*cursor..end).ok_or_else(|| {
+        cntryl_midge_core::common::MidgeError::Corruption(format!(
+            "{field} truncated in SST metadata"
+        ))
+    })?;
+    *cursor = end;
+    Ok(bytes.to_vec())
+}
+
+/// Apply point-key admission limits to both endpoints and bound the complete
+/// singleton range block (count, two lengths, sequence, and endpoint bytes).
+pub(crate) fn validate_range_tombstone_size(
+    start_len: usize,
+    end_len: usize,
+) -> cntryl_midge_core::common::MidgeResult<()> {
+    crate::sst::encoding::validate_entry_size(start_len, 0)?;
+    crate::sst::encoding::validate_entry_size(end_len, 0)?;
+    let encoded_len = start_len
+        .checked_add(end_len)
+        .and_then(|size| size.checked_add(20));
+    if encoded_len.is_none_or(|size| size > cntryl_midge_core::codec::MAX_DECOMPRESSED_BLOCK_SIZE) {
+        return Err(cntryl_midge_core::common::MidgeError::ResourceLimit(
+            "SST range tombstone exceeds the 64 MiB decoded block limit".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[must_use]
+pub fn encode_range_tombstones(tombstones: &[RangeTombstone]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(
+        &u32::try_from(tombstones.len())
+            .unwrap_or(u32::MAX)
+            .to_le_bytes(),
+    );
+
+    for tombstone in tombstones {
+        buf.extend_from_slice(
+            &u32::try_from(tombstone.start.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        buf.extend_from_slice(&tombstone.start);
+        buf.extend_from_slice(
+            &u32::try_from(tombstone.end.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        buf.extend_from_slice(&tombstone.end);
+        buf.extend_from_slice(&tombstone.seq.to_le_bytes());
+    }
+
+    buf
+}
+
+/// Decode serialized range tombstones.
+///
+/// # Errors
+///
+/// Returns `MidgeError::Corruption` when the encoded tombstone block is truncated.
+pub fn decode_range_tombstones(
+    data: &[u8],
+) -> cntryl_midge_core::common::MidgeResult<Vec<RangeTombstone>> {
+    if data.len() < 4 {
+        return Err(cntryl_midge_core::common::MidgeError::Corruption(
+            "Range tombstone block too short".into(),
+        ));
+    }
+
+    let mut offset = 0;
+    let count = usize::try_from(read_range_tombstone_u32(
+        data,
+        &mut offset,
+        "Range tombstone count truncated",
+    )?)
+    .map_err(|_| {
+        cntryl_midge_core::common::MidgeError::Corruption("Range tombstone count overflow".into())
+    })?;
+    let remaining = data.len().saturating_sub(offset);
+    if count > remaining / 16 {
+        return Err(cntryl_midge_core::common::MidgeError::Corruption(
+            "Range tombstone count exceeds remaining bytes".into(),
+        ));
+    }
+    let mut tombstones = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let start_len = usize::try_from(read_range_tombstone_u32(
+            data,
+            &mut offset,
+            "Range tombstone start length truncated",
+        )?)
+        .map_err(|_| {
+            cntryl_midge_core::common::MidgeError::Corruption(
+                "Range tombstone start length overflow".into(),
+            )
+        })?;
+        let start = read_range_tombstone_slice(
+            data,
+            &mut offset,
+            start_len,
+            "Range tombstone start bytes truncated",
+        )?
+        .to_vec();
+
+        let end_len = usize::try_from(read_range_tombstone_u32(
+            data,
+            &mut offset,
+            "Range tombstone end length truncated",
+        )?)
+        .map_err(|_| {
+            cntryl_midge_core::common::MidgeError::Corruption(
+                "Range tombstone end length overflow".into(),
+            )
+        })?;
+        let end = read_range_tombstone_slice(
+            data,
+            &mut offset,
+            end_len,
+            "Range tombstone end bytes truncated",
+        )?
+        .to_vec();
+
+        let seq =
+            read_range_tombstone_u64(data, &mut offset, "Range tombstone sequence truncated")?;
+
+        tombstones.push(RangeTombstone::new(start, end, seq));
+    }
+
+    Ok(tombstones)
+}
+
+fn read_range_tombstone_slice<'a>(
+    data: &'a [u8],
+    offset: &mut usize,
+    len: usize,
+    message: &str,
+) -> cntryl_midge_core::common::MidgeResult<&'a [u8]> {
+    let end = offset.checked_add(len).ok_or_else(|| {
+        cntryl_midge_core::common::MidgeError::Corruption(format!("{message}: offset overflow"))
+    })?;
+    if end > data.len() {
+        return Err(cntryl_midge_core::common::MidgeError::Corruption(
+            message.into(),
+        ));
+    }
+    let slice = &data[*offset..end];
+    *offset = end;
+    Ok(slice)
+}
+
+fn read_range_tombstone_u32(
+    data: &[u8],
+    offset: &mut usize,
+    message: &str,
+) -> cntryl_midge_core::common::MidgeResult<u32> {
+    let bytes = read_range_tombstone_slice(data, offset, 4, message)?;
+    Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_range_tombstone_u64(
+    data: &[u8],
+    offset: &mut usize,
+    message: &str,
+) -> cntryl_midge_core::common::MidgeResult<u64> {
+    let bytes = read_range_tombstone_slice(data, offset, 8, message)?;
+    Ok(u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use cntryl_midge_core::types::EntryType;
+
+    // =========== BlockHandle Tests ===========
+
+    #[test]
+    fn should_create_block_handle_with_zero_offset() {
+        // Arrange
+        // (no setup)
+
+        // Act
+        let handle = BlockHandle::new(0, 100);
+
+        // Assert
+        assert_eq!(handle.offset, 0);
+        assert_eq!(handle.size, 100);
+    }
+
+    #[test]
+    fn should_create_block_handle_with_large_offset() {
+        // Arrange
+        // (no setup)
+
+        // Act
+        let handle = BlockHandle::new(u64::MAX - 1000, 500);
+
+        // Assert
+        assert_eq!(handle.offset, u64::MAX - 1000);
+        assert_eq!(handle.size, 500);
+    }
+
+    #[test]
+    fn should_create_block_handle_with_max_size() {
+        // Arrange
+        // (no setup)
+
+        // Act
+        let handle = BlockHandle::new(1000, u64::MAX);
+
+        // Assert
+        assert_eq!(handle.size, u64::MAX);
+    }
+
+    #[test]
+    fn should_block_handle_equality() {
+        // Arrange
+        let h1 = BlockHandle::new(100, 200);
+        let h2 = BlockHandle::new(100, 200);
+
+        // Act
+        // (none)
+
+        // Assert
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn should_block_handle_inequality_on_offset() {
+        // Arrange
+        let h1 = BlockHandle::new(100, 200);
+        let h2 = BlockHandle::new(101, 200);
+
+        // Act
+        // (none)
+
+        // Assert
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn should_block_handle_inequality_on_size() {
+        // Arrange
+        let h1 = BlockHandle::new(100, 200);
+        let h2 = BlockHandle::new(100, 201);
+
+        // Act
+        // (none)
+
+        // Assert
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn should_block_handle_clone() {
+        // Arrange
+        let h1 = BlockHandle::new(100, 200);
+
+        // Act
+        let h2 = h1;
+
+        // Assert
+        assert_eq!(h1, h2);
+    }
+
+    // =========== Footer Encoding/Decoding Tests ===========
+
+    #[test]
+    fn should_encode_footer_to_exact_v5_size() {
+        // Arrange
+        let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200));
+
+        // Act
+        let encoded = footer.encode();
+
+        // Assert
+        assert_eq!(encoded.len(), SST_FOOTER_SIZE);
+    }
+
+    #[test]
+    fn should_encode_footer_with_zero_offsets() {
+        // Arrange
+        let footer = Footer::new(BlockHandle::new(0, 0), BlockHandle::new(0, 0));
+
+        // Act
+        let encoded = footer.encode();
+
+        // Assert
+        assert_eq!(encoded.len(), SST_FOOTER_SIZE);
+        let decoded = Footer::decode(&encoded).unwrap();
+        assert_eq!(decoded.meta_index_handle.offset, 0);
+        assert_eq!(decoded.index_handle.offset, 0);
+    }
+
+    #[test]
+    fn should_encode_footer_with_large_offsets() {
+        // Arrange
+        let footer = Footer::new(
+            BlockHandle::new(u64::MAX - 1000, 500),
+            BlockHandle::new(u64::MAX - 500, 100),
+        );
+
+        // Act
+        let encoded = footer.encode();
+
+        // Assert
+        assert_eq!(encoded.len(), SST_FOOTER_SIZE);
+        let decoded = Footer::decode(&encoded).unwrap();
+        assert_eq!(decoded.meta_index_handle.offset, u64::MAX - 1000);
+        assert_eq!(decoded.index_handle.offset, u64::MAX - 500);
+    }
+
+    #[test]
+    fn should_decode_footer_meta_index_handle() {
+        // Arrange
+        let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200));
+        let encoded = footer.encode();
+
+        // Act
+        let decoded = Footer::decode(&encoded).unwrap();
+
+        // Assert
+        assert_eq!(decoded.meta_index_handle.offset, 0);
+        assert_eq!(decoded.meta_index_handle.size, 100);
+    }
+
+    #[test]
+    fn should_decode_footer_index_handle() {
+        // Arrange
+        let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200));
+        let encoded = footer.encode();
+
+        // Act
+        let decoded = Footer::decode(&encoded).unwrap();
+
+        // Assert
+        assert_eq!(decoded.index_handle.offset, 100);
+        assert_eq!(decoded.index_handle.size, 200);
+    }
+
+    #[test]
+    fn should_decode_footer_without_trie() {
+        // Arrange
+        let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200));
+        let encoded = footer.encode();
+
+        // Act
+        let decoded = Footer::decode(&encoded).unwrap();
+
+        // Assert
+        assert_eq!(decoded.trie_handle, None);
+    }
+
+    #[test]
+    fn should_add_trie_to_footer() {
+        // Arrange
+        let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200))
+            .with_trie(BlockHandle::new(300, 50));
+        let encoded = footer.encode();
+
+        // Act
+        let decoded = Footer::decode(&encoded).unwrap();
+
+        // Assert
+        assert_eq!(decoded.trie_handle, Some(BlockHandle::new(300, 50)));
+    }
+
+    #[test]
+    fn should_footer_roundtrip_with_all_fields() {
+        // Arrange
+        let original = Footer::new(BlockHandle::new(1000, 2000), BlockHandle::new(3000, 4000))
+            .with_trie(BlockHandle::new(5000, 6000));
+
+        // Act
+        let encoded = original.encode();
+        let decoded = Footer::decode(&encoded).unwrap();
+
+        // Assert
+        assert_eq!(decoded.meta_index_handle, original.meta_index_handle);
+        assert_eq!(decoded.index_handle, original.index_handle);
+        assert_eq!(decoded.trie_handle, original.trie_handle);
+    }
+
+    #[test]
+    fn should_detect_corruption_given_footer_meta_index_size_zeroed_when_data_blocks_are_modern() {
+        // Arrange
+        let footer = Footer::new(BlockHandle::new(11, 101), BlockHandle::new(112, 202))
+            .with_trie(BlockHandle::new(314, 303))
+            .with_block_bloom(BlockHandle::new(617, 404));
+        let mut encoded = footer.encode();
+        encoded[8..16].fill(0);
+
+        // Act
+        let result = Footer::decode(&encoded);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(cntryl_midge_core::common::MidgeError::Corruption(_))
+        ));
+    }
+
+    #[test]
+    fn should_reject_well_formed_unknown_footer_version() {
+        // Arrange
+        let mut encoded =
+            Footer::new(BlockHandle::new(11, 101), BlockHandle::new(112, 202)).encode();
+        encoded[64..68].copy_from_slice(&6_u32.to_le_bytes());
+        let checksum = crc32c::crc32c(&encoded[..SST_FOOTER_CHECKSUM_OFFSET]);
+        encoded[SST_FOOTER_CHECKSUM_OFFSET..].copy_from_slice(&checksum.to_le_bytes());
+
+        // Act
+        let result = Footer::decode(&encoded);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(cntryl_midge_core::common::MidgeError::CompatibilityError(_))
+        ));
+    }
+
+    #[test]
+    fn should_reject_half_present_optional_footer_handle() {
+        // Arrange
+        let mut encoded =
+            Footer::new(BlockHandle::new(11, 101), BlockHandle::new(112, 202)).encode();
+        encoded[32..40].copy_from_slice(&1_u64.to_le_bytes());
+        let checksum = crc32c::crc32c(&encoded[..SST_FOOTER_CHECKSUM_OFFSET]);
+        encoded[SST_FOOTER_CHECKSUM_OFFSET..].copy_from_slice(&checksum.to_le_bytes());
+
+        // Act
+        let result = Footer::decode(&encoded);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(cntryl_midge_core::common::MidgeError::Corruption(_))
+        ));
+    }
+
+    #[test]
+    fn should_footer_reject_invalid_magic() {
+        // Arrange
+        let mut data = vec![0u8; 56];
+        // Wrong magic at end
+        data[48..56].copy_from_slice(&0xffff_ffff_ffff_ffff_u64.to_le_bytes());
+
+        // Act
+        let result = Footer::decode(&data);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_footer_reject_short_data() {
+        // Arrange
+        let data = vec![0u8; 40];
+
+        // Act
+        let result = Footer::decode(&data);
+
+        // Assert
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_footer_builder_pattern() {
+        // Arrange
+        // (setup)
+        let footer = Footer::new(BlockHandle::new(0, 100), BlockHandle::new(100, 200))
+            .with_trie(BlockHandle::new(200, 50));
+
+        // Act
+        // (none)
+
+        // Assert
+        assert_eq!(footer.meta_index_handle.offset, 0);
+        assert_eq!(footer.index_handle.offset, 100);
+        assert!(footer.trie_handle.is_some());
+    }
+
+    #[test]
+    fn should_footer_with_none_trie_handle_encodes_zeros() {
+        // Arrange
+        let footer = Footer::new(BlockHandle::new(100, 200), BlockHandle::new(300, 400));
+        let encoded = footer.encode();
+
+        // Act
+        // (none)
+
+        // Assert - Trie handle bytes should be zero (None means 0,0)
+        assert_eq!(encoded[32..40], vec![0u8; 8][..]);
+        assert_eq!(encoded[40..48], vec![0u8; 8][..]);
+    }
+
+    // =========== RangeTombstone Tests ===========
+
+    #[test]
+    fn should_create_range_tombstone() {
+        // Arrange
+        // (no setup)
+
+        // Act
+        let rt = RangeTombstone::new(b"start".to_vec(), b"end".to_vec(), 100);
+
+        // Assert
+        assert_eq!(rt.start, b"start");
+        assert_eq!(rt.end, b"end");
+        assert_eq!(rt.seq, 100);
+    }
+
+    #[test]
+    fn should_range_tombstone_cover_key_within_range() {
+        // Arrange
+        let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
+
+        // Act
+        // Assert
+        assert!(rt.covers(b"m"));
+    }
+
+    #[test]
+    fn should_range_tombstone_cover_start_boundary() {
+        // Arrange
+        let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
+
+        // Act
+        // (none)
+
+        // Assert - Start is inclusive
+        assert!(rt.covers(b"a"));
+    }
+
+    #[test]
+    fn should_range_tombstone_not_cover_end_boundary() {
+        // Arrange
+        let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
+
+        // Act
+        // (none)
+
+        // Assert - End is exclusive
+        assert!(!rt.covers(b"z"));
+    }
+
+    #[test]
+    fn should_range_tombstone_not_cover_key_below_start() {
+        // Arrange
+        let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
+
+        // Act
+        // (none)
+
+        // Assert
+        assert!(!rt.covers(b"0"));
+    }
+
+    #[test]
+    fn should_range_tombstone_not_cover_key_above_end() {
+        // Arrange
+        let rt = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
+
+        // Act
+        // (none)
+
+        // Assert
+        assert!(!rt.covers(b"zz"));
+    }
+
+    #[test]
+    fn should_range_tombstone_with_empty_range() {
+        // Arrange
+        let rt = RangeTombstone::new(b"a".to_vec(), b"a".to_vec(), 10);
+
+        // Act
+        // (none)
+
+        // Assert - [a, a) is empty
+        assert!(!rt.covers(b"a"));
+    }
+
+    #[test]
+    fn should_range_tombstone_with_binary_keys() {
+        // Arrange
+        let rt = RangeTombstone::new(vec![0u8, 100u8], vec![255u8], 5);
+
+        // Act
+        // (none)
+
+        // Assert
+        assert!(rt.covers(&[0u8, 200u8]));
+        assert!(!rt.covers(&[255u8]));
+    }
+
+    #[test]
+    fn should_range_tombstone_single_key_range() {
+        // Arrange
+        let rt = RangeTombstone::new(b"key".to_vec(), b"kez".to_vec(), 1);
+
+        // Act
+        // (none)
+
+        // Assert
+        assert!(rt.covers(b"key"));
+        assert!(rt.covers(b"key_data"));
+        assert!(!rt.covers(b"kez"));
+    }
+
+    #[test]
+    fn should_range_tombstone_clone() {
+        // Arrange
+        let rt1 = RangeTombstone::new(b"a".to_vec(), b"z".to_vec(), 10);
+
+        // Act
+        let rt2 = rt1.clone();
+
+        // Assert
+        assert_eq!(rt1.start, rt2.start);
+        assert_eq!(rt1.end, rt2.end);
+        assert_eq!(rt1.seq, rt2.seq);
+    }
+
+    #[test]
+    fn should_reject_declared_range_tombstone_count_larger_than_remaining_bytes() {
+        // Arrange
+        let encoded = u32::MAX.to_le_bytes();
+
+        // Act
+        let result = decode_range_tombstones(&encoded);
+
+        // Assert
+        assert!(matches!(
+            result,
+            Err(cntryl_midge_core::common::MidgeError::Corruption(_))
+        ));
+    }
+
+    // =========== KeyState Tests ===========
+
+    #[test]
+    fn should_create_key_state_absent() {
+        // Arrange
+        // (no setup)
+
+        // Act
+        let state = KeyState::Absent;
+
+        // Assert
+        assert!(matches!(state, KeyState::Absent), "expected Absent state");
+    }
+
+    #[test]
+    fn should_create_key_state_tombstone() {
+        // Arrange
+        // (no setup)
+
+        // Act
+        let state = KeyState::Tombstone(100);
+
+        // Assert
+        assert!(
+            matches!(state, KeyState::Tombstone(100)),
+            "expected Tombstone(100)"
+        );
+    }
+
+    #[test]
+    fn should_create_key_state_value() {
+        // Arrange
+        // (no setup)
+
+        // Act
+        let state = KeyState::Value(Bytes::from("val"), 100, Some(500), EntryType::Put);
+
+        // Assert
+        assert!(
+            matches!(state, KeyState::Value(_, 100, Some(500), EntryType::Put)),
+            "expected Value state with correct fields"
+        );
+    }
+
+    #[test]
+    fn should_format_key_state_absent() {
+        // Arrange
+        let state = KeyState::Absent;
+
+        // Act
+        let formatted = format!("{state}");
+
+        // Assert
+        assert_eq!(formatted, "Absent");
+    }
+
+    #[test]
+    fn should_format_key_state_tombstone() {
+        // Arrange
+        let state = KeyState::Tombstone(42);
+
+        // Act
+        let formatted = format!("{state}");
+
+        // Assert
+        assert!(formatted.contains("Tombstone"));
+        assert!(formatted.contains("42"));
+    }
+
+    #[test]
+    fn should_format_key_state_value() {
+        // Arrange
+        let state = KeyState::Value(Bytes::from("val"), 100, Some(500), EntryType::Put);
+
+        // Act
+        let formatted = format!("{state}");
+
+        // Assert
+        assert!(formatted.contains("Value"));
+        assert!(formatted.contains("100"));
+    }
+
+    #[test]
+    fn should_key_state_clone() {
+        // Arrange
+        let state1 = KeyState::Value(Bytes::from("val"), 100, Some(500), EntryType::Put);
+
+        // Act
+        let state2 = state1.clone();
+
+        // Assert
+        assert_eq!(state1.clone(), state2, "cloned state should be equal");
+    }
+
+    #[test]
+    fn should_key_state_value_with_zero_expiration() {
+        // Arrange
+        // (no setup)
+
+        // Act
+        let state = KeyState::Value(Bytes::from("val"), 1, Some(0), EntryType::Put);
+
+        // Assert
+        assert!(
+            matches!(state, KeyState::Value(_, _, Some(0), _)),
+            "expected Value state with zero expiration"
+        );
+    }
+
+    #[test]
+    fn should_key_state_value_with_max_sequence() {
+        // Arrange
+        // (no setup)
+
+        // Act
+        let state = KeyState::Value(Bytes::from("val"), u64::MAX, None, EntryType::Put);
+
+        // Assert
+        assert!(
+            matches!(state, KeyState::Value(_, u64::MAX, None, _)),
+            "expected Value state with max sequence"
+        );
+    }
+
+    #[test]
+    fn should_key_state_tombstone_with_zero_sequence() {
+        // Arrange
+        // (no setup)
+
+        // Act
+        let state = KeyState::Tombstone(0);
+
+        // Assert
+        assert!(
+            matches!(state, KeyState::Tombstone(0)),
+            "expected Tombstone(0)"
+        );
+    }
+}
