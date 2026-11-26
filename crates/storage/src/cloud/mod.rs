@@ -181,9 +181,9 @@ pub use backend::{
     CloudReadCapability, CloudReadOptions, CloudRequestOptions, CloudWriteCapability,
 };
 
-#[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
+#[cfg(any(test, feature = "internal-testing"))]
 mod mock;
-#[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
+#[cfg(any(test, feature = "internal-testing"))]
 pub use mock::MockCloudBackend;
 
 mod dispatcher;

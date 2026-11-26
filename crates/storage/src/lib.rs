@@ -255,13 +255,6 @@ impl StorageRequest {
 
 impl StorageObjectMetadata {
     /// Metadata for a provider that reports no object generation.
-    #[cfg(any(
-        test,
-        feature = "cloud-aws",
-        feature = "cloud-azure",
-        feature = "cloud-gcp",
-        feature = "cloud-oci"
-    ))]
     #[must_use]
     pub fn new(size: u64, etag: String) -> Self {
         Self {

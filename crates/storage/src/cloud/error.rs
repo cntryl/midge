@@ -1,6 +1,6 @@
 //! The structured cloud error taxonomy and outcome type.
 
-#[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
+#[cfg(any(test, feature = "internal-testing"))]
 use cntryl_midge_core::MidgeError;
 
 /// Structured cloud provider failure, classified at the point the HTTP
@@ -30,7 +30,7 @@ pub enum CloudError {
     #[cfg_attr(not(any(test, feature = "cloud-aws")), allow(dead_code))]
     ConditionalConflict(String),
     /// Authentication or authorization failure (401 / 403).
-    #[cfg(any(test, feature = "cloud-common"))]
+    #[cfg(any(test, feature = "cloud-common", feature = "internal-testing"))]
     Unauthorized(String),
     /// The provider rejected the request as malformed (non-retryable 4xx other
     /// than not-found/precondition/auth).
@@ -38,7 +38,7 @@ pub enum CloudError {
     InvalidRequest(String),
     /// The provider reported a retryable or server-side failure
     /// (408 / 425 / 429 / 5xx).
-    #[cfg(any(test, feature = "cloud-common"))]
+    #[cfg(any(test, feature = "cloud-common", feature = "internal-testing"))]
     ServerError(String),
     /// The request could not reach the provider (network, DNS, TLS, or
     /// connection failure) without a confirmed deadline expiry.
@@ -84,7 +84,7 @@ impl CloudError {
     pub(crate) fn is_timeout(&self) -> bool {
         match self {
             Self::Timeout(_) => true,
-            #[cfg(any(test, feature = "cloud-common"))]
+            #[cfg(any(test, feature = "cloud-common", feature = "internal-testing"))]
             Self::ServerError(message) if message.starts_with("status 408:") => true,
             _ => false,
         }
@@ -139,11 +139,11 @@ impl std::fmt::Display for CloudError {
             Self::NotFound(msg) => write!(f, "not found: {msg}"),
             Self::PreconditionFailed(msg) => write!(f, "precondition failed: {msg}"),
             Self::ConditionalConflict(msg) => write!(f, "conditional conflict: {msg}"),
-            #[cfg(any(test, feature = "cloud-common"))]
+            #[cfg(any(test, feature = "cloud-common", feature = "internal-testing"))]
             Self::Unauthorized(msg) => write!(f, "unauthorized: {msg}"),
             #[cfg(any(test, feature = "cloud-common"))]
             Self::InvalidRequest(msg) => write!(f, "invalid request: {msg}"),
-            #[cfg(any(test, feature = "cloud-common"))]
+            #[cfg(any(test, feature = "cloud-common", feature = "internal-testing"))]
             Self::ServerError(msg) => write!(f, "server error: {msg}"),
             Self::Transport(msg) => write!(f, "transport error: {msg}"),
             Self::Timeout(msg) => write!(f, "timeout: {msg}"),
@@ -173,7 +173,7 @@ pub fn contextualize_operation_error(
 /// Cloud operation outcome sent across the callback boundary.
 pub type CloudOutcome<T> = Result<T, CloudError>;
 
-#[cfg(any(test, all(feature = "internal-testing", feature = "cloud-common")))]
+#[cfg(any(test, feature = "internal-testing"))]
 pub(super) fn cloud_outcome_from_result<T>(result: Result<T, MidgeError>) -> CloudOutcome<T> {
     result.map_err(|error| match error {
         MidgeError::NotFound => CloudError::NotFound(format!("{error:?}")),

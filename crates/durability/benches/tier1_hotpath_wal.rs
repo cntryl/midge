@@ -30,7 +30,8 @@ fn usize_to_u64(value: usize) -> u64 {
 }
 
 fn small_put_record() -> WalRecord {
-    WalRecord::new(
+    WalRecord::new_cf(
+        0,
         WalOpKind::Put,
         Bytes::from_static(b"key"),
         Some(Bytes::from_static(b"value")),
@@ -39,7 +40,8 @@ fn small_put_record() -> WalRecord {
 }
 
 fn medium_put_record() -> WalRecord {
-    WalRecord::new(
+    WalRecord::new_cf(
+        0,
         WalOpKind::Put,
         Bytes::from_static(&[0u8; 64]),
         Some(Bytes::from_static(&[0u8; 256])),
@@ -48,7 +50,8 @@ fn medium_put_record() -> WalRecord {
 }
 
 fn delete_record() -> WalRecord {
-    WalRecord::new(
+    WalRecord::new_cf(
+        0,
         WalOpKind::Delete,
         Bytes::from_static(b"deleted_key"),
         None,
@@ -57,7 +60,8 @@ fn delete_record() -> WalRecord {
 }
 
 fn variable_small_put_record(index: usize) -> WalRecord {
-    WalRecord::new(
+    WalRecord::new_cf(
+        0,
         WalOpKind::Put,
         Bytes::from(format!("key_{index:010}")),
         Some(Bytes::from(format!("value_{index:010}"))),
@@ -71,7 +75,8 @@ fn variable_medium_put_record(index: usize) -> WalRecord {
     let index_bytes = usize_to_u64(index).to_be_bytes();
     key[56..64].copy_from_slice(&index_bytes);
     value[248..256].copy_from_slice(&index_bytes);
-    WalRecord::new(
+    WalRecord::new_cf(
+        0,
         WalOpKind::Put,
         Bytes::from(key),
         Some(Bytes::from(value)),
@@ -80,7 +85,8 @@ fn variable_medium_put_record(index: usize) -> WalRecord {
 }
 
 fn variable_delete_record(index: usize) -> WalRecord {
-    WalRecord::new(
+    WalRecord::new_cf(
+        0,
         WalOpKind::Delete,
         Bytes::from(format!("deleted_key_{index:010}")),
         None,

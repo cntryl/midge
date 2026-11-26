@@ -586,22 +586,27 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cloud-common")]
     impl crate::cloud::CloudWriteCapability for RangeIgnoringBackend {
         crate::cloud::forward_cloud_backend!(inner; submit_put);
     }
 
+    #[cfg(feature = "cloud-common")]
     impl crate::cloud::CloudDeleteCapability for RangeIgnoringBackend {
         crate::cloud::forward_cloud_backend!(inner; submit_delete);
     }
 
+    #[cfg(feature = "cloud-common")]
     impl crate::cloud::CloudListCapability for RangeIgnoringBackend {
         crate::cloud::forward_cloud_backend!(inner; submit_list);
     }
 
+    #[cfg(feature = "cloud-common")]
     impl crate::cloud::CloudHeadCapability for RangeIgnoringBackend {
         crate::cloud::forward_cloud_backend!(inner; submit_head);
     }
 
+    #[cfg(feature = "cloud-common")]
     impl crate::cloud::CloudBackend for RangeIgnoringBackend {}
 
     #[cfg(feature = "cloud-common")]
