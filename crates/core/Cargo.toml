@@ -1,0 +1,55 @@
+[package]
+name = "cntryl-midge-core"
+version = "0.6.0"
+edition = "2021"
+rust-version = "1.97"
+description = "Foundational filesystem, codec, clock, deadline, and instrumentation types for Midge"
+license = "Apache-2.0"
+repository = "https://github.com/cntryl/midge"
+
+# Standalone during the staged extraction; the coordinator folds this package
+# into the repository workspace when integrating the wave.
+[workspace]
+
+[features]
+default = []
+failpoints = ["dep:fail"]
+internal-testing = []
+telemetry = ["dep:tracing-subscriber", "dep:opentelemetry", "dep:tracing-opentelemetry", "dep:opentelemetry_sdk"]
+telemetry-otlp = ["telemetry", "dep:opentelemetry-otlp"]
+
+[dependencies]
+bytes = { version = "1.12", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+crc32c = "0.6"
+fail = { version = "0.5", features = ["failpoints"], optional = true }
+lz4_flex = "0.14"
+parking_lot = "0.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+zstd = "0.14"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"], optional = true }
+opentelemetry = { version = "0.33", optional = true }
+opentelemetry-otlp = { version = "0.33", optional = true, features = ["grpc-tonic"] }
+opentelemetry_sdk = { version = "0.33", optional = true, features = ["rt-tokio"] }
+tracing-opentelemetry = { version = "0.34", optional = true }
+
+[dev-dependencies]
+cntryl-stress = "0.5.1"
+tempfile = "3.27"
+
+[[bench]]
+name = "tier1_hotpath_compression"
+harness = false
+
+[[bench]]
+name = "tier2_subsystem_compression"
+harness = false
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["fileapi", "winbase"] }
