@@ -46,9 +46,10 @@ pub(super) fn next_frame(
             // Streaming replay buffers records, so reject one whose decoded
             // size would exceed the pending-transaction budget before
             // decoding it.
-            preflight_decoded_record(&payload, limits.max_pending_txn_bytes)?;
+            let view = encoding::decode_view(&payload)?;
+            preflight_decoded_record(&view, limits.max_pending_txn_bytes)?;
             Ok(NextWalFrame::Frame(ReplayedWalFrame {
-                record: encoding::decode(payload.as_ref())?,
+                record: view.into_owned()?,
                 payload,
                 next_pos,
             }))
@@ -56,8 +57,7 @@ pub(super) fn next_frame(
     }
 }
 
-fn preflight_decoded_record(payload: &[u8], limit: usize) -> MidgeResult<()> {
-    let view = encoding::decode_view(payload)?;
+fn preflight_decoded_record(view: &encoding::WalRecordView<'_>, limit: usize) -> MidgeResult<()> {
     let value_bytes = view.value.map_or(Ok(0), |value| {
         decoded_value_len_for_preflight(value, view.compression)
     })?;
