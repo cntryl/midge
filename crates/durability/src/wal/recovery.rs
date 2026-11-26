@@ -529,8 +529,7 @@ pub fn replay_wal_with_frontiers_within(
 
 struct ReplayedWalFrame {
     record: WalRecord,
-    /// The frame's verified payload, which the segment digest covers.
-    payload: bytes::Bytes,
+    verified: crate::wal::frame::VerifiedFrame,
     next_pos: u64,
 }
 
@@ -539,7 +538,7 @@ enum NextWalFrame {
     Frame(ReplayedWalFrame),
     /// The segment's footer frame, and the offset after it.
     Footer {
-        payload: bytes::Bytes,
+        frame: crate::wal::frame::VerifiedFrame,
         next_pos: u64,
     },
 }

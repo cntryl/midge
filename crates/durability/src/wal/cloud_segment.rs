@@ -43,18 +43,18 @@ pub fn validate_segment_bytes(key: &str, data: &[u8]) -> Result<SegmentValidatio
     loop {
         let step = super::frame::next_frame(&data, &key, pos, super::frame::FrameLimits::default())
             .map_err(|error| format!("cloud WAL segment '{key}' frame: {}", error.into_error()))?;
-        let (payload, next_pos) = match step {
+        let (frame, next_pos) = match step {
             super::frame::FrameStep::Eof => break,
-            super::frame::FrameStep::Frame { payload, next_pos } => (payload, next_pos),
+            super::frame::FrameStep::Frame { frame, next_pos } => (frame, next_pos),
         };
         let scanned = scan
-            .frame(&payload)
+            .frame(&frame)
             .map_err(|error| format!("cloud WAL segment '{key}': {error}"))?;
         pos = next_pos;
         if scanned == super::format::ScannedFrame::Footer {
             break;
         }
-        let record = super::encoding::decode(payload.as_ref())
+        let record = super::encoding::decode(frame.payload())
             .map_err(|error| format!("cloud WAL segment '{key}' record decode: {error}"))?;
         if record.op.is_transaction_batch() {
             let payload = record

@@ -332,13 +332,26 @@ mod tests {
     }
 }
 
+/// The on-disk bytes of a frame whose payload CRC has been verified.
+pub(crate) struct VerifiedFrame {
+    header: bytes::Bytes,
+    payload: bytes::Bytes,
+}
+
+impl VerifiedFrame {
+    pub(crate) fn header(&self) -> &[u8] {
+        &self.header
+    }
+
+    pub(crate) fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
 /// Where a frame walk stopped.
 pub(crate) enum FrameStep {
-    /// A complete, CRC-verified frame payload and the offset after it.
-    Frame {
-        payload: bytes::Bytes,
-        next_pos: u64,
-    },
+    /// A complete, CRC-verified frame and the offset after it.
+    Frame { frame: VerifiedFrame, next_pos: u64 },
     /// The walk reached the end of the file exactly on a frame boundary.
     Eof,
 }
@@ -605,7 +618,7 @@ pub(crate) fn next_frame<S: FrameBytes>(
         .map_err(FrameError::Corrupt)?;
     verify_frame_crc(&payload, expected_crc).map_err(FrameError::Corrupt)?;
     Ok(FrameStep::Frame {
-        payload,
+        frame: VerifiedFrame { header, payload },
         next_pos: payload_end,
     })
 }

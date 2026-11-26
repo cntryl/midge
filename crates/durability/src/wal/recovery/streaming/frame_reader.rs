@@ -37,20 +37,20 @@ pub(super) fn next_frame(
     *read_ns = read_ns.saturating_add(source.read_ns().saturating_sub(before_read_ns));
     match step? {
         frame::FrameStep::Eof => Ok(NextWalFrame::Eof),
-        frame::FrameStep::Frame { payload, next_pos }
-            if crate::wal::format::segment::is_footer_payload(&payload) =>
+        frame::FrameStep::Frame { frame, next_pos }
+            if crate::wal::format::segment::is_footer_payload(frame.payload()) =>
         {
-            Ok(NextWalFrame::Footer { payload, next_pos })
+            Ok(NextWalFrame::Footer { frame, next_pos })
         }
-        frame::FrameStep::Frame { payload, next_pos } => {
+        frame::FrameStep::Frame { frame, next_pos } => {
             // Streaming replay buffers records, so reject one whose decoded
             // size would exceed the pending-transaction budget before
             // decoding it.
-            let view = encoding::decode_view(&payload)?;
+            let view = encoding::decode_view(frame.payload())?;
             preflight_decoded_record(&view, limits.max_pending_txn_bytes)?;
             Ok(NextWalFrame::Frame(ReplayedWalFrame {
                 record: view.into_owned()?,
-                payload,
+                verified: frame,
                 next_pos,
             }))
         }
