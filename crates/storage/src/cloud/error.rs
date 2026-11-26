@@ -106,13 +106,6 @@ impl CloudError {
 
     /// Preserve parser/protocol classification while retaining a typed
     /// executor deadline from a multi-request operation such as LIST.
-    #[cfg(any(
-        test,
-        feature = "cloud-aws",
-        feature = "cloud-azure",
-        feature = "cloud-gcp",
-        feature = "cloud-oci"
-    ))]
     #[must_use]
     pub(crate) fn from_protocol_or_timeout_error(error: cntryl_midge_core::MidgeError) -> Self {
         match error {
