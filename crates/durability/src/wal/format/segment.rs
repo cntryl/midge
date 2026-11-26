@@ -472,20 +472,24 @@ impl SegmentScan {
         self.footer.as_ref().map(|(footer, _)| footer)
     }
 
-    /// Take the next complete, checksum-verified frame `payload`. A record
+    /// Take the next complete, checksum-verified `frame`. A record
     /// frame joins the digest; the footer must match everything scanned.
     ///
     /// # Errors
     ///
     /// `Corruption` for a frame after the footer, or a footer that does not
     /// match the records before it.
-    pub(crate) fn frame(&mut self, payload: &[u8]) -> MidgeResult<ScannedFrame> {
+    pub(crate) fn frame(
+        &mut self,
+        frame: &crate::wal::frame::VerifiedFrame,
+    ) -> MidgeResult<ScannedFrame> {
         if self.footer.is_some() {
             return Err(MidgeError::Corruption(format!(
                 "bytes follow the footer of WAL segment {}",
                 self.header.id
             )));
         }
+        let payload = frame.payload();
         if is_footer_payload(payload) {
             let footer = Footer::decode_payload(payload)?;
             let expected = self.sealing();
@@ -502,9 +506,7 @@ impl SegmentScan {
             self.footer = Some((footer, end));
             return Ok(ScannedFrame::Footer);
         }
-        let frame_header = crate::wal::frame::frame_header(payload)
-            .map_err(|_| corruption("WAL frame exceeds the frame limits"))?;
-        self.digest.update(&frame_header);
+        self.digest.update(frame.header());
         self.digest.update(payload);
         Ok(ScannedFrame::Record)
     }
@@ -584,12 +586,12 @@ pub fn records(bytes: &[u8]) -> MidgeResult<Vec<crate::wal::WalRecord>> {
             crate::wal::frame::FrameLimits::default(),
         )
         .map_err(crate::wal::frame::FrameError::into_error)?;
-        let crate::wal::frame::FrameStep::Frame { payload, next_pos } = step else {
+        let crate::wal::frame::FrameStep::Frame { frame, next_pos } = step else {
             scan.finish(bytes.len() as u64)?;
             return Ok(records);
         };
-        if scan.frame(&payload)? == ScannedFrame::Record {
-            let record = crate::wal::encoding::decode(payload.as_ref())?;
+        if scan.frame(&frame)? == ScannedFrame::Record {
+            let record = crate::wal::encoding::decode(frame.payload())?;
             scan.observe(record.seq, record.cf_id)?;
             records.push(record);
         }
@@ -636,12 +638,12 @@ pub fn sealed_footer(bytes: &[u8]) -> MidgeResult<Option<Footer>> {
             crate::wal::frame::FrameLimits::default(),
         )
         .map_err(crate::wal::frame::FrameError::into_error)?;
-        let crate::wal::frame::FrameStep::Frame { payload, next_pos } = step else {
+        let crate::wal::frame::FrameStep::Frame { frame, next_pos } = step else {
             scan.finish(bytes.len() as u64)?;
             return Ok(scan.footer().cloned());
         };
-        if scan.frame(&payload)? == ScannedFrame::Record {
-            let record = crate::wal::encoding::decode_view(payload.as_ref())?;
+        if scan.frame(&frame)? == ScannedFrame::Record {
+            let record = crate::wal::encoding::decode_view(frame.payload())?;
             scan.observe(record.seq, record.cf_id)?;
         }
         pos = next_pos;
@@ -770,7 +772,7 @@ pub fn lenient_footer(bytes: &[u8]) -> MidgeResult<Footer> {
 fn lenient_tail(body: &[u8]) -> SegmentTail {
     let mut tail = SegmentTail::default();
     let mut pos = 0;
-    while let Ok(crate::wal::frame::FrameStep::Frame { payload, next_pos }) =
+    while let Ok(crate::wal::frame::FrameStep::Frame { frame, next_pos }) =
         crate::wal::frame::next_frame(
             &body,
             &"fixture",
@@ -778,7 +780,7 @@ fn lenient_tail(body: &[u8]) -> SegmentTail {
             crate::wal::frame::FrameLimits::default(),
         )
     {
-        let Ok(record) = crate::wal::encoding::decode_view(&payload) else {
+        let Ok(record) = crate::wal::encoding::decode_view(frame.payload()) else {
             break;
         };
         tail.count(record.seq, record.cf_id);

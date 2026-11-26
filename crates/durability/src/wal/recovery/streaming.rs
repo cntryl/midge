@@ -461,12 +461,12 @@ pub fn scan_segment_file(
         {
             NextWalFrame::Eof => break,
             NextWalFrame::Frame(frame) => {
-                scan.frame(&frame.payload)?;
+                scan.frame(&frame.verified)?;
                 scan.observe(frame.record.seq, frame.record.cf_id)?;
                 pos = frame.next_pos;
             }
-            NextWalFrame::Footer { payload, .. } => {
-                scan.frame(&payload)?;
+            NextWalFrame::Footer { frame, .. } => {
+                scan.frame(&frame)?;
                 break;
             }
         }
@@ -542,12 +542,12 @@ fn inspect_file_from(
             };
         let (next_pos, records) = match next {
             NextWalFrame::Eof => break,
-            NextWalFrame::Footer { payload, next_pos } => {
+            NextWalFrame::Footer { frame, next_pos } => {
                 // The walk takes the footer only once nothing follows it, so
                 // a stopped walk never reads as sealed.
                 let mut sealed = (*scan).clone();
                 let finished = sealed
-                    .frame(&payload)
+                    .frame(&frame)
                     .and_then(|_| crate::wal::frame::FrameBytes::len(&source))
                     .and_then(|len| sealed.finish(len));
                 if let Err(error) = finished {
@@ -567,7 +567,7 @@ fn inspect_file_from(
                     })
                     .and_then(|()| visitor(&frame.record))
                     .and_then(|()| {
-                        scan.frame(&frame.payload)?;
+                        scan.frame(&frame.verified)?;
                         scan.observe(frame.record.seq, frame.record.cf_id)
                     });
                 if let Err(error) = admitted {
@@ -686,9 +686,9 @@ fn replay_paths(
             );
             let frame = match next {
                 Ok(NextWalFrame::Eof) => break,
-                Ok(NextWalFrame::Footer { payload, next_pos }) => {
+                Ok(NextWalFrame::Footer { frame, next_pos }) => {
                     let sealed = scan
-                        .frame(&payload)
+                        .frame(&frame)
                         .and_then(|_| crate::wal::frame::FrameBytes::len(&source))
                         .and_then(|len| scan.finish(len))
                         .and_then(|()| expect_footer(path, &scan));
@@ -705,7 +705,7 @@ fn replay_paths(
                 }
             };
             let bytes = frame.next_pos.saturating_sub(pos);
-            if let Err(error) = scan.frame(&frame.payload) {
+            if let Err(error) = scan.frame(&frame.verified) {
                 return state.stop_at(storage, paths, (index, pos), policy, error.into());
             }
             // Authority failures cannot be classified as salvageable WAL damage.
