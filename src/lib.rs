@@ -232,7 +232,6 @@ pub mod __internal {
     pub mod storage {
         pub mod cloud {
             /// In-memory object store for injection tests.
-            #[cfg(feature = "cloud-common")]
             pub use cntryl_midge_storage::cloud::MockCloudBackend;
             #[doc(inline)]
             pub use cntryl_midge_storage::cloud::{
@@ -252,7 +251,6 @@ pub mod __internal {
         pub use cntryl_midge_core::simulation::crash_fs::{
             CrashDevice, Decision, Fault, FaultEffect, FaultError, FaultId, FaultOp, Subject,
         };
-        #[cfg(feature = "cloud-common")]
         pub use cntryl_midge_storage::simulation::{
             Failure, Fate, Operation, RequestId, Schedule, SimulatedObjectStore, StoreImage,
             FAILURE_MESSAGE,

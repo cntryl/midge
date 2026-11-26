@@ -930,7 +930,7 @@ enum GcsBackendMode {
 
 /// A JSON-API backend against a test HTTP endpoint, for the provider
 /// contract table.
-#[cfg(any(test, feature = "internal-testing"))]
+#[cfg(all(feature = "cloud-all", any(test, feature = "internal-testing")))]
 pub(super) fn contract_test_json_backend(
     endpoint: String,
 ) -> std::sync::Arc<dyn crate::cloud::CloudBackend> {

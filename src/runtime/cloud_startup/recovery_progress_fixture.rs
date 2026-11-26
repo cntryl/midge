@@ -21,6 +21,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 mod backend;
+#[cfg(any(test, feature = "cloud-common"))]
+mod inventory;
 use backend::{FixtureObservations, ObservedBackend};
 
 const READ_WINDOW: usize = 64 * 1024;
@@ -70,7 +72,14 @@ enum PreparedInput {
         wal: Box<FixtureWal>,
     },
     #[cfg(any(test, feature = "cloud-common"))]
-    Inventory(Vec<cntryl_midge_durability::metadata::FileMeta>),
+    Inventory(PreparedInventory),
+}
+
+#[cfg(any(test, feature = "cloud-common"))]
+struct PreparedInventory {
+    files: Vec<cntryl_midge_durability::metadata::FileMeta>,
+    head_delay: Duration,
+    persist_progress: bool,
 }
 
 /// Seed fixture input before the external watchdog begins observing recovery.
@@ -82,7 +91,6 @@ pub struct PreparedRecoveryProgressFixture {
     remote: Arc<dyn StorageBackend>,
     input: PreparedInput,
     setup_elapsed: Duration,
-    inventory_head_delay: Duration,
 }
 
 /// Prepare actual startup inventory or catalog planner/replay input.
@@ -152,12 +160,7 @@ fn prepare_recovery_progress_fixture_with_inventory_count(
             "recovery fixture requires an empty local WAL directory".into(),
         ));
     }
-    let observations = Arc::new(FixtureObservations::new(
-        root,
-        mode,
-        0,
-        persist_inventory_progress,
-    )?);
+    let observations = Arc::new(FixtureObservations::new(root, mode)?);
     let remote: Arc<dyn StorageBackend> = Arc::new(ObservedBackend::new(
         root.join("cloud"),
         mode,
@@ -170,12 +173,19 @@ fn prepare_recovery_progress_fixture_with_inventory_count(
             {
                 let inventory = seed_inventory(root, inventory_entries)?;
                 observations.set_expected_inventory(inventory.len())?;
-                PreparedInput::Inventory(inventory)
+                PreparedInput::Inventory(PreparedInventory {
+                    files: inventory,
+                    head_delay: inventory_head_delay,
+                    persist_progress: persist_inventory_progress,
+                })
             }
             #[cfg(not(any(test, feature = "cloud-common")))]
-            return Err(MidgeError::InvalidArgument(
-                "metadata inventory fixture requires cloud-common".into(),
-            ));
+            {
+                let _ = (inventory_head_delay, persist_inventory_progress);
+                return Err(MidgeError::InvalidArgument(
+                    "metadata inventory fixture requires cloud-common".into(),
+                ));
+            }
         }
         _ => {
             let wal = seed_wal(root)?;
@@ -210,7 +220,6 @@ fn prepare_recovery_progress_fixture_with_inventory_count(
         remote,
         input,
         setup_elapsed: started.elapsed(),
-        inventory_head_delay,
     })
 }
 
@@ -246,7 +255,6 @@ impl PreparedRecoveryProgressFixture {
                 &local,
                 &self.observations,
                 inventory,
-                self.inventory_head_delay,
                 started,
             ),
         }
@@ -338,18 +346,18 @@ fn inventory_fixture(
     mode: RecoveryProgressFixtureMode,
     local: &Path,
     observations: &Arc<FixtureObservations>,
-    files: Vec<cntryl_midge_durability::metadata::FileMeta>,
-    inventory_head_delay: Duration,
+    inventory: PreparedInventory,
     started: Instant,
 ) -> MidgeResult<RecoveryProgressFixtureResult> {
-    let expected_inventory = serde_json::to_vec(&files)
+    let expected_inventory = serde_json::to_vec(&inventory.files)
         .map_err(|error| MidgeError::Internal(format!("inventory fixture metadata: {error}")))?;
-    let backend = backend::InventoryCloudBackend::new(
+    let backend = inventory::InventoryCloudBackend::new(
         root.join("cloud"),
         mode,
-        &files,
+        &inventory.files,
         Arc::clone(observations),
-        inventory_head_delay,
+        inventory.head_delay,
+        inventory.persist_progress,
     )?;
     let cloud = cntryl_midge_storage::cloud::CloudStorage::new_with_timeout(
         Arc::new(backend),
@@ -359,7 +367,7 @@ fn inventory_fixture(
     // In-memory runtime metadata keeps the sampled local database completely
     // flat; the actual cloud inventory reconciliation and HEADs still execute.
     let mut state = crate::runtime::RuntimeState::try_new(local, true, RecoveryPolicy::Strict)?;
-    state.manifest.replace_files(files);
+    state.manifest.replace_files(inventory.files);
     observations.set_phase("metadata_inventory")?;
     super::CloudStartupRecovery::validate_manifest_ssts_in_store(&mut state, &cloud)?;
     observations.check_failure()?;

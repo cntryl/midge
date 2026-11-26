@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  CARGO_INCREMENTAL: 0
+  CARGO_INCREMENTAL: "0"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -49,9 +49,6 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings -D clippy::pedantic
-
-      - name: Check
-        run: cargo check --locked --workspace --all-targets --all-features
 
       - name: Build
         run: cargo build --locked --workspace --all-targets --all-features

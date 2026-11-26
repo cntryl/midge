@@ -133,8 +133,8 @@ jobs:
           cargo test --locked --doc --all-features
           cargo run --locked --example documented_quick_start
           cargo test --locked --test verification_cli
-      - name: Verify crate package
-        run: cargo package --locked
+      - name: Verify workspace packages
+        run: cargo package --workspace --locked
       - uses: actions/upload-artifact@v7
         if: always()
         with:
