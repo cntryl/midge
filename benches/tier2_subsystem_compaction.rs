@@ -1,6 +1,6 @@
 //! Tier 2 - production compaction CPU per logical input MiB.
 //!
-//! The fixture writes eight independently flushed SSTs. Fixture creation is
+//! The fixture writes eight overlapping, independently flushed SSTs. Fixture creation is
 //! outside the measurement; the measured phase is one production `compact_all`
 //! call. Process CPU time includes the compaction worker threads.
 
@@ -72,13 +72,14 @@ fn timeval_duration(value: libc::timeval) -> Duration {
     )
 }
 
-fn write_sst(engine: &Engine, cf: &ColumnFamilyHandle, first_id: u64) {
+fn write_sst(engine: &Engine, cf: &ColumnFamilyHandle, stripe: usize) {
     for offset in (0..ROWS_PER_SST).step_by(WRITE_BATCH) {
         let mut transaction = engine
             .begin_tx(cf.id(), TransactionMode::ReadWrite)
             .expect("begin compaction fixture transaction");
         for row in offset..offset + WRITE_BATCH {
-            let id = first_id + u64::try_from(row).expect("row index fits in u64");
+            // Interleave keys so this SST must be merged, even with an empty target level.
+            let id = u64::try_from(row * SST_COUNT + stripe).expect("fixture key fits in u64");
             transaction
                 .put(key(id).to_vec(), value(id).to_vec(), None)
                 .expect("stage compaction fixture row");
@@ -91,9 +92,8 @@ fn write_sst(engine: &Engine, cf: &ColumnFamilyHandle, first_id: u64) {
 }
 
 fn fixture(engine: &Engine, cf: &ColumnFamilyHandle) {
-    for sst in 0..SST_COUNT {
-        let first_id = u64::try_from(sst * ROWS_PER_SST).expect("fixture id fits in u64");
-        write_sst(engine, cf, first_id);
+    for stripe in 0..SST_COUNT {
+        write_sst(engine, cf, stripe);
     }
 }
 
@@ -145,12 +145,15 @@ fn run(ctx: &mut StressContext) {
     engine.compact_all().expect("compact benchmark fixture");
     let wall_elapsed = wall_started.elapsed();
     let cpu_elapsed = process_cpu_time().saturating_sub(cpu_before);
+    let outputs = sst_layout(&engine, &cf);
     assert!(
-        sst_layout(&engine, &cf) != inputs_before,
-        "fixture must produce real compaction work: before={inputs_before:?}, after={:?}",
-        sst_layout(&engine, &cf)
+        !outputs.is_empty()
+            && inputs_before
+                .iter()
+                .all(|(_, input, _)| outputs.iter().all(|(_, output, _)| input != output)),
+        "fixture must rewrite every input SST: before={inputs_before:?}, after={outputs:?}"
     );
-    let compaction_bytes = sst_layout(&engine, &cf)
+    let compaction_bytes = outputs
         .iter()
         .map(|(_, _, size)| size)
         .copied()
