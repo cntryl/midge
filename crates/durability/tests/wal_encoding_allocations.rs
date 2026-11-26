@@ -1,9 +1,8 @@
-//! The borrowed raw-value WAL encoder avoids the owned intermediate value
-//! allocation used by the previous construction path (#947).
+//! Allocation contracts for WAL payload encoding and decoding.
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use cntryl_midge_core::codec::compress_wal_value;
-use cntryl_midge_durability::wal::encoding::encode_into;
+use cntryl_midge_durability::wal::encoding::{decode, decode_view, encode, encode_into};
 use cntryl_midge_durability::wal::{WalOpKind, WalRecord};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -17,7 +16,7 @@ thread_local! {
 
 fn record_allocation() {
     // Const, non-dropping TLS needs no allocation. Other threads and thread
-    // teardown cannot contribute to the synchronous encoder's observation.
+    // teardown cannot contribute to the synchronous codec's observation.
     let _ = ALLOCATION_COUNT.try_with(|counter| {
         if let Some(count) = counter.get() {
             counter.set(Some(count + 1));
@@ -26,7 +25,7 @@ fn record_allocation() {
 }
 
 // SAFETY: every allocator operation delegates to System unchanged; the test
-// counter observes allocation calls only on the measured encoder thread.
+// counter observes allocation calls only on the measured codec thread.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record_allocation();
@@ -59,22 +58,25 @@ const SAMPLES: usize = 16;
 fn measured_allocations(run: impl FnOnce()) -> u64 {
     ALLOCATION_COUNT.with(|counter| counter.set(Some(0)));
     run();
-    ALLOCATION_COUNT.with(|counter| counter.replace(None).expect("active encoder measurement"))
+    ALLOCATION_COUNT.with(|counter| counter.replace(None).expect("active codec measurement"))
+}
+
+fn raw_value() -> Bytes {
+    Bytes::from(
+        (0..VALUE_LEN)
+            .map(|index| u8::try_from(index % 251).expect("byte alphabet"))
+            .collect::<Vec<_>>(),
+    )
 }
 
 #[test]
 fn should_avoid_owned_intermediate_allocation_for_incompressible_raw_wal_values() {
     // Arrange: this deterministic high-entropy value stays raw in the WAL.
-    let value = Bytes::from(
-        (0..VALUE_LEN)
-            .map(|index| u8::try_from(index % 251).expect("byte alphabet"))
-            .collect::<Vec<_>>(),
-    );
     let record = WalRecord::new_cf(
         7,
         WalOpKind::Put,
         Bytes::from_static(b"key"),
-        Some(value),
+        Some(raw_value()),
         19,
     );
     let mut borrowed_payload = Vec::with_capacity(VALUE_LEN + 128);
@@ -134,4 +136,53 @@ fn should_avoid_owned_intermediate_allocation_for_incompressible_raw_wal_values(
     assert_eq!(borrowed_payload, owned_payload);
     assert_eq!(borrowed_allocations, 0);
     assert_eq!(owned_allocations, SAMPLES as u64);
+}
+
+#[test]
+fn should_allocate_only_owned_fields_when_decoding_raw_wal_payload() {
+    // Arrange
+    let record = WalRecord::new_cf(
+        7,
+        WalOpKind::Put,
+        Bytes::from_static(b"key"),
+        Some(raw_value()),
+        19,
+    );
+    let payload = encode(&record).expect("encode raw record");
+    assert_eq!(
+        decode_view(&payload).expect("read record view").compression,
+        None
+    );
+    let mut input = payload.as_ref();
+    let mut decoded = None;
+
+    // Act
+    let allocations = measured_allocations(|| {
+        decoded = Some(decode(&mut input).expect("decode raw record"));
+    });
+
+    // Assert
+    assert_eq!(decoded.expect("decoded record"), record);
+    assert_eq!(input, b"");
+    assert_eq!(
+        allocations, 2,
+        "only the owned key and value should allocate"
+    );
+}
+
+#[test]
+fn should_consume_only_contiguous_input_when_wal_decode_rejects_payload() {
+    // Arrange
+    let mut truncated = b"MW".as_slice();
+    let mut split = b"M".as_slice().chain(b"W".as_slice());
+
+    // Act
+    let truncated_result = decode(&mut truncated);
+    let split_result = decode(&mut split);
+
+    // Assert
+    assert!(truncated_result.is_err());
+    assert_eq!(truncated, b"");
+    assert!(split_result.is_err());
+    assert_eq!(split.remaining(), 2);
 }

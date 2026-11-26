@@ -472,33 +472,37 @@ pub fn decode_view(data: &[u8]) -> MidgeResult<WalRecordView<'_>> {
 /// Returns an error when the payload is malformed or value decompression fails.
 pub fn decode(mut bytes: impl Buf) -> MidgeResult<WalRecord> {
     // WAL frames must be contiguous; enforce this.
+    let len = bytes.remaining();
     let data = bytes.chunk();
-    if data.len() != bytes.remaining() {
+    if data.len() != len {
         return Err(corruption("non-contiguous WAL buffer"));
     }
-    let owned = bytes.copy_to_bytes(bytes.remaining());
-    let view = decode_view(owned.as_ref())?;
+    let record = decode_view(data).and_then(WalRecordView::into_owned);
+    // As with the previous consuming decode, a contiguous malformed payload
+    // still consumes its input when the caller passes a buffer by reference.
+    bytes.advance(len);
+    record
+}
 
-    // Decompress value if a compression tag is present
-    let value = match view.value {
-        Some(raw_val) => {
-            let decompressed =
-                cntryl_midge_core::codec::decompress_wal_value(raw_val, view.compression)?;
-            Some(decompressed)
-        }
-        None => None,
-    };
+impl WalRecordView<'_> {
+    /// Materialize fields without retaining the encoded frame's backing buffer.
+    pub(super) fn into_owned(self) -> MidgeResult<WalRecord> {
+        let value = self
+            .value
+            .map(|raw| cntryl_midge_core::codec::decompress_wal_value(raw, self.compression))
+            .transpose()?;
 
-    Ok(WalRecord {
-        cf_id: view.cf_id,
-        op: view.op,
-        key: Bytes::copy_from_slice(view.key),
-        value,
-        seq: view.seq,
-        expiration: view.expiration,
-        range_end: view.range_end.map(Bytes::copy_from_slice),
-        txn_id: view.txn_id,
-    })
+        Ok(WalRecord {
+            cf_id: self.cf_id,
+            op: self.op,
+            key: Bytes::copy_from_slice(self.key),
+            value,
+            seq: self.seq,
+            expiration: self.expiration,
+            range_end: self.range_end.map(Bytes::copy_from_slice),
+            txn_id: self.txn_id,
+        })
+    }
 }
 
 fn push_len_prefixed_bytes(buf: &mut Vec<u8>, value: &[u8]) -> MidgeResult<()> {

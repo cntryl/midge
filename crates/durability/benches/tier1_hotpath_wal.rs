@@ -3,7 +3,7 @@
 //! Covers WAL record TLV serialization, deserialization, and round trips.
 
 use bytes::Bytes;
-use cntryl_midge_durability::wal::encoding::{decode_view, encode, encode_into};
+use cntryl_midge_durability::wal::encoding::{decode, decode_view, encode, encode_into};
 use cntryl_midge_durability::wal::{WalOpKind, WalRecord};
 use cntryl_stress::{black_box, stress, stress_main, StressContext};
 
@@ -226,6 +226,38 @@ fn decode_medium_put(ctx: &mut StressContext) {
 )]
 fn decode_delete(ctx: &mut StressContext) {
     run_decode_record(ctx, "delete");
+}
+
+#[stress(tier = 1, role = "diagnostic", metadata(component = "wal_encoding"))]
+fn decode_owned_raw_put(ctx: &mut StressContext) {
+    let value = Bytes::from_static(&[b'v'; 100]);
+    let payloads: Vec<_> = (0..WAL_DECODE_BATCH_SIZE_DEFAULT)
+        .map(|index| {
+            encode(&WalRecord::new_cf(
+                0,
+                WalOpKind::Put,
+                Bytes::from(format!("{index:016x}")),
+                Some(value.clone()),
+                usize_to_u64(index),
+            ))
+            .expect("encode benchmark WAL payload")
+        })
+        .collect();
+    ctx.parameter("key_bytes", 16);
+    ctx.parameter("value_bytes", value.len());
+    ctx.parameter("decode_batch_size", payloads.len());
+    ctx.parameter("logical_unit", "wal_record");
+
+    measure_hot_path_batch(
+        ctx,
+        "decode_owned_raw_put",
+        usize_to_u64(payloads.len()),
+        || {
+            for payload in &payloads {
+                black_box(decode(black_box(payload.as_ref())).expect("decode WAL record"));
+            }
+        },
+    );
 }
 
 fn run_roundtrip(ctx: &mut StressContext, scenario: &'static str, record: &WalRecord) {
