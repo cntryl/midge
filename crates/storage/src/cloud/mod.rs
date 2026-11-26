@@ -84,12 +84,6 @@ use std::sync::Arc;
 
 pub const REQUEST_TIMEOUT_HEADER: &str = "x-midge-internal-request-timeout-ms";
 
-#[cfg(any(
-    feature = "cloud-aws",
-    feature = "cloud-azure",
-    feature = "cloud-gcp",
-    feature = "cloud-oci"
-))]
 pub fn parse_request_timeout(value: &str) -> Result<std::time::Duration, String> {
     value
         .parse::<u64>()
